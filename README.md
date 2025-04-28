@@ -139,3 +139,84 @@ data.subtitles 里存放着平台的字幕信息。有的视频有字幕，就�
   - 以 text 模式通知
   - 通知内容包含：原始链接、当前进行的步骤（获取下载地址？下载中？转录？）
   - webhook 地址写在 config 文件里。
+
+
+# 增加功能-总结转录的文本
+在转录完成 或者 获取到视频的字幕之后，调用大模型。两次调用大模型（并行同时调用），分别 校对文本 & 总结视频内容，然后发送到企业微信。
+- 大模型的 api_key,calibrate_model,summary_model,base_url 都写在 config 文件里。
+- 发送到企业微信时注意换行符，增加可读性。
+- 可以命令行输入 txt 文本路径进行测试，比如 “output\bilibili_BV1JBLozmEFi_1745827015.merge.txt”
+
+## 校对文本
+calibrate_model: "gpt-4.1"
+prompt:
+```
+你将收到一段音频的转录文本。你的任务是对这段文本进行校对,提高其可读性,但不改变原意。 请按照以下指示进行校对: 
+1. 适当分段,使文本结构更清晰。每个自然段落应该是一个完整的思想单元。 
+2. 修正明显的错别字和语法错误。 
+3. 调整标点符号的使用,确保其正确性和一致性。 
+4. 如有必要,可以轻微调整词序以提高可读性,但不要改变原意。 
+5. 保留原文中的口语化表达和说话者的语气特点。 
+6. 不要添加或删除任何实质性内容。 
+7. 不要解释或评论文本内容。 
+
+只返回校对后的文本,不要包含任何其他解释或评论。 
+以下是需要校对的转录文本: 
+<transcript>  </transcript>
+```
+
+## 总结文本
+summary_model:"deepseek-chat"
+prompt:
+```
+请以回车换行为分割，逐段地将正文内容，高度归纳提炼总结为凝炼的一句话，需涵盖主要内容，不能丢失关键信息和想表达的核心意思。用中文。然后将归纳总结的，用无序列表，挨个排列出来。
+```
+
+## 大模型 API 
+
+示例请求
+```
+curl https://api.openai.com/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer api_key" \
+  -d '{
+        "model": "model",
+        "messages": [
+          {"role": "system", "content": "You are a helpful assistant."},
+          {"role": "user", "content": "Hello!"}
+        ],
+        "stream": false
+      }'
+```
+
+示例响应
+```
+{
+    "id": "4411f908-f006-431e-b3c9-77a90222d94b",
+    "object": "chat.completion",
+    "created": 1745833820,
+    "model": "deepseek-chat",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "你好，有什么能帮到你"
+            },
+            "logprobs": null,
+            "finish_reason": "stop"
+        }
+    ],
+    "usage": {
+        "prompt_tokens": 1369,
+        "completion_tokens": 586,
+        "total_tokens": 1955,
+        "prompt_tokens_details": {
+            "cached_tokens": 1344
+        },
+        "prompt_cache_hit_tokens": 1344,
+        "prompt_cache_miss_tokens": 25
+    },
+    "system_fingerprint": "fp_8802369eaa_prod0425fp8"
+}
+```
