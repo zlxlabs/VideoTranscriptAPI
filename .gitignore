@@ -1,2 +1,39 @@
+# Python缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境
+venv/
+env/
+ENV/
+
+# 日志文件
+logs/
+*.log
+
+# 临时文件和输出
+temp/
+output/
+*.mp3
+*.mp4
+*.m4a
+*.m4s
+
+# 模型文件
+models/
+
+# 测试文件
+test_subtitle.srt
+test_output/
+
+# IDE配置
+.vscode/
+.idea/
+
+# 其他
+.DS_Store
+Thumbs.db
+
 CapsWriter-Offline
 sample_files\转录案例\bilibili_m4s\29108798989-1-30232.m4s
