@@ -1,0 +1,182 @@
+{
+    "code": 200,
+    "router": "/api/v1/xiaohongshu/web/get_note_info_v3",
+    "params": {
+      "share_text": "http://xhslink.com/a/eCCK4tuHDVlbb"
+    },
+    "data": {
+      "xsec_token": "CBuMBq31CkUiDRh9k2lyiYcW_QIWBW6-9dg_gbIJhqkN0=",
+      "time": 1745830179000,
+      "ip_location": "四川",
+      "user": {
+        "user_id": "6543caf40000000006007a99",
+        "nickname": "诞诞有来信",
+        "avatar": "https://sns-avatar-qc.xhscdn.com/avatar/1040g2jo31aggca2jna005pa3pbq1gukp4pq86no",
+        "xsec_token": "ABglek98bOZJ2AVfkS1-rXcc6yZgyLoiDOJkGxzHHQdzo="
+      },
+      "video": {
+        "capa": {
+          "duration": 36
+        },
+        "consumer": {
+          "origin_video_key": "spectrum/1040g2f031gqiskhtjc0g5pa3pbq1gukpu7tb598"
+        },
+        "media": {
+          "video_id": 137376561092206780,
+          "video": {
+            "biz_id": "281491749153906436",
+            "duration": 37,
+            "md5": "914874676df6930d0d8dcade8c3d93bb",
+            "hdr_type": 0,
+            "drm_type": 0,
+            "stream_types": [
+              258
+            ],
+            "biz_name": 110
+          },
+          "stream": {
+            "av1": [],
+            "h264": [
+              {
+                "video_duration": 36666,
+                "audio_bitrate": 56224,
+                "weight": 59,
+                "duration": 36688,
+                "stream_desc": "X264_MP4",
+                "height": 1280,
+                "volume": 0,
+                "backup_urls": [
+                  "http://sns-bak-v1.xhscdn.com/stream/1/110/258/01e80f41245da0c801037001967b96d997_258.mp4",
+                  "http://sns-bak-v2.xhscdn.com/stream/1/110/258/01e80f41245da0c801037001967b96d997_258.mp4"
+                ],
+                "vmaf": -1,
+                "stream_type": 258,
+                "format": "mp4",
+                "avg_bitrate": 1742725,
+                "fps": 30,
+                "audio_duration": 36687,
+                "master_url": "http://sns-video-zl.xhscdn.com/stream/1/110/258/01e80f41245da0c801037001967b96d997_258.mp4",
+                "video_bitrate": 1680614,
+                "audio_channels": 2,
+                "ssim": 0,
+                "rotate": 0,
+                "hdr_type": 0,
+                "width": 720,
+                "quality_type": "HD",
+                "audio_codec": "aac",
+                "video_codec": "h264",
+                "default_stream": 0,
+                "psnr": 0,
+                "size": 7992140
+              }
+            ],
+            "h265": [],
+            "h266": []
+          }
+        },
+        "image": {
+          "thumbnail_fileid": "110/0/01e80f41245da0c8001000000001967b96ab77_0.webp"
+        }
+      },
+      "image_list": [
+        {
+          "file_id": "",
+          "height": 1685,
+          "width": 1263,
+          "url": "",
+          "trace_id": "",
+          "info_list": [
+            {
+              "image_scene": "WB_PRV",
+              "url": "http://sns-webpic-qc.xhscdn.com/202504291105/3752babdbca93970da4c56944034913d/spectrum/1040g0k031gqislqq38005pa3pbq1gukp4tle7l0!nd_prv_wlteh_jpg_3"
+            },
+            {
+              "image_scene": "WB_DFT",
+              "url": "http://sns-webpic-qc.xhscdn.com/202504291105/8a2ae56b5375ebc065a651d1a5241f97/spectrum/1040g0k031gqislqq38005pa3pbq1gukp4tle7l0!nd_dft_wlteh_jpg_3"
+            }
+          ],
+          "url_pre": "http://sns-webpic-qc.xhscdn.com/202504291105/3752babdbca93970da4c56944034913d/spectrum/1040g0k031gqislqq38005pa3pbq1gukp4tle7l0!nd_prv_wlteh_jpg_3",
+          "url_default": "http://sns-webpic-qc.xhscdn.com/202504291105/8a2ae56b5375ebc065a651d1a5241f97/spectrum/1040g0k031gqislqq38005pa3pbq1gukp4tle7l0!nd_dft_wlteh_jpg_3",
+          "stream": {},
+          "live_photo": false
+        }
+      ],
+      "last_update_time": 1745830180000,
+      "title": "如何判断一个男生本身就是很好的人？",
+      "desc": "世界是复杂的，人性更是流动的。与其执着于“好与坏”的判定，不如学会倾听自己的直觉——那些让你心安或不安的瞬间，往往比任何标准都更诚实。\n﻿@李诞﻿ ﻿#李诞直播间[话题]#﻿ ﻿#李诞小卖部[话题]#﻿ ﻿﻿#女性成长[话题]#﻿ ﻿#人际交往[话题]#﻿ ﻿#了解一个人[话题]#﻿ ﻿#辨别身边的聪明人[话题]#﻿ ﻿#细节看清人品[话题]#﻿ ﻿#擦亮眼睛看清人[话题]#﻿ ﻿#情感共鸣[话题]#﻿ ﻿#亲密关系[话题]#﻿",
+      "share_info": {
+        "un_share": false
+      },
+      "note_id": "680f41230000000021019f04",
+      "interact_info": {
+        "followed": false,
+        "relation": "none",
+        "liked": false,
+        "liked_count": "10+",
+        "collected": false,
+        "collected_count": "10+",
+        "comment_count": "10+",
+        "share_count": "10+"
+      },
+      "at_user_list": [
+        {
+          "user_id": "5c878d39000000001202d5e0",
+          "nickname": "李诞",
+          "xsec_token": "ABWegnRvijdaR9aKjtWigcmKHlu6YoPrRi3jp0rRKPupE="
+        }
+      ],
+      "type": "video",
+      "tag_list": [
+        {
+          "id": "639203cc00000000010035bf",
+          "name": "李诞直播间",
+          "type": "topic"
+        },
+        {
+          "id": "6656bb6f000000000301a23e",
+          "name": "李诞小卖部",
+          "type": "topic"
+        },
+        {
+          "type": "topic",
+          "id": "5bed21275b78d40001310fc8",
+          "name": "女性成长"
+        },
+        {
+          "id": "5be2e3a56c820600012694af",
+          "name": "人际交往",
+          "type": "topic"
+        },
+        {
+          "id": "60e131af000000000100597b",
+          "name": "了解一个人",
+          "type": "topic"
+        },
+        {
+          "id": "5f1a06d00000000001001723",
+          "name": "辨别身边的聪明人",
+          "type": "topic"
+        },
+        {
+          "id": "5f4c3b9a00000000010047eb",
+          "name": "细节看清人品",
+          "type": "topic"
+        },
+        {
+          "id": "63ad0f980000000001007f8c",
+          "name": "擦亮眼睛看清人",
+          "type": "topic"
+        },
+        {
+          "type": "topic",
+          "id": "5dc97b2e0000000001002aa0",
+          "name": "情感共鸣"
+        },
+        {
+          "name": "亲密关系",
+          "type": "topic",
+          "id": "63609c45000000000101f757"
+        }
+      ]
+    }
+  }

@@ -16,14 +16,16 @@
 - 返回参数中 转录文本对应的 key 为 "transcript",视频标题对应的 key 为 "video_title"，视频作者对应的 key 为 "author",其他的错误码、错误信息的 key 符合常见标准即可。
 
 ## 视频下载方法
-- 平台传过来的链接通常是短链接，所以需要解析短链接以获取原始的长链接。
+- 平台传过来的链接通常是短链接，所以需要解析短链接以获取原始的长链接(小红书除外）。
 - 通过长链接 url 获取视频下载地址： https://api.tikhub.io ，支持 youtube 字幕和视频地址、抖音、小红书、bilibili 视频
 - 有 mp3 的情况下优先下载 mp3 文件到本地，否则应该下载码率最低的 mp4 文件已节省存储空间。
 - 大部分的 api 响应 json 很长，我在下面文档里只以 json path 说明需要提取的参数，完整的响应结果我放在 sample_files 里了。
 
 ### 抖音
 短链接：https://v.douyin.com/rzK48SiNhJE/ 
+
 解析长链接：https://www.douyin.com/video/74770599505779786363
+
 获取视频下载地址请求：
 ```
 curl -X 'GET' \
@@ -40,7 +42,9 @@ data.aweme_detail.video.bit_rate_audio[0].audio_meta.url_list.main_url: mp3 的�
 
 ### bilibili
 短链接：https://b23.tv/CpOgR16
+
 长链接：https://www.bilibili.com/video/BV1JBLozmEFi?-Arouter=story
+
 请求：
 ```
 curl -X 'GET' \
@@ -70,7 +74,27 @@ data.data.dash.audio[0].baseUrl : 音频文件地址
 
 ### 小红书视频
 短链接：http://xhslink.com/a/sTDXmexS0aebb
+
 长链接：https://www.xiaohongshu.com/explore/67e7beb7000000000f03adfe
+
+#### 方法 A（使用这个）
+此时直接使用短链接即可，无需自我解析成长链接
+
+请求
+```
+curl --location 'https://api.tikhub.io/api/v1/xiaohongshu/web/get_note_info_v3?share_text=http%3A%2F%2Fxhslink.com%2Fa%2FeCCK4tuHDVlbb' \
+--header 'accept: application/json' \
+--header 'Authorization: Bearer Bearer tokenxxx'
+```
+
+响应
+```
+data.user.nickname: 作者名称
+data.title： 视频标题
+data.video.media.stream.h264[0].backup_urls[0]：视频下载地址
+```
+
+#### 方法B（废弃）
 请求
 ```
 curl -X 'GET' \
@@ -87,8 +111,11 @@ data.data.data[0].note_list[0].title
 ```
 
 ### Youtube 
+
 短链接：https://youtu.be/AMCUqgu_cTM?si=Lx1Pq_HE8rhkA5HX
+
 长链接：https://www.youtube.com/watch?v=AMCUqgu_cTM
+
 获取视频下载地址 api 请求
 ```
 curl -X 'GET' \
