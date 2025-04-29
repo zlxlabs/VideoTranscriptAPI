@@ -1,0 +1,14 @@
+{
+    "wechat": {
+        "webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=your-key-here"
+    },
+    "whisper": {
+        "model": "medium",
+        "language": "zh",
+        "task": "transcribe"
+    },
+    "logging": {
+        "level": "INFO",
+        "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    }
+} 

@@ -41,3 +41,24 @@ sample_files\转录案例\bilibili_m4s\29108798989-1-30232.m4s
 # 配置文件
 config.json
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 日志文件
+*.log
+
+# 环境文件
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE配置
+.idea/
+.vscode/
+*.swp
+*.swo
+
