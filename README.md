@@ -45,6 +45,24 @@ data.aweme_detail.video.bit_rate_audio[0].audio_meta.url_list.main_url: mp3 的�
 
 长链接：https://www.bilibili.com/video/BV1JBLozmEFi?-Arouter=story
 
+#### 直接使用 BBDown 完成视频下载（新方案）
+BBdown 是一个专门用来下载 bilibili 视频的工具，其用法可以参考 BBDown\BBDown_README.md
+windows 可执行文件：BBDown\BBDown.exe
+linux 可执行文件：BBDown\BBDown
+
+可以通过形如 `.\BBDown.exe  "https://b23.tv/ZD05YvW" --audio-only` 之类的命令直接通过 url 下载 bilibili 的 mp3 到本地环境。
+
+然后使用 python 直接命令行调用可执行文件下载 bilibili 视频到本地。（注意 windows 和 linux 的环境兼容性）
+
+请在 config.json 文件中配置是否选择 BBdown 作为 bilibili 视频下载工具。
+
+此时，依旧需要将短链接解析成长链接以提取 videoid，但是视频的标题可以直接从下载的文件名里获取。作者留空。
+
+注意，这只是替代了下载文件的方法。但后续转录的步骤和其他下载器完全一致。
+
+
+#### API 解析方案（原方案保留，暂时不用）
+
 请求：
 ```
 curl -X 'GET' \
