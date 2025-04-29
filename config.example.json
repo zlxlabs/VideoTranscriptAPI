@@ -1,14 +1,44 @@
 {
+    "api": {
+      "port": 8000,
+      "host": "0.0.0.0",
+      "auth_token": "your-auth-token-here"
+    },
+    "tikhub": {
+      "api_key": "your-tikhub-api-key-here",
+      "max_retries": 2,
+      "retry_delay": 5,
+      "timeout": 30
+    },
+    "capswriter": {
+      "path": "./CapsWriter-Offline",
+      "server_url": "ws://localhost:6016",
+      "max_retries": 5,
+      "retry_delay": 3,
+      "connection_timeout": 10
+    },
+    "concurrent": {
+      "max_workers": 3,
+      "queue_size": 10
+    },
+    "storage": {
+      "temp_dir": "./temp",
+      "output_dir": "./output"
+    },
     "wechat": {
-        "webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=your-key-here"
+      "webhook": "your-webhook-url-here"
     },
-    "whisper": {
-        "model": "medium",
-        "language": "zh",
-        "task": "transcribe"
+    "log": {
+      "level": "INFO",
+      "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+      "file": "./logs/app.log",
+      "max_size": 10485760,
+      "backup_count": 5
     },
-    "logging": {
-        "level": "INFO",
-        "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    "llm": {
+      "api_key": "your-llm-api-key-here",
+      "base_url": "your-base-url-here",
+      "calibrate_model": "gpt-4.1-mini",
+      "summary_model": "deepseek-chat"
     }
-} 
+  } 
