@@ -1,0 +1,49 @@
+{
+  "file_name": "spk_extract.mp3",
+  "file_size": 650842,
+  "file_hash": "5e06014621b265556822403cba11e9d0",
+  "task_id": "63cdc380-94a8-4a34-89ce-3e01e2d94734",
+  "processing_time": 0.014019012451171875,
+  "server_processing_time": 6.529069185256958,
+  "transcription_result": {
+    "task_id": "b1d7c266-5189-4557-88d7-3656c7362015",
+    "file_name": "5e06014621b265556822403cba11e9d0.mp3",
+    "file_hash": "5e06014621b265556822403cba11e9d0",
+    "duration": 40.045714,
+    "segments": [
+      {
+        "start_time": 0.05,
+        "end_time": 12.49,
+        "text": "好，欢迎收听本期的创业内幕。我是主持人 lily。本期我们请到的嘉宾来自于国内首家自主研发云 CAD 公司卡伦特的技术合伙人李荣璐 lif 李总跟大家打个招呼吧。",
+        "speaker": "Speaker1"
+      },
+      {
+        "start_time": 12.77,
+        "end_time": 31.67,
+        "text": "大家好，我叫李荣录。复旦计算机系极其专业的博士，曾经在这个 auto desk 担任首位的华人首席工程师，也在这个 SAP blackboard 等这些公司呢担任首席架程师，然后呢也有将近二十年的软件开发和管理经验。嗯，",
+        "speaker": "Speaker2"
+      },
+      {
+        "start_time": 32.11,
+        "end_time": 34.01,
+        "text": "您当年为什么选择加入卡伦特，",
+        "speaker": "Speaker1"
+      },
+      {
+        "start_time": 34.01,
+        "end_time": 39.96,
+        "text": "这是一个很有意思的问题啊，当年我在复旦读博的时候，确实赶上了人工智能的一个，",
+        "speaker": "Speaker2"
+      }
+    ],
+    "speakers": [
+      "Speaker1",
+      "Speaker2"
+    ],
+    "created_at": "2025-07-29T21:31:12.920383",
+    "processing_time": 6.529069185256958,
+    "error": null
+  },
+  "test_success": true,
+  "cached_result": true
+}
