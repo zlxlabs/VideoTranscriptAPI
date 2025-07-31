@@ -169,7 +169,7 @@ python main.py --start
 curl -X POST "http://localhost:8000/api/transcribe" \
   -H "Authorization: Bearer your_api_token_here" \
   -H "Content-Type: application/json" \
-  -d '{"url":"https://www.xiaoyuzhoufm.com/episode/687893e0a12f9ff06a98a597"}'
+  -d '{"url":"https://www.xiaoyuzhoufm.com/episode/687893e0a12f9ff06a98a597","use_speaker_recognition": true}'
 ```
 
 响应:
