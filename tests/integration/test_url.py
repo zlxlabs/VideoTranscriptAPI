@@ -8,7 +8,7 @@ import json
 from typing import List, Dict, Any
 
 # 添加项目根目录到导入路径
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from utils import setup_logger
 from downloaders import create_downloader
