@@ -32,6 +32,8 @@
 ├── transcriber/              # 视频转录模块
 │   ├── __init__.py
 │   ├── transcriber.py        # 转录器实现（基于CapsWriter-Offline）
+│   ├── capswriter_client.py  # CapsWriter精简客户端
+│   ├── funasr_client.py      # FunASR说话人识别客户端
 │   └── srt_converter.py      # 字幕格式转换器
 ├── utils/                    # 工具模块
 │   ├── __init__.py
@@ -82,20 +84,11 @@ venv\Scripts\activate     # Windows
 pip install -r requirements.txt
 ```
 
-4. 克隆或下载CapsWriter-Offline
+4. 启动CapsWriter-Offline服务器（需要单独部署）
 
-```bash
-git clone https://github.com/path/to/CapsWriter-Offline.git
-```
+CapsWriter-Offline服务器需要单独部署，本项目只包含客户端。请参考CapsWriter-Offline项目文档启动服务器。
 
-5. 启动CapsWriter-Offline服务器
-
-```bash
-cd CapsWriter-Offline
-python start_server.py
-```
-
-6. 修改配置文件
+5. 修改配置文件
 
 编辑`config.json`配置文件，设置相关参数：
 
@@ -225,20 +218,24 @@ python scripts/test_url.py url_list url_list.txt -o results.json
 python scripts/test_url.py audio path/to/audio/file.mp3
 ```
 
-## 关于CapsWriter-Offline集成
+## 关于语音转文字服务集成
 
-本项目使用CapsWriter-Offline作为转录引擎，而不是直接使用Whisper等模型。CapsWriter-Offline是一个客户端-服务器架构的转录工具，本项目使用其客户端功能将文件发送到CapsWriter-Offline服务器进行转录。
+本项目支持两种语音转文字服务：
 
-使用前必须先确保CapsWriter-Offline服务器已经启动并正常运行。服务器默认在`ws://localhost:6006`监听连接，可以通过配置文件修改。
+### 1. CapsWriter-Offline
+使用精简的客户端（capswriter_client.py）连接到CapsWriter-Offline服务器。服务器默认在`ws://localhost:6006`监听连接，可以通过配置文件修改。
+
+### 2. FunASR Speaker Recognition Server
+支持说话人识别功能的转录服务，适用于需要区分多个说话人的场景。通过funasr_client.py连接到FunASR服务器。
 
 转录流程：
 
 1. API接收视频URL请求
 2. 下载器从平台获取视频或音频文件
-3. 转录器调用CapsWriter-Offline客户端功能
-4. CapsWriter-Offline客户端将文件发送给服务器处理
-5. 处理结果（SRT、JSON等）保存到输出目录
-6. 生成LRC格式文件并返回转录结果
+3. 转录器根据配置选择合适的客户端
+4. 客户端将文件发送给对应服务器处理
+5. 处理结果保存到输出目录
+6. 生成所需格式文件并返回转录结果
 
 ## 运行测试
 
