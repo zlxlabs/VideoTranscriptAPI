@@ -168,8 +168,9 @@ websocket = await websockets.connect(
 
 #### 步骤5：接收最终上传完成响应
 
-当所有分片上传完成后：
+当所有分片上传完成后，服务器可能返回以下几种响应之一：
 
+##### 响应模式1：标准流程
 ```json
 {
   "type": "upload_complete",
@@ -179,6 +180,33 @@ websocket = await websockets.connect(
   }
 }
 ```
+
+##### 响应模式2：快速处理（直接返回结果）
+```json
+{
+  "type": "task_complete",
+  "data": {
+    "task_id": "uuid-task-id",
+    "result": {
+      // 完整的转录结果
+    }
+  }
+}
+```
+
+##### 响应模式3：队列处理
+```json
+{
+  "type": "task_queued",
+  "data": {
+    "task_id": "uuid-task-id",
+    "queue_position": 3,
+    "estimated_wait_minutes": 5
+  }
+}
+```
+
+**重要提示**：客户端应该能够处理这三种响应模式，以确保与服务器的兼容性。
 
 ## 转录状态监控
 
@@ -450,15 +478,25 @@ class FunASRClient:
         
         print("✓ 所有分片上传完成，等待处理...")
         
-        # 等待上传完成通知
+        # 等待上传完成通知或直接的转录结果
         response = await self.receive_message()
-        if response["type"] not in ["upload_complete", "task_queued"]:
-            raise Exception(f"分片上传完成失败: {response}")
         
-        if response["type"] == "task_queued":
+        # 服务器可能有三种响应模式
+        if response["type"] == "upload_complete":
+            # 标准模式：先确认上传完成，再进行转录
+            print("✓ 分片上传完成，开始转录...")
+        elif response["type"] == "task_complete":
+            # 快速模式：直接返回转录结果（跳过upload_complete）
+            print("✓ 分片上传完成并直接获得转录结果")
+            result = response["data"]["result"]
+            return result
+        elif response["type"] == "task_queued":
+            # 排队模式：需要等待队列处理
             position = response["data"]["queue_position"]
             wait_time = response["data"]["estimated_wait_minutes"]
             print(f"⏳ 任务排队中，位置: {position}，预计等待: {wait_time}分钟")
+        else:
+            raise Exception(f"分片上传后收到未知响应类型: {response['type']}")
         
         # 等待转录完成
         return await self._wait_for_result()
@@ -630,6 +668,46 @@ import logging
 logging.basicConfig(level=logging.DEBUG)
 ```
 
+## 服务器响应模式兼容性说明
+
+### 重要发现（2025-08-13）
+
+在实际测试中发现，FunASR 服务器在处理分片上传时可能有不同的响应模式，客户端需要兼容这些差异。
+
+### 响应模式差异
+
+#### 1. 标准响应流程
+```
+客户端上传分片 → 服务器确认每个分片 → upload_complete → task_progress → task_complete
+```
+
+#### 2. 快速响应流程
+```
+客户端上传分片 → 服务器确认每个分片 → 直接返回 task_complete（跳过 upload_complete）
+```
+
+这种快速模式可能发生在：
+- 服务器处理速度非常快
+- 文件已有缓存结果
+- 服务器内部优化了响应流程
+
+### 客户端兼容性处理
+
+客户端在分片上传完成后，应该能够处理以下三种可能的响应：
+
+1. **upload_complete**：标准的上传完成确认
+2. **task_complete**：直接返回转录结果（服务器优化路径）
+3. **task_queued**：任务进入队列等待处理
+
+### 实际案例
+
+在处理一个 62.31MB 的音频文件时：
+- 分片上传：63个分片（每片1MB）全部成功
+- 服务器响应：直接返回 `task_complete` 而非 `upload_complete`
+- 转录结果：成功，包含完整的转录数据
+
+这说明服务器可能会根据内部处理逻辑优化响应流程，客户端必须具备足够的灵活性。
+
 ## 总结
 
 FunASR WebSocket 客户端支持灵活的文件上传和转录功能：
@@ -639,5 +717,6 @@ FunASR WebSocket 客户端支持灵活的文件上传和转录功能：
 - **实时监控**：支持进度跟踪和状态通知
 - **错误处理**：完善的错误恢复机制
 - **格式支持**：多种音频格式和输出选项
+- **响应兼容**：支持服务器的多种响应模式
 
 通过遵循本指南，可以构建稳定、高效的音频转录客户端应用。
