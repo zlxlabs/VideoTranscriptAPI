@@ -69,7 +69,7 @@ class SimpleWebhookRateLimiter:
             
             # 发送消息
             content_preview = content[:100].replace('\n', ' ')
-            logger.info(f"[同步发送] Webhook: {webhook_url[:30]}..., 预览: {content_preview}...")
+            logger.debug(f"[同步发送] Webhook: {webhook_url[:30]}..., 预览: {content_preview}...")
             
             success = self._send_webhook_now(webhook_url, content)
             
@@ -84,9 +84,9 @@ class SimpleWebhookRateLimiter:
                     self.stats['total_failed'] += 1
             
             if success:
-                logger.info(f"[同步发送] 发送成功, Webhook: {webhook_url[:30]}..., 预览: {content_preview}...")
+                logger.debug(f"[同步发送] 发送成功, Webhook: {webhook_url[:30]}..., 预览: {content_preview}...")
             else:
-                logger.error(f"[同步发送] 发送失败, Webhook: {webhook_url[:30]}..., 预览: {content_preview}...")
+                logger.debug(f"[同步发送] 发送失败, Webhook: {webhook_url[:30]}..., 预览: {content_preview}...")
             
             return success
     

@@ -87,7 +87,7 @@ class WechatNotifier:
             )
             
             if response.status_code == 200 and response.json().get("errcode") == 0:
-                logger.info(f"企业微信通知发送成功: {content[:50]}...")
+                logger.debug(f"企业微信通知发送成功: {content[:50]}...")
                 return True
             else:
                 logger.error(f"企业微信通知发送失败: {response.text}")
@@ -263,7 +263,7 @@ def send_long_text_wechat(title, url, text, is_summary=False, webhook=None, has_
         
         # 发送内容
         content_preview = content[:100].replace('\n', ' ')  # 内容预览
-        logger.info(f"[分段发送] 发送第{part_count}段, 长度: {len(part_text)}, 预览: {content_preview}...")
+        logger.debug(f"[分段发送] 发送第{part_count}段, 长度: {len(part_text)}, 预览: {content_preview}...")
         
         success = notifier.send_text(content)
         if not success:
@@ -279,7 +279,7 @@ def send_long_text_wechat(title, url, text, is_summary=False, webhook=None, has_
         
         start = end
     
-    logger.info(f"长文本发送完成，共{part_count}段，总长度: {text_len}")
+    logger.debug(f"长文本发送完成，共{part_count}段，总长度: {text_len}")
 
 
 def send_view_link_wechat(title, view_token, webhook=None):
@@ -303,7 +303,7 @@ def send_view_link_wechat(title, view_token, webhook=None):
         success = notifier.send_text(message)
         
         if success:
-            logger.info(f"查看链接发送成功: {title}")
+            logger.debug(f"查看链接发送成功: {title}")
         else:
             logger.error(f"查看链接发送失败: {title}")
             
