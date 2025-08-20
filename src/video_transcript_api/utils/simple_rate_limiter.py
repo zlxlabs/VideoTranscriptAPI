@@ -12,6 +12,7 @@ import json
 import os
 from functools import wraps
 from pathlib import Path
+from collections import defaultdict
 from .logger import setup_logger
 
 logger = setup_logger("simple_rate_limiter")
@@ -25,12 +26,14 @@ class SimpleWebhookRateLimiter:
     """
     
     def __init__(self):
-        # 全局发送锁，确保同一时刻只有一个消息在发送
-        self._send_lock = threading.Lock()
+        # 每个webhook独立的发送锁，实现独立频控
+        self._webhook_locks = defaultdict(threading.Lock)
         # 记录每个webhook的最后发送时间
         self._last_send_times = {}
         # 最小发送间隔（秒）
         self.min_interval = 0.8
+        # 统计信息锁
+        self._stats_lock = threading.Lock()
         # 统计信息
         self.stats = {
             'total_sent': 0,
@@ -59,26 +62,31 @@ class SimpleWebhookRateLimiter:
         webhook_url = webhook_url.strip()
         content = content.strip()
         
-        # 使用全局锁，确保消息按调用顺序发送
-        with self._send_lock:
+        # 使用该webhook独立的锁，不同webhook可以并行发送
+        with self._webhook_locks[webhook_url]:
             # 检查时间间隔，如有必要则等待
             self._wait_if_needed(webhook_url)
             
             # 发送消息
             content_preview = content[:100].replace('\n', ' ')
-            logger.info(f"[同步发送] 开始发送消息，预览: {content_preview}...")
+            logger.info(f"[同步发送] Webhook: {webhook_url[:30]}..., 预览: {content_preview}...")
             
             success = self._send_webhook_now(webhook_url, content)
             
             # 记录发送时间
             self._last_send_times[webhook_url] = time.time()
             
+            # 更新统计信息（需要锁保护）
+            with self._stats_lock:
+                if success:
+                    self.stats['total_sent'] += 1
+                else:
+                    self.stats['total_failed'] += 1
+            
             if success:
-                self.stats['total_sent'] += 1
-                logger.info(f"[同步发送] 消息发送成功，预览: {content_preview}...")
+                logger.info(f"[同步发送] 发送成功, Webhook: {webhook_url[:30]}..., 预览: {content_preview}...")
             else:
-                self.stats['total_failed'] += 1
-                logger.error(f"[同步发送] 消息发送失败，预览: {content_preview}...")
+                logger.error(f"[同步发送] 发送失败, Webhook: {webhook_url[:30]}..., 预览: {content_preview}...")
             
             return success
     
@@ -90,7 +98,7 @@ class SimpleWebhookRateLimiter:
         
         if elapsed < self.min_interval:
             wait_time = self.min_interval - elapsed
-            logger.debug(f"等待发送间隔: {wait_time:.3f}s")
+            logger.debug(f"Webhook {webhook_url[:30]}... 等待发送间隔: {wait_time:.3f}s")
             time.sleep(wait_time)
     
     def _send_webhook_now(self, webhook_url: str, content: str) -> bool:
