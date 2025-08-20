@@ -47,7 +47,7 @@ class EnhancedLLMProcessor:
     
     def process_llm_task(self, llm_task: Dict[str, Any]) -> Dict[str, Any]:
         """
-        处理LLM任务，自动判断是否需要分段
+        处理LLM任务，自动判断是否需要分段和结构化处理
         
         Args:
             llm_task: LLM任务字典，包含所有必要信息
@@ -62,8 +62,15 @@ class EnhancedLLMProcessor:
         author = llm_task["author"]
         description = llm_task.get("description", "")
         transcription_data = llm_task.get("transcription_data")
+        platform = llm_task.get("platform", "")
+        media_id = llm_task.get("media_id", "")
         
         logger.info(f"开始处理LLM任务: {task_id}, 标题: {video_title}")
+        
+        # 优先使用结构化处理（仅限说话人识别场景）
+        if use_speaker_recognition and transcription_data and platform and media_id:
+            logger.info(f"检测到说话人识别场景，使用结构化处理: {task_id}, 平台: {platform}, 媒体ID: {media_id}")
+            return self._process_with_structured_output(llm_task)
         
         # 根据transcription_data判断文件类型和处理方式
         if use_speaker_recognition and transcription_data:
@@ -91,6 +98,68 @@ class EnhancedLLMProcessor:
         else:
             # 使用原有逻辑处理
             return self._process_original_logic(llm_task)
+    
+    def _process_with_structured_output(self, llm_task: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        使用结构化输出处理说话人识别任务
+        
+        Args:
+            llm_task: LLM任务字典
+            
+        Returns:
+            包含校对文本、总结文本和结构化数据的字典
+        """
+        try:
+            # 构建缓存目录路径
+            cache_dir = self._build_cache_dir_from_task(llm_task)
+            
+            # 构建视频元数据
+            video_metadata = {
+                'video_title': llm_task["video_title"],
+                'author': llm_task["author"],
+                'description': llm_task.get("description", "")
+            }
+            
+            # 调用结构化处理方法
+            result = self.process_llm_task_with_structure(
+                cache_dir=cache_dir,
+                funasr_data=llm_task.get("transcription_data"),
+                video_metadata=video_metadata
+            )
+            
+            logger.info(f"结构化处理完成: {llm_task['task_id']}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"结构化处理失败，降级到传统处理: {e}")
+            return self._process_original_logic(llm_task)
+    
+    def _build_cache_dir_from_task(self, llm_task: Dict[str, Any]) -> str:
+        """从任务信息构建缓存目录路径"""
+        import os
+        from .cache_manager import CacheManager
+        
+        # 获取配置中的缓存目录
+        cache_base_dir = self.config.get("storage", {}).get("cache_dir", "./data/cache")
+        
+        platform = llm_task.get("platform", "")
+        media_id = llm_task.get("media_id", "")
+        
+        if not platform or not media_id:
+            raise ValueError("缺少平台或媒体ID信息")
+        
+        # 构建缓存路径：cache_dir/platform/YYYY/YYYYMM/media_id
+        import datetime
+        now = datetime.datetime.now()
+        year = now.strftime("%Y")
+        year_month = now.strftime("%Y%m")
+        
+        cache_dir = os.path.join(cache_base_dir, platform, year, year_month, media_id)
+        
+        # 确保目录存在
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        return cache_dir
     
     def _process_txt_segmented(self, llm_task: Dict[str, Any]) -> Dict[str, str]:
         """处理TXT格式的分段校对"""
@@ -426,7 +495,7 @@ class EnhancedLLMProcessor:
             # 9. 保存结果到缓存
             self._save_structured_result(cache_dir, structured_result, calibrated_text, summary_text)
             
-            logger.info("结构化LLM处理完成")
+            logger.info(f"结构化LLM处理完成，已保存llm_processed.json到: {cache_dir}")
             return {
                 '校对文本': calibrated_text,
                 '内容总结': summary_text,
