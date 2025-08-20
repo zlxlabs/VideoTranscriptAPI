@@ -78,8 +78,7 @@ video_transcript_api/
 │   ├── cache/                    # 缓存数据
 │   ├── logs/                     # 日志文件
 │   └── temp/                     # 临时文件
-├── third_party/                  # 第三方工具
-│   └── BBDown/                   # BBDown工具
+├── BBDown/                       # BBDown工具 
 ├── main.py                       # 主程序入口
 ├── requirements.txt              # 项目依赖
 ├── .gitignore                    # Git忽略规则

@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any
 
 from ..utils import setup_logger, load_config, WechatNotifier, MetadataCache, CacheManager
+from ..utils.webhook_rate_limiter import get_rate_limiter_stats, get_webhook_status
 from ..utils.markdown_renderer import render_markdown_to_html, get_base_url
 from ..utils.timezone_helper import format_datetime_for_display
 from ..utils.llm_enhanced import EnhancedLLMProcessor
@@ -1016,6 +1017,54 @@ async def get_task_status(task_id: str):
         message=task_result.get("message", "获取任务状态成功"),
         data=task_result.get("data")
     )
+
+
+@app.get("/api/webhook-stats", dependencies=[Depends(verify_token)])
+async def get_webhook_stats():
+    """
+    获取webhook限流器统计信息
+    
+    返回:
+        dict: 限流器统计数据
+    """
+    try:
+        stats = get_rate_limiter_stats()
+        return TranscribeResponse(
+            code=200,
+            message="获取统计信息成功",
+            data=stats
+        )
+    except Exception as e:
+        logger.exception(f"获取webhook统计信息异常: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取统计信息失败: {str(e)}")
+
+
+@app.get("/api/webhook-status", dependencies=[Depends(verify_token)])
+async def get_webhook_status_info(webhook_url: str):
+    """
+    获取指定webhook的状态信息
+    
+    请求参数:
+        webhook_url: webhook地址（URL参数）
+        
+    返回:
+        dict: webhook状态信息
+    """
+    try:
+        if not webhook_url:
+            raise HTTPException(status_code=400, detail="webhook地址不能为空")
+            
+        status = get_webhook_status(webhook_url)
+        return TranscribeResponse(
+            code=200,
+            message="获取webhook状态成功",
+            data=status
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"获取webhook状态异常: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取webhook状态失败: {str(e)}")
 
 
 @app.get("/view/{view_token}", response_class=HTMLResponse)
