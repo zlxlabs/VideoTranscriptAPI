@@ -158,6 +158,74 @@ class DialogRenderer:
         except ValueError:
             return self.SPEAKER_COLORS[0]  # 默认颜色
     
+    def smart_paragraph_split(self, text: str) -> str:
+        """
+        智能分段，通过中英文标点符号自动分段
+        
+        Args:
+            text: 输入文本
+            
+        Returns:
+            str: 分段后的文本
+        """
+        if not text or len(text) < 100:  # 短文本无需分段
+            return text
+            
+        # 中英文句号、问号、感叹号等结束符号
+        sentence_endings = ['。', '！', '？', '.', '!', '?']
+        # 逗号、分号等暂停符号（用于较长句子的断点）
+        pause_marks = ['，', '；', ',', ';']
+        
+        # 分割成句子
+        sentences = []
+        current_sentence = ""
+        
+        i = 0
+        while i < len(text):
+            char = text[i]
+            current_sentence += char
+            
+            # 检查是否是句子结束符
+            if char in sentence_endings:
+                # 检查下一个字符是否是引号、括号等
+                next_chars = text[i+1:i+3] if i+1 < len(text) else ""
+                if not next_chars or not any(c in '"）】"' for c in next_chars):
+                    sentences.append(current_sentence.strip())
+                    current_sentence = ""
+            # 对于很长的句子，在逗号等处强制断句
+            elif char in pause_marks and len(current_sentence) > 80:
+                sentences.append(current_sentence.strip())
+                current_sentence = ""
+            
+            i += 1
+        
+        # 添加最后的未完成句子
+        if current_sentence.strip():
+            sentences.append(current_sentence.strip())
+        
+        # 将句子组合成段落（2-4个句子为一段）
+        paragraphs = []
+        current_paragraph = []
+        current_length = 0
+        
+        for sentence in sentences:
+            current_paragraph.append(sentence)
+            current_length += len(sentence)
+            
+            # 条件：达到2-4个句子且长度合适，或者单个句子太长
+            if (len(current_paragraph) >= 2 and current_length > 120) or \
+               (len(current_paragraph) >= 4) or \
+               (len(sentence) > 150):  # 单个长句独立成段
+                paragraphs.append(' '.join(current_paragraph))
+                current_paragraph = []
+                current_length = 0
+        
+        # 添加剩余的句子
+        if current_paragraph:
+            paragraphs.append(' '.join(current_paragraph))
+        
+        return '\n\n'.join(paragraphs)
+    
     def render_dialog_html(self, text: str) -> str:
         """
         渲染对话为HTML格式
@@ -191,8 +259,11 @@ class DialogRenderer:
                 content = dialog['content']
                 color = self.get_speaker_color(speaker, speakers)
                 
-                # 处理内容中的换行
-                content_html = content.replace('\n\n', '</p><p>').replace('\n', '<br>')
+                # 智能分段处理
+                smart_content = self.smart_paragraph_split(content)
+                
+                # 处理内容中的换行，为段落间增加特殊样式类
+                content_html = smart_content.replace('\n\n', '</p><p class="paragraph-break">').replace('\n', '<br>')
                 if content_html and not content_html.startswith('<p>'):
                     content_html = f'<p>{content_html}</p>'
                 
@@ -324,8 +395,11 @@ class DialogRenderer:
                 content = dialog['content']
                 color = self.get_speaker_color(speaker, speakers)
                 
-                # 处理内容中的换行
-                content_html = content.replace('\n\n', '</p><p>').replace('\n', '<br>')
+                # 智能分段处理
+                smart_content = self.smart_paragraph_split(content)
+                
+                # 处理内容中的换行，为段落间增加特殊样式类
+                content_html = smart_content.replace('\n\n', '</p><p class="paragraph-break">').replace('\n', '<br>')
                 if content_html and not content_html.startswith('<p>'):
                     content_html = f'<p>{content_html}</p>'
                 
@@ -508,8 +582,11 @@ class DialogRenderer:
             content = dialog['content']
             color = self.get_speaker_color(speaker, speakers)
             
-            # 处理内容中的换行
-            content_html = content.replace('\n\n', '</p><p>').replace('\n', '<br>')
+            # 智能分段处理
+            smart_content = self.smart_paragraph_split(content)
+            
+            # 处理内容中的换行，为段落间增加特殊样式类
+            content_html = smart_content.replace('\n\n', '</p><p class="paragraph-break">').replace('\n', '<br>')
             if content_html and not content_html.startswith('<p>'):
                 content_html = f'<p>{content_html}</p>'
             

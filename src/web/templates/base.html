@@ -206,42 +206,59 @@
         .dialog-container {
             display: flex;
             flex-direction: column;
-            gap: 16px;
+            gap: 20px;
         }
         
         .dialog-item {
             display: flex;
             align-items: flex-start;
             gap: 20px;
-            margin-bottom: 16px;
+            margin-bottom: 20px;
+            padding: 16px;
+            background: #fafbfc;
+            border: 1px solid #e1e8ed;
+            border-radius: 12px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+            transition: box-shadow 0.2s ease;
+        }
+        
+        .dialog-item:hover {
+            box-shadow: 0 2px 6px rgba(0,0,0,0.12);
         }
         
         .speaker-tag {
             flex-shrink: 0;
             width: 100px;
-            text-align: right;
-            padding: 4px 8px;
-            border-radius: 6px;
+            text-align: center;
+            padding: 8px 12px;
+            border-radius: 8px;
             color: white;
             font-weight: 600;
-            font-size: 0.85em;
-            line-height: 1.4;
+            font-size: 0.9em;
+            line-height: 1.3;
             word-break: break-all;
             align-self: flex-start;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
         }
         
         .dialog-content {
             flex: 1;
             min-width: 0;
+            padding: 4px 0;
         }
         
         .dialog-content p {
-            margin: 0 0 12px 0;
+            margin: 0 0 16px 0;
             line-height: 1.7;
+            text-align: justify;
         }
         
         .dialog-content p:last-child {
             margin-bottom: 0;
+        }
+        
+        .dialog-content .paragraph-break {
+            margin-bottom: 20px;
         }
         
         /* 手机端响应式样式 */
