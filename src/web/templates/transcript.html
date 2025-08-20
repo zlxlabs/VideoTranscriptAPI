@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title or "视频转录" }} - 视频转录查看器{% endblock %}
+
+{% block content %}
+    <div class="section">
+        <h2>📝 内容总结</h2>
+        <div class="content">
+            {% if summary_html %}
+                {{ summary_html|safe }}
+            {% else %}
+                <p style="color: #666; font-style: italic;">总结处理中...</p>
+            {% endif %}
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2>📄 完整转录文本</h2>
+        {% if use_speaker_recognition %}
+            <p style="color: #666; font-size: 0.9rem; margin-bottom: 20px;">
+                🎤 本转录包含说话人识别信息
+            </p>
+        {% endif %}
+        <div class="content">
+            {% if transcript_html %}
+                {{ transcript_html|safe }}
+            {% else %}
+                <p style="color: #666; font-style: italic;">转录文本获取中...</p>
+            {% endif %}
+        </div>
+    </div>
+{% endblock %}

@@ -4,7 +4,11 @@
 import os
 import sys
 import argparse
-from api import start_server
+
+# 添加src目录到Python路径
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+
+from video_transcript_api.api.server import start_server
 
 def main():
     """主程序入口函数"""

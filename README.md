@@ -22,54 +22,69 @@
 ## 项目结构
 
 ```
-.
-├── api/                      # API服务模块
-│   ├── __init__.py
-│   └── server.py             # API服务实现
-├── downloaders/              # 视频下载模块
-│   ├── __init__.py
-│   ├── base.py               # 下载器基类
-│   ├── douyin.py             # 抖音下载器
-│   ├── bilibili.py           # B站下载器
-│   ├── xiaohongshu.py        # 小红书下载器
-│   ├── youtube.py            # YouTube下载器
-│   ├── xiaoyuzhou.py         # 小宇宙播客下载器
-│   └── factory.py            # 下载器工厂
-├── transcriber/              # 视频转录模块
-│   ├── __init__.py
-│   ├── transcriber.py        # 转录器实现（基于CapsWriter-Offline）
-│   ├── capswriter_client.py  # CapsWriter精简客户端
-│   └── funasr_client.py      # FunASR说话人识别客户端
-├── utils/                    # 工具模块
-│   ├── __init__.py
-│   ├── logger.py             # 日志工具
-│   ├── wechat.py             # 企业微信通知
-│   ├── cache_manager.py      # 智能缓存管理器
-│   └── metadata_cache.py     # 元数据缓存（兼容性）
-├── tests/                    # 测试模块
-│   ├── __init__.py
-│   ├── README.md             # 测试说明文档
-│   ├── unit/                 # 单元测试
+video_transcript_api/
+├── src/                          # 源代码目录
+│   ├── video_transcript_api/     # 主要包目录
 │   │   ├── __init__.py
-│   │   ├── test_downloader.py    # 下载器测试
-│   │   └── test_transcriber.py   # 转录器测试
-│   ├── integration/          # 集成测试
-│   │   ├── __init__.py
-│   │   ├── test_url.py           # URL端到端测试
-│   │   └── test_api.py           # API集成测试
-│   ├── performance/          # 性能测试
-│   │   ├── __init__.py
-│   │   └── test_concurrent.py    # 并发测试
-│   └── manual/               # 手动测试脚本
-│       ├── __init__.py
-│       ├── test_transcribe.py    # 转录功能测试
-│       └── llm_test.py           # LLM功能测试
-├── config.json               # 配置文件
-├── requirements.txt          # 项目依赖
-├── run_tests.py              # 测试运行脚本
-├── cleanup_cache.py          # 缓存清理脚本
-├── main.py                   # 主程序入口
-└── README.md                 # 项目说明
+│   │   ├── api/                  # API服务模块
+│   │   │   ├── __init__.py
+│   │   │   └── server.py         # API服务实现
+│   │   ├── downloaders/          # 视频下载模块
+│   │   │   ├── __init__.py
+│   │   │   ├── base.py           # 下载器基类
+│   │   │   ├── douyin.py         # 抖音下载器
+│   │   │   ├── bilibili.py       # B站下载器
+│   │   │   ├── xiaohongshu.py    # 小红书下载器
+│   │   │   ├── youtube.py        # YouTube下载器
+│   │   │   ├── xiaoyuzhou.py     # 小宇宙播客下载器
+│   │   │   ├── generic.py        # 通用下载器
+│   │   │   └── factory.py        # 下载器工厂
+│   │   ├── transcriber/          # 视频转录模块
+│   │   │   ├── __init__.py
+│   │   │   ├── transcriber.py    # 转录器实现（基于CapsWriter-Offline）
+│   │   │   ├── capswriter_client.py  # CapsWriter精简客户端
+│   │   │   └── funasr_client.py  # FunASR说话人识别客户端
+│   │   └── utils/                # 工具模块
+│   │       ├── __init__.py
+│   │       ├── logger.py         # 日志工具
+│   │       ├── wechat.py         # 企业微信通知
+│   │       ├── cache_manager.py  # 智能缓存管理器
+│   │       ├── llm_enhanced.py   # 增强LLM处理器
+│   │       └── ...               # 其他工具模块
+│   └── web/                      # Web模板资源
+│       └── templates/            # HTML模板
+├── tests/                        # 测试模块
+│   ├── unit/                     # 单元测试
+│   ├── integration/              # 集成测试
+│   ├── performance/              # 性能测试
+│   ├── manual/                   # 手动测试脚本
+│   ├── llm/                      # LLM功能测试
+│   ├── cache/                    # 缓存功能测试
+│   ├── features/                 # 功能特性测试
+│   ├── platforms/                # 平台相关测试
+│   └── sample_files/             # 测试样本文件
+├── scripts/                      # 工具脚本
+│   ├── cleanup_cache.py          # 缓存清理脚本
+│   └── run_tests.py              # 测试运行脚本
+├── docs/                         # 文档目录
+│   ├── api/                      # API文档
+│   ├── development/              # 开发文档
+│   ├── architecture/             # 架构文档
+│   └── examples/                 # 示例文档
+├── config/                       # 配置文件目录
+│   ├── config.example.json       # 配置示例文件
+│   └── config.json               # 实际配置文件
+├── data/                         # 数据目录
+│   ├── cache/                    # 缓存数据
+│   ├── logs/                     # 日志文件
+│   └── temp/                     # 临时文件
+├── third_party/                  # 第三方工具
+│   └── BBDown/                   # BBDown工具
+├── main.py                       # 主程序入口
+├── requirements.txt              # 项目依赖
+├── .gitignore                    # Git忽略规则
+├── README.md                     # 项目说明
+└── CLAUDE.md                     # 项目开发规范
 ```
 
 ## 安装与配置
@@ -122,7 +137,7 @@ pip install -r requirements.txt
 
 5. 修改配置文件
 
-编辑`config.json`配置文件，设置相关参数：
+编辑`config/config.json`配置文件，设置相关参数：
 
 ```json
 {
@@ -416,14 +431,14 @@ cache_dir/
 **手动清理缓存**：
 ```bash
 # 清理超过保留期限的旧缓存，并验证完整性
-python cleanup_cache.py
+python scripts/cleanup_cache.py
 ```
 
 **配置缓存保留时间**：
 ```json
 {
   "storage": {
-    "cache_dir": "./cache_dir",
+    "cache_dir": "./data/cache",
     "cache_retention_days": 360
   }
 }
@@ -445,7 +460,7 @@ python cleanup_cache.py
 ## 运行测试
 
 ```bash
-python run_tests.py
+python scripts/run_tests.py
 ```
 
 ## 许可证

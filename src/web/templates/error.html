@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title or "出现错误" }} - 视频转录查看器{% endblock %}
+
+{% block content %}
+    <div class="section">
+        <div class="status-error">
+            <h2 style="margin-top: 0;">❌ 出现错误</h2>
+            <p>{{ message or "页面无法正常显示" }}</p>
+            
+            {% if url %}
+            <div style="margin-top: 20px;">
+                <h3>您可以：</h3>
+                <ul class="action-list">
+                    <li>📎 <a href="{{ url }}" target="_blank" rel="noopener">查看原始视频链接</a></li>
+                    <li>🔄 刷新页面重试</li>
+                    <li>📝 重新提交转录任务</li>
+                </ul>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2>💡 可能的解决方法</h2>
+        <div class="content">
+            <ul>
+                <li><strong>404 - 页面不存在</strong>：检查链接是否正确，或者任务可能已被删除</li>
+                <li><strong>转录失败</strong>：视频可能无法访问或格式不支持，请尝试重新提交</li>
+                <li><strong>服务异常</strong>：系统临时故障，请稍后重试</li>
+            </ul>
+            
+            <p style="margin-top: 20px;">
+                <button onclick="window.location.reload()" style="
+                    background: #f44336;
+                    color: white;
+                    border: none;
+                    padding: 10px 20px;
+                    border-radius: 4px;
+                    cursor: pointer;
+                    font-size: 1rem;
+                ">🔄 重新加载</button>
+            </p>
+        </div>
+    </div>
+    
+    {% if created_at_display %}
+    <div class="section">
+        <p style="color: #666; text-align: center;">
+            任务创建时间：{{ created_at_display }}
+        </p>
+    </div>
+    {% elif created_at %}
+    <div class="section">
+        <p style="color: #666; text-align: center;">
+            任务创建时间：{{ created_at }}
+        </p>
+    </div>
+    {% endif %}
+{% endblock %}

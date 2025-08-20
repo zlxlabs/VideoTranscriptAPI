@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block title %}处理中 - 视频转录查看器{% endblock %}
+
+{% block extra_css %}
+<style>
+    .spinner {
+        border: 4px solid #f3f3f3;
+        border-top: 4px solid #3498db;
+        border-radius: 50%;
+        width: 40px;
+        height: 40px;
+        animation: spin 1s linear infinite;
+        margin: 20px auto;
+    }
+    
+    @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+    <div class="section">
+        <div class="status-processing">
+            <div class="spinner"></div>
+            <h2 style="text-align: center; margin: 20px 0;">⏳ 转录处理中...</h2>
+            <p style="text-align: center; color: #666;">
+                视频转录任务正在进行中，请稍后刷新页面查看结果。
+            </p>
+            <p style="text-align: center; margin-top: 20px;">
+                <button onclick="window.location.reload()" style="
+                    background: #2196f3;
+                    color: white;
+                    border: none;
+                    padding: 10px 20px;
+                    border-radius: 4px;
+                    cursor: pointer;
+                    font-size: 1rem;
+                ">🔄 刷新页面</button>
+            </p>
+        </div>
+        
+        {% if created_at_display %}
+        <p style="color: #666; text-align: center; margin-top: 20px;">
+            任务创建时间：{{ created_at_display }}
+        </p>
+        {% elif created_at %}
+        <p style="color: #666; text-align: center; margin-top: 20px;">
+            任务创建时间：{{ created_at }}
+        </p>
+        {% endif %}
+    </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // 自动刷新页面
+    setTimeout(function() {
+        window.location.reload();
+    }, 30000); // 30秒后自动刷新
+</script>
+{% endblock %}

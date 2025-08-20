@@ -1,67 +1,72 @@
-# Python缓存文件
+# Python字节码和缓存文件
 __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache
+*.pyc
+*.pyo
 
 # 虚拟环境
 venv/
 env/
 ENV/
+.env
+.venv
 
-sample_files/test_files/
+# IDE配置
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
 
 # 日志文件
-logs/
+data/logs/
 *.log
 
-# 临时文件和输出
-temp/
-output/
+# 数据目录
+data/cache/
+data/temp/
+data/*.db
+
+# 媒体文件
 *.mp3
 *.mp4
 *.m4a
 *.m4s
+*.wav
+*.flac
 
 # 模型文件
 models/
 
-# 测试文件
+# 测试输出
 test_output/
+tests/sample_files/test_files/
 
-# IDE配置
-.vscode/
-.idea/
+# 配置文件（敏感信息）
+config/config.json
 
-# 其他
+# 第三方工具输出
+third_party/BBDown/output/
+
+# Python分发
+build/
+dist/
+*.egg-info/
+
+# 开发工具
+.coverage
+.pytest_cache
+.mypy_cache
+.tox
+
+# 操作系统文件
+*.tmp
+*.temp
 .DS_Store
 Thumbs.db
 
-CapsWriter-Offline
-sample_files\转录案例\bilibili_m4s\29108798989-1-30232.m4s
-cache_dir
-
-# 配置文件
-config.json
-
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-
-# 日志文件
-*.log
-
-# 环境文件
-.env
-.venv
-env/
-venv/
-ENV/
-
-# IDE配置
-.idea/
-.vscode/
-*.swp
-*.swo
-
+# 文档构建
+docs/_build/
