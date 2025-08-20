@@ -4,7 +4,7 @@
 """
 import os
 import threading
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from .logger import setup_logger
 from .llm import call_llm_api
 from .llm_segmented import SegmentedLLMProcessor
@@ -354,3 +354,404 @@ class EnhancedLLMProcessor:
             )
         
         return summary_prompt
+    
+    def process_llm_task_with_structure(self, cache_dir: str, funasr_data: Dict, video_metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        处理LLM任务并生成结构化输出（新格式）
+        
+        Args:
+            cache_dir: 缓存目录路径
+            funasr_data: FunASR原始转录数据
+            video_metadata: 视频元数据信息
+            
+        Returns:
+            Dict: 包含结构化对话数据和映射关系
+        """
+        try:
+            # 导入说话人映射推断器
+            from .speaker_mapping import SpeakerMappingInference
+            
+            # 提取基本信息
+            video_title = video_metadata.get('video_title', '未知标题')
+            author = video_metadata.get('author', '未知作者')
+            description = video_metadata.get('description', '')
+            
+            logger.info(f"开始结构化LLM处理: {video_title}")
+            
+            # 1. 提取原始说话人信息
+            mapping_inference = SpeakerMappingInference()
+            original_speakers = mapping_inference.extract_speakers_from_funasr(funasr_data)
+            
+            if not original_speakers:
+                logger.warning("FunASR数据中未找到说话人信息，降级到文本处理")
+                return self._process_without_speakers(funasr_data, video_metadata, cache_dir)
+            
+            # 2. 生成说话人推断提示词
+            speaker_inference_prompt = self._generate_speaker_inference_prompt(funasr_data, original_speakers, video_metadata)
+            
+            # 3. 调用LLM进行说话人推断
+            logger.info("执行说话人推断")
+            speaker_mapping_result = call_llm_api(
+                prompt=speaker_inference_prompt,
+                model=self.calibrate_model,
+                api_key=self.api_key,
+                base_url=self.base_url,
+                max_retries=self.max_retries,
+                retry_delay=self.retry_delay
+            )
+            
+            # 4. 解析说话人映射关系
+            speaker_mapping = self._parse_speaker_mapping_result(speaker_mapping_result, original_speakers)
+            
+            # 5. 生成结构化对话内容
+            structured_dialogs = self._generate_structured_dialogs(funasr_data, speaker_mapping)
+            
+            # 6. 生成文本版本（兼容性）
+            calibrated_text = self._generate_text_from_structured_dialogs(structured_dialogs)
+            
+            # 7. 生成总结
+            summary_text = self._generate_summary_from_structured_content(calibrated_text, video_metadata)
+            
+            # 8. 构建结构化结果
+            structured_result = {
+                'format_version': 'v2',
+                'video_metadata': video_metadata,
+                'original_speakers': original_speakers,
+                'speaker_mapping': speaker_mapping,
+                'dialogs': structured_dialogs,
+                'summary': summary_text,
+                'generated_at': self._get_current_timestamp()
+            }
+            
+            # 9. 保存结果到缓存
+            self._save_structured_result(cache_dir, structured_result, calibrated_text, summary_text)
+            
+            logger.info("结构化LLM处理完成")
+            return {
+                '校对文本': calibrated_text,
+                '内容总结': summary_text,
+                '结构化数据': structured_result
+            }
+            
+        except Exception as e:
+            logger.error(f"结构化LLM处理失败: {e}")
+            # 降级到传统处理方式
+            return self._fallback_to_traditional_processing(funasr_data, video_metadata, cache_dir)
+    
+    def _generate_speaker_inference_prompt(self, funasr_data: Dict, original_speakers: List[str], video_metadata: Dict) -> str:
+        """生成说话人推断提示词"""
+        video_title = video_metadata.get('video_title', '未知标题')
+        author = video_metadata.get('author', '未知作者')
+        description = video_metadata.get('description', '')
+        
+        # 提取部分转录内容作为上下文
+        context_snippets = self._extract_context_snippets(funasr_data, original_speakers)
+        
+        prompt = f"""你是一个专业的说话人识别专家。请基于以下转录内容，推断出每个说话人的真实姓名或身份。
+
+视频信息：
+- 标题：{video_title}
+- 作者：{author}
+- 描述：{description}
+
+原始说话人标识：{', '.join(original_speakers)}
+
+转录内容片段：
+{context_snippets}
+
+请按照以下JSON格式返回说话人映射关系：
+
+```json
+{{
+    "speaker_mapping": {{
+        "{original_speakers[0] if original_speakers else 'speaker1'}": "推断的真实姓名或身份",
+        "{original_speakers[1] if len(original_speakers) > 1 else 'speaker2'}": "推断的真实姓名或身份"
+    }},
+    "confidence": {{
+        "{original_speakers[0] if original_speakers else 'speaker1'}": 0.8,
+        "{original_speakers[1] if len(original_speakers) > 1 else 'speaker2'}": 0.9
+    }},
+    "reasoning": "简要说明推断依据"
+}}
+```
+
+推断规则：
+1. 优先根据内容中的自我介绍、称呼等信息推断
+2. 结合视频标题、作者信息进行合理推测
+3. 如果无法确定，使用描述性身份（如"主持人"、"嘉宾"等）
+4. 确信度请如实评估（0-1之间）
+5. 姓名长度应合理（通常2-4个字符）
+"""
+        
+        return prompt
+    
+    def _extract_context_snippets(self, funasr_data: Dict, speakers: List[str], max_snippets: int = 10) -> str:
+        """提取关键的转录片段作为推断上下文"""
+        snippets = []
+        
+        # 提取转录段落
+        segments = []
+        if isinstance(funasr_data, list):
+            segments = funasr_data
+        elif isinstance(funasr_data, dict):
+            for key in ['segments', 'result', 'data']:
+                if key in funasr_data:
+                    segments = funasr_data[key]
+                    break
+        
+        # 选择有代表性的片段
+        speaker_samples = {speaker: [] for speaker in speakers}
+        
+        for segment in segments[:50]:  # 只看前50个段落
+            if not isinstance(segment, dict):
+                continue
+            
+            # 提取说话人和文本
+            speaker = None
+            text = ""
+            
+            for field in ['spk', 'speaker', 'speaker_id']:
+                if field in segment:
+                    speaker = str(segment[field])
+                    break
+            
+            for field in ['text', 'content', 'transcript']:
+                if field in segment:
+                    text = str(segment[field]).strip()
+                    break
+            
+            if speaker in speaker_samples and text and len(text) > 10:
+                speaker_samples[speaker].append(text)
+        
+        # 构建上下文片段
+        for speaker in speakers:
+            samples = speaker_samples.get(speaker, [])[:3]  # 每个说话人最多3个样本
+            if samples:
+                snippets.append(f"\n{speaker}:")
+                for i, sample in enumerate(samples, 1):
+                    snippets.append(f"  {i}. {sample}")
+        
+        return '\n'.join(snippets) if snippets else "无足够的转录内容"
+    
+    def _parse_speaker_mapping_result(self, llm_result: str, original_speakers: List[str]) -> Dict[str, str]:
+        """解析LLM返回的说话人映射结果"""
+        try:
+            import json
+            import re
+            
+            # 尝试提取JSON部分
+            json_match = re.search(r'```json\s*(.*?)\s*```', llm_result, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # 如果没找到代码块，尝试直接解析
+                json_str = llm_result
+            
+            parsed = json.loads(json_str)
+            speaker_mapping = parsed.get('speaker_mapping', {})
+            
+            # 验证映射关系
+            validated_mapping = {}
+            for original_speaker in original_speakers:
+                if original_speaker in speaker_mapping:
+                    mapped_name = speaker_mapping[original_speaker].strip()
+                    if mapped_name and len(mapped_name) <= 20:  # 合理的名字长度
+                        validated_mapping[original_speaker] = mapped_name
+                    else:
+                        validated_mapping[original_speaker] = original_speaker
+                else:
+                    validated_mapping[original_speaker] = original_speaker
+            
+            logger.info(f"成功解析说话人映射: {validated_mapping}")
+            return validated_mapping
+            
+        except Exception as e:
+            logger.error(f"解析说话人映射失败: {e}")
+            # 降级：使用原始标识
+            return {speaker: speaker for speaker in original_speakers}
+    
+    def _generate_structured_dialogs(self, funasr_data: Dict, speaker_mapping: Dict[str, str]) -> List[Dict[str, str]]:
+        """基于映射关系生成结构化对话"""
+        dialogs = []
+        
+        # 提取转录段落
+        segments = []
+        if isinstance(funasr_data, list):
+            segments = funasr_data
+        elif isinstance(funasr_data, dict):
+            for key in ['segments', 'result', 'data']:
+                if key in funasr_data:
+                    segments = funasr_data[key]
+                    break
+        
+        # 重构对话
+        current_speaker = None
+        current_content = []
+        
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            
+            # 提取说话人标识
+            original_speaker = None
+            for field in ['spk', 'speaker', 'speaker_id']:
+                if field in segment:
+                    original_speaker = str(segment[field])
+                    break
+            
+            # 提取文本内容
+            text_content = ""
+            for field in ['text', 'content', 'transcript']:
+                if field in segment:
+                    text_content = str(segment[field]).strip()
+                    break
+            
+            if not original_speaker or not text_content:
+                continue
+            
+            # 映射到实际人名
+            actual_speaker = speaker_mapping.get(original_speaker, original_speaker)
+            
+            # 合并连续同一说话人的内容
+            if current_speaker == actual_speaker:
+                current_content.append(text_content)
+            else:
+                # 保存前一个说话人的内容
+                if current_speaker and current_content:
+                    dialogs.append({
+                        'speaker': current_speaker,
+                        'content': ' '.join(current_content)
+                    })
+                
+                # 开始新的说话人
+                current_speaker = actual_speaker
+                current_content = [text_content]
+        
+        # 保存最后一个说话人的内容
+        if current_speaker and current_content:
+            dialogs.append({
+                'speaker': current_speaker,
+                'content': ' '.join(current_content)
+            })
+        
+        return dialogs
+    
+    def _generate_text_from_structured_dialogs(self, dialogs: List[Dict[str, str]]) -> str:
+        """从结构化对话生成文本版本（兼容性）"""
+        text_lines = []
+        
+        for dialog in dialogs:
+            speaker = dialog['speaker']
+            content = dialog['content']
+            text_lines.append(f"{speaker}：{content}")
+        
+        return '\n\n'.join(text_lines)
+    
+    def _generate_summary_from_structured_content(self, calibrated_text: str, video_metadata: Dict) -> str:
+        """基于结构化内容生成总结"""
+        # 复用现有的总结生成逻辑
+        video_title = video_metadata.get('video_title', '')
+        author = video_metadata.get('author', '')
+        description = video_metadata.get('description', '')
+        
+        summary_prompt = self._generate_original_summary_prompt(
+            calibrated_text, video_title, author, description, 
+            use_speaker_recognition=True, transcription_data=None
+        )
+        
+        return call_llm_api(
+            prompt=summary_prompt,
+            model=self.summary_model,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            max_retries=self.max_retries,
+            retry_delay=self.retry_delay
+        )
+    
+    def _save_structured_result(self, cache_dir: str, structured_result: Dict, calibrated_text: str, summary_text: str):
+        """保存结构化结果到缓存"""
+        import json
+        import os
+        
+        # 保存结构化JSON
+        structured_file = os.path.join(cache_dir, 'llm_processed.json')
+        with open(structured_file, 'w', encoding='utf-8') as f:
+            json.dump(structured_result, f, ensure_ascii=False, indent=2)
+        
+        # 保存兼容性文本文件
+        calibrated_file = os.path.join(cache_dir, 'llm_calibrated.txt')
+        with open(calibrated_file, 'w', encoding='utf-8') as f:
+            f.write(calibrated_text)
+        
+        summary_file = os.path.join(cache_dir, 'llm_summary.txt')
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            f.write(summary_text)
+        
+        # 保存版本标识
+        version_file = os.path.join(cache_dir, '.format_version')
+        with open(version_file, 'w', encoding='utf-8') as f:
+            f.write('v2')
+        
+        logger.info(f"结构化结果已保存到: {cache_dir}")
+    
+    def _process_without_speakers(self, funasr_data: Dict, video_metadata: Dict, cache_dir: str) -> Dict[str, Any]:
+        """处理无说话人数据的情况"""
+        # 提取纯文本
+        text_content = self._extract_text_from_funasr(funasr_data)
+        
+        # 使用传统LLM处理
+        llm_task = {
+            'task_id': 'structured_fallback',
+            'transcript': text_content,
+            'use_speaker_recognition': False,
+            'video_title': video_metadata.get('video_title', ''),
+            'author': video_metadata.get('author', ''),
+            'description': video_metadata.get('description', ''),
+            'transcription_data': funasr_data
+        }
+        
+        return self._process_original_logic(llm_task)
+    
+    def _extract_text_from_funasr(self, funasr_data: Dict) -> str:
+        """从FunASR数据中提取纯文本"""
+        text_parts = []
+        
+        segments = []
+        if isinstance(funasr_data, list):
+            segments = funasr_data
+        elif isinstance(funasr_data, dict):
+            for key in ['segments', 'result', 'data']:
+                if key in funasr_data:
+                    segments = funasr_data[key]
+                    break
+        
+        for segment in segments:
+            if isinstance(segment, dict):
+                for field in ['text', 'content', 'transcript']:
+                    if field in segment:
+                        text_parts.append(str(segment[field]).strip())
+                        break
+        
+        return ' '.join(text_parts)
+    
+    def _fallback_to_traditional_processing(self, funasr_data: Dict, video_metadata: Dict, cache_dir: str) -> Dict[str, Any]:
+        """降级到传统处理方式"""
+        logger.warning("降级到传统LLM处理方式")
+        return self._process_without_speakers(funasr_data, video_metadata, cache_dir)
+    
+    def _get_current_timestamp(self) -> str:
+        """获取当前时间戳"""
+        import datetime
+        return datetime.datetime.now().isoformat()
+    
+    def should_use_structured_processing(self, cache_dir: str) -> bool:
+        """判断是否应该使用结构化处理"""
+        # 检查是否已有结构化数据
+        import os
+        structured_file = os.path.join(cache_dir, 'llm_processed.json')
+        if os.path.exists(structured_file):
+            return False  # 已有结构化数据，无需重复处理
+        
+        # 检查是否有FunASR数据
+        funasr_file = os.path.join(cache_dir, 'transcript_funasr.json')
+        return os.path.exists(funasr_file)

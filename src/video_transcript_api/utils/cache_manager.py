@@ -787,7 +787,8 @@ class CacheManager:
                         'summary': summary,
                         'transcript': transcript,
                         'use_speaker_recognition': cache_data.get('use_speaker_recognition', False),
-                        'created_at': task_info['created_at']
+                        'created_at': task_info['created_at'],
+                        'cache_dir': cache_data.get('file_path')  # 使用缓存数据中的文件路径
                     }
                 else:
                     # 底层文件已清理

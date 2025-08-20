@@ -17,7 +17,7 @@ from typing import Optional, Dict, Any
 from ..utils import setup_logger, load_config, WechatNotifier, MetadataCache, CacheManager
 from ..utils.webhook_rate_limiter import get_rate_limiter_stats, get_webhook_status
 from ..utils.markdown_renderer import render_markdown_to_html, get_base_url
-from ..utils.dialog_renderer import render_transcript_content
+from ..utils.dialog_renderer import render_transcript_content, render_transcript_content_smart
 from ..utils.timezone_helper import format_datetime_for_display
 from ..utils.llm_enhanced import EnhancedLLMProcessor
 from ..downloaders import create_downloader
@@ -1150,8 +1150,32 @@ async def view_transcript(view_token: str, request: Request):
         elif view_data['status'] == 'success':
             # 服务端渲染内容
             view_data['summary_html'] = render_markdown_to_html(view_data.get('summary', ''))
-            # 使用对话渲染器处理转录文本，支持多人对话和普通文本
-            view_data['transcript_html'] = render_transcript_content(view_data.get('transcript', ''))
+            
+            # 使用智能对话渲染器处理转录文本
+            # 优先使用缓存分析的智能渲染，降级到文本检测渲染
+            cache_dir = view_data.get('cache_dir')
+            fallback_text = view_data.get('transcript', '')
+            
+            if cache_dir and os.path.exists(cache_dir):
+                try:
+                    # 使用智能渲染（基于缓存分析）
+                    view_data['transcript_html'] = render_transcript_content_smart(cache_dir, fallback_text)
+                    logger.debug(f"使用智能渲染成功: {view_token}")
+                    
+                    # 检查是否需要后台升级缓存
+                    logger.info(f"检查缓存升级需求: {cache_dir}")
+                    try:
+                        _trigger_cache_upgrade_if_needed(cache_dir, view_data)
+                    except Exception as upgrade_e:
+                        logger.error(f"缓存升级检查异常: {upgrade_e}", exc_info=True)
+                    
+                except Exception as e:
+                    logger.warning(f"智能渲染失败，降级到文本检测渲染: {e}")
+                    # 降级到基础文本检测渲染
+                    view_data['transcript_html'] = render_transcript_content(fallback_text)
+            else:
+                # 没有缓存信息，使用基础文本检测渲染
+                view_data['transcript_html'] = render_transcript_content(fallback_text)
             
             return templates.TemplateResponse(
                 "transcript.html",
@@ -1169,6 +1193,73 @@ async def view_transcript(view_token: str, request: Request):
             "error.html",
             {"request": request, "message": "服务异常", "title": "服务异常"}
         )
+
+def _trigger_cache_upgrade_if_needed(cache_dir: str, view_data: dict):
+    """
+    检查并触发缓存升级（如果需要的话）
+    
+    Args:
+        cache_dir: 缓存目录路径
+        view_data: 视图数据
+    """
+    try:
+        logger.info(f"进入缓存升级检查: {cache_dir}")
+        from ..utils.cache_analyzer import should_upgrade_cache
+        from ..utils.llm_enhanced import EnhancedLLMProcessor
+        import threading
+        import json
+        
+        # 判断是否需要升级
+        should_upgrade = should_upgrade_cache(cache_dir)
+        logger.info(f"缓存升级检查结果: {cache_dir} -> {should_upgrade}")
+        
+        if not should_upgrade:
+            logger.info(f"缓存无需升级: {cache_dir}")
+            return
+        
+        logger.info(f"检测到高价值缓存，触发后台升级: {cache_dir}")
+        
+        # 在后台线程中进行升级，避免阻塞用户响应
+        def background_upgrade():
+            try:
+                # 读取FunASR数据
+                funasr_file = os.path.join(cache_dir, 'transcript_funasr.json')
+                if not os.path.exists(funasr_file):
+                    return
+                
+                with open(funasr_file, 'r', encoding='utf-8') as f:
+                    funasr_data = json.load(f)
+                
+                # 构建视频元数据
+                video_metadata = {
+                    'video_title': view_data.get('title', '未知标题'),
+                    'author': view_data.get('author', '未知作者'), 
+                    'description': view_data.get('description', '')
+                }
+                
+                # 使用增强LLM处理器进行升级
+                config = load_config()
+                llm_processor = EnhancedLLMProcessor(config)
+                
+                # 检查是否应该使用结构化处理
+                if llm_processor.should_use_structured_processing(cache_dir):
+                    logger.info(f"开始结构化升级: {cache_dir}")
+                    result = llm_processor.process_llm_task_with_structure(
+                        cache_dir, funasr_data, video_metadata
+                    )
+                    logger.info(f"缓存升级完成: {cache_dir}")
+                else:
+                    logger.debug(f"缓存无需升级: {cache_dir}")
+                    
+            except Exception as e:
+                logger.error(f"后台缓存升级失败: {cache_dir}, {e}")
+        
+        # 在后台线程中执行升级
+        upgrade_thread = threading.Thread(target=background_upgrade, daemon=True)
+        upgrade_thread.start()
+        
+    except Exception as e:
+        logger.error(f"触发缓存升级失败: {e}")
 
 
 def start_server():
