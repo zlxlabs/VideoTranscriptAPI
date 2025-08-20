@@ -25,9 +25,20 @@ def test_basic_functionality():
     print("[初始化] 处理器创建成功")
     
     # 检查配置参数
-    enable_threshold = config.get('llm', {}).get('segmentation', {}).get('enable_threshold', 8000)
-    segment_size = config.get('llm', {}).get('segmentation', {}).get('segment_size', 2500)
-    max_segment_size = config.get('llm', {}).get('segmentation', {}).get('max_segment_size', 3000)
+    segmentation_config = config.get('llm', {}).get('segmentation', {})
+    if not segmentation_config:
+        print("[错误] 配置文件中缺少 llm.segmentation 配置节")
+        return
+    
+    required_keys = ['enable_threshold', 'segment_size', 'max_segment_size']
+    for key in required_keys:
+        if key not in segmentation_config:
+            print(f"[错误] 配置文件中缺少 llm.segmentation.{key} 配置项")
+            return
+    
+    enable_threshold = segmentation_config['enable_threshold']
+    segment_size = segmentation_config['segment_size']
+    max_segment_size = segmentation_config['max_segment_size']
     
     print(f"[配置] 分段阈值: {enable_threshold}")
     print(f"[配置] 分段大小: {segment_size}")

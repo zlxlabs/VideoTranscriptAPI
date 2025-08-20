@@ -176,7 +176,11 @@ def test_enhanced_processor():
     try:
         # 这里只测试逻辑，不实际调用LLM API
         text_length = len(short_task['transcript'])
-        enable_threshold = config.get('llm', {}).get('segmentation', {}).get('enable_threshold', 8000)
+        segmentation_config = config.get('llm', {}).get('segmentation', {})
+        if not segmentation_config or 'enable_threshold' not in segmentation_config:
+            print("[错误] 配置文件中缺少 llm.segmentation.enable_threshold 配置项")
+            return
+        enable_threshold = segmentation_config['enable_threshold']
         need_segmentation = text_length > enable_threshold
         
         print(f"[检查] 阈值检查: {text_length} > {enable_threshold} = {need_segmentation}")
