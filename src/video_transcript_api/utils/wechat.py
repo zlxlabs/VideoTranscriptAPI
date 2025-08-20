@@ -3,7 +3,7 @@ import requests
 import datetime
 import re
 from .logger import setup_logger, load_config
-from .webhook_rate_limiter import send_rate_limited_message
+from .simple_rate_limiter import send_rate_limited_message
 
 # 创建日志记录器
 logger = setup_logger("wechat_notifier")
@@ -262,11 +262,20 @@ def send_long_text_wechat(title, url, text, is_summary=False, webhook=None, has_
             content = prefix + part_text
         
         # 发送内容
+        content_preview = content[:100].replace('\n', ' ')  # 内容预览
+        logger.info(f"[分段发送] 发送第{part_count}段, 长度: {len(part_text)}, 预览: {content_preview}...")
+        
         success = notifier.send_text(content)
         if not success:
             logger.error(f"发送第{part_count}段失败")
         else:
             logger.debug(f"发送第{part_count}段成功，长度: {len(part_text)}")
+        
+        # 添加短暂延迟，确保每个分段消息都能按顺序加入队列
+        if use_rate_limit:
+            import time
+            logger.debug(f"[分段延迟] 第{part_count}段发送后延迟10ms")
+            time.sleep(0.01)  # 每个分段后都延迟10ms，确保消息顺序
         
         start = end
     

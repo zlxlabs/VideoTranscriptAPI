@@ -30,6 +30,7 @@ class WebhookMessage:
     webhook_url: str
     content: str
     timestamp: float
+    sequence_id: int  # 添加全局序列号，确保FIFO顺序
     retry_count: int = 0
     max_retries: int = 3
 
@@ -47,26 +48,35 @@ class WebhookRateLimiter:
     """
     
     _instance = None
-    _lock = threading.Lock()
+    _instance_lock = threading.Lock()
+    _init_lock = threading.Lock()
     
     def __new__(cls):
-        """单例模式实现"""
+        """单例模式实现 - 线程安全的双重检查锁定"""
         if cls._instance is None:
-            with cls._lock:
+            with cls._instance_lock:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
         return cls._instance
     
     def __init__(self):
-        """初始化限流器"""
-        if hasattr(self, '_initialized'):
-            return
-        self._initialized = True
+        """初始化限流器 - 确保只初始化一次"""
+        # 使用独立的初始化锁，避免与__new__冲突
+        with self._init_lock:
+            if hasattr(self, '_initialized') and self._initialized:
+                logger.debug("限流器已初始化，跳过重复初始化")
+                return
+            self._initialized = True
+            logger.info("webhook限流器开始初始化...")
         
         # 配置参数
         self.max_messages_per_minute = 20  # 每分钟最大消息数
-        self.min_interval_seconds = 0.3    # 最小发送间隔（秒）
+        self.min_interval_seconds = 0.8    # 最小发送间隔（秒）
         self.worker_timeout_seconds = 300  # worker线程空闲超时（秒）
+        
+        # 每个webhook的消息序列号计数器（确保同一webhook消息严格按顺序处理）
+        self.webhook_sequence_counters: Dict[str, int] = defaultdict(int)
+        self._sequence_locks: Dict[str, threading.RLock] = defaultdict(threading.RLock)  # 每个webhook一个锁
         
         # 每个webhook的消息队列
         self.webhook_queues: Dict[str, Queue] = defaultdict(lambda: Queue(maxsize=1000))
@@ -79,6 +89,9 @@ class WebhookRateLimiter:
         
         # 线程锁：保护线程管理操作
         self.thread_locks: Dict[str, threading.Lock] = defaultdict(threading.Lock)
+        
+        # 用于统计目的的全局发送锁（保护统计数据）
+        self._stats_lock = threading.Lock()
         
         # 统计信息
         self.stats = {
@@ -110,26 +123,37 @@ class WebhookRateLimiter:
             return False
             
         try:
+            # 分配该webhook的序列号
+            webhook_url_clean = webhook_url.strip()
+            with self._sequence_locks[webhook_url_clean]:
+                self.webhook_sequence_counters[webhook_url_clean] += 1
+                sequence_id = self.webhook_sequence_counters[webhook_url_clean]
+            
             message = WebhookMessage(
-                webhook_url=webhook_url.strip(),
+                webhook_url=webhook_url_clean,
                 content=content.strip(),
-                timestamp=time.time()
+                timestamp=time.time(),
+                sequence_id=sequence_id
             )
             
             # 检查队列是否已满
-            queue = self.webhook_queues[webhook_url]
+            queue = self.webhook_queues[webhook_url_clean]
             if queue.full():
-                logger.warning(f"webhook队列已满，丢弃消息: {webhook_url[:50]}...")
+                logger.warning(f"webhook队列已满，丢弃消息: {webhook_url_clean[:50]}...")
                 return False
             
             # 将消息加入对应webhook的队列
             queue.put_nowait(message)
-            self.stats['total_queued'] += 1
+            with self._stats_lock:
+                self.stats['total_queued'] += 1
             
-            logger.debug(f"消息已加入队列: {webhook_url[:50]}..., 内容长度: {len(content)}")
+            # 增强日志：显示消息内容预览和序列号
+            content_preview = content[:100].replace('\n', ' ')  # 取前100字符并替换换行符
+            logger.info(f"[队列入队] Webhook序列号: {sequence_id}, 内容长度: {len(content)}, 预览: {content_preview}...")
+            logger.debug(f"消息已加入队列: {webhook_url_clean[:50]}..., 时间戳: {message.timestamp}, 序列号: {sequence_id}")
             
             # 启动worker线程（如果尚未启动）
-            self._ensure_worker_thread(webhook_url)
+            self._ensure_worker_thread(webhook_url_clean)
             
             return True
             
@@ -140,21 +164,25 @@ class WebhookRateLimiter:
     def _ensure_worker_thread(self, webhook_url: str):
         """确保指定webhook的worker线程已启动"""
         with self.thread_locks[webhook_url]:
-            # 检查线程是否存在且活跃
-            if (webhook_url not in self.worker_threads or 
-                not self.worker_threads[webhook_url].is_alive()):
-                
-                thread = threading.Thread(
-                    target=self._worker_thread,
-                    args=(webhook_url,),
-                    daemon=True,
-                    name=f"webhook-worker-{hash(webhook_url) % 10000}"
-                )
-                thread.start()
-                self.worker_threads[webhook_url] = thread
-                
-                logger.info(f"启动webhook worker线程: {webhook_url[:50]}...")
-                self._update_active_webhooks_count()
+            # 双重检查：先检查是否已存在活跃线程
+            current_thread = self.worker_threads.get(webhook_url)
+            if current_thread is not None and current_thread.is_alive():
+                logger.debug(f"Worker线程已存在且活跃: {webhook_url[:50]}...")
+                return
+            
+            # 如果线程不存在或已死亡，创建新线程
+            logger.info(f"创建新的webhook worker线程: {webhook_url[:50]}...")
+            thread = threading.Thread(
+                target=self._worker_thread,
+                args=(webhook_url,),
+                daemon=True,
+                name=f"webhook-worker-{hash(webhook_url) % 10000}"
+            )
+            thread.start()
+            self.worker_threads[webhook_url] = thread
+            
+            logger.info(f"启动webhook worker线程: {webhook_url[:50]}...")
+            self._update_active_webhooks_count()
     
     def _worker_thread(self, webhook_url: str):
         """处理指定webhook的消息队列"""
@@ -188,16 +216,22 @@ class WebhookRateLimiter:
                             logger.info(f"webhook频率限制，等待 {wait_time:.1f}s: {webhook_url[:50]}...")
                             time.sleep(wait_time)
                     
-                    # 发送消息
+                    # 发送消息（依赖Python Queue的FIFO特性保证顺序）
+                    content_preview = message.content[:100].replace('\n', ' ')  # 消息内容预览
+                    logger.info(f"[队列发送] 开始发送消息, Webhook序列号: {message.sequence_id}, 预览: {content_preview}...")
+                    
                     success = self._send_message_now(message)
                     last_send_time = time.time()
                     
                     if success:
-                        self.stats['total_sent'] += 1
+                        with self._stats_lock:
+                            self.stats['total_sent'] += 1
                         self._record_send_time(webhook_url)
+                        logger.info(f"[队列发送] 消息发送成功, Webhook序列号: {message.sequence_id}, 预览: {content_preview}...")
                         logger.debug(f"消息发送成功: {webhook_url[:50]}...")
                     else:
-                        self.stats['total_failed'] += 1
+                        with self._stats_lock:
+                            self.stats['total_failed'] += 1
                         # 重试逻辑
                         if message.retry_count < message.max_retries:
                             message.retry_count += 1
@@ -348,8 +382,23 @@ class WebhookRateLimiter:
         }
 
 
-# 全局实例
-webhook_rate_limiter = WebhookRateLimiter()
+# 全局实例 - 延迟初始化
+webhook_rate_limiter = None
+_global_limiter_lock = threading.Lock()
+
+
+def _get_global_limiter():
+    """获取全局限流器实例 - 线程安全的延迟初始化"""
+    global webhook_rate_limiter
+    if webhook_rate_limiter is None:
+        with _global_limiter_lock:
+            if webhook_rate_limiter is None:
+                import threading
+                thread_name = threading.current_thread().name
+                logger.info(f"在线程 {thread_name} 中创建全局webhook限流器实例")
+                webhook_rate_limiter = WebhookRateLimiter()
+                logger.info(f"全局webhook限流器实例已创建，实例ID: {id(webhook_rate_limiter)}")
+    return webhook_rate_limiter
 
 
 def send_rate_limited_message(webhook_url: str, content: str) -> bool:
@@ -363,14 +412,14 @@ def send_rate_limited_message(webhook_url: str, content: str) -> bool:
     Returns:
         bool: 是否成功加入发送队列
     """
-    return webhook_rate_limiter.send_message(webhook_url, content)
+    return _get_global_limiter().send_message(webhook_url, content)
 
 
 def get_rate_limiter_stats() -> dict:
     """获取限流器统计信息"""
-    return webhook_rate_limiter.get_stats()
+    return _get_global_limiter().get_stats()
 
 
 def get_webhook_status(webhook_url: str) -> dict:
     """获取指定webhook的状态信息"""
-    return webhook_rate_limiter.get_webhook_status(webhook_url)
+    return _get_global_limiter().get_webhook_status(webhook_url)

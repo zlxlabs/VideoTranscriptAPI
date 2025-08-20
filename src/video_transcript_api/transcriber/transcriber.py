@@ -27,7 +27,7 @@ class Transcriber:
             config = load_config()
         
         self.config = config
-        self.output_dir = config.get("storage", {}).get("output_dir", "./output")
+        self.output_dir = config.get("storage", {}).get("output_dir", "./data/output")
         self.max_retries = config.get("capswriter", {}).get("max_retries", 3)
         self.retry_delay = config.get("capswriter", {}).get("retry_delay", 5)
         

@@ -15,7 +15,7 @@ class MetadataCache:
     def __init__(self):
         """初始化元数据缓存管理器"""
         self.config = load_config()
-        self.output_dir = self.config.get("storage", {}).get("output_dir", "./output")
+        self.output_dir = self.config.get("storage", {}).get("output_dir", "./data/output")
     
     def _get_metadata_filename(self, base_filename):
         """

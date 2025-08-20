@@ -19,7 +19,7 @@ class CacheManager:
     使用 SQLite 数据库存储元数据，文件系统存储实际内容
     """
     
-    def __init__(self, cache_dir: str = "./cache_dir", db_path: str = None):
+    def __init__(self, cache_dir: str = "./data/cache", db_path: str = None):
         """
         初始化缓存管理器
         

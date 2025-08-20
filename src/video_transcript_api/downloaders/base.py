@@ -20,7 +20,7 @@ class BaseDownloader(ABC):
         """
         self.config = load_config()
         self.api_key = self.config.get("tikhub", {}).get("api_key")
-        self.temp_dir = self.config.get("storage", {}).get("temp_dir", "./temp")
+        self.temp_dir = self.config.get("storage", {}).get("temp_dir", "./data/temp")
         ensure_dir(self.temp_dir)
         
     @abstractmethod
