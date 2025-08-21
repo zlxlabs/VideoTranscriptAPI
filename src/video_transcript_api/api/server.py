@@ -476,12 +476,18 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
         # 检查是否来自通用下载器
         is_from_generic = video_info.get("is_generic", False)
         
-        # 尝试获取字幕 - 只有YouTube等特定平台才需要尝试
+        # 根据 use_speaker_recognition 参数决定处理优先级
         subtitle = None
-        if downloader.__class__.__name__ == "YoutubeDownloader":
-            logger.info(f"尝试获取字幕: {url}")
-            subtitle = downloader.get_subtitle(url)
         
+        if use_speaker_recognition:
+            # 如果需要说话人识别，强制跳过平台字幕，直接进行下载转录
+            logger.info(f"需要说话人识别，跳过平台字幕获取，强制下载转录: {url}")
+        else:
+            # 只有在不需要说话人识别时，才尝试获取平台字幕
+            if downloader.__class__.__name__ == "YoutubeDownloader":
+                logger.info(f"不需要说话人识别，尝试获取YouTube平台字幕: {url}")
+                subtitle = downloader.get_subtitle(url)
+            
         if subtitle:
             # 如果有字幕，直接使用
             logger.info(f"使用平台提供的字幕: {url}")
