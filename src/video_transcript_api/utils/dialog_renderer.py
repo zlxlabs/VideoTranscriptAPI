@@ -352,6 +352,51 @@ class DialogRenderer:
             else:
                 return self._render_normal_text_from_cache(cache_dir, fallback_text)
     
+    def render_original_transcript_with_cache_analysis(self, cache_dir: str, fallback_text: Optional[str] = None) -> str:
+        """
+        基于缓存分析的智能渲染（专门用于原始转录文本）
+        当存在校对文本时，优先显示原始转录内容以避免重复
+        
+        Args:
+            cache_dir: 缓存目录路径
+            fallback_text: 降级文本内容
+            
+        Returns:
+            str: 渲染后的HTML
+        """
+        try:
+            # 分析缓存能力
+            capabilities = analyze_cache_capabilities(cache_dir)
+            
+            # 检查是否存在校对文本
+            calibrated_file = os.path.join(cache_dir, 'llm_calibrated.txt')
+            has_calibrated = os.path.exists(calibrated_file)
+            
+            # 根据能力选择渲染策略
+            strategy = self._get_optimal_rendering_strategy(capabilities)
+            
+            logger.debug(f"原始转录渲染，缓存 {cache_dir} 使用策略: {strategy}, 有校对文本: {has_calibrated}")
+            
+            if strategy == 'structured':
+                return self._render_from_structured_data(cache_dir)
+            elif strategy == 'mapped':
+                return self._render_from_speaker_mapping(cache_dir)
+            elif strategy == 'detected' and has_calibrated:
+                # 如果有校对文本，尝试显示原始转录而不是校对文本
+                return self._render_original_transcript_detection(cache_dir, fallback_text)
+            elif strategy == 'detected':
+                return self._render_with_text_detection(cache_dir, fallback_text)
+            else:
+                return self._render_normal_text_from_cache(cache_dir, fallback_text)
+                
+        except Exception as e:
+            logger.error(f"原始转录智能渲染失败 {cache_dir}: {e}")
+            # 降级到基础文本渲染
+            if fallback_text:
+                return self.render_dialog_html(fallback_text)
+            else:
+                return self._render_normal_text_from_cache(cache_dir, fallback_text)
+    
     def _get_optimal_rendering_strategy(self, capabilities: CacheCapabilities) -> str:
         """根据缓存能力选择最优渲染策略"""
         # 策略1: 结构化渲染 - 最优
@@ -475,6 +520,73 @@ class DialogRenderer:
             
         except Exception as e:
             logger.error(f"文本检测渲染失败 {cache_dir}: {e}")
+            raise
+    
+    def _render_calibrated_text_detection(self, cache_dir: str) -> str:
+        """专门用于校对文本的文本检测渲染"""
+        try:
+            calibrated_file = os.path.join(cache_dir, 'llm_calibrated.txt')
+            
+            with open(calibrated_file, 'r', encoding='utf-8') as f:
+                calibrated_text = f.read().strip()
+            
+            if not calibrated_text:
+                raise ValueError("校对文本为空")
+            
+            # 使用文本检测渲染校对文本
+            return self.render_dialog_html(calibrated_text)
+            
+        except Exception as e:
+            logger.error(f"校对文本检测渲染失败 {cache_dir}: {e}")
+            raise
+    
+    def _render_original_transcript_detection(self, cache_dir: str, fallback_text: Optional[str] = None) -> str:
+        """专门用于原始转录文本的文本检测渲染，优先显示非校对版本"""
+        try:
+            # 优先级：CapsWriter转录 > FunASR转录 > 降级文本
+            for filename in ['transcript_capswriter.txt', 'transcript_funasr.json']:
+                file_path = os.path.join(cache_dir, filename)
+                if os.path.exists(file_path):
+                    if filename.endswith('.txt'):
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            text_content = f.read().strip()
+                    else:
+                        # 处理FunASR JSON文件
+                        import json
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            funasr_data = json.load(f)
+                        # 提取纯文本内容（简化版本，不包含校对）
+                        if isinstance(funasr_data, list):
+                            text_parts = []
+                            for item in funasr_data:
+                                if isinstance(item, dict) and 'text' in item:
+                                    text_parts.append(item['text'])
+                            text_content = '\n'.join(text_parts)
+                        else:
+                            text_content = str(funasr_data)
+                    
+                    if text_content:
+                        logger.debug(f"使用原始转录文件: {filename}")
+                        return self.render_dialog_html(text_content)
+            
+            # 如果没有找到原始转录文件，使用降级文本
+            if fallback_text:
+                logger.debug("使用降级文本作为原始转录")
+                return self.render_dialog_html(fallback_text)
+            
+            # 最后才使用校对文本
+            calibrated_file = os.path.join(cache_dir, 'llm_calibrated.txt')
+            if os.path.exists(calibrated_file):
+                with open(calibrated_file, 'r', encoding='utf-8') as f:
+                    calibrated_text = f.read().strip()
+                if calibrated_text:
+                    logger.debug("降级使用校对文本作为原始转录")
+                    return self.render_dialog_html(calibrated_text)
+            
+            raise ValueError("没有找到任何可用的转录文本")
+            
+        except Exception as e:
+            logger.error(f"原始转录文本检测渲染失败 {cache_dir}: {e}")
             raise
     
     def _render_normal_text_from_cache(self, cache_dir: str, fallback_text: Optional[str] = None) -> str:
@@ -635,6 +747,7 @@ def render_transcript_content(text: str) -> str:
 def render_transcript_content_smart(cache_dir: str, fallback_text: Optional[str] = None) -> str:
     """
     智能渲染转录内容的便捷函数（基于缓存分析）
+    专门用于"完整转录文本"区块，当存在校对文本时优先显示原始转录
     
     Args:
         cache_dir: 缓存目录路径
@@ -644,4 +757,59 @@ def render_transcript_content_smart(cache_dir: str, fallback_text: Optional[str]
         str: 渲染后的HTML
     """
     renderer = DialogRenderer()
-    return renderer.render_with_cache_analysis(cache_dir, fallback_text)
+    return renderer.render_original_transcript_with_cache_analysis(cache_dir, fallback_text)
+
+def render_calibrated_content_smart(cache_dir: str) -> Optional[str]:
+    """
+    智能渲染校对文本内容的便捷函数，专门用于校对文本区块
+    
+    Args:
+        cache_dir: 缓存目录路径
+        
+    Returns:
+        str: 渲染后的HTML，如果没有校对文本则返回None
+    """
+    if not cache_dir or not os.path.exists(cache_dir):
+        return None
+    
+    # 检查是否存在校对文本文件
+    calibrated_file = os.path.join(cache_dir, 'llm_calibrated.txt')
+    if not os.path.exists(calibrated_file):
+        return None
+    
+    try:
+        # 使用智能渲染系统处理校对文本，但强制使用校对文本内容
+        renderer = DialogRenderer()
+        
+        # 分析缓存能力
+        from .cache_analyzer import analyze_cache_capabilities
+        capabilities = analyze_cache_capabilities(cache_dir)
+        
+        # 根据能力选择渲染策略，但总是基于校对文本
+        strategy = renderer._get_optimal_rendering_strategy(capabilities)
+        
+        logger.debug(f"校对文本专用渲染，缓存 {cache_dir} 使用策略: {strategy}")
+        
+        # 强制使用校对文本内容进行渲染
+        if strategy == 'structured':
+            # 对于结构化数据，我们仍然使用结构化渲染，因为它包含了校对后的内容和时间信息
+            return renderer._render_from_structured_data(cache_dir)
+        elif strategy == 'mapped':
+            # 对于映射渲染，我们也使用它，因为它基于校对文本和说话人映射
+            return renderer._render_from_speaker_mapping(cache_dir)
+        else:
+            # 对于其他情况，强制使用校对文本进行检测渲染
+            return renderer._render_calibrated_text_detection(cache_dir)
+        
+    except Exception as e:
+        logger.error(f"智能渲染校对文本失败 {cache_dir}: {e}")
+        # 降级到基础文本渲染
+        try:
+            with open(calibrated_file, 'r', encoding='utf-8') as f:
+                calibrated_text = f.read().strip()
+            if calibrated_text:
+                renderer = DialogRenderer()
+                return renderer.render_dialog_html(calibrated_text)
+        except Exception as fallback_e:
+            logger.error(f"降级渲染校对文本也失败 {cache_dir}: {fallback_e}")
+        return None

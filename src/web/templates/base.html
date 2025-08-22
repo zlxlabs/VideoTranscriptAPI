@@ -5,28 +5,58 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}视频转录查看器{% endblock %}</title>
     <style>
+        /* CSS变量定义 - 主题系统 */
+        :root {
+            /* 浅色主题 */
+            --bg-gradient-start: #667eea;
+            --bg-gradient-end: #764ba2;
+            --text-primary: #333;
+            --text-secondary: #6b7280;
+            --bg-primary: #ffffff;
+            --bg-secondary: #f8f9fa;
+            --bg-tertiary: #f3f4f6;
+            --border-primary: #e5e7eb;
+            --header-text: #ffffff;
+        }
+
+        /* 深色主题 */
+        [data-theme="dark"] {
+            --bg-gradient-start: #1e293b;
+            --bg-gradient-end: #0f172a;
+            --text-primary: #f8fafc;
+            --text-secondary: #cbd5e1;
+            --bg-primary: #1e293b;
+            --bg-secondary: #334155;
+            --bg-tertiary: #475569;
+            --border-primary: #475569;
+            --header-text: #f8fafc;
+        }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
             line-height: 1.6;
-            color: #333;
+            color: var(--text-primary);
             max-width: 900px;
             margin: 0 auto;
             padding: 20px;
-            background: #f8f9fa;
+            background: var(--bg-secondary);
+            transition: color 0.3s ease, background 0.3s ease;
         }
         
         .container {
-            background: white;
+            background: var(--bg-primary);
             border-radius: 8px;
             box-shadow: 0 2px 8px rgba(0,0,0,0.1);
             overflow: hidden;
+            transition: background 0.3s ease;
         }
         
         .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
+            background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-end) 100%);
+            color: var(--header-text);
             padding: 30px;
             text-align: center;
+            position: relative;
         }
         
         .header h1 {
@@ -42,7 +72,7 @@
         }
         
         .header .meta a {
-            color: white;
+            color: var(--header-text);
             text-decoration: none;
         }
         
@@ -52,7 +82,7 @@
         
         .section {
             padding: 30px;
-            border-bottom: 1px solid #eee;
+            border-bottom: 1px solid var(--border-primary);
         }
         
         .section:last-child {
@@ -61,9 +91,9 @@
         
         .section h2 {
             margin: 0 0 20px 0;
-            color: #495057;
+            color: var(--text-primary);
             font-size: 1.3rem;
-            border-bottom: 2px solid #e9ecef;
+            border-bottom: 2px solid var(--border-primary);
             padding-bottom: 10px;
         }
         
@@ -215,11 +245,11 @@
             gap: 20px;
             margin-bottom: 20px;
             padding: 16px;
-            background: #fafbfc;
-            border: 1px solid #e1e8ed;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-primary);
             border-radius: 12px;
             box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-            transition: box-shadow 0.2s ease;
+            transition: box-shadow 0.2s ease, background 0.3s ease, border 0.3s ease;
         }
         
         .dialog-item:hover {
@@ -249,14 +279,15 @@
         }
         
         .time-tag {
-            background: #f8f9fa;
-            color: #6c757d;
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
             padding: 4px 8px;
             border-radius: 4px;
             font-size: 0.8em;
             font-family: "SFMono-Regular", Monaco, "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
-            border: 1px solid #dee2e6;
+            border: 1px solid var(--border-primary);
             white-space: nowrap;
+            transition: background 0.3s ease, color 0.3s ease, border 0.3s ease;
         }
         
         .dialog-content {
@@ -286,7 +317,7 @@
                 gap: 8px;
                 margin-bottom: 20px;
                 padding: 16px;
-                background: #f8f9fa;
+                background: var(--bg-secondary);
                 border-radius: 8px;
                 border-left: 4px solid var(--speaker-color, #3B82F6);
             }
@@ -354,12 +385,53 @@
                 margin-bottom: 10px;
             }
         }
+
+        /* 主题切换按钮样式 */
+        .theme-toggle {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(255, 255, 255, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            width: 44px;
+            height: 44px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            color: var(--header-text);
+            font-size: 1.2rem;
+        }
+
+        .theme-toggle:hover {
+            background: rgba(255, 255, 255, 0.3);
+            transform: scale(1.05);
+        }
+
+        .theme-toggle:active {
+            transform: scale(0.95);
+        }
+
+        [data-theme="dark"] .theme-toggle {
+            background: rgba(0, 0, 0, 0.2);
+            border-color: rgba(0, 0, 0, 0.3);
+        }
+
+        [data-theme="dark"] .theme-toggle:hover {
+            background: rgba(0, 0, 0, 0.3);
+        }
     </style>
     {% block extra_css %}{% endblock %}
 </head>
 <body>
     <div class="container">
         <div class="header">
+            <button id="theme-toggle" class="theme-toggle" title="切换主题">
+                🌙
+            </button>
             <h1>{{ title or "视频转录查看器" }}</h1>
             {% if author or url %}
             <div class="meta">
@@ -380,5 +452,97 @@
     </div>
     
     {% block extra_js %}{% endblock %}
+    
+    <!-- 主题切换脚本 -->
+    <script>
+        // 简化版主题切换功能（用于模板页面）
+        document.addEventListener('DOMContentLoaded', function() {
+            const THEME_KEY = 'vta_theme_preference';
+            
+            function getStoredTheme() {
+                try {
+                    const value = localStorage.getItem(THEME_KEY);
+                    return value ? JSON.parse(value) : null;
+                } catch (e) {
+                    return null;
+                }
+            }
+            
+            function setStoredTheme(theme) {
+                try {
+                    localStorage.setItem(THEME_KEY, JSON.stringify(theme));
+                } catch (e) {
+                    console.error('Failed to save theme preference');
+                }
+            }
+            
+            function detectSystemTheme() {
+                if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+                    return 'dark';
+                }
+                return 'light';
+            }
+            
+            function applyTheme(theme) {
+                const body = document.body;
+                const themeToggle = document.getElementById('theme-toggle');
+                
+                if (theme === 'dark') {
+                    body.setAttribute('data-theme', 'dark');
+                    if (themeToggle) {
+                        themeToggle.textContent = '☀️';
+                        themeToggle.title = '切换到浅色模式';
+                    }
+                } else {
+                    body.removeAttribute('data-theme');
+                    if (themeToggle) {
+                        themeToggle.textContent = '🌙';
+                        themeToggle.title = '切换到深色模式';
+                    }
+                }
+            }
+            
+            function toggleTheme() {
+                const currentTheme = document.body.hasAttribute('data-theme') ? 'dark' : 'light';
+                const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+                const themeToggle = document.getElementById('theme-toggle');
+                
+                // 添加按钮旋转动画
+                if (themeToggle) {
+                    themeToggle.classList.add('switching');
+                    setTimeout(() => {
+                        themeToggle.classList.remove('switching');
+                    }, 600);
+                }
+                
+                setStoredTheme(newTheme);
+                
+                // 添加页面过渡动画
+                const body = document.body;
+                body.style.transition = 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)';
+                
+                // 应用新主题
+                setTimeout(() => {
+                    applyTheme(newTheme);
+                }, 50);
+                
+                // 清除过渡样式
+                setTimeout(() => {
+                    body.style.transition = '';
+                }, 350);
+            }
+            
+            // 初始化主题
+            const savedTheme = getStoredTheme();
+            const theme = savedTheme || detectSystemTheme();
+            applyTheme(theme);
+            
+            // 绑定切换按钮
+            const themeToggle = document.getElementById('theme-toggle');
+            if (themeToggle) {
+                themeToggle.addEventListener('click', toggleTheme);
+            }
+        });
+    </script>
 </body>
 </html>

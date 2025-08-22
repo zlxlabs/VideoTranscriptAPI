@@ -9,7 +9,8 @@ const APP_CONFIG = {
         BEARER_TOKEN: 'vta_bearer_token',
         WECHAT_WEBHOOK: 'vta_wechat_webhook',
         SPEAKER_RECOGNITION: 'vta_speaker_recognition',
-        TASK_HISTORY: 'vta_task_history'
+        TASK_HISTORY: 'vta_task_history',
+        THEME_PREFERENCE: 'vta_theme_preference'
     },
     API_BASE_URL: '',
     MAX_HISTORY_ITEMS: 10,
@@ -447,6 +448,119 @@ class TaskHistoryManager {
 }
 
 /**
+ * 主题管理类
+ */
+class ThemeManager {
+    /**
+     * 初始化主题系统
+     */
+    static initialize() {
+        // 获取保存的主题偏好
+        const savedTheme = StorageManager.get(APP_CONFIG.STORAGE_KEYS.THEME_PREFERENCE);
+        
+        // 如果没有保存的主题，则检测系统偏好
+        let theme = savedTheme;
+        if (!theme) {
+            theme = this.detectSystemTheme();
+        }
+        
+        // 应用主题
+        this.applyTheme(theme);
+        
+        // 绑定主题切换按钮事件
+        const themeToggle = document.getElementById('theme-toggle');
+        if (themeToggle) {
+            themeToggle.addEventListener('click', () => this.toggleTheme());
+        }
+        
+        // 监听系统主题变化（如果用户没有手动设置过主题）
+        if (!savedTheme && window.matchMedia) {
+            const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+            mediaQuery.addEventListener('change', (e) => {
+                // 只在用户未手动设置主题时才自动切换
+                const currentSavedTheme = StorageManager.get(APP_CONFIG.STORAGE_KEYS.THEME_PREFERENCE);
+                if (!currentSavedTheme) {
+                    this.applyTheme(e.matches ? 'dark' : 'light');
+                }
+            });
+        }
+    }
+    
+    /**
+     * 检测系统主题偏好
+     */
+    static detectSystemTheme() {
+        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            return 'dark';
+        }
+        return 'light';
+    }
+    
+    /**
+     * 应用主题
+     */
+    static applyTheme(theme) {
+        const body = document.body;
+        const themeToggle = document.getElementById('theme-toggle');
+        
+        if (theme === 'dark') {
+            body.setAttribute('data-theme', 'dark');
+            if (themeToggle) {
+                themeToggle.textContent = '☀️';
+                themeToggle.title = '切换到浅色模式';
+            }
+        } else {
+            body.removeAttribute('data-theme');
+            if (themeToggle) {
+                themeToggle.textContent = '🌙';
+                themeToggle.title = '切换到深色模式';
+            }
+        }
+    }
+    
+    /**
+     * 切换主题
+     */
+    static toggleTheme() {
+        const currentTheme = this.getCurrentTheme();
+        const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+        const themeToggle = document.getElementById('theme-toggle');
+        
+        // 添加按钮旋转动画
+        if (themeToggle) {
+            themeToggle.classList.add('switching');
+            setTimeout(() => {
+                themeToggle.classList.remove('switching');
+            }, 600);
+        }
+        
+        // 保存用户偏好
+        StorageManager.set(APP_CONFIG.STORAGE_KEYS.THEME_PREFERENCE, newTheme);
+        
+        // 添加页面过渡动画
+        const body = document.body;
+        body.style.transition = 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)';
+        
+        // 应用新主题
+        setTimeout(() => {
+            this.applyTheme(newTheme);
+        }, 50);
+        
+        // 清除过渡样式
+        setTimeout(() => {
+            body.style.transition = '';
+        }, 350);
+    }
+    
+    /**
+     * 获取当前主题
+     */
+    static getCurrentTheme() {
+        return document.body.hasAttribute('data-theme') ? 'dark' : 'light';
+    }
+}
+
+/**
  * UI管理类
  */
 class UIManager {
@@ -804,6 +918,9 @@ function initializePage() {
     
     // 渲染任务历史
     TaskHistoryManager.renderHistory();
+    
+    // 初始化主题系统
+    ThemeManager.initialize();
     
     // 初始状态更新
     UIManager.updateSubmitButton();

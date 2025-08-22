@@ -20,7 +20,7 @@ from ..utils.user_manager import get_user_manager
 from ..utils.audit_logger import get_audit_logger
 from ..utils.webhook_rate_limiter import get_rate_limiter_stats, get_webhook_status
 from ..utils.markdown_renderer import render_markdown_to_html, get_base_url
-from ..utils.dialog_renderer import render_transcript_content, render_transcript_content_smart
+from ..utils.dialog_renderer import render_transcript_content, render_transcript_content_smart, render_calibrated_content_smart
 from ..utils.timezone_helper import format_datetime_for_display
 from ..utils.llm_enhanced import EnhancedLLMProcessor
 from ..downloaders import create_downloader
@@ -1331,6 +1331,13 @@ async def view_transcript(view_token: str, request: Request):
                 try:
                     # 使用智能渲染（基于缓存分析）
                     view_data['transcript_html'] = render_transcript_content_smart(cache_dir, fallback_text)
+                    
+                    # 渲染校对文本（如果存在）
+                    calibrated_html = render_calibrated_content_smart(cache_dir)
+                    if calibrated_html:
+                        view_data['calibrated_html'] = calibrated_html
+                        logger.debug(f"校对文本渲染成功: {view_token}")
+                    
                     logger.debug(f"使用智能渲染成功: {view_token}")
                     
                     # 检查是否需要后台升级缓存
