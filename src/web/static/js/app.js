@@ -7,7 +7,6 @@
 const APP_CONFIG = {
     STORAGE_KEYS: {
         BEARER_TOKEN: 'vta_bearer_token',
-        WECHAT_WEBHOOK: 'vta_wechat_webhook',
         SPEAKER_RECOGNITION: 'vta_speaker_recognition',
         TASK_HISTORY: 'vta_task_history',
         THEME_PREFERENCE: 'vta_theme_preference'
@@ -228,7 +227,7 @@ class APIManager {
     /**
      * 提交转录任务
      */
-    static async submitTranscription(url, useSpeakerRecognition, webhook) {
+    static async submitTranscription(url, useSpeakerRecognition) {
         const token = StorageManager.get(APP_CONFIG.STORAGE_KEYS.BEARER_TOKEN);
         
         if (!token) {
@@ -243,8 +242,7 @@ class APIManager {
             },
             body: JSON.stringify({
                 url: url,
-                use_speaker_recognition: useSpeakerRecognition,
-                wechat_webhook: webhook || undefined
+                use_speaker_recognition: useSpeakerRecognition
             })
         });
 
@@ -618,9 +616,8 @@ class UIManager {
         
         const selectedURL = getSelectedURL();
         const token = StorageManager.get(APP_CONFIG.STORAGE_KEYS.BEARER_TOKEN);
-        const webhook = document.getElementById('wechat-webhook').value.trim();
         
-        const canSubmit = selectedURL && token && webhook && !currentTask;
+        const canSubmit = selectedURL && token && !currentTask;
         
         btn.disabled = !canSubmit;
         
@@ -628,14 +625,11 @@ class UIManager {
             btnIcon.textContent = '⏳';
             btnText.textContent = '处理中...';
         } else if (!selectedURL) {
-            btnIcon.textContent = '🚀';
-            btnText.textContent = '请先输入视频链接';
-        } else if (!webhook) {
-            btnIcon.textContent = '📱';
-            btnText.textContent = '请先设置企业微信通知地址';
+            btnIcon.textContent = '📝';
+            btnText.textContent = '请输入包含视频链接的内容';
         } else if (!token) {
             btnIcon.textContent = '🔐';
-            btnText.textContent = '请先设置访问令牌';
+            btnText.textContent = '请在高级设置中填写 API 令牌';
         } else {
             btnIcon.textContent = '🚀';
             btnText.textContent = '开始转录';
@@ -773,24 +767,29 @@ async function submitTranscription(event) {
     
     const selectedURL = getSelectedURL();
     const useSpeakerRecognition = document.getElementById('speaker-recognition').checked;
-    const webhook = document.getElementById('wechat-webhook').value.trim();
     const originalText = document.getElementById('share-content').value.trim();
     
     if (!selectedURL) {
-        UIManager.showStatus('error', '请先选择一个视频链接');
+        UIManager.showStatus('error', '请先选择一个视频链接', '请在上方文本框中输入包含视频链接的内容，系统会自动提取并显示可选的链接');
+        setTimeout(UIManager.hideStatus, 5000);
         return;
     }
     
-    if (!webhook) {
-        UIManager.showStatus('error', '请先设置企业微信通知地址', '企业微信Webhook地址为必填项，用于接收转录进度通知');
-        return;
-    }
-    
-    // 验证Webhook URL格式
-    try {
-        new URL(webhook);
-    } catch (e) {
-        UIManager.showStatus('error', '企业微信Webhook地址格式无效', '请输入正确的Webhook URL格式');
+    const token = StorageManager.get(APP_CONFIG.STORAGE_KEYS.BEARER_TOKEN);
+    if (!token) {
+        UIManager.showStatus('error', '请先设置 API 令牌', '请在高级设置中填写你的 API 访问令牌（Bearer Token）');
+        // 自动展开高级设置
+        if (!isAdvancedSettingsExpanded) {
+            UIManager.toggleAdvancedSettings();
+        }
+        // 聚焦到 token 输入框
+        setTimeout(() => {
+            const tokenInput = document.getElementById('bearer-token');
+            if (tokenInput) {
+                tokenInput.focus();
+            }
+        }, 100);
+        setTimeout(UIManager.hideStatus, 5000);
         return;
     }
     
@@ -801,11 +800,8 @@ async function submitTranscription(event) {
         
         // 保存设置到本地存储
         StorageManager.set(APP_CONFIG.STORAGE_KEYS.SPEAKER_RECOGNITION, useSpeakerRecognition);
-        if (webhook) {
-            StorageManager.set(APP_CONFIG.STORAGE_KEYS.WECHAT_WEBHOOK, webhook);
-        }
         
-        const response = await APIManager.submitTranscription(selectedURL, useSpeakerRecognition, webhook);
+        const response = await APIManager.submitTranscription(selectedURL, useSpeakerRecognition);
         
         if (response.code === 202 && response.data && response.data.task_id) {
             const taskData = {
@@ -821,7 +817,7 @@ async function submitTranscription(event) {
             
             // 根据是否重复显示不同的提示
             let statusMessage = '任务提交成功！';
-            let statusDetails = `任务ID: ${response.data.task_id}<br>转录将在后台进行，完成后会通过企业微信通知您<br>`;
+            let statusDetails = `任务ID: ${response.data.task_id}<br>转录将在后台进行，完成后会通过配置的企业微信通知您<br>`;
             
             if (historyResult.isDuplicate) {
                 statusMessage = '任务提交成功！(检测到重复URL)';
@@ -862,14 +858,10 @@ function initializePage() {
     
     // 加载保存的设置
     const savedToken = StorageManager.get(APP_CONFIG.STORAGE_KEYS.BEARER_TOKEN);
-    const savedWebhook = StorageManager.get(APP_CONFIG.STORAGE_KEYS.WECHAT_WEBHOOK);
     const savedSpeakerRecognition = StorageManager.get(APP_CONFIG.STORAGE_KEYS.SPEAKER_RECOGNITION);
     
     if (savedToken) {
         document.getElementById('bearer-token').value = savedToken;
-    }
-    if (savedWebhook) {
-        document.getElementById('wechat-webhook').value = savedWebhook;
     }
     if (savedSpeakerRecognition !== null) {
         document.getElementById('speaker-recognition').checked = savedSpeakerRecognition;
@@ -884,6 +876,11 @@ function initializePage() {
     const previewContainer = document.getElementById('url-preview');
     previewContainer.innerHTML = '<div class="no-urls">请输入包含视频链接的内容</div>';
     
+    // 如果没有保存的 token，自动展开高级设置
+    if (!savedToken) {
+        UIManager.toggleAdvancedSettings();
+    }
+    
     const form = document.getElementById('transcribe-form');
     form.addEventListener('submit', submitTranscription);
     
@@ -893,11 +890,6 @@ function initializePage() {
     const tokenToggle = document.getElementById('toggle-token-visibility');
     tokenToggle.addEventListener('click', UIManager.toggleTokenVisibility);
     
-    const clearWebhook = document.getElementById('clear-webhook');
-    clearWebhook.addEventListener('click', () => {
-        document.getElementById('wechat-webhook').value = '';
-        StorageManager.remove(APP_CONFIG.STORAGE_KEYS.WECHAT_WEBHOOK);
-    });
     
     // 监听设置变化
     document.getElementById('bearer-token').addEventListener('input', (e) => {
@@ -905,12 +897,6 @@ function initializePage() {
         UIManager.updateSubmitButton();
     });
     
-    document.getElementById('wechat-webhook').addEventListener('input', (e) => {
-        if (e.target.value.trim()) {
-            StorageManager.set(APP_CONFIG.STORAGE_KEYS.WECHAT_WEBHOOK, e.target.value.trim());
-        }
-        UIManager.updateSubmitButton();
-    });
     
     document.getElementById('speaker-recognition').addEventListener('change', (e) => {
         StorageManager.set(APP_CONFIG.STORAGE_KEYS.SPEAKER_RECOGNITION, e.target.checked);
