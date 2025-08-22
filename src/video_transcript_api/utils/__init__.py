@@ -2,6 +2,8 @@ from .logger import setup_logger, load_config, ensure_dir
 from .wechat import WechatNotifier, wechat_notify
 from .metadata_cache import MetadataCache
 from .cache_manager import CacheManager
+from .user_manager import UserManager, get_user_manager
+from .audit_logger import AuditLogger, get_audit_logger
 import os
 
 def create_debug_dir():
@@ -31,5 +33,9 @@ __all__ = [
     "wechat_notify",
     "create_debug_dir",
     "MetadataCache",
-    "CacheManager"
+    "CacheManager",
+    "UserManager",
+    "get_user_manager",
+    "AuditLogger",
+    "get_audit_logger"
 ] 

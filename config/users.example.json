@@ -1,0 +1,25 @@
+{
+  "users": {
+    "sk-user001-xxxxxxxxxx": {
+      "user_id": "user_001",
+      "name": "张三",
+      "wechat_webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=user1-key",
+      "created_at": "2025-01-01T00:00:00Z",
+      "enabled": true
+    },
+    "sk-user002-yyyyyyyyyy": {
+      "user_id": "user_002", 
+      "name": "李四",
+      "wechat_webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=user2-key",
+      "created_at": "2025-01-01T00:00:00Z",
+      "enabled": true
+    },
+    "sk-user003-zzzzzzzzzz": {
+      "user_id": "user_003",
+      "name": "王五",
+      "wechat_webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=user3-key",
+      "created_at": "2025-01-01T00:00:00Z",
+      "enabled": true
+    }
+  }
+}

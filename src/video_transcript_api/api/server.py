@@ -16,6 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any
 
 from ..utils import setup_logger, load_config, WechatNotifier, MetadataCache, CacheManager
+from ..utils.user_manager import get_user_manager
+from ..utils.audit_logger import get_audit_logger
 from ..utils.webhook_rate_limiter import get_rate_limiter_stats, get_webhook_status
 from ..utils.markdown_renderer import render_markdown_to_html, get_base_url
 from ..utils.dialog_renderer import render_transcript_content, render_transcript_content_smart
@@ -45,6 +47,12 @@ app.add_middleware(
 
 # 加载配置信息
 config = load_config()
+
+# 初始化用户管理器（传入回退配置）
+user_manager = get_user_manager(fallback_config=config)
+
+# 初始化审计日志记录器
+audit_logger = get_audit_logger()
 
 # 创建转录任务线程池
 max_workers = config.get("concurrent", {}).get("max_workers", 3)
@@ -99,17 +107,20 @@ class TranscribeResponse(BaseModel):
     data: Optional[Dict[str, Any]] = Field(None, description="响应数据")
 
 
-async def verify_token(authorization: str = Header(None)):
-    """验证API令牌"""
-    expected_token = config.get("api", {}).get("auth_token")
+async def verify_token(authorization: str = Header(None), request: Request = None):
+    """
+    验证API令牌（支持多用户）
     
+    Args:
+        authorization: Authorization头
+        request: FastAPI请求对象
+        
+    Returns:
+        dict: 用户信息
+    """
     if not authorization:
         logger.warning("请求未提供Authorization头")
         raise HTTPException(status_code=401, detail="未提供授权令牌")
-    
-    if not expected_token:
-        logger.warning("系统未配置API令牌")
-        return
     
     # 检查令牌格式
     token_parts = authorization.split()
@@ -119,11 +130,19 @@ async def verify_token(authorization: str = Header(None)):
     
     token = token_parts[1]
     
-    if token != expected_token:
-        logger.warning("授权令牌无效")
+    # 使用用户管理器验证令牌
+    user_info = user_manager.validate_token(token)
+    if not user_info:
+        logger.warning(f"授权令牌无效: {token[:8]}...")
         raise HTTPException(status_code=401, detail="授权令牌无效")
     
-    return token
+    logger.debug(f"用户认证成功: {user_info.get('user_id')}")
+    
+    # 将用户信息添加到请求状态中（供后续使用）
+    if request:
+        request.state.user_info = user_info
+    
+    return user_info
 
 
 async def process_task_queue():
@@ -138,6 +157,7 @@ async def process_task_queue():
             url = task["url"]
             use_speaker_recognition = task.get("use_speaker_recognition", False)
             wechat_webhook = task.get("wechat_webhook", None)
+            user_info = task.get("user_info", {})
             
             try:
                 # 更新任务状态
@@ -969,10 +989,12 @@ async def add_task_by_web():
         raise HTTPException(status_code=500, detail=f"访问Web任务添加页面失败: {str(e)}")
 
 
-@app.post("/api/transcribe", response_model=TranscribeResponse, dependencies=[Depends(verify_token)])
+@app.post("/api/transcribe", response_model=TranscribeResponse)
 async def transcribe_video(
-    request: TranscribeRequest, 
-    background_tasks: BackgroundTasks
+    request_body: TranscribeRequest, 
+    background_tasks: BackgroundTasks,
+    request: Request,
+    user_info: dict = Depends(verify_token)
 ):
     """
     转录视频接口
@@ -983,14 +1005,31 @@ async def transcribe_video(
     返回:
         TranscribeResponse: 包含转录结果的响应
     """
-    url = request.url
+    url = request_body.url
     if not url:
         logger.warning("请求未提供视频URL")
         raise HTTPException(status_code=400, detail="视频URL不能为空")
     
+    # 记录API调用开始时间
+    start_time = datetime.datetime.now()
+    
+    # 获取用户信息
+    user_id = user_info.get("user_id")
+    api_key = user_info.get("api_key")
+    
+    # 记录API调用审计日志（开始）
+    audit_logger.log_api_call(
+        api_key=api_key,
+        user_id=user_id,
+        endpoint="/api/transcribe",
+        video_url=url,
+        user_agent=request.headers.get("User-Agent"),
+        remote_ip=request.client.host if request.client else None
+    )
+    
     try:
         # 创建任务并生成唯一ID和view_token
-        task_info = cache_manager.create_task(url, request.use_speaker_recognition)
+        task_info = cache_manager.create_task(url, request_body.use_speaker_recognition)
         task_id = task_info["task_id"]
         view_token = task_info["view_token"]
         
@@ -1003,11 +1042,19 @@ async def transcribe_video(
         
         # 添加任务到队列
         try:
+            # 确定要使用的企微webhook地址（优先级：请求参数 > 用户配置 > 全局配置）
+            effective_webhook = (
+                request_body.wechat_webhook or 
+                user_info.get("wechat_webhook") or 
+                config.get("wechat", {}).get("webhook")
+            )
+            
             task = {
                 "id": task_id, 
                 "url": url, 
-                "use_speaker_recognition": request.use_speaker_recognition,
-                "wechat_webhook": request.wechat_webhook
+                "use_speaker_recognition": request_body.use_speaker_recognition,
+                "wechat_webhook": effective_webhook,
+                "user_info": user_info  # 添加用户信息到任务中
             }
             await task_queue.put(task)
             logger.info(f"任务已加入队列: {task_id}, URL: {url}")
@@ -1033,7 +1080,7 @@ async def transcribe_video(
                 send_view_link_wechat(
                     title=f"🎬 {title}",
                     view_token=view_token,
-                    webhook=request.wechat_webhook
+                    webhook=effective_webhook
                 )
                 logger.info(f"已发送任务创建通知: {task_id}")
                 
@@ -1045,6 +1092,20 @@ async def transcribe_video(
             logger.warning(f"任务队列已满，拒绝任务: {url}")
             raise HTTPException(status_code=503, detail="任务队列已满，请稍后重试")
         
+        # 计算处理时间并记录成功的审计日志
+        processing_time_ms = int((datetime.datetime.now() - start_time).total_seconds() * 1000)
+        audit_logger.log_api_call(
+            api_key=api_key,
+            user_id=user_id,
+            endpoint="/api/transcribe",
+            video_url=url,
+            processing_time_ms=processing_time_ms,
+            status_code=202,
+            task_id=task_id,
+            user_agent=request.headers.get("User-Agent"),
+            remote_ip=request.client.host if request.client else None
+        )
+        
         # 返回任务ID和view_token
         return TranscribeResponse(
             code=202,
@@ -1054,15 +1115,43 @@ async def transcribe_video(
                 "view_token": view_token
             }
         )
-    except HTTPException:
+    except HTTPException as he:
+        # 记录HTTP异常的审计日志
+        processing_time_ms = int((datetime.datetime.now() - start_time).total_seconds() * 1000)
+        audit_logger.log_api_call(
+            api_key=api_key,
+            user_id=user_id,
+            endpoint="/api/transcribe",
+            video_url=url,
+            processing_time_ms=processing_time_ms,
+            status_code=he.status_code,
+            user_agent=request.headers.get("User-Agent"),
+            remote_ip=request.client.host if request.client else None
+        )
         raise
     except Exception as e:
+        # 记录一般异常的审计日志
+        processing_time_ms = int((datetime.datetime.now() - start_time).total_seconds() * 1000)
+        audit_logger.log_api_call(
+            api_key=api_key,
+            user_id=user_id,
+            endpoint="/api/transcribe",
+            video_url=url,
+            processing_time_ms=processing_time_ms,
+            status_code=500,
+            user_agent=request.headers.get("User-Agent"),
+            remote_ip=request.client.host if request.client else None
+        )
         logger.exception(f"提交转录任务失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"提交转录任务失败: {str(e)}")
 
 
-@app.get("/api/task/{task_id}", response_model=TranscribeResponse, dependencies=[Depends(verify_token)])
-async def get_task_status(task_id: str):
+@app.get("/api/task/{task_id}", response_model=TranscribeResponse)
+async def get_task_status(
+    task_id: str,
+    request: Request,
+    user_info: dict = Depends(verify_token)
+):
     """
     获取任务状态接口
     
@@ -1072,28 +1161,76 @@ async def get_task_status(task_id: str):
     返回:
         TranscribeResponse: 包含任务状态的响应
     """
-    if task_id not in task_results:
-        logger.warning(f"任务不存在: {task_id}")
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    # 记录API调用审计日志
+    start_time = datetime.datetime.now()
+    user_id = user_info.get("user_id")
+    api_key = user_info.get("api_key")
     
-    task_result = task_results[task_id]
-    
-    # 根据任务状态设置响应码
-    code = 200
-    if task_result.get("status") == "queued" or task_result.get("status") == "processing":
-        code = 202  # 处理中
-    elif task_result.get("status") == "failed":
-        code = 500  # 失败
-    
-    return TranscribeResponse(
-        code=code,
-        message=task_result.get("message", "获取任务状态成功"),
-        data=task_result.get("data")
-    )
+    try:
+        if task_id not in task_results:
+            # 记录任务不存在的审计日志
+            processing_time_ms = int((datetime.datetime.now() - start_time).total_seconds() * 1000)
+            audit_logger.log_api_call(
+                api_key=api_key,
+                user_id=user_id,
+                endpoint=f"/api/task/{task_id}",
+                processing_time_ms=processing_time_ms,
+                status_code=404,
+                task_id=task_id,
+                user_agent=request.headers.get("User-Agent"),
+                remote_ip=request.client.host if request.client else None
+            )
+            logger.warning(f"任务不存在: {task_id}")
+            raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+        
+        task_result = task_results[task_id]
+        
+        # 根据任务状态设置响应码
+        code = 200
+        if task_result.get("status") == "queued" or task_result.get("status") == "processing":
+            code = 202  # 处理中
+        elif task_result.get("status") == "failed":
+            code = 500  # 失败
+        
+        # 记录成功的审计日志
+        processing_time_ms = int((datetime.datetime.now() - start_time).total_seconds() * 1000)
+        audit_logger.log_api_call(
+            api_key=api_key,
+            user_id=user_id,
+            endpoint=f"/api/task/{task_id}",
+            processing_time_ms=processing_time_ms,
+            status_code=code,
+            task_id=task_id,
+            user_agent=request.headers.get("User-Agent"),
+            remote_ip=request.client.host if request.client else None
+        )
+        
+        return TranscribeResponse(
+            code=code,
+            message=task_result.get("message", "获取任务状态成功"),
+            data=task_result.get("data")
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        # 记录异常的审计日志
+        processing_time_ms = int((datetime.datetime.now() - start_time).total_seconds() * 1000)
+        audit_logger.log_api_call(
+            api_key=api_key,
+            user_id=user_id,
+            endpoint=f"/api/task/{task_id}",
+            processing_time_ms=processing_time_ms,
+            status_code=500,
+            task_id=task_id,
+            user_agent=request.headers.get("User-Agent"),
+            remote_ip=request.client.host if request.client else None
+        )
+        logger.exception(f"获取任务状态异常: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取任务状态失败: {str(e)}")
 
 
-@app.get("/api/webhook-stats", dependencies=[Depends(verify_token)])
-async def get_webhook_stats():
+@app.get("/api/webhook-stats")
+async def get_webhook_stats(user_info: dict = Depends(verify_token)):
     """
     获取webhook限流器统计信息
     
@@ -1112,8 +1249,8 @@ async def get_webhook_stats():
         raise HTTPException(status_code=500, detail=f"获取统计信息失败: {str(e)}")
 
 
-@app.get("/api/webhook-status", dependencies=[Depends(verify_token)])
-async def get_webhook_status_info(webhook_url: str):
+@app.get("/api/webhook-status")
+async def get_webhook_status_info(webhook_url: str, user_info: dict = Depends(verify_token)):
     """
     获取指定webhook的状态信息
     
@@ -1294,6 +1431,101 @@ def _trigger_cache_upgrade_if_needed(cache_dir: str, view_data: dict):
         
     except Exception as e:
         logger.error(f"触发缓存升级失败: {e}")
+
+
+@app.get("/api/audit/stats")
+async def get_audit_stats(
+    days: int = 30,
+    user_info: dict = Depends(verify_token)
+):
+    """
+    获取API调用统计信息
+    
+    请求参数:
+        days: 统计天数，默认30天
+        
+    返回:
+        dict: 统计信息
+    """
+    try:
+        user_id = user_info.get("user_id")
+        
+        # 获取用户自己的统计信息
+        user_stats = audit_logger.get_user_stats(user_id, days)
+        
+        return TranscribeResponse(
+            code=200,
+            message="获取统计信息成功",
+            data={
+                "user_stats": user_stats,
+                "is_multi_user_mode": user_manager.is_multi_user_mode(),
+                "total_users": user_manager.get_user_count()
+            }
+        )
+    except Exception as e:
+        logger.exception(f"获取审计统计异常: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取统计信息失败: {str(e)}")
+
+
+@app.get("/api/audit/calls")
+async def get_audit_calls(
+    limit: int = 100,
+    user_info: dict = Depends(verify_token)
+):
+    """
+    获取最近的API调用记录
+    
+    请求参数:
+        limit: 返回记录数量，默认100
+        
+    返回:
+        list: API调用记录
+    """
+    try:
+        user_id = user_info.get("user_id")
+        
+        # 用户只能查看自己的调用记录
+        recent_calls = audit_logger.get_recent_calls(user_id, limit)
+        
+        return TranscribeResponse(
+            code=200,
+            message="获取调用记录成功",
+            data={
+                "calls": recent_calls,
+                "user_id": user_id,
+                "limit": limit
+            }
+        )
+    except Exception as e:
+        logger.exception(f"获取审计调用记录异常: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取调用记录失败: {str(e)}")
+
+
+@app.get("/api/users/profile")
+async def get_user_profile(user_info: dict = Depends(verify_token)):
+    """
+    获取当前用户的配置信息
+    
+    返回:
+        dict: 用户配置信息
+    """
+    try:
+        # 移除敏感信息
+        safe_user_info = user_info.copy()
+        if "api_key" in safe_user_info:
+            safe_user_info["api_key"] = user_manager._mask_api_key(safe_user_info["api_key"])
+        
+        return TranscribeResponse(
+            code=200,
+            message="获取用户配置成功",
+            data={
+                "user_info": safe_user_info,
+                "is_multi_user_mode": user_manager.is_multi_user_mode()
+            }
+        )
+    except Exception as e:
+        logger.exception(f"获取用户配置异常: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取用户配置失败: {str(e)}")
 
 
 def start_server():

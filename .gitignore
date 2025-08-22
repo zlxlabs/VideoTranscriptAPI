@@ -47,6 +47,7 @@ tests/sample_files/test_files/
 
 # 配置文件（敏感信息）
 config/config.json
+config/users.json
 
 # 第三方工具输出
 third_party/BBDown/output/
