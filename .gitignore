@@ -29,6 +29,7 @@ data/logs/
 data/cache/
 data/temp/
 data/*.db
+data/output
 
 # 媒体文件
 *.mp3
