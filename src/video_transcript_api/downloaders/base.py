@@ -99,19 +99,134 @@ class BaseDownloader(ABC):
             # 创建目录（如果不存在）
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
             
+            logger.info(f"开始下载文件: {url[:100]}...")
+            
             response = requests.get(url, stream=True, timeout=60)
             response.raise_for_status()
             
+            # 获取文件总大小（如果可用）
+            content_length = response.headers.get('Content-Length')
+            expected_size = int(content_length) if content_length else None
+            if expected_size:
+                logger.info(f"预期文件大小: {expected_size / 1024 / 1024:.2f} MB")
+            
+            downloaded_size = 0
             with open(local_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
+                        downloaded_size += len(chunk)
             
-            logger.info(f"文件下载成功: {local_path}")
+            # 验证下载的文件
+            actual_size = os.path.getsize(local_path)
+            logger.info(f"实际下载文件大小: {actual_size / 1024 / 1024:.2f} MB")
+            
+            # 检查文件大小是否合理
+            if actual_size == 0:
+                logger.error(f"下载的文件大小为0字节: {local_path}")
+                self.clean_up(local_path)
+                return None
+            
+            # 如果有预期大小，检查是否匹配
+            if expected_size and abs(actual_size - expected_size) > 1024:  # 允许1KB的误差
+                logger.warning(f"文件大小不匹配 - 预期: {expected_size}, 实际: {actual_size}")
+            
+            # 验证文件是否为有效的音视频文件
+            if not self._validate_media_file(local_path):
+                logger.error(f"下载的文件不是有效的音视频文件: {local_path}")
+                self.clean_up(local_path)
+                return None
+            
+            logger.info(f"文件下载并验证成功: {local_path}")
             return local_path
+            
         except Exception as e:
             logger.error(f"文件下载失败: {url}, 错误: {str(e)}")
+            # 清理可能存在的不完整文件
+            try:
+                if 'local_path' in locals() and os.path.exists(local_path):
+                    self.clean_up(local_path)
+            except:
+                pass
             return None
+    
+    def _validate_media_file(self, file_path):
+        """
+        验证文件是否为有效的音视频文件
+        
+        参数:
+            file_path: 文件路径
+            
+        返回:
+            bool: 是否为有效的音视频文件
+        """
+        try:
+            import subprocess
+            
+            # 使用ffprobe检查文件
+            cmd = [
+                "ffprobe",
+                "-v", "quiet",
+                "-print_format", "json", 
+                "-show_format",
+                "-show_streams",
+                str(file_path)
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode != 0:
+                logger.error(f"ffprobe检查文件失败: {file_path}")
+                logger.error(f"ffprobe错误输出: {result.stderr}")
+                return False
+            
+            # 解析ffprobe输出
+            try:
+                import json as json_module
+                probe_data = json_module.loads(result.stdout)
+                
+                # 检查是否有音频或视频流
+                streams = probe_data.get("streams", [])
+                has_audio = any(stream.get("codec_type") == "audio" for stream in streams)
+                has_video = any(stream.get("codec_type") == "video" for stream in streams)
+                
+                if not has_audio and not has_video:
+                    logger.error(f"文件中没有找到音频或视频流: {file_path}")
+                    return False
+                
+                # 获取文件时长
+                format_info = probe_data.get("format", {})
+                duration = format_info.get("duration")
+                if duration:
+                    duration_float = float(duration)
+                    logger.info(f"媒体文件时长: {duration_float:.2f}秒")
+                    
+                    # 检查时长是否合理（至少1秒）
+                    if duration_float < 1.0:
+                        logger.error(f"媒体文件时长过短: {duration_float}秒")
+                        return False
+                else:
+                    logger.warning(f"无法获取媒体文件时长: {file_path}")
+                
+                logger.info(f"文件验证通过: 音频流={has_audio}, 视频流={has_video}")
+                return True
+                
+            except Exception as parse_error:
+                logger.error(f"解析ffprobe输出失败: {parse_error}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            logger.error(f"ffprobe超时: {file_path}")
+            return False
+        except FileNotFoundError:
+            logger.warning("ffprobe未找到，跳过媒体文件验证")
+            # 如果ffprobe不可用，至少检查文件扩展名
+            valid_extensions = {'.mp4', '.mp3', '.m4a', '.wav', '.webm', '.ogg', '.flv', '.avi', '.mkv'}
+            file_ext = os.path.splitext(file_path)[1].lower()
+            return file_ext in valid_extensions
+        except Exception as e:
+            logger.error(f"验证媒体文件时出错: {e}")
+            return False
     
     def clean_up(self, file_path):
         """

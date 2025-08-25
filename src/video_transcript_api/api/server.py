@@ -598,20 +598,27 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                 logger.info(f"使用BBDown已下载的文件: {local_file}")
             else:
                 # 常规下载流程
-                download_url = video_info.get("download_url")
-                filename = video_info.get("filename")
+                # 如果是YouTube链接，使用优先级下载方式（yt-dlp优先，TikHub备用）
+                if hasattr(downloader, 'download_video_with_priority') and ("youtube.com" in url or "youtu.be" in url):
+                    logger.info(f"YouTube视频，使用优先级下载（yt-dlp优先）: {url}")
+                    local_file = downloader.download_video_with_priority(url, video_info)
+                else:
+                    # 其他平台使用常规下载流程
+                    download_url = video_info.get("download_url")
+                    filename = video_info.get("filename")
+                    
+                    if not download_url or not filename:
+                        error_msg = f"无法获取下载信息: {url}"
+                        logger.error(error_msg)
+                        task_notifier.notify_task_status(url, "下载失败", error_msg, title=video_title, author=author)
+                        return {
+                            "status": "failed",
+                            "message": error_msg
+                        }
+                    
+                    # 下载文件
+                    local_file = downloader.download_file(download_url, filename)
                 
-                if not download_url or not filename:
-                    error_msg = f"无法获取下载信息: {url}"
-                    logger.error(error_msg)
-                    task_notifier.notify_task_status(url, "下载失败", error_msg, title=video_title, author=author)
-                    return {
-                        "status": "failed",
-                        "message": error_msg
-                    }
-                
-                # 下载文件
-                local_file = downloader.download_file(download_url, filename)
                 if not local_file:
                     error_msg = f"下载文件失败: {url}"
                     logger.error(error_msg)

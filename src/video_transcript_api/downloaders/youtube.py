@@ -101,18 +101,21 @@ class YoutubeDownloader(BaseDownloader):
             # 提取视频ID
             video_id = self._extract_video_id(url)
             
-            # 优先尝试使用 yt-dlp 获取视频信息
+            # 优先尝试使用 yt-dlp 获取视频信息和下载链接
             logger.info(f"尝试使用 yt-dlp 获取 YouTube 视频信息: {video_id}")
             try:
                 video_info = self._get_video_info_with_ytdlp(url)
-                if video_info:
+                if video_info and video_info.get("download_url"):
                     logger.info(f"成功使用 yt-dlp 获取视频信息: {video_info['video_title']}")
+                    video_info["download_method"] = "yt-dlp"
                     return video_info
+                else:
+                    logger.warning("yt-dlp 获取的视频信息中没有有效的下载链接")
             except Exception as e:
                 logger.warning(f"yt-dlp 获取视频信息失败: {e}")
-                logger.info("降级到 TikHub API 获取视频信息")
             
             # 如果 yt-dlp 失败，使用 TikHub API 作为备用
+            logger.info("降级到 TikHub API 获取视频信息")
             endpoint = f"/api/v1/youtube/web/get_video_info"
             params = {"video_id": video_id}
             
@@ -230,7 +233,8 @@ class YoutubeDownloader(BaseDownloader):
                 "download_url": download_url,
                 "filename": filename,
                 "platform": "youtube",
-                "subtitle_info": subtitle_info
+                "subtitle_info": subtitle_info,
+                "download_method": "tikhub"
             }
             
             logger.info(f"成功获取YouTube视频信息: ID={video_id}, 文件类型={file_ext}")
@@ -553,9 +557,58 @@ class YoutubeDownloader(BaseDownloader):
             logger.error(f"yt-dlp 获取视频信息异常: {e}")
             raise
     
+    def download_video_with_priority(self, url, video_info=None):
+        """
+        按优先级下载视频：优先使用yt-dlp，备用TikHub API
+        
+        参数:
+            url: 视频URL
+            video_info: 视频信息（可选，如果提供则使用其中的下载方法信息）
+            
+        返回:
+            str: 本地文件路径，失败返回None
+        """
+        logger.info(f"开始按优先级下载YouTube视频: {url}")
+        
+        # 首先尝试yt-dlp下载
+        try:
+            logger.info("优先使用yt-dlp下载...")
+            audio_result = self.download_audio_for_transcription(url)
+            if audio_result and audio_result.get("audio_path"):
+                logger.info(f"yt-dlp下载成功: {audio_result['audio_path']}")
+                return audio_result["audio_path"]
+            else:
+                logger.warning("yt-dlp下载失败或未返回有效路径")
+        except Exception as e:
+            logger.warning(f"yt-dlp下载异常: {e}")
+        
+        # 如果yt-dlp失败，尝试使用TikHub API
+        if video_info:
+            download_url = video_info.get("download_url")
+            filename = video_info.get("filename")
+            
+            if download_url and filename:
+                logger.info("降级使用TikHub API下载...")
+                try:
+                    local_file = self.download_file(download_url, filename)
+                    if local_file:
+                        logger.info(f"TikHub API下载成功: {local_file}")
+                        return local_file
+                    else:
+                        logger.error("TikHub API下载失败")
+                except Exception as e:
+                    logger.error(f"TikHub API下载异常: {e}")
+            else:
+                logger.error("TikHub API下载信息不完整")
+        else:
+            logger.warning("没有提供video_info，无法使用TikHub API下载")
+        
+        logger.error(f"所有下载方式均失败: {url}")
+        return None
+    
     def download_audio_for_transcription(self, url):
         """
-        当无法获取字幕时，下载音频用于转录
+        使用yt-dlp下载音频用于转录
         
         参数:
             url: 视频URL
