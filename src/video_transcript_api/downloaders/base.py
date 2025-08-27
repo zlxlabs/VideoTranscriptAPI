@@ -173,17 +173,34 @@ class BaseDownloader(ABC):
                 str(file_path)
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=False, timeout=30)
             
             if result.returncode != 0:
                 logger.error(f"ffprobe检查文件失败: {file_path}")
-                logger.error(f"ffprobe错误输出: {result.stderr}")
+                # 尝试解码错误输出
+                try:
+                    stderr_text = result.stderr.decode('utf-8')
+                except UnicodeDecodeError:
+                    try:
+                        stderr_text = result.stderr.decode('gbk')
+                    except UnicodeDecodeError:
+                        stderr_text = result.stderr.decode('utf-8', errors='ignore')
+                logger.error(f"ffprobe错误输出: {stderr_text}")
                 return False
             
             # 解析ffprobe输出
             try:
                 import json as json_module
-                probe_data = json_module.loads(result.stdout)
+                # 尝试解码标准输出
+                try:
+                    stdout_text = result.stdout.decode('utf-8')
+                except UnicodeDecodeError:
+                    try:
+                        stdout_text = result.stdout.decode('gbk')
+                    except UnicodeDecodeError:
+                        stdout_text = result.stdout.decode('utf-8', errors='ignore')
+                
+                probe_data = json_module.loads(stdout_text)
                 
                 # 检查是否有音频或视频流
                 streams = probe_data.get("streams", [])
