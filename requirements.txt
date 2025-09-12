@@ -21,8 +21,8 @@ pypinyin
 watchdog
 srt
 beautifulsoup4>=4.9.0
-youtube-transcript-api>=1.2.1
-yt-dlp>=2025.07.21
+youtube-transcript-api
+yt-dlp
 markdown>=3.4.0
 pymdown-extensions>=10.0.0
 jinja2>=3.0.0
