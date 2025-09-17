@@ -232,8 +232,9 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
         # 创建本任务专用的通知器（如果提供了自定义webhook）
         task_notifier = WechatNotifier(wechat_webhook) if wechat_webhook else wechat_notifier
         
-        # 通知任务开始
-        task_notifier.notify_task_status(url, "开始处理")
+        # 通知任务开始，包含转录服务器类型信息
+        engine_info = "说话人识别(FunASR)" if use_speaker_recognition else "普通转录(CapsWriter)"
+        task_notifier.notify_task_status(url, f"开始处理 - {engine_info}")
         
         # 创建下载器
         downloader = create_downloader(url)
@@ -332,11 +333,12 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                 
                 # 通知用户使用缓存的 LLM 结果
                 cache_type = "含说话人识别" if has_speaker_recognition else "普通转录"
+                engine_info = "FunASR" if has_speaker_recognition else "CapsWriter"
                 task_notifier.notify_task_status(
-                    url, 
-                    f"使用已有缓存({cache_type}，含LLM结果)", 
-                    title=video_title, 
-                    author=author, 
+                    url,
+                    f"使用已有缓存({cache_type}-{engine_info}，含LLM结果)",
+                    title=video_title,
+                    author=author,
                     transcript="使用缓存的校对和总结文本..."
                 )
                 
@@ -440,11 +442,12 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                 
                 # 通知用户我们使用的是缓存的转录
                 cache_type = "含说话人识别" if has_speaker_recognition else "普通转录"
+                engine_info = "FunASR" if has_speaker_recognition else "CapsWriter"
                 task_notifier.notify_task_status(
-                    url, 
-                    f"使用已有缓存({cache_type})", 
-                    title=video_title, 
-                    author=author, 
+                    url,
+                    f"使用已有缓存({cache_type}-{engine_info})",
+                    title=video_title,
+                    author=author,
                     transcript="正在处理已存在的转录文本..."
                 )
                 
@@ -519,9 +522,9 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
             
             # 通知获取平台字幕成功
             task_notifier.notify_task_status(
-                url, 
-                "平台字幕获取成功", 
-                title=video_title, 
+                url,
+                "平台字幕获取成功 - 直接使用平台字幕",
+                title=video_title,
                 author=author
             )
             
@@ -588,7 +591,8 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
         else:
             # 没有字幕，需要下载音视频并转录
             logger.info(f"下载视频进行转录: {url}")
-            task_notifier.notify_task_status(url, "正在下载视频", title=video_title, author=author)
+            engine_info = "说话人识别(FunASR)" if use_speaker_recognition else "普通转录(CapsWriter)"
+            task_notifier.notify_task_status(url, f"正在下载视频 - {engine_info}", title=video_title, author=author)
             
             # 检查是否已通过BBDown下载
             local_file = None
@@ -631,7 +635,8 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
             try:
                 # 开始转录
                 logger.info(f"开始转录音视频: {local_file}")
-                task_notifier.notify_task_status(url, "正在转录音视频", title=video_title, author=author)
+                engine_info = "说话人识别(FunASR)" if use_speaker_recognition else "普通转录(CapsWriter)"
+                task_notifier.notify_task_status(url, f"正在转录音视频 - {engine_info}", title=video_title, author=author)
                 
                 # 获取平台和媒体ID
                 platform = video_info.get('platform')
@@ -697,12 +702,13 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                 # 获取转录文本
                 transcript = transcription_result.get("transcript", "")
                 
-                # 通知转录完成，包含转录文本预览
+                # 通知转录完成，包含转录文本预览和服务器类型信息
+                engine_info = "说话人识别(FunASR)" if use_speaker_recognition else "普通转录(CapsWriter)"
                 task_notifier.notify_task_status(
-                    url, 
-                    "转录完成", 
-                    title=video_title, 
-                    author=author, 
+                    url,
+                    f"转录完成 - {engine_info}",
+                    title=video_title,
+                    author=author,
                     transcript=transcript
                 )
                 
@@ -998,17 +1004,17 @@ async def add_task_by_web():
 
 @app.post("/api/transcribe", response_model=TranscribeResponse)
 async def transcribe_video(
-    request_body: TranscribeRequest, 
+    request_body: TranscribeRequest,
     background_tasks: BackgroundTasks,
     request: Request,
     user_info: dict = Depends(verify_token)
 ):
     """
     转录视频接口
-    
+
     请求参数:
         url: 视频URL
-        
+
     返回:
         TranscribeResponse: 包含转录结果的响应
     """
@@ -1016,10 +1022,15 @@ async def transcribe_video(
     if not url:
         logger.warning("请求未提供视频URL")
         raise HTTPException(status_code=400, detail="视频URL不能为空")
-    
+
+    # 记录完整的API请求body信息，方便排查参数
+    logger.info(f"收到转录API请求 - URL: {url}, 说话人识别: {request_body.use_speaker_recognition}, "
+                f"自定义企微webhook: {request_body.wechat_webhook is not None}, "
+                f"完整请求体: {request_body.model_dump()}")
+
     # 记录API调用开始时间
     start_time = datetime.datetime.now()
-    
+
     # 获取用户信息
     user_id = user_info.get("user_id")
     api_key = user_info.get("api_key")
