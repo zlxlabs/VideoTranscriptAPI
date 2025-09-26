@@ -168,10 +168,56 @@ class WechatNotifier:
                 return url.split("?")[0]
             return url
 
+    def _get_status_emoji(self, status, error=None):
+        """
+        根据任务状态获取对应的emoji
+
+        参数:
+            status: 任务状态
+            error: 错误信息
+
+        返回:
+            str: 对应的emoji
+        """
+        # 错误状态优先
+        if error or "失败" in status or "异常" in status or "错误" in status:
+            return "❌"
+
+        # 根据状态关键词匹配emoji
+        status_lower = status.lower()
+
+        if "开始" in status or "处理" in status:
+            return "🔄"
+        elif "下载" in status:
+            if "正在下载" in status:
+                return "⬇️"
+            elif "下载完成" in status or "下载成功" in status:
+                return "✅"
+            else:
+                return "📥"
+        elif "转录" in status:
+            if "正在转录" in status:
+                return "🎤"
+            elif "转录完成" in status or "转录成功" in status:
+                return "✅"
+            else:
+                return "📝"
+        elif "完成" in status or "成功" in status:
+            return "✅"
+        elif "等待" in status or "队列" in status:
+            return "⏳"
+        elif "缓存" in status:
+            return "💾"
+        elif "平台字幕" in status:
+            return "📄"
+        else:
+            # 默认处理中状态
+            return "🔄"
+
     def notify_task_status(self, url, status, error=None, title=None, author=None, transcript=None):
         """
         通知任务状态
-        
+
         参数:
             url: 视频URL
             status: 当前状态
@@ -179,18 +225,21 @@ class WechatNotifier:
             title: 视频标题，如果有的话
             author: 视频作者，如果有的话
             transcript: 转录文本，如果有的话
-            
+
         返回:
             bool: 发送是否成功
         """
         # 添加时间戳前缀
         timestamp = datetime.datetime.now().strftime("%y%m%d-%H%M%S")
-        
+
         # 清洗URL
         clean_url = self._clean_url(url)
-        
+
+        # 根据状态选择对应的emoji
+        status_emoji = self._get_status_emoji(status, error)
+
         # 构建通知内容（markdown_v2格式）
-        content = f"## {timestamp}\n\n**视频转录任务状态更新**\n\n{clean_url}\n\n**状态：** {status}"
+        content = f"## {timestamp}\n\n{status_emoji} **视频转录任务状态更新**\n\n{clean_url}\n\n**状态：** {status}"
 
         # 添加标题和作者信息（如果有）
         if title:
