@@ -301,7 +301,7 @@ def send_view_link_wechat(title, view_token, webhook=None, original_url=None):
         if original_url:
             # 清洗原始URL
             clean_url = WechatNotifier()._clean_url(original_url)
-            message = f"{title}\n\n【媒体URL】{clean_url}\n\n点击查看转录进度和结果：{view_url}"
+            message = f"{title}\n\n{clean_url}\n\n点击查看转录进度和结果：{view_url}"
         else:
             # 保持原有格式作为后备
             message = f"🔗 【查看链接】{title}\n\n点击查看转录进度和结果：{view_url}"
