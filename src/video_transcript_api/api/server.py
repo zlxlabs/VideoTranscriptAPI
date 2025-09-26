@@ -374,7 +374,7 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                     # 使用限流系统发送完成通知，确保顺序正确
                     # 清洗URL用于显示
                     clean_url = WechatNotifier()._clean_url(url)
-                    completion_message = f"{video_title}\n{clean_url}\n\n🔗 总结和校对：{view_url}\n\n✅ 【任务完成】"
+                    completion_message = f"# {video_title}\n\n{clean_url}\n\n🔗 总结和校对：\n{view_url}\n\n✅ **【任务完成】**"
                     logger.info(f"[缓存模式] 准备发送任务完成通知: {video_title}")
                     task_notifier = WechatNotifier(wechat_webhook, use_rate_limit=True)
                     task_notifier.send_text(completion_message)
@@ -864,7 +864,7 @@ def process_llm_queue():
                         # 使用限流系统发送完成通知，确保顺序正确
                         # 清洗URL用于显示
                         clean_url = WechatNotifier()._clean_url(url)
-                        completion_message = f"{video_title}\n{clean_url}\n\n🔗 总结和校对：{view_url}\n\n✅ 【任务完成】"
+                        completion_message = f"# {video_title}\n\n{clean_url}\n\n🔗 总结和校对：\n{view_url}\n\n✅ **【任务完成】**"
                         task_notifier = WechatNotifier(wechat_webhook, use_rate_limit=True)
                         task_notifier.send_text(completion_message)
                         logger.info(f"任务完成通知已加入限流队列: {task_id}")

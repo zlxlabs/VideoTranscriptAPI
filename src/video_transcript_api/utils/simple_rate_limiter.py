@@ -40,14 +40,15 @@ class SimpleWebhookRateLimiter:
             'total_failed': 0
         }
     
-    def send_message(self, webhook_url: str, content: str) -> bool:
+    def send_message(self, webhook_url: str, content: str, msgtype: str = "text") -> bool:
         """
         同步发送消息，自动限流
-        
+
         Args:
             webhook_url: webhook地址
             content: 消息内容
-            
+            msgtype: 消息类型，支持 "text" 或 "markdown_v2"，默认为 "text"
+
         Returns:
             bool: 发送是否成功
         """
@@ -69,9 +70,9 @@ class SimpleWebhookRateLimiter:
             
             # 发送消息
             content_preview = content[:100].replace('\n', ' ')
-            logger.debug(f"[同步发送] Webhook: {webhook_url[:30]}..., 预览: {content_preview}...")
-            
-            success = self._send_webhook_now(webhook_url, content)
+            logger.debug(f"[同步发送] Webhook: {webhook_url[:30]}..., 类型: {msgtype}, 预览: {content_preview}...")
+
+            success = self._send_webhook_now(webhook_url, content, msgtype)
             
             # 记录发送时间
             self._last_send_times[webhook_url] = time.time()
@@ -101,20 +102,29 @@ class SimpleWebhookRateLimiter:
             logger.debug(f"Webhook {webhook_url[:30]}... 等待发送间隔: {wait_time:.3f}s")
             time.sleep(wait_time)
     
-    def _send_webhook_now(self, webhook_url: str, content: str) -> bool:
+    def _send_webhook_now(self, webhook_url: str, content: str, msgtype: str = "text") -> bool:
         """立即发送webhook消息"""
         try:
-            data = {
-                "msgtype": "text",
-                "text": {
-                    "content": content
+            if msgtype == "markdown_v2":
+                data = {
+                    "msgtype": "markdown_v2",
+                    "markdown_v2": {
+                        "content": content
+                    }
                 }
-            }
-            
+            else:
+                # 默认为text格式
+                data = {
+                    "msgtype": "text",
+                    "text": {
+                        "content": content
+                    }
+                }
+
             response = requests.post(
                 webhook_url,
-                data=json.dumps(data),
-                headers={"Content-Type": "application/json"},
+                data=json.dumps(data, ensure_ascii=False).encode('utf-8'),
+                headers={"Content-Type": "application/json; charset=utf-8"},
                 timeout=10
             )
             
@@ -146,18 +156,19 @@ class SimpleWebhookRateLimiter:
 # 全局实例 - 模块级别，避免多线程创建问题
 _global_limiter = SimpleWebhookRateLimiter()
 
-def send_rate_limited_message(webhook_url: str, content: str) -> bool:
+def send_rate_limited_message(webhook_url: str, content: str, msgtype: str = "text") -> bool:
     """
     发送限流消息的便捷函数
-    
+
     Args:
         webhook_url: webhook地址
         content: 消息内容
-        
+        msgtype: 消息类型，支持 "text" 或 "markdown_v2"，默认为 "text"
+
     Returns:
         bool: 发送是否成功
     """
-    return _global_limiter.send_message(webhook_url, content)
+    return _global_limiter.send_message(webhook_url, content, msgtype)
 
 def get_rate_limiter_stats() -> dict:
     """获取限流器统计信息"""
