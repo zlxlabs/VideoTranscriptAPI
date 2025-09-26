@@ -342,71 +342,25 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                     transcript="使用缓存的校对和总结文本..."
                 )
                 
-                # 直接发送缓存的 LLM 结果
+                # 直接发送缓存的 LLM 结果（仅发送总结文本）
                 from utils.wechat import send_long_text_wechat
-                
-                # 根据校对文本长度判断是否发送校对文本
-                calibrated_text = cache_data.get('llm_calibrated', '')
-                calibrated_text_length = len(calibrated_text)
-                
-                # 从配置中获取校对文本最大长度阈值
-                wechat_config = config.get('wechat', {})
-                calibrated_text_max_length = wechat_config.get('calibrated_text_max_length', 5000)
-                
-                should_send_calibrated_text = calibrated_text_length <= calibrated_text_max_length
-                
-                logger.info(f"缓存模式 - 校对文本长度: {calibrated_text_length}, 阈值: {calibrated_text_max_length}, 是否发送校对文本: {should_send_calibrated_text}")
-                
-                if should_send_calibrated_text:
-                    # 校对文本不超过阈值：发送校对文本和总结文本
-                    logger.info("缓存模式 - 校对文本长度合适，发送校对文本和总结文本")
-                    # 发送校对文本（确保使用限流）
-                    send_long_text_wechat(
-                        title=video_title,
-                        url=url,
-                        text=cache_data['llm_calibrated'],
-                        is_summary=False,
-                        has_speaker_recognition=has_speaker_recognition,
-                        webhook=wechat_webhook,
-                        use_rate_limit=True
-                    )
-                    
-                    # 确保校对文本完全加入队列后再发送总结文本
-                    import time
-                    logger.info(f"[缓存模式] 校对文本发送完成，延迟100ms后发送总结文本")
-                    time.sleep(0.1)  # 100ms延迟，确保所有校对文本分段都已加入队列
-                    
-                    # 发送总结文本（确保使用限流）
-                    send_long_text_wechat(
-                        title=video_title,
-                        url=url,
-                        text=cache_data['llm_summary'],
-                        is_summary=True,
-                        has_speaker_recognition=has_speaker_recognition,
-                        webhook=wechat_webhook,
-                        use_rate_limit=True
-                    )
-                    
-                    # 确保总结文本完全加入队列后再发送完成通知
-                    logger.info(f"[缓存模式] 总结文本发送完成，延迟100ms后发送完成通知")
-                    time.sleep(0.1)  # 100ms延迟，确保总结文本已加入队列
-                else:
-                    # 校对文本超过阈值：只发送总结文本（校对文本太长了）
-                    logger.info("缓存模式 - 校对文本过长，跳过校对文本发送，只发送总结文本")
-                    send_long_text_wechat(
-                        title=video_title,
-                        url=url,
-                        text=cache_data['llm_summary'],
-                        is_summary=True,
-                        has_speaker_recognition=has_speaker_recognition,
-                        webhook=wechat_webhook,
-                        use_rate_limit=True
-                    )
-                    
-                    # 确保总结文本完全加入队列后再发送完成通知
-                    import time
-                    logger.info(f"[缓存模式] 总结文本发送完成（校对文本过长），延迟100ms后发送完成通知")
-                    time.sleep(0.1)  # 100ms延迟，确保总结文本已加入队列
+
+                logger.info("缓存模式 - 发送总结文本")
+                # 只发送总结文本（确保使用限流）
+                send_long_text_wechat(
+                    title=video_title,
+                    url=url,
+                    text=cache_data['llm_summary'],
+                    is_summary=True,
+                    has_speaker_recognition=has_speaker_recognition,
+                    webhook=wechat_webhook,
+                    use_rate_limit=True
+                )
+
+                # 确保总结文本完全加入队列后再发送完成通知
+                import time
+                logger.info(f"[缓存模式] 总结文本发送完成，延迟100ms后发送完成通知")
+                time.sleep(0.1)  # 100ms延迟，确保总结文本已加入队列
                 
                 # 发送任务完成通知，包含查看链接  
                 task_info = cache_manager.get_task_by_id(task_id)
@@ -418,7 +372,9 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                     view_url = f"{base_url}/view/{task_info['view_token']}"
                     
                     # 使用限流系统发送完成通知，确保顺序正确
-                    completion_message = f"✅ 【任务完成】{video_title}\n\n转录和AI处理已全部完成！\n\n🔗 查看完整结果：{view_url}"
+                    # 清洗URL用于显示
+                    clean_url = WechatNotifier()._clean_url(url)
+                    completion_message = f"{video_title}\n{clean_url}\n\n🔗 总结和校对：{view_url}\n\n✅ 【任务完成】"
                     logger.info(f"[缓存模式] 准备发送任务完成通知: {video_title}")
                     task_notifier = WechatNotifier(wechat_webhook, use_rate_limit=True)
                     task_notifier.send_text(completion_message)
@@ -881,65 +837,21 @@ def process_llm_queue():
                         )
                         logger.info(f"LLM结果已保存到缓存: {platform}/{media_id}")
                     
-                    # 根据校对文本长度判断是否发送校对文本
-                    calibrated_text = result_dict.get('校对文本', '')
-                    calibrated_text_length = len(calibrated_text)
-                    
-                    # 从配置中获取校对文本最大长度阈值
-                    wechat_config = config.get('wechat', {})
-                    calibrated_text_max_length = wechat_config.get('calibrated_text_max_length', 5000)
-                    
-                    should_send_calibrated_text = calibrated_text_length <= calibrated_text_max_length
-                    
-                    logger.info(f"校对文本长度: {calibrated_text_length}, 阈值: {calibrated_text_max_length}, 是否发送校对文本: {should_send_calibrated_text}")
-                    
-                    if should_send_calibrated_text:
-                        # 校对文本不超过阈值：发送校对文本和总结文本
-                        logger.info("校对文本长度合适，发送校对文本和总结文本")
-                        # 校对文本分段发送（确保使用限流）
-                        send_long_text_wechat(
-                            title=video_title,
-                            url=url,
-                            text=result_dict['校对文本'],
-                            is_summary=False,
-                            has_speaker_recognition=use_speaker_recognition,
-                            webhook=wechat_webhook,
-                            use_rate_limit=True
-                        )
-                        
-                        # 确保校对文本完全加入队列后再发送总结文本
-                        import time
-                        time.sleep(0.1)  # 100ms延迟，确保所有校对文本分段都已加入队列
-                        
-                        # 总结文本直接发送（确保使用限流）
-                        send_long_text_wechat(
-                            title=video_title,
-                            url=url,
-                            text=result_dict['内容总结'],
-                            is_summary=True,
-                            has_speaker_recognition=use_speaker_recognition,
-                            webhook=wechat_webhook,
-                            use_rate_limit=True
-                        )
-                        
-                        # 确保总结文本完全加入队列后再发送完成通知
-                        time.sleep(0.1)  # 100ms延迟，确保总结文本已加入队列
-                    else:
-                        # 校对文本超过阈值：只发送总结文本（校对文本太长了）
-                        logger.info("校对文本过长，跳过校对文本发送，只发送总结文本")
-                        send_long_text_wechat(
-                            title=video_title,
-                            url=url,
-                            text=result_dict['内容总结'],
-                            is_summary=True,
-                            has_speaker_recognition=use_speaker_recognition,
-                            webhook=wechat_webhook,
-                            use_rate_limit=True
-                        )
-                        
-                        # 确保总结文本完全加入队列后再发送完成通知
-                        import time
-                        time.sleep(0.1)  # 100ms延迟，确保总结文本已加入队列
+                    # 只发送总结文本（不再发送校对文本）
+                    logger.info("发送总结文本")
+                    send_long_text_wechat(
+                        title=video_title,
+                        url=url,
+                        text=result_dict['内容总结'],
+                        is_summary=True,
+                        has_speaker_recognition=use_speaker_recognition,
+                        webhook=wechat_webhook,
+                        use_rate_limit=True
+                    )
+
+                    # 确保总结文本完全加入队列后再发送完成通知
+                    import time
+                    time.sleep(0.1)  # 100ms延迟，确保总结文本已加入队列
                     
                     # 发送任务完成通知，包含查看链接
                     task_info = cache_manager.get_task_by_id(task_id)
@@ -950,7 +862,9 @@ def process_llm_queue():
                         view_url = f"{base_url}/view/{task_info['view_token']}"
                         
                         # 使用限流系统发送完成通知，确保顺序正确
-                        completion_message = f"✅ 【任务完成】{video_title}\n\n转录和AI处理已全部完成！\n\n🔗 查看完整结果：{view_url}"
+                        # 清洗URL用于显示
+                        clean_url = WechatNotifier()._clean_url(url)
+                        completion_message = f"{video_title}\n{clean_url}\n\n🔗 总结和校对：{view_url}\n\n✅ 【任务完成】"
                         task_notifier = WechatNotifier(wechat_webhook, use_rate_limit=True)
                         task_notifier.send_text(completion_message)
                         logger.info(f"任务完成通知已加入限流队列: {task_id}")
@@ -1098,7 +1012,8 @@ async def transcribe_video(
                 send_view_link_wechat(
                     title=f"🎬 {title}",
                     view_token=view_token,
-                    webhook=effective_webhook
+                    webhook=effective_webhook,
+                    original_url=url
                 )
                 logger.info(f"已发送任务创建通知: {task_id}")
                 

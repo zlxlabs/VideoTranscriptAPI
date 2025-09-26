@@ -282,22 +282,29 @@ def send_long_text_wechat(title, url, text, is_summary=False, webhook=None, has_
     logger.debug(f"长文本发送完成，共{part_count}段，总长度: {text_len}")
 
 
-def send_view_link_wechat(title, view_token, webhook=None):
+def send_view_link_wechat(title, view_token, webhook=None, original_url=None):
     """
     发送查看链接到企业微信
-    
+
     Args:
         title: 视频标题
         view_token: 查看token
         webhook: 自定义企业微信webhook地址
+        original_url: 原始媒体URL（可选）
     """
     from utils.markdown_renderer import get_base_url
-    
+
     try:
         base_url = get_base_url()
         view_url = f"{base_url}/view/{view_token}"
-        
-        message = f"🔗 【查看链接】{title}\n\n点击查看转录进度和结果：{view_url}"
+
+        if original_url:
+            # 清洗原始URL
+            clean_url = WechatNotifier()._clean_url(original_url)
+            message = f"{title}\n\n【媒体URL】{clean_url}\n\n点击查看转录进度和结果：{view_url}"
+        else:
+            # 保持原有格式作为后备
+            message = f"🔗 【查看链接】{title}\n\n点击查看转录进度和结果：{view_url}"
         
         notifier = WechatNotifier(webhook)
         success = notifier.send_text(message)
