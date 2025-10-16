@@ -30,6 +30,8 @@ data/cache/
 data/temp/
 data/*.db
 data/output
+tests/llm/output
+
 
 # 媒体文件
 *.mp3

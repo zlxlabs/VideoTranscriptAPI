@@ -102,45 +102,82 @@ class TextSegmentationProcessor:
     def segment_txt_content(self, content: str) -> List[str]:
         """
         对TXT内容进行分段
-        
+
         Args:
             content: 文本内容
-            
+
         Returns:
             分段后的文本列表
         """
         segments = []
-        
-        # 按句号、问号、感叹号分割
-        sentences = re.split(r'[。！？!?]', content)
-        
-        current_segment = ""
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-                
-            # 如果添加这个句子不会超过最大限制
-            if len(current_segment + sentence) < self.max_segment_size:
-                if current_segment:
-                    current_segment += sentence + "。"
+
+        # 检测文本格式：判断是否为 CapsWriter 格式（短句换行，无标点符号）
+        # 统计标点符号密度：每1000字符中的句号、问号、感叹号数量
+        text_length = len(content)
+        if text_length > 0:
+            punctuation_count = content.count('。') + content.count('！') + content.count('？') + content.count('!') + content.count('?')
+            punctuation_density = (punctuation_count / text_length) * 1000  # 每1000字符的标点数
+
+            # 如果标点密度小于5（即每1000字符少于5个标点），认为是 CapsWriter 格式
+            is_capswriter_format = punctuation_density < 5
+        else:
+            is_capswriter_format = False
+
+        if is_capswriter_format:
+            logger.info("检测到短句换行格式（CapsWriter），按行分段处理")
+            # CapsWriter 格式：按行分割，每行是一个短句
+            lines = [line.strip() for line in content.split('\n') if line.strip()]
+
+            current_segment = ""
+            for line in lines:
+                # 如果添加这一行不会超过最大限制
+                if len(current_segment + line) < self.max_segment_size:
+                    if current_segment:
+                        current_segment += line
+                    else:
+                        current_segment = line
                 else:
-                    current_segment = sentence + "。"
-            else:
-                # 如果当前段落已经达到合适大小，保存并开始新段落
-                if len(current_segment) >= self.segment_size:
-                    segments.append(current_segment.strip())
-                    current_segment = sentence + "。"
+                    # 如果当前段落已经达到合适大小，保存并开始新段落
+                    if len(current_segment) >= self.segment_size:
+                        segments.append(current_segment.strip())
+                        current_segment = line
+                    else:
+                        # 当前段落还不够大，但加上新行会超限，强制添加
+                        current_segment += line
+                        segments.append(current_segment.strip())
+                        current_segment = ""
+        else:
+            logger.info("检测到标准标点格式，按句子分段处理")
+            # 标准格式：按句号、问号、感叹号分割
+            sentences = re.split(r'[。！？!?]', content)
+
+            current_segment = ""
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if not sentence:
+                    continue
+
+                # 如果添加这个句子不会超过最大限制
+                if len(current_segment + sentence) < self.max_segment_size:
+                    if current_segment:
+                        current_segment += sentence + "。"
+                    else:
+                        current_segment = sentence + "。"
                 else:
-                    # 当前段落还不够大，但加上新句子会超限，强制添加
-                    current_segment += sentence + "。"
-                    segments.append(current_segment.strip())
-                    current_segment = ""
-        
+                    # 如果当前段落已经达到合适大小，保存并开始新段落
+                    if len(current_segment) >= self.segment_size:
+                        segments.append(current_segment.strip())
+                        current_segment = sentence + "。"
+                    else:
+                        # 当前段落还不够大，但加上新句子会超限，强制添加
+                        current_segment += sentence + "。"
+                        segments.append(current_segment.strip())
+                        current_segment = ""
+
         # 添加最后一段
         if current_segment.strip():
             segments.append(current_segment.strip())
-        
+
         logger.info(f"TXT文本分段完成: {len(segments)} 个段落")
         return segments
     
