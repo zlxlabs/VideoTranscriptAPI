@@ -374,10 +374,23 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                     # 使用限流系统发送完成通知，确保顺序正确
                     # 清洗URL用于显示
                     clean_url = WechatNotifier()._clean_url(url)
-                    completion_message = f"# {video_title}\n\n{clean_url}\n\n🔗 总结和校对：\n{view_url}\n\n✅ **【任务完成】**"
-                    logger.info(f"[缓存模式] 准备发送任务完成通知: {video_title}")
+
+                    # 【新增】对标题进行风控处理
+                    sanitized_title = video_title
+                    try:
+                        from ..utils.risk_control import is_enabled, sanitize_text
+                        if is_enabled():
+                            title_result = sanitize_text(video_title, text_type="title")
+                            if title_result["has_sensitive"]:
+                                logger.info(f"[风控] 完成通知标题包含 {len(title_result['sensitive_words'])} 个敏感词，已处理")
+                                sanitized_title = title_result["sanitized_text"]
+                    except Exception as e:
+                        logger.exception(f"完成通知标题风控处理失败: {e}")
+
+                    completion_message = f"# {sanitized_title}\n\n{clean_url}\n\n🔗 总结和校对：\n{view_url}\n\n✅ **【任务完成】**"
+                    logger.info(f"[缓存模式] 准备发送任务完成通知: {sanitized_title}")
                     task_notifier = WechatNotifier(wechat_webhook, use_rate_limit=True)
-                    task_notifier.send_text(completion_message)
+                    task_notifier.send_text(completion_message, skip_risk_control=True)
                     logger.info(f"[缓存模式] 任务完成通知已加入限流队列: {task_id}")
                 
                 logger.info(f"已发送缓存的 LLM 结果: {video_title}")
@@ -864,9 +877,22 @@ def process_llm_queue():
                         # 使用限流系统发送完成通知，确保顺序正确
                         # 清洗URL用于显示
                         clean_url = WechatNotifier()._clean_url(url)
-                        completion_message = f"# {video_title}\n\n{clean_url}\n\n🔗 总结和校对：\n{view_url}\n\n✅ **【任务完成】**"
+
+                        # 【新增】对标题进行风控处理
+                        sanitized_title = video_title
+                        try:
+                            from ..utils.risk_control import is_enabled, sanitize_text
+                            if is_enabled():
+                                title_result = sanitize_text(video_title, text_type="title")
+                                if title_result["has_sensitive"]:
+                                    logger.info(f"[风控] 完成通知标题包含 {len(title_result['sensitive_words'])} 个敏感词，已处理")
+                                    sanitized_title = title_result["sanitized_text"]
+                        except Exception as e:
+                            logger.exception(f"完成通知标题风控处理失败: {e}")
+
+                        completion_message = f"# {sanitized_title}\n\n{clean_url}\n\n🔗 总结和校对：\n{view_url}\n\n✅ **【任务完成】**"
                         task_notifier = WechatNotifier(wechat_webhook, use_rate_limit=True)
-                        task_notifier.send_text(completion_message)
+                        task_notifier.send_text(completion_message, skip_risk_control=True)
                         logger.info(f"任务完成通知已加入限流队列: {task_id}")
                     
                     logger.info(f"LLM任务处理完成: {task_id}, 标题: {video_title}")
@@ -888,11 +914,23 @@ async def startup_event():
     """服务启动时执行"""
     # 启动任务队列处理器
     asyncio.create_task(process_task_queue())
-    
+
     # 启动LLM队列处理器（在单独线程中运行）
     llm_thread = threading.Thread(target=process_llm_queue, daemon=True)
     llm_thread.start()
-    
+
+    # 【新增】初始化风控模块
+    risk_config = config.get("risk_control", {})
+    if risk_config.get("enabled", False):
+        logger.info("正在初始化风控模块...")
+        try:
+            from ..utils.risk_control import init_risk_control
+            init_risk_control(config)
+            logger.info("风控模块初始化完成")
+        except Exception as e:
+            logger.exception(f"风控模块初始化失败: {e}")
+            logger.warning("风控模块将被禁用")
+
     logger.info("API服务已启动，转录队列和LLM队列处理器已启动")
 
 

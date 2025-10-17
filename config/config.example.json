@@ -53,5 +53,12 @@
       "max_retries": 3,
       "retry_delay": 5,
       "connection_timeout": 30
+    },
+    "risk_control": {
+      "enabled": false,
+      "sensitive_word_urls": [
+        "https://raw.githubusercontent.com/konsheng/Sensitive-lexicon/refs/heads/main/Vocabulary/%E6%96%B0%E6%80%9D%E6%83%B3%E5%90%AF%E8%92%99.txt"
+      ],
+      "cache_file": "./data/risk_control/sensitive_words.txt"
     }
   } 

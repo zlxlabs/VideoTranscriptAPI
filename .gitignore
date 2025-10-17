@@ -30,6 +30,7 @@ data/cache/
 data/temp/
 data/*.db
 data/output
+data/risk_control/
 tests/llm/output
 
 
