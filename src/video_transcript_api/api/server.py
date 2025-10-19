@@ -16,9 +16,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any
 
 from ..utils import setup_logger, load_config, WechatNotifier, MetadataCache, CacheManager
+from ..utils.wechat import init_global_notifier, shutdown_global_notifier
 from ..utils.user_manager import get_user_manager
 from ..utils.audit_logger import get_audit_logger
-from ..utils.webhook_rate_limiter import get_rate_limiter_stats, get_webhook_status
 from ..utils.markdown_renderer import render_markdown_to_html, get_base_url
 from ..utils.dialog_renderer import render_transcript_content, render_transcript_content_smart, render_calibrated_content_smart
 from ..utils.timezone_helper import format_datetime_for_display
@@ -58,8 +58,9 @@ audit_logger = get_audit_logger()
 max_workers = config.get("concurrent", {}).get("max_workers", 3)
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
 
-# 创建企业微信通知器
-wechat_notifier = WechatNotifier()
+# 注意：不再在模块级别创建 WechatNotifier 实例
+# 全局 WeComNotifier 会在 startup_event 中初始化
+# 需要时可以直接创建 WechatNotifier()，所有实例共享同一个全局 WeComNotifier
 
 # 创建元数据缓存管理器
 metadata_cache = MetadataCache()
@@ -230,7 +231,8 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
         logger.info(f"开始处理转录任务: {task_id}, URL: {url}")
         
         # 创建本任务专用的通知器（如果提供了自定义webhook）
-        task_notifier = WechatNotifier(wechat_webhook) if wechat_webhook else wechat_notifier
+        # 注意：所有 WechatNotifier 实例共享同一个全局 WeComNotifier
+        task_notifier = WechatNotifier(wechat_webhook) if wechat_webhook else WechatNotifier()
         
         # 通知任务开始，包含转录服务器类型信息
         engine_info = "说话人识别(FunASR)" if use_speaker_recognition else "普通转录(CapsWriter)"
@@ -343,7 +345,8 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                 )
                 
                 # 直接发送缓存的 LLM 结果（仅发送总结文本）
-                from utils.wechat import send_long_text_wechat
+                # 使用包内绝对导入，避免重复加载模块导致全局实例被初始化两次
+                from ..utils.wechat import send_long_text_wechat
 
                 logger.info("缓存模式 - 发送总结文本")
                 # 只发送总结文本（确保使用限流）
@@ -353,8 +356,7 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                     text=cache_data['llm_summary'],
                     is_summary=True,
                     has_speaker_recognition=has_speaker_recognition,
-                    webhook=wechat_webhook,
-                    use_rate_limit=True
+                    webhook=wechat_webhook
                 )
 
                 # 确保总结文本完全加入队列后再发送完成通知
@@ -365,8 +367,9 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                 # 发送任务完成通知，包含查看链接  
                 task_info = cache_manager.get_task_by_id(task_id)
                 if task_info and task_info.get('view_token'):
-                    from utils.wechat import send_view_link_wechat
-                    from utils.markdown_renderer import get_base_url
+                    # 使用包内绝对导入，避免重复加载模块导致全局实例被初始化两次
+                    from ..utils.wechat import send_view_link_wechat
+                    from ..utils.markdown_renderer import get_base_url
                     
                     base_url = get_base_url()
                     view_url = f"{base_url}/view/{task_info['view_token']}"
@@ -389,7 +392,7 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
 
                     completion_message = f"# {sanitized_title}\n\n{clean_url}\n\n🔗 总结和校对：\n{view_url}\n\n✅ **【任务完成】**"
                     logger.info(f"[缓存模式] 准备发送任务完成通知: {sanitized_title}")
-                    task_notifier = WechatNotifier(wechat_webhook, use_rate_limit=True)
+                    task_notifier = WechatNotifier(wechat_webhook)
                     task_notifier.send_text(completion_message, skip_risk_control=True)
                     logger.info(f"[缓存模式] 任务完成通知已加入限流队列: {task_id}")
                 
@@ -774,16 +777,18 @@ def process_llm_queue():
                 use_speaker_recognition = llm_task.get("use_speaker_recognition", False)
                 transcription_data = llm_task.get("transcription_data")
                 wechat_webhook = llm_task.get("wechat_webhook")
-                
+
                 # 创建本任务专用的通知器（如果提供了自定义webhook）
-                task_notifier = WechatNotifier(wechat_webhook) if wechat_webhook else wechat_notifier
-                
+                # 注意：所有 WechatNotifier 实例共享同一个全局 WeComNotifier
+                task_notifier = WechatNotifier(wechat_webhook) if wechat_webhook else WechatNotifier()
+
                 logger.info(f"开始处理LLM任务: {task_id}, 标题: {video_title}")
                 
                 try:
                     # 使用增强LLM处理器进行校对和总结（支持自动分段）
-                    from utils.wechat import send_long_text_wechat
-                    from utils.llm import call_llm_api
+                    # 使用包内绝对导入，避免重复加载模块导致全局实例被初始化两次
+                    from ..utils.wechat import send_long_text_wechat
+                    from ..utils.llm import call_llm_api
                     
                     # 如果是通用下载器且没有标题，先生成标题
                     if video_title == "":
@@ -858,8 +863,7 @@ def process_llm_queue():
                         text=result_dict['内容总结'],
                         is_summary=True,
                         has_speaker_recognition=use_speaker_recognition,
-                        webhook=wechat_webhook,
-                        use_rate_limit=True
+                        webhook=wechat_webhook
                     )
 
                     # 确保总结文本完全加入队列后再发送完成通知
@@ -869,7 +873,8 @@ def process_llm_queue():
                     # 发送任务完成通知，包含查看链接
                     task_info = cache_manager.get_task_by_id(task_id)
                     if task_info and task_info.get('view_token'):
-                        from utils.markdown_renderer import get_base_url
+                        # 使用包内绝对导入，避免重复加载模块
+                        from ..utils.markdown_renderer import get_base_url
                         
                         base_url = get_base_url()
                         view_url = f"{base_url}/view/{task_info['view_token']}"
@@ -891,7 +896,7 @@ def process_llm_queue():
                             logger.exception(f"完成通知标题风控处理失败: {e}")
 
                         completion_message = f"# {sanitized_title}\n\n{clean_url}\n\n🔗 总结和校对：\n{view_url}\n\n✅ **【任务完成】**"
-                        task_notifier = WechatNotifier(wechat_webhook, use_rate_limit=True)
+                        task_notifier = WechatNotifier(wechat_webhook)
                         task_notifier.send_text(completion_message, skip_risk_control=True)
                         logger.info(f"任务完成通知已加入限流队列: {task_id}")
                     
@@ -912,7 +917,11 @@ def process_llm_queue():
 @app.on_event("startup")
 async def startup_event():
     """服务启动时执行"""
+    # 初始化全局 WeComNotifier 实例（确保所有通知共享同一实例）
+    init_global_notifier()
+
     # 启动任务队列处理器
+    logger.info("启动任务队列处理器")
     asyncio.create_task(process_task_queue())
 
     # 启动LLM队列处理器（在单独线程中运行）
@@ -932,6 +941,14 @@ async def startup_event():
             logger.warning("风控模块将被禁用")
 
     logger.info("API服务已启动，转录队列和LLM队列处理器已启动")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """服务关闭时执行"""
+    # 关闭全局 WeComNotifier 实例
+    shutdown_global_notifier()
+    logger.info("API服务已关闭")
 
 
 @app.get("/add_task_by_web", response_class=HTMLResponse)
@@ -1031,7 +1048,7 @@ async def transcribe_video(
             
             # 立即发送企微通知，包含查看链接
             try:
-                from utils.wechat import send_view_link_wechat
+                from ..utils.wechat import send_view_link_wechat
                 
                 # 尝试从URL获取简单的标题信息（不进行复杂解析）
                 title = "转录任务已创建"
@@ -1203,49 +1220,47 @@ async def get_task_status(
 @app.get("/api/webhook-stats")
 async def get_webhook_stats(user_info: dict = Depends(verify_token)):
     """
-    获取webhook限流器统计信息
-    
+    获取webhook限流器统计信息（已废弃）
+
+    注意: 此功能已迁移至 wecom-notifier 包，不再提供详细统计
+
     返回:
-        dict: 限流器统计数据
+        dict: 提示信息
     """
-    try:
-        stats = get_rate_limiter_stats()
-        return TranscribeResponse(
-            code=200,
-            message="获取统计信息成功",
-            data=stats
-        )
-    except Exception as e:
-        logger.exception(f"获取webhook统计信息异常: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"获取统计信息失败: {str(e)}")
+    return TranscribeResponse(
+        code=200,
+        message="限流器已迁移至 wecom-notifier，不再提供详细统计",
+        data={
+            "deprecated": True,
+            "message": "Rate limiter has been migrated to wecom-notifier package",
+            "suggestion": "Rate limiting is now handled automatically by wecom-notifier"
+        }
+    )
 
 
 @app.get("/api/webhook-status")
 async def get_webhook_status_info(webhook_url: str, user_info: dict = Depends(verify_token)):
     """
-    获取指定webhook的状态信息
-    
+    获取指定webhook的状态信息（已废弃）
+
+    注意: 此功能已迁移至 wecom-notifier 包，不再提供详细状态
+
     请求参数:
         webhook_url: webhook地址（URL参数）
-        
+
     返回:
-        dict: webhook状态信息
+        dict: 提示信息
     """
-    try:
-        if not webhook_url:
-            raise HTTPException(status_code=400, detail="webhook地址不能为空")
-            
-        status = get_webhook_status(webhook_url)
-        return TranscribeResponse(
-            code=200,
-            message="获取webhook状态成功",
-            data=status
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception(f"获取webhook状态异常: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"获取webhook状态失败: {str(e)}")
+    return TranscribeResponse(
+        code=200,
+        message="限流器已迁移至 wecom-notifier，不再提供详细状态",
+        data={
+            "deprecated": True,
+            "webhook_url": webhook_url[:50] + "..." if len(webhook_url) > 50 else webhook_url,
+            "message": "Webhook status is now managed by wecom-notifier package",
+            "suggestion": "All webhooks are automatically rate-limited by wecom-notifier"
+        }
+    )
 
 
 @app.get("/view/{view_token}", response_class=HTMLResponse)

@@ -219,6 +219,12 @@ pip install -r requirements.txt
 python main.py --start
 ```
 
+### 开发提示（企业微信通知）
+- 项目使用外部包 `wecom-notifier` 的限流与分段能力，要求全局仅一个 `WeComNotifier` 实例。
+- 应用已在启动时初始化全局实例。包内代码使用通知功能时，请采用包内绝对/相对导入，避免同一模块以不同名称被加载两次导致单例失效：
+  - 正确：`from video_transcript_api.utils.wechat import send_long_text_wechat` 或 `from ..utils.wechat import WechatNotifier`
+  - 避免：`from utils.wechat import ...`
+
 ### API使用示例
 
 #### 请求转录

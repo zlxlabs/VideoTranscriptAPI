@@ -2,11 +2,52 @@ import json
 import requests
 import datetime
 import re
+from wecom_notifier import WeComNotifier
 from .logger import setup_logger, load_config
-from .simple_rate_limiter import send_rate_limited_message
 
 # 创建日志记录器
 logger = setup_logger("wechat_notifier")
+
+# 全局 WeComNotifier 实例（单例模式）
+_global_wecom_notifier = None
+
+def init_global_notifier():
+    """
+    初始化全局 WeComNotifier 实例
+
+    应在应用启动时调用一次，确保所有通知共享同一个实例，
+    从而实现正确的并发控制和消息顺序保证。
+    """
+    global _global_wecom_notifier
+    if _global_wecom_notifier is None:
+        _global_wecom_notifier = WeComNotifier()
+        logger.info("全局 WeComNotifier 实例已初始化")
+    else:
+        logger.warning("全局 WeComNotifier 已存在，跳过重复初始化")
+
+def shutdown_global_notifier():
+    """
+    关闭全局 WeComNotifier 实例
+
+    应在应用关闭时调用，确保资源正确释放。
+    """
+    global _global_wecom_notifier
+    if _global_wecom_notifier is not None:
+        # WeComNotifier 会自动清理资源
+        _global_wecom_notifier = None
+        logger.info("全局 WeComNotifier 实例已关闭")
+
+def _get_global_notifier():
+    """
+    获取全局 WeComNotifier 实例
+
+    如果未初始化则自动初始化（用于兼容测试场景）
+    """
+    global _global_wecom_notifier
+    if _global_wecom_notifier is None:
+        logger.warning("全局 WeComNotifier 未初始化，自动初始化（建议在应用启动时显式初始化）")
+        init_global_notifier()
+    return _global_wecom_notifier
 
 def _get_risk_control():
     """获取风控模块（每次都重新导入以确保获取最新状态）"""
@@ -30,49 +71,112 @@ def _get_risk_control():
 class WechatNotifier:
     """
     企业微信通知类
-    支持自动限流：每个webhook地址每分钟最多20条消息，超限自动排队
+    使用 wecom-notifier 包实现消息发送、自动分段和频率控制
+
+    注意：所有实例共享同一个全局 WeComNotifier，确保正确的并发控制和消息顺序
     """
-    def __init__(self, webhook=None, use_rate_limit=True):
+    def __init__(self, webhook=None):
         """
         初始化企业微信通知器
-        
+
         参数:
             webhook: 企业微信webhook地址，如果为None则从配置文件加载
-            use_rate_limit: 是否启用限流功能，默认为True
         """
         config = load_config()
         self.webhook = webhook or config.get("wechat", {}).get("webhook")
-        self.use_rate_limit = use_rate_limit
-        
+        # 使用全局共享的 WeComNotifier 实例
+        self.notifier = _get_global_notifier()
+
         if not self.webhook:
             logger.warning("企业微信webhook未配置")
         else:
-            logger.debug(f"企业微信通知器已初始化，限流: {'启用' if use_rate_limit else '禁用'}")
-    
-    def _apply_risk_control(self, content: str) -> str:
+            logger.debug(f"企业微信通知器已初始化，使用全局 WeComNotifier 实例")
+
+    def _protect_urls(self, content: str) -> tuple:
         """
-        应用风控处理，对内容进行敏感词消敏
+        提取并保护内容中的 URL，避免被风控误处理
 
         参数:
             content: 原始内容
 
         返回:
-            消敏后的内容
+            tuple: (处理后的内容, URL映射表)
         """
-        rc = _get_risk_control()
-        if not rc or not rc.is_enabled():
+        if not content:
+            return content, {}
+
+        # 匹配 http/https URL，排除中文字符
+        url_pattern = r'https?://[^\s\u4e00-\u9fff]+'
+        urls = re.findall(url_pattern, content)
+
+        if not urls:
+            return content, {}
+
+        # 用占位符替换 URL
+        url_map = {}
+        protected = content
+        for i, url in enumerate(urls):
+            placeholder = f"__URL_PLACEHOLDER_{i}__"
+            url_map[placeholder] = url
+            protected = protected.replace(url, placeholder, 1)
+
+        logger.debug(f"[URL保护] 提取了 {len(urls)} 个URL")
+        return protected, url_map
+
+    def _restore_urls(self, content: str, url_map: dict) -> str:
+        """
+        恢复被保护的 URL
+
+        参数:
+            content: 处理后的内容
+            url_map: URL映射表
+
+        返回:
+            恢复URL后的内容
+        """
+        if not url_map:
             return content
 
-        try:
-            result = rc.sanitize_text(content)
-            if result["has_sensitive"]:
-                logger.info(f"[风控] 通用消息包含 {len(result['sensitive_words'])} 个敏感词，已移除")
-                logger.debug(f"[风控] 敏感词: {result['sensitive_words'][:5]}")
-            return result["sanitized_text"]
-        except Exception as e:
-            logger.exception(f"[风控] 处理失败: {e}")
-            # 风控失败时返回原内容，不影响正常发送
+        restored = content
+        for placeholder, url in url_map.items():
+            restored = restored.replace(placeholder, url)
+
+        return restored
+
+    def _apply_risk_control_safe(self, content: str, text_type: str = "general") -> str:
+        """
+        安全的风控处理，保护 URL 不被误处理
+
+        参数:
+            content: 原始内容
+            text_type: 文本类型 (general/title/author/summary)
+
+        返回:
+            消敏后的内容
+        """
+        if not content or not content.strip():
             return content
+
+        # 1. 保护 URL
+        protected_content, url_map = self._protect_urls(content)
+
+        # 2. 应用风控处理
+        rc = _get_risk_control()
+        if rc and rc.is_enabled():
+            try:
+                result = rc.sanitize_text(protected_content, text_type=text_type)
+                if result["has_sensitive"]:
+                    logger.info(f"[风控] {text_type} 包含 {len(result['sensitive_words'])} 个敏感词，已处理")
+                    logger.debug(f"[风控] 敏感词: {result['sensitive_words'][:5]}")
+                sanitized = result["sanitized_text"]
+            except Exception as e:
+                logger.exception(f"[风控] 处理失败: {e}")
+                sanitized = protected_content
+        else:
+            sanitized = protected_content
+
+        # 3. 恢复 URL
+        return self._restore_urls(sanitized, url_map)
 
     def send_text(self, content, skip_risk_control=False):
         """
@@ -83,20 +187,23 @@ class WechatNotifier:
             skip_risk_control: 是否跳过风控处理（当内容已被处理时使用）
 
         返回:
-            bool: 发送是否成功（启用限流时返回是否成功加入队列）
+            bool: 发送是否成功
         """
         return self.send_markdown_v2(content, skip_risk_control=skip_risk_control)
 
     def send_markdown_v2(self, content, skip_risk_control=False):
         """
-        发送markdown_v2消息
+        发送markdown_v2消息，使用 wecom-notifier 自动处理频控和分段
+
+        采用完全异步模式：消息提交后立即返回，不等待发送结果。
+        wecom-notifier 会在后台自动处理限流、重试和分段发送。
 
         参数:
             content: 要发送的markdown内容
             skip_risk_control: 是否跳过风控处理（当内容已被处理时使用）
 
         返回:
-            bool: 发送是否成功（启用限流时返回是否成功加入队列）
+            bool: 是否成功提交发送（True表示已提交，不代表已送达）
         """
         if not self.webhook:
             logger.warning("企业微信webhook未配置，无法发送通知")
@@ -108,70 +215,30 @@ class WechatNotifier:
 
         # 应用风控处理（除非已被处理）
         if not skip_risk_control:
-            sanitized_content = self._apply_risk_control(content)
+            sanitized_content = self._apply_risk_control_safe(content, text_type="general")
         else:
             sanitized_content = content
 
-        # 根据配置选择发送方式
-        if self.use_rate_limit:
-            # 使用限流发送
-            success = send_rate_limited_message(self.webhook, sanitized_content, msgtype="markdown_v2")
-            if success:
-                logger.debug(f"markdown_v2消息已加入限流队列: {sanitized_content[:30]}...")
-            else:
-                logger.error(f"markdown_v2消息加入限流队列失败: {sanitized_content[:30]}...")
-            return success
-        else:
-            # 直接发送（原有逻辑）
-            return self._send_immediate_markdown_v2(sanitized_content)
-    
-    def _send_immediate(self, content):
-        """
-        立即发送文本消息（不经过限流，兼容方法）
-
-        参数:
-            content: 要发送的文本内容
-
-        返回:
-            bool: 发送是否成功
-        """
-        return self._send_immediate_markdown_v2(content)
-
-    def _send_immediate_markdown_v2(self, content):
-        """
-        立即发送markdown_v2消息（不经过限流）
-
-        参数:
-            content: 要发送的markdown内容
-
-        返回:
-            bool: 发送是否成功
-        """
+        # 使用 wecom-notifier 发送（完全异步模式）
         try:
-            data = {
-                "msgtype": "markdown_v2",
-                "markdown_v2": {
-                    "content": content
-                }
-            }
-
-            response = requests.post(
-                self.webhook,
-                data=json.dumps(data, ensure_ascii=False).encode('utf-8'),
-                headers={"Content-Type": "application/json; charset=utf-8"},
-                timeout=10
+            result = self.notifier.send_markdown(
+                webhook_url=self.webhook,
+                content=sanitized_content,
+                async_send=True
             )
 
-            if response.status_code == 200 and response.json().get("errcode") == 0:
-                logger.debug(f"企业微信markdown_v2通知发送成功: {content[:50]}...")
-                return True
-            else:
-                logger.error(f"企业微信markdown_v2通知发送失败: {response.text}")
-                return False
-        except Exception as e:
-            logger.exception(f"企业微信markdown_v2通知发送异常: {str(e)}")
-            return False
+            # 完全异步：不等待结果，让消息在后台自动完成
+            # wecom-notifier 会自动处理：
+            # - 频率限制（自动等待65秒）
+            # - 网络错误（自动重试）
+            # - 文本分段（自动分段发送）
+            logger.debug(f"markdown_v2消息已提交发送（异步模式）: {sanitized_content[:50]}...")
+            return True  # 立即返回成功，不阻塞工作线程
 
+        except Exception as e:
+            logger.exception(f"提交markdown_v2消息异常: {e}")
+            return False
+    
     def _clean_url(self, url):
         """
         清洗URL，移除问号后的追踪参数
@@ -290,26 +357,11 @@ class WechatNotifier:
         # 根据状态选择对应的emoji
         status_emoji = self._get_status_emoji(status, error)
 
-        # 【新增】对标题和作者进行风控处理
-        rc = _get_risk_control()
-        if rc and rc.is_enabled():
-            try:
-                if title:
-                    title_result = rc.sanitize_text(title, text_type="title")
-                    if title_result["has_sensitive"]:
-                        logger.info(f"[风控] 任务状态-标题包含 {len(title_result['sensitive_words'])} 个敏感词，已截断")
-                        logger.debug(f"[风控] 敏感词: {title_result['sensitive_words'][:3]}")
-                        title = title_result["sanitized_text"]
-
-                if author:
-                    author_result = rc.sanitize_text(author, text_type="author")
-                    if author_result["has_sensitive"]:
-                        logger.info(f"[风控] 任务状态-作者包含 {len(author_result['sensitive_words'])} 个敏感词，已截断")
-                        logger.debug(f"[风控] 敏感词: {author_result['sensitive_words'][:3]}")
-                        author = author_result["sanitized_text"]
-            except Exception as e:
-                logger.exception(f"Risk control in notify_task_status failed: {e}")
-                # 风控失败时继续使用原内容
+        # 对标题和作者进行风控处理（带 URL 保护）
+        if title:
+            title = self._apply_risk_control_safe(title, text_type="title")
+        if author:
+            author = self._apply_risk_control_safe(author, text_type="author")
 
         # 构建通知内容（markdown_v2格式）
         content = f"## {timestamp}\n\n{status_emoji} **视频转录任务状态更新**\n\n{clean_url}\n\n**状态：** {status}"
@@ -326,11 +378,11 @@ class WechatNotifier:
 
         # 添加转录文本预览（如果有）
         if transcript and status == "转录完成":
-            # 最多显示前400个字符
+            # 最多显示前100个字符
             preview = transcript[:100] + ("..." if len(transcript) > 100 else "")
             content += f"\n\n**转录预览：**\n```\n{preview}\n```"
 
-        return self.send_text(content)
+        return self.send_text(content, skip_risk_control=True)
 
 def wechat_notify(message, webhook=None, config=None):
     """
@@ -352,7 +404,7 @@ def wechat_notify(message, webhook=None, config=None):
 
 def send_long_text_wechat(title, url, text, is_summary=False, webhook=None, has_speaker_recognition=False, use_rate_limit=True):
     """
-    分段发送长文本到企业微信，自动按字节分割
+    发送长文本到企业微信，使用 wecom-notifier 自动处理分段
 
     参数:
         title: 视频标题
@@ -361,127 +413,45 @@ def send_long_text_wechat(title, url, text, is_summary=False, webhook=None, has_
         is_summary: 是否为总结文本
         webhook: 自定义webhook地址
         has_speaker_recognition: 是否包含说话人识别
-        use_rate_limit: 是否启用限流，默认为True
+        use_rate_limit: 是否启用限流（已废弃，保留仅为兼容性）
     """
     if not text or not text.strip():
         logger.warning("文本内容为空，跳过发送")
         return
 
-    # 【调试】记录函数入口参数
-    logger.info(f"[DEBUG] send_long_text_wechat called: is_summary={is_summary}, text_len={len(text)}, title='{title[:50] if title else None}...'")
+    notifier = WechatNotifier(webhook)
 
-    # 【新增】在分段前对标题和文本内容进行风控处理
-    rc = _get_risk_control()
-    rc_exists = rc is not None
+    # 1. URL 清洗
+    clean_url = notifier._clean_url(url)
 
-    # 【调试】检查风控模块状态
-    if rc_exists:
-        logger.info(f"[DEBUG] Risk control module loaded: {rc}")
-        logger.info(f"[DEBUG] Checking rc._text_sanitizer: {getattr(rc, '_text_sanitizer', 'NOT FOUND')}")
-        logger.info(f"[DEBUG] Checking rc._words_manager: {getattr(rc, '_words_manager', 'NOT FOUND')}")
+    # 2. 风控处理（带 URL 保护）
+    safe_title = notifier._apply_risk_control_safe(title, text_type="title") if title else ""
+    text_type = "summary" if is_summary else "general"
+    safe_text = notifier._apply_risk_control_safe(text, text_type=text_type)
 
-    rc_enabled = rc.is_enabled() if rc else False
-    logger.info(f"[DEBUG] Risk control status: exists={rc_exists}, enabled={rc_enabled}")
-
-    if rc and rc.is_enabled():
-        try:
-            # 对标题进行消敏（移除敏感词后取前6字符）
-            if title:
-                logger.debug(f"[DEBUG] Processing title with risk control...")
-                title_result = rc.sanitize_text(title, text_type="title")
-                logger.debug(f"[DEBUG] Title risk control result: has_sensitive={title_result['has_sensitive']}, words={title_result['sensitive_words']}")
-                if title_result["has_sensitive"]:
-                    logger.info(f"[风控] 标题包含 {len(title_result['sensitive_words'])} 个敏感词: {title_result['sensitive_words'][:3]}{'...' if len(title_result['sensitive_words']) > 3 else ''}")
-                    logger.info(f"[风控] 标题处理: '{title[:20]}...' -> '{title_result['sanitized_text']}'")
-                    title = title_result["sanitized_text"]
-
-            # 对文本内容进行消敏
-            # 总结文本：如有敏感词则替换为"内容风险，请通过url查看"
-            # 其他文本：移除所有敏感词
-            text_type = "summary" if is_summary else "general"
-            logger.info(f"[DEBUG] Processing text: text_type='{text_type}', text_len={len(text)}, preview='{text[:100].replace(chr(10), ' ')}...'")
-
-            text_result = rc.sanitize_text(text, text_type=text_type)
-
-            logger.info(f"[DEBUG] Risk control result: has_sensitive={text_result['has_sensitive']}, sensitive_count={len(text_result['sensitive_words'])}")
-            if text_result['sensitive_words']:
-                logger.info(f"[DEBUG] Detected sensitive words: {text_result['sensitive_words'][:10]}")
-            logger.info(f"[DEBUG] Sanitized text preview: '{text_result['sanitized_text'][:100].replace(chr(10), ' ')}...'")
-
-            if text_result["has_sensitive"]:
-                action = "替换为风控提示" if text_type == "summary" else "移除敏感词"
-                logger.info(f"[风控] {'总结' if is_summary else '校对'}文本包含 {len(text_result['sensitive_words'])} 个敏感词，已{action}")
-                logger.info(f"[风控] 敏感词列表: {text_result['sensitive_words'][:5]}{'...' if len(text_result['sensitive_words']) > 5 else ''}")
-                logger.info(f"[风控] 处理前: '{text[:80].replace(chr(10), ' ')}...'")
-                logger.info(f"[风控] 处理后: '{text_result['sanitized_text'][:80].replace(chr(10), ' ')}...'")
-                text = text_result["sanitized_text"]
-            else:
-                logger.info(f"[DEBUG] No sensitive words found in text (text_type={text_type})")
-        except Exception as e:
-            logger.exception(f"Risk control in send_long_text_wechat failed: {e}")
-            # 风控失败时继续使用原内容
-    else:
-        logger.debug(f"[DEBUG] Risk control skipped (rc={rc is not None}, enabled={rc.is_enabled() if rc else False})")
-
-    max_bytes = 4000
-    clean_url = WechatNotifier()._clean_url(url)
+    # 3. 构建消息（简化版，不需要手动分段）
     content_type = '**总结文本**' if is_summary else '**校对文本**'
     speaker_info = '（含说话人识别）' if has_speaker_recognition else ''
-    prefix = f"## {title or ''}\n\n{clean_url}\n\n{content_type}{speaker_info}\n\n"
-    prefix_bytes = len(prefix.encode('utf-8'))
-    max_content_bytes = max_bytes - prefix_bytes
 
-    if max_content_bytes <= 0:
-        logger.error("前缀信息过长，无法发送内容")
-        return
+    message = f"""## {safe_title}
 
-    notifier = WechatNotifier(webhook, use_rate_limit=use_rate_limit)
-    
-    start = 0
-    text_len = len(text)
-    part_count = 0
-    
-    while start < text_len:
-        end = start
-        curr_bytes = 0
-        
-        # 按字符递增，保证utf-8分割安全
-        while end < text_len:
-            char_bytes = len(text[end].encode('utf-8'))
-            if curr_bytes + char_bytes > max_content_bytes:
-                break
-            curr_bytes += char_bytes
-            end += 1
-        
-        # 构造分段内容
-        part_count += 1
-        part_text = text[start:end]
-        
-        # 如果是多段，添加段落标识
-        if text_len > max_content_bytes:
-            content = f"{prefix}**[第{part_count}段]**\n{part_text}"
-        else:
-            content = prefix + part_text
-        
-        # 发送内容（跳过风控，因为文本已在上面被处理过）
-        content_preview = content[:100].replace('\n', ' ')  # 内容预览
-        logger.debug(f"[分段发送] 发送第{part_count}段, 长度: {len(part_text)}, 预览: {content_preview}...")
+{clean_url}
 
-        success = notifier.send_text(content, skip_risk_control=True)
-        if not success:
-            logger.error(f"发送第{part_count}段失败")
-        else:
-            logger.debug(f"发送第{part_count}段成功，长度: {len(part_text)}")
-        
-        # 添加短暂延迟，确保每个分段消息都能按顺序加入队列
-        if use_rate_limit:
-            import time
-            logger.debug(f"[分段延迟] 第{part_count}段发送后延迟10ms")
-            time.sleep(0.01)  # 每个分段后都延迟10ms，确保消息顺序
-        
-        start = end
-    
-    logger.debug(f"长文本发送完成，共{part_count}段，总长度: {text_len}")
+{content_type}{speaker_info}
+
+{safe_text}
+"""
+
+    # 4. 发送（wecom-notifier 自动处理分段和频控）
+    logger.info(f"发送{'总结' if is_summary else '校对'}文本，长度: {len(safe_text)} 字符")
+    success = notifier.send_markdown_v2(message, skip_risk_control=True)
+
+    if success:
+        logger.info(f"{'总结' if is_summary else '校对'}文本发送成功")
+    else:
+        logger.error(f"{'总结' if is_summary else '校对'}文本发送失败")
+
+    return success
 
 
 def send_view_link_wechat(title, view_token, webhook=None, original_url=None):
@@ -494,43 +464,36 @@ def send_view_link_wechat(title, view_token, webhook=None, original_url=None):
         webhook: 自定义企业微信webhook地址
         original_url: 原始媒体URL（可选）
     """
-    from utils.markdown_renderer import get_base_url
+    from .markdown_renderer import get_base_url
 
     try:
-        # 【新增】对标题进行风控处理（移除敏感词后取前6字符）
-        rc = _get_risk_control()
-        if rc and rc.is_enabled() and title:
-            try:
-                title_result = rc.sanitize_text(title, text_type="title")
-                if title_result["has_sensitive"]:
-                    logger.info(f"[风控] 查看链接-标题包含 {len(title_result['sensitive_words'])} 个敏感词，已截断")
-                    logger.debug(f"[风控] 敏感词: {title_result['sensitive_words'][:3]}")
-                    title = title_result["sanitized_text"]
-            except Exception as e:
-                logger.exception(f"Risk control in send_view_link_wechat failed: {e}")
-                # 风控失败时继续使用原标题
+        notifier = WechatNotifier(webhook)
+
+        # 对标题进行风控处理（带 URL 保护）
+        if title:
+            title = notifier._apply_risk_control_safe(title, text_type="title")
 
         base_url = get_base_url()
         view_url = f"{base_url}/view/{view_token}"
 
         if original_url:
             # 清洗原始URL
-            clean_url = WechatNotifier()._clean_url(original_url)
+            clean_url = notifier._clean_url(original_url)
             message = f"# {title}\n\n{clean_url}\n\n🔗 点击查看转录进度和结果：\n{view_url}"
         else:
             # 保持原有格式作为后备
             message = f"# 🔗 【查看链接】{title}\n\n🔗 点击查看转录进度和结果：\n{view_url}"
 
-        notifier = WechatNotifier(webhook)
-        success = notifier.send_text(message)
-        
+        # 跳过风控（标题已经处理过，URL 不需要风控）
+        success = notifier.send_text(message, skip_risk_control=True)
+
         if success:
             logger.debug(f"查看链接发送成功: {title}")
         else:
             logger.error(f"查看链接发送失败: {title}")
-            
+
         return success
-        
+
     except Exception as e:
         logger.exception(f"发送查看链接异常: {e}")
         return False 

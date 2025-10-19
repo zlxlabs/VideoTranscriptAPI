@@ -183,7 +183,8 @@ class GenericDownloader(BaseDownloader):
         
         # 尝试导入企微通知器
         try:
-            from utils.wechat import WechatNotifier
+            # 使用包内绝对导入，避免重复加载模块导致全局实例被初始化两次
+            from ..utils.wechat import WechatNotifier
             wechat_notifier = WechatNotifier()
         except:
             wechat_notifier = None

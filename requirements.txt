@@ -26,3 +26,4 @@ yt-dlp
 markdown>=3.4.0
 pymdown-extensions>=10.0.0
 jinja2>=3.0.0
+wecom-notifier
