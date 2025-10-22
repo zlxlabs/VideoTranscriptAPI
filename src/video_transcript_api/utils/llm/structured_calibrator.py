@@ -765,17 +765,16 @@ class StructuredCalibrator:
         """保存校对prompt到文件进行分析"""
         import os
         from datetime import datetime
-        
-        # 创建调试目录
-        debug_dir = "debug"
-        if not os.path.exists(debug_dir):
-            os.makedirs(debug_dir)
-        
+        from video_transcript_api.utils import get_llm_debug_dir
+
+        # 从配置获取调试目录
+        debug_dir = get_llm_debug_dir()
+
         # 添加时间戳和大小信息
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:17]  # 包含微秒避免重名
         filename = f"{timestamp}_calibration_prompt_chunk{chunk_size}.txt"
         file_path = os.path.join(debug_dir, filename)
-        
+
         try:
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(prompt)

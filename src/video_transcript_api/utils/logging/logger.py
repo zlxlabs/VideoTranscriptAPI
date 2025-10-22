@@ -6,19 +6,29 @@ from loguru import logger
 
 # 全局变量，标记logger是否已经配置
 _logger_configured = False
+# 全局配置缓存
+_config_cache = None
 
 # 加载配置文件
 def load_config():
     """
     加载配置文件
     """
+    global _config_cache
+
+    # 如果已经加载过配置，直接返回缓存
+    if _config_cache is not None:
+        return _config_cache
+
     # 获取项目根目录下的配置文件路径
     current_file = Path(__file__).resolve()
     project_root = current_file.parents[4]
     config_path = project_root / "config" / "config.json"
 
     with config_path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+        _config_cache = json.load(f)
+
+    return _config_cache
 
 # 创建日志目录
 def ensure_dir(directory):
