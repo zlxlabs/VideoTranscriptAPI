@@ -305,7 +305,7 @@ class StructuredCalibrator:
         prompt = self._generate_calibration_prompt(input_data, video_metadata)
         
         # 保存prompt到文件进行分析
-        self._save_calibration_prompt_to_file(prompt, len(chunk))
+        # self._save_calibration_prompt_to_file(prompt, len(chunk))
         
         # 调用LLM
         response = call_llm_api(
