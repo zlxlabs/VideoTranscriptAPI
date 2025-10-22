@@ -200,7 +200,7 @@
                 </div>
                 <div class="toc-header">
                     <div class="toc-title">📑 目录</div>
-                    <button class="toc-pin-btn" id="toc-pin-btn" title="固定目录">📌</button>
+                    <button class="toc-pin-btn" id="toc-pin-btn" title="固定目录（点击保持展开）">📌</button>
                 </div>
                 <div class="toc-content">
                     <ul class="toc-list">
@@ -348,16 +348,29 @@
 
         isPinned = !isPinned;
 
+        // 添加点击动画
         if (isPinned) {
+            // 固定动画
+            pinBtn.classList.add('animating-pin');
+            setTimeout(() => {
+                pinBtn.classList.remove('animating-pin');
+            }, 400);
+
             container.classList.add('pinned');
             container.classList.remove('collapsed');
             pinBtn.classList.add('pinned');
-            pinBtn.title = '取消固定';
+            pinBtn.title = '取消固定目录（已固定）';
         } else {
+            // 取消固定动画
+            pinBtn.classList.add('animating-unpin');
+            setTimeout(() => {
+                pinBtn.classList.remove('animating-unpin');
+            }, 400);
+
             container.classList.remove('pinned');
             container.classList.add('collapsed');
             pinBtn.classList.remove('pinned');
-            pinBtn.title = '固定目录';
+            pinBtn.title = '固定目录（点击保持展开）';
         }
 
         savePinState(isPinned);
@@ -537,6 +550,13 @@
                 container.classList.add('pinned');
                 container.classList.remove('collapsed');
                 pinBtn.classList.add('pinned');
+                pinBtn.title = '取消固定目录（已固定）';
+            }
+        } else {
+            // 确保初始状态的 tooltip 正确
+            const pinBtn = document.getElementById('toc-pin-btn');
+            if (pinBtn) {
+                pinBtn.title = '固定目录（点击保持展开）';
             }
         }
 

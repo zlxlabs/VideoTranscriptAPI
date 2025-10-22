@@ -142,21 +142,59 @@
     border: none;
     cursor: pointer;
     font-size: 1.1rem;
-    padding: 4px;
-    border-radius: 4px;
-    transition: background 0.2s ease;
+    padding: 6px;
+    border-radius: 6px;
+    transition: all 0.3s ease;
     color: var(--toc-text-secondary);
     display: flex;
     align-items: center;
     justify-content: center;
+    position: relative;
+    min-width: 32px;
+    min-height: 32px;
 }
 
 .toc-pin-btn:hover {
     background: var(--toc-hover);
+    transform: scale(1.05);
 }
 
+.toc-pin-btn:active {
+    transform: scale(0.95);
+}
+
+/* 已固定状态 */
 .toc-pin-btn.pinned {
-    color: var(--toc-active);
+    background: linear-gradient(135deg, var(--toc-indicator-start) 0%, var(--toc-indicator-end) 100%);
+    color: white;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    transform: rotate(45deg);
+}
+
+.toc-pin-btn.pinned:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    transform: rotate(45deg) scale(1.05);
+}
+
+/* Pin 按钮动画 */
+@keyframes pinRotate {
+    0% { transform: rotate(0deg); }
+    50% { transform: rotate(15deg) scale(1.1); }
+    100% { transform: rotate(45deg); }
+}
+
+@keyframes unpinRotate {
+    0% { transform: rotate(45deg); }
+    50% { transform: rotate(30deg) scale(1.1); }
+    100% { transform: rotate(0deg); }
+}
+
+.toc-pin-btn.animating-pin {
+    animation: pinRotate 0.4s ease-out forwards;
+}
+
+.toc-pin-btn.animating-unpin {
+    animation: unpinRotate 0.4s ease-out forwards;
 }
 
 /* TOC 内容区域 */
