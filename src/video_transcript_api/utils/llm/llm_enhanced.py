@@ -323,178 +323,261 @@ class EnhancedLLMProcessor:
         
         return calibrate_prompt
     
-    def _generate_original_summary_prompt(self, transcript: str, video_title: str, 
-                                        author: str, description: str, 
-                                        use_speaker_recognition: bool, 
+    def _generate_original_summary_prompt(self, transcript: str, video_title: str,
+                                        author: str, description: str,
+                                        use_speaker_recognition: bool,
                                         transcription_data: Optional[Dict[str, Any]]) -> str:
-        """生成原始总结提示词"""
-        # 检测说话人数量，决定总结策略
-        speaker_count = 1  # 默认单说话人
-        if use_speaker_recognition and transcription_data:
-            # 从转录数据中获取说话人数量
+        """
+        生成总结提示词（统一模板）
+
+        策略：单说话人和多说话人使用统一的分析框架，仅在部分描述上有细微差异
+
+        Args:
+            transcript: 转录文本
+            video_title: 视频标题
+            author: 作者/频道
+            description: 视频描述
+            use_speaker_recognition: ASR服务器标志
+                - False: CapsWriter 转录结果（不支持说话人识别）
+                - True: FunASR 转录结果（支持说话人识别）
+            transcription_data: 转录数据结构（FunASR 提供）
+
+        Returns:
+            str: 完整的总结提示词
+        """
+        # 1. 检测说话人数量（核心逻辑）
+        speaker_count = self._detect_speaker_count(use_speaker_recognition, transcription_data, transcript)
+
+        logger.info(
+            f"转录引擎: {'FunASR' if use_speaker_recognition else 'CapsWriter'}, "
+            f"检测到说话人数量: {speaker_count}, "
+            f"选择总结策略: {'多说话人' if speaker_count > 1 else '单说话人'}"
+        )
+
+        # 2. 构建差异化内容（字符串片段）
+        intro = self._build_intro(speaker_count)
+        overview_desc = self._build_overview_desc(speaker_count)
+        speaker_topic_instruction = self._build_speaker_topic_instruction(speaker_count)
+        insight_focus = self._build_insight_focus(speaker_count)
+
+        # 3. 构建共用内容（完整段落）
+        context_info = self._build_context_info(video_title, author, description)
+        logic_analysis = self._build_logic_analysis_section()
+        style_requirements = self._build_style_requirements()
+
+        # 4. 组装完整 Prompt
+        summary_prompt = f"""{intro}请按以下结构进行详细总结：
+{context_info}
+## 1. 概述（Overview）
+用一段话（100-150字）{overview_desc}。
+
+## 2. 主题详述
+识别并详细展开内容中的各个主题，要求：
+- 每个主题作为一个小节，详细展开内容（每个小节不少于500字）
+- 让读者不需要二次查看原内容就能了解详情
+- 若出现方法/框架/流程，将其重写为条理清晰的步骤或段落
+- 若有关键数字、定义、原话，请如实保留核心词，并在括号内补充注释
+- 使用分层的bullet points组织内容，避免单个段落过长
+{speaker_topic_instruction}
+## 3. 核心观点与洞察
+- 提炼内容中的核心观点和重要结论（每点150字以上）
+- {insight_focus}
+- 总结主要论点和支撑论据
+
+{logic_analysis}
+
+## 5. 框架与心智模型（Framework & Mindset）
+从内容中抽象出的framework & mindset，要求：
+- 将其重写为条理清晰的步骤或段落
+- 每个framework & mindset不少于500字
+- 说明其应用场景和核心价值
+- 如果内容中没有明显的框架或模型，可省略此部分
+
+{style_requirements}
+
+转录文本：
+{transcript}
+"""
+
+        return summary_prompt
+
+    # ==================== 说话人检测方法 ====================
+
+    def _detect_speaker_count(
+        self,
+        use_speaker_recognition: bool,
+        transcription_data: Optional[Dict],
+        transcript: str
+    ) -> int:
+        """
+        检测说话人数量
+
+        参数说明：
+            use_speaker_recognition: ASR服务器标志位
+                - False: CapsWriter 转录结果（不支持说话人识别）
+                - True:  FunASR 转录结果（支持说话人识别）
+            transcription_data: 转录数据结构（FunASR 提供）
+            transcript: 转录文本内容
+
+        检测逻辑：
+            - CapsWriter (use_speaker_recognition=False)
+              → 固定返回 1（不支持说话人识别）
+
+            - FunASR (use_speaker_recognition=True)
+              → 从数据中提取实际的说话人数量
+                - 优先从 transcription_data.speakers 获取
+                - 降级：从文本中检测 Speaker[x] 标识
+                - 最终返回值可能是 1 或 >1
+
+        返回：
+            int: 实际检测到的说话人数量
+                - = 1: 单说话人场景（CapsWriter 或 FunASR检测到1人）
+                - > 1: 多说话人场景（仅FunASR且检测到多人时）
+        """
+        # 场景1: CapsWriter 转录结果
+        if not use_speaker_recognition:
+            logger.debug("CapsWriter 转录结果，固定为单说话人")
+            return 1
+
+        # 场景2: FunASR 转录结果 - 从结构化数据获取
+        if transcription_data:
             speakers = transcription_data.get("speakers", [])
-            speaker_count = len(speakers) if speakers else 1
-        elif use_speaker_recognition:
-            # 如果没有转录数据，从文本中检测说话人标识
-            import re
-            speaker_pattern = r'Speaker\d+'
-            unique_speakers = set(re.findall(speaker_pattern, transcript))
-            speaker_count = len(unique_speakers) if unique_speakers else 1
-        
-        logger.info(f"检测到说话人数量: {speaker_count}，选择相应的总结策略")
-        
-        # 构建辅助信息
-        context_info = ""
-        if video_title or author or description:
-            context_info = "\n以下是视频的辅助信息：\n"
-            if video_title:
-                context_info += f"- 视频标题：{video_title}\n"
-            if author:
-                context_info += f"- 作者/频道：{author}\n"
-            if description:
-                context_info += f"- 视频描述：{description[:500]}{'...' if len(description) > 500 else ''}\n"
-            context_info += "\n"
-        
-        # 根据说话人数量选择不同的总结策略
+            count = len(speakers) if speakers else 1
+            logger.debug(f"FunASR 转录结果：从 transcription_data 检测到 {count} 个说话人")
+            return count
+
+        # 场景3: FunASR 转录结果 - 从文本标识推断（降级方案）
+        import re
+        unique_speakers = set(re.findall(r'Speaker\d+', transcript))
+        count = len(unique_speakers) if unique_speakers else 1
+        logger.debug(f"FunASR 转录结果：从文本标识检测到 {count} 个说话人")
+        return count
+
+    # ==================== 差异化内容构建方法 ====================
+
+    def _build_intro(self, speaker_count: int) -> str:
+        """
+        构建开头引导语
+
+        注意：只有真正检测到多个说话人时才使用"多人对话"描述
+        """
         if speaker_count > 1:
-            # 多说话人：使用结构化深度总结
-            summary_prompt = (
-                "这是一段多人对话的转录文本。请按以下结构进行详细总结：\n"
-                + context_info +
-                "\n## 1. 概述（Overview）\n"
-                "用一段话（100-150字）点明对话的核心主题、参与者和关键结论。\n"
-                "\n## 2. 主题详述\n"
-                "按照对话中的主要话题进行梳理，每个主题都需要：\n"
-                "- 详细展开讨论内容，包含各方观点、论据和细节（每个主题不少于300字）\n"
-                "- 保留关键数字、定义、重要原话（用引号标注）\n"
+            return "这是一段多人对话的转录文本。"
+        else:
+            # CapsWriter 或 FunASR检测到1人，都使用此描述
+            return "这是一段视频/音频的转录文本。"
+
+    def _build_overview_desc(self, speaker_count: int) -> str:
+        """构建概述部分的描述要求"""
+        if speaker_count > 1:
+            return "点明对话的核心主题、参与者和关键结论"
+        else:
+            return "点明内容的核心论题与结论"
+
+    def _build_speaker_topic_instruction(self, speaker_count: int) -> str:
+        """
+        构建主题部分的说话人相关指令
+
+        区分两种情况：
+        1. 真正的多说话人对话（speaker_count > 1）
+        2. 单说话人但可能有 Speaker 标识（speaker_count = 1）
+        """
+        if speaker_count > 1:
+            # 真正的多人对话：要求分析不同说话人的立场
+            return (
                 "- 说明不同说话人的立场和贡献\n"
-                "- 如果能推测出Speaker的真实姓名或身份，请使用推测的姓名，无法推测则保留Speaker[x]\n"
-                "\n## 3. 核心观点与洞察\n"
-                "- 提炼对话中的核心观点和重要结论（每点150字以上）\n"
-                "- 识别对话中达成的共识或分歧点\n"
-                "- 总结各方的主要论点和支撑论据\n"
-                "\n## 4. 逻辑分析\n"
-                "如果对话是观点论述类（非故事、采访、科普类），请全面分析论述的逻辑结构和谬误：\n"
-                "### 论证结构分析：\n"
-                "- 识别主要论点、次要论点与论据的层次关系\n"
-                "- 分析论证链条的完整性和逻辑连贯性\n"
-                "- 评估结论是否从前提中合理推出\n"
-                "### 逻辑谬误识别（请逐一检查,只返回存在的谬误）：\n"
-                "- **因果谬误**：混淆相关性与因果性、倒置因果关系、忽略其他可能原因\n"
-                "- **归纳谬误**：以偏概全、样本偏差、过度归纳、轶事证据\n"
-                "- **演绎谬误**：大前提错误、小前提不准确、推理形式错误\n"
-                "- **类比谬误**：不当类比、忽略关键差异、强行对比\n"
-                "- **权威谬误**：诉诸不相关权威、权威意见当作绝对真理\n"
-                "- **情感谬误**：诉诸恐惧、诉诸同情、诉诸愤怒、诉诸虚荣\n"
-                "- **人身攻击**：攻击论证者而非论点本身\n"
-                "- **稻草人谬误**：歪曲或简化对方观点进行攻击\n"
-                "- **滑坡谬误**：认为一个事件必然导致极端后果\n"
-                "- **假二择一**：将复杂问题简化为非黑即白的选择\n"
-                "- **循环论证**：用结论证明前提，用前提证明结论\n"
-                "- **转移话题**：偏离核心议题，引入无关信息\n"
-                "- **诉诸传统/新潮**：仅因传统或新颖就认为正确\n"
-                "- **诉诸众人/少数**：仅因多数或少数支持就认为正确\n"
-                "- **负担转移**：要求对方证明否定命题\n"
-                "### 论证质量评估：\n"
-                "- 证据的可信度和充分性\n"
-                "- 推理过程的严谨性\n"
-                "- 对反对意见的处理\n"
-                "- 整体论述的说服力\n"
-                "**注意：广告插入等与主题无关的内容不算逻辑问题，应忽略**\n"
-                "\n## 5. 框架与思维模型（如适用,不存在时可以忽略）\n"
-                "如果对话中涉及方法论、流程或思维框架：\n"
-                "- 将其重写为条理清晰的步骤或要点（不少于300字）\n"
-                "- 说明该框架的应用场景和价值\n"
-                "\n风格要求：\n"
-                "- 永远不要高度浓缩，要充分展开细节\n"
-                "- 使用分层的bullet points组织长段落，提高可读性\n"
-                "- Markdown 使用 `-` 来作为无序列表标识符\n"
-                "- **仅使用中文书写，禁止添加任何英文翻译或解释**\n"
-                "- 专有名词直接使用中文，不要在括号内添加英文原文\n"
-                "- 多使用emoji增加可读性\n"
-                "- 专注于总结，要求类的指令禁止体现出来（例如 不少于300字、多使用 emoji，分层 bullet points）\n"
-                "- 不新增事实，含混表述请保持原意并注明不确定性\n"
-                "\n对话内容：\n" + transcript
+                "- 如果能推测出Speaker的真实姓名或身份，请使用推测的姓名，"
+                "无法推测则保留Speaker[x]\n"
             )
         else:
-            # 单说话人或无说话人识别：使用结构化深度总结
-            summary_speaker_instruction = ""
-            if use_speaker_recognition:
-                summary_speaker_instruction = (
-                    "注意：如果文本中有 Speaker1 等说话人标识，请尝试根据内容推测具体姓名或身份，"
-                    "无法推测则保留 Speaker[x] 的格式。"
-                )
-            
-            summary_prompt = (
-                "这是一段视频/音频的转录文本。请按以下结构进行详细总结：\n"
-                + context_info
-                + ("\n" + summary_speaker_instruction + "\n" if summary_speaker_instruction else "\n") +
-                "\n## 1. 概述（Overview）\n"
-                "用一段话（100-150字）点明视频的核心论题与结论。\n"
-                "\n## 2. 按主题梳理\n"
-                "识别并详细展开视频中的各个主题，要求：\n"
-                "- 每个主题作为一个小节，详细展开内容（每个小节不少于500字）\n"
-                "- 让读者不需要二次查看视频就能了解详情\n"
-                "- 若出现方法/框架/流程，将其重写为条理清晰的步骤或段落\n"
-                "- 若有关键数字、定义、原话，请如实保留核心词，并在括号内补充注释\n"
-                "- 使用分层的bullet points组织内容，避免单个段落过长\n"
-                "\n## 3. 逻辑分析\n"
-                "如果视频内容是观点论述类（非故事、采访、科普类），请全面分析论述的逻辑结构和谬误：\n"
-                "### 论证结构分析：\n"
-                "- 识别主要论点、次要论点与论据的层次关系\n"
-                "- 分析论证链条的完整性和逻辑连贯性\n"
-                "- 评估结论是否从前提中合理推出\n"
-                "### 逻辑谬误识别（请逐一检查,只返回存在的谬误）：\n"
-                "- **因果谬误**：混淆相关性与因果性、倒置因果关系、忽略其他可能原因\n"
-                "- **归纳谬误**：以偏概全、样本偏差、过度归纳、轶事证据\n"
-                "- **演绎谬误**：大前提错误、小前提不准确、推理形式错误\n"
-                "- **类比谬误**：不当类比、忽略关键差异、强行对比\n"
-                "- **权威谬误**：诉诸不相关权威、权威意见当作绝对真理\n"
-                "- **情感谬误**：诉诸恐惧、诉诸同情、诉诸愤怒、诉诸虚荣\n"
-                "- **人身攻击**：攻击论证者而非论点本身\n"
-                "- **稻草人谬误**：歪曲或简化对方观点进行攻击\n"
-                "- **滑坡谬误**：认为一个事件必然导致极端后果\n"
-                "- **假二择一**：将复杂问题简化为非黑即白的选择\n"
-                "- **循环论证**：用结论证明前提，用前提证明结论\n"
-                "- **转移话题**：偏离核心议题，引入无关信息\n"
-                "- **诉诸传统/新潮**：仅因传统或新颖就认为正确\n"
-                "- **诉诸众人/少数**：仅因多数或少数支持就认为正确\n"
-                "- **负担转移**：要求对方证明否定命题\n"
-                "### 论证质量评估：\n"
-                "- 证据的可信度和充分性\n"
-                "- 推理过程的严谨性\n"
-                "- 对反对意见的处理\n"
-                "- 整体论述的说服力\n"
-                "**注意：广告插入等与主题无关的内容不算逻辑问题，应忽略**\n"
-                "\n## 4. 框架与心智模型（Framework & Mindset）\n"
-                "从视频中抽象出的framework & mindset，要求：\n"
-                "- 将其重写为条理清晰的步骤或段落\n"
-                "- 每个framework & mindset不少于500字\n"
-                "- 说明其应用场景和核心价值\n"
-                "- 如果视频中没有明显的框架或模型，可省略此部分\n"
-                "\n风格与限制：\n"
-                "- 永远不要高度浓缩！要充分展开所有细节\n"
-                "- 不新增事实；若出现含混表述，请保持原意并注明不确定性\n"
-                "- **仅使用中文书写，禁止添加任何英文翻译或解释**\n"
-                "- 专有名词直接使用中文，不要在括号内添加英文原文或音译\n"
-                "- 避免一个段落的内容过多，可以拆解成多个逻辑段落（使用bullet points）\n"
-                "- Markdown 使用 `-` 来作为无序列表标识符\n"
-                "- 多使用emoji增加可读性\n"
-                "- 专注于总结，要求类的指令禁止体现出来（例如 不少于300字、多使用 emoji，分层 bullet points）\n"
-                "\n转录文本：\n" + transcript
+            # 单说话人：仅提示处理可能存在的 Speaker 标识
+            return (
+                "- 如果文本中有Speaker标识，请尝试根据内容推测具体姓名或身份，"
+                "无法推测则保留Speaker[x]的格式\n"
             )
-        
-        return summary_prompt
-    
+
+    def _build_insight_focus(self, speaker_count: int) -> str:
+        """构建核心观点部分的识别重点"""
+        if speaker_count > 1:
+            return "识别对话中达成的共识或分歧点"
+        else:
+            return "识别论述中的关键主张和论证逻辑"
+
+    # ==================== 共用内容构建方法 ====================
+
+    def _build_context_info(self, video_title: str, author: str, description: str) -> str:
+        """构建辅助信息（完全共用）"""
+        if not (video_title or author or description):
+            return ""
+
+        info = "\n以下是内容的辅助信息：\n"
+        if video_title:
+            info += f"- 标题：{video_title}\n"
+        if author:
+            info += f"- 作者/频道：{author}\n"
+        if description:
+            info += f"- 描述：{description[:500]}{'...' if len(description) > 500 else ''}\n"
+
+        return info
+
+    def _build_logic_analysis_section(self) -> str:
+        """构建逻辑分析章节（完全共用，完整章节）"""
+        return """## 4. 逻辑分析
+如果内容是观点论述类（非故事、采访、科普类），请全面分析论述的逻辑结构和谬误：
+
+### 论证结构分析：
+- 识别主要论点、次要论点与论据的层次关系
+- 分析论证链条的完整性和逻辑连贯性
+- 评估结论是否从前提中合理推出
+
+### 逻辑谬误识别（请逐一检查,只返回存在的谬误）：
+- **因果谬误**：混淆相关性与因果性、倒置因果关系、忽略其他可能原因
+- **归纳谬误**：以偏概全、样本偏差、过度归纳、轶事证据
+- **演绎谬误**：大前提错误、小前提不准确、推理形式错误
+- **类比谬误**：不当类比、忽略关键差异、强行对比
+- **权威谬误**：诉诸不相关权威、权威意见当作绝对真理
+- **情感谬误**：诉诸恐惧、诉诸同情、诉诸愤怒、诉诸虚荣
+- **人身攻击**：攻击论证者而非论点本身
+- **稻草人谬误**：歪曲或简化对方观点进行攻击
+- **滑坡谬误**：认为一个事件必然导致极端后果
+- **假二择一**：将复杂问题简化为非黑即白的选择
+- **循环论证**：用结论证明前提，用前提证明结论
+- **转移话题**：偏离核心议题，引入无关信息
+- **诉诸传统/新潮**：仅因传统或新颖就认为正确
+- **诉诸众人/少数**：仅因多数或少数支持就认为正确
+- **负担转移**：要求对方证明否定命题
+
+### 论证质量评估：
+- 证据的可信度和充分性
+- 推理过程的严谨性
+- 对反对意见的处理
+- 整体论述的说服力
+
+**注意：广告插入等与主题无关的内容不算逻辑问题，应忽略**
+"""
+
+    def _build_style_requirements(self) -> str:
+        """构建风格要求（完全共用）"""
+        return """风格与限制：
+- 永远不要高度浓缩！要充分展开所有细节
+- 不新增事实；若出现含混表述，请保持原意并注明不确定性
+- **仅使用中文书写，禁止添加任何英文翻译或解释**
+- 专有名词直接使用中文，不要在括号内添加英文原文或音译
+- 避免一个段落的内容过多，可以拆解成多个逻辑段落（使用bullet points）
+- Markdown 使用 `-` 来作为无序列表标识符
+- 多使用emoji增加可读性
+- 专注于总结，要求类的指令禁止体现出来（例如 不少于300字、多使用 emoji，分层 bullet points）
+"""
+
     def process_llm_task_with_structure(self, cache_dir: str, funasr_data: Dict, video_metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
         处理LLM任务并生成结构化输出（新格式，含校对）
-        
+
         Args:
             cache_dir: 缓存目录路径
             funasr_data: FunASR原始转录数据
             video_metadata: 视频元数据信息
-            
+
         Returns:
             Dict: 包含结构化对话数据和映射关系
         """
