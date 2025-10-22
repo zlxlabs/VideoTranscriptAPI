@@ -38,14 +38,14 @@ class FunASRSpeakerClient:
         try:
             logger.info(f"连接到 FunASR 服务器: {self.server_url}")
             # 使用推荐的连接配置（适配服务器端设置）
+            # 注意：read_limit 和 write_limit 参数在 websockets 12.0+ 中已被移除
+            # 库会自动使用合理的默认缓冲区大小
             self.websocket = await websockets.connect(
                 self.server_url,
                 ping_interval=60,      # 60秒发送一次心跳（与服务器一致）
                 ping_timeout=120,      # 心跳响应超时120秒
                 close_timeout=60,      # 关闭连接超时60秒
-                max_size=10 * 1024 * 1024,  # 单消息最大10MB
-                read_limit=2**20,      # 1MB读缓冲
-                write_limit=2**20      # 1MB写缓冲
+                max_size=10 * 1024 * 1024  # 单消息最大10MB
             )
             
             # 接收服务器的连接确认消息
