@@ -381,6 +381,7 @@ class EnhancedLLMProcessor:
 {speaker_topic_instruction}
 ## 3. 核心观点与洞察
 - 提炼内容中的核心观点和重要结论（每点150字以上）
+- 使用 markdown 格式来提升观点可读性。
 - {insight_focus}
 - 总结主要论点和支撑论据
 
@@ -564,7 +565,7 @@ class EnhancedLLMProcessor:
 - **仅使用中文书写，禁止添加任何英文翻译或解释**
 - 专有名词直接使用中文，不要在括号内添加英文原文或音译
 - 避免一个段落的内容过多，可以拆解成多个逻辑段落（使用bullet points）
-- Markdown 使用 `-` 来作为无序列表标识符
+- 多使用 Markdown 来强化全文的结构，提升可读性，注意使用 `-` 来作为无序列表标识符
 - 多使用emoji增加可读性
 - 专注于总结，要求类的指令禁止体现出来（例如 不少于300字、多使用 emoji，分层 bullet points）
 """
