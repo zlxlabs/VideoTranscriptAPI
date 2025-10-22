@@ -113,12 +113,16 @@ class YoutubeDownloader(BaseDownloader):
             logger.info(f"尝试使用 yt-dlp 获取 YouTube 视频信息: {video_id}")
             try:
                 video_info = self._get_video_info_with_ytdlp(url)
-                if video_info and video_info.get("download_url"):
+                # 只要能获取到基本视频信息就认为成功，不强制要求 download_url
+                # 因为 download_audio_for_transcription 方法不需要直接 URL
+                if video_info and video_info.get("video_title"):
                     logger.info(f"成功使用 yt-dlp 获取视频信息: {video_info['video_title']}")
                     video_info["download_method"] = "yt-dlp"
+                    if not video_info.get("download_url"):
+                        logger.info("yt-dlp 未提取到直接下载链接，将使用 yt-dlp 下载方法")
                     return video_info
                 else:
-                    logger.warning("yt-dlp 获取的视频信息中没有有效的下载链接")
+                    logger.warning("yt-dlp 获取的视频信息不完整")
             except Exception as e:
                 logger.warning(f"yt-dlp 获取视频信息失败: {e}")
             
@@ -595,7 +599,7 @@ class YoutubeDownloader(BaseDownloader):
         if video_info:
             download_url = video_info.get("download_url")
             filename = video_info.get("filename")
-            
+
             if download_url and filename:
                 logger.info("降级使用TikHub API下载...")
                 try:
@@ -608,9 +612,9 @@ class YoutubeDownloader(BaseDownloader):
                 except Exception as e:
                     logger.error(f"TikHub API下载异常: {e}")
             else:
-                logger.error("TikHub API下载信息不完整")
+                logger.warning("video_info 中没有 TikHub API 下载信息，无法使用备用下载方式")
         else:
-            logger.warning("没有提供video_info，无法使用TikHub API下载")
+            logger.warning("没有提供video_info，无法使用TikHub API备用下载")
         
         logger.error(f"所有下载方式均失败: {url}")
         return None
