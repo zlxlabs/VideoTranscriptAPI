@@ -55,7 +55,7 @@
       "api_key": "your-llm-api-key-here",
       "base_url": "your-base-url-here",
       "calibrate_model": "gpt-4.1-mini",
-      "calibrate_reasoning_effort": "none",
+      "calibrate_reasoning_effort": null,
       "summary_model": "deepseek-chat",
       "summary_reasoning_effort": "high",
       "max_retries": 2,
@@ -79,7 +79,7 @@
         "enable_validation": true,
         "fallback_to_original": true,
         "validator_model": "gpt-4.1-mini",
-        "validator_reasoning_effort": "none"
+        "validator_reasoning_effort": null
       }
     },
     "funasr_spk_server": {

@@ -34,9 +34,9 @@ class SegmentedLLMProcessor:
         self.api_key = self.llm_config['api_key']
         self.base_url = self.llm_config['base_url']
         self.calibrate_model = self.llm_config['calibrate_model']
-        self.calibrate_reasoning_effort = self.llm_config.get('calibrate_reasoning_effort', 'none')
+        self.calibrate_reasoning_effort = self.llm_config.get('calibrate_reasoning_effort', None)
         self.summary_model = self.llm_config['summary_model']
-        self.summary_reasoning_effort = self.llm_config.get('summary_reasoning_effort', 'high')
+        self.summary_reasoning_effort = self.llm_config.get('summary_reasoning_effort', None)
         self.max_retries = self.llm_config['max_retries']
         self.retry_delay = self.llm_config['retry_delay']
         

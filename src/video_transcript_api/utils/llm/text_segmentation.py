@@ -40,7 +40,7 @@ class TextSegmentationProcessor:
 
         # 读取 reasoning_effort 配置
         llm_config = config.get('llm', {})
-        self.calibrate_reasoning_effort = llm_config.get('calibrate_reasoning_effort', 'none')
+        self.calibrate_reasoning_effort = llm_config.get('calibrate_reasoning_effort', None)
 
         logger.info(f"文本分段处理器初始化完成 - 阈值: {self.enable_threshold}, 分段大小: {self.segment_size}")
     

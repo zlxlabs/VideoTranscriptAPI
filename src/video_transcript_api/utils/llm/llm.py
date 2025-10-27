@@ -50,9 +50,12 @@ def call_llm_api(model: str, prompt: str, api_key: str, base_url: str,
     # 总共尝试 max_retries + 1 次（初始尝试 + 重试次数）
     for attempt in range(max_retries + 1):
         try:
+            # 格式化 reasoning_effort 显示：None → disabled, 其他 → 原值
+            reasoning_status = 'disabled' if reasoning_effort is None else reasoning_effort
+
             # INFO 级别：记录任务类型、模型、推理级别
             logger.info(
-                f"[{task_type.upper()}] Model: {model} | Reasoning: {reasoning_effort or 'none'} | "
+                f"[{task_type.upper()}] Model: {model} | Reasoning: {reasoning_status} | "
                 f"Attempt {attempt + 1}/{max_retries + 1}"
             )
             # DEBUG 级别：记录详细参数

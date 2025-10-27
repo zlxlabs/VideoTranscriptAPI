@@ -33,9 +33,9 @@ class StructuredCalibrator:
         self.api_key = self.llm_config['api_key']
         self.base_url = self.llm_config['base_url']
         self.calibrate_model = self.llm_config['calibrate_model']
-        self.calibrate_reasoning_effort = self.llm_config.get('calibrate_reasoning_effort', 'none')
+        self.calibrate_reasoning_effort = self.llm_config.get('calibrate_reasoning_effort', None)
         self.validator_model = self.calibration_config.get('validator_model', self.calibrate_model)
-        self.validator_reasoning_effort = self.calibration_config.get('validator_reasoning_effort', 'none')
+        self.validator_reasoning_effort = self.calibration_config.get('validator_reasoning_effort', None)
         self.max_retries = self.llm_config['max_retries']
         self.retry_delay = self.llm_config['retry_delay']
         
