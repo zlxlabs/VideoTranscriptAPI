@@ -603,11 +603,11 @@ class CacheManager:
         """
         task_id = self.generate_task_id()
         
-        # 检查是否已有相同URL的成功任务，如果有则复用其view_token
+        # 检查是否已有相同URL的任务，如果有则复用其view_token（无论任务状态）
         existing_task = self.get_existing_task_by_url(url, use_speaker_recognition)
-        if existing_task and existing_task['status'] == 'success':
+        if existing_task:
             view_token = existing_task['view_token']
-            logger.info(f"复用现有view_token: {view_token} for URL: {url}")
+            logger.info(f"复用现有view_token: {view_token} (状态: {existing_task['status']}) for URL: {url}")
         else:
             view_token = self.generate_view_token()
             logger.info(f"生成新view_token: {view_token} for URL: {url}")
