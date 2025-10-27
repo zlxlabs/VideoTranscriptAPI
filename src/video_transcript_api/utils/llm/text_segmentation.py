@@ -37,7 +37,11 @@ class TextSegmentationProcessor:
         self.enable_threshold = segmentation_config['enable_threshold']
         self.segment_size = segmentation_config['segment_size']
         self.max_segment_size = segmentation_config['max_segment_size']
-        
+
+        # 读取 reasoning_effort 配置
+        llm_config = config.get('llm', {})
+        self.calibrate_reasoning_effort = llm_config.get('calibrate_reasoning_effort', 'none')
+
         logger.info(f"文本分段处理器初始化完成 - 阈值: {self.enable_threshold}, 分段大小: {self.segment_size}")
     
     def get_text_length(self, file_path: str, file_type: str) -> int:
@@ -380,7 +384,9 @@ class TextSegmentationProcessor:
             api_key=self.config.get('llm', {}).get('api_key', ''),
             base_url=self.config.get('llm', {}).get('base_url', ''),
             max_retries=self.config.get('llm', {}).get('max_retries', 2),
-            retry_delay=self.config.get('llm', {}).get('retry_delay', 5)
+            retry_delay=self.config.get('llm', {}).get('retry_delay', 5),
+            reasoning_effort=self.calibrate_reasoning_effort,
+            task_type="speaker_mapping"
         )
         
         # 解析LLM响应

@@ -34,7 +34,9 @@ class SegmentedLLMProcessor:
         self.api_key = self.llm_config['api_key']
         self.base_url = self.llm_config['base_url']
         self.calibrate_model = self.llm_config['calibrate_model']
+        self.calibrate_reasoning_effort = self.llm_config.get('calibrate_reasoning_effort', 'none')
         self.summary_model = self.llm_config['summary_model']
+        self.summary_reasoning_effort = self.llm_config.get('summary_reasoning_effort', 'high')
         self.max_retries = self.llm_config['max_retries']
         self.retry_delay = self.llm_config['retry_delay']
         
@@ -105,10 +107,10 @@ class SegmentedLLMProcessor:
         def calibrate_segment(index, segment):
             """校对单个段落"""
             logger.info(f"开始校对第 {index+1}/{total_segments} 段 (长度: {len(segment)} 字符)")
-            
+
             # 生成校对提示词
             prompt = self._generate_calibrate_prompt(segment, False, title, "", description)
-            
+
             # 调用LLM进行校对
             calibrated_text = call_llm_api(
                 model=self.calibrate_model,
@@ -116,7 +118,9 @@ class SegmentedLLMProcessor:
                 api_key=self.api_key,
                 base_url=self.base_url,
                 max_retries=self.max_retries,
-                retry_delay=self.retry_delay
+                retry_delay=self.retry_delay,
+                reasoning_effort=self.calibrate_reasoning_effort,
+                task_type="calibrate_segment"
             )
             
             calibrated_segments[index] = calibrated_text
@@ -178,12 +182,12 @@ class SegmentedLLMProcessor:
             # 将JSON段落转换为文本
             segment_text = self._json_segment_to_text(segment_data)
             text_length = len(segment_text)
-            
+
             logger.info(f"开始校对第 {index+1}/{total_segments} 段 (长度: {text_length} 字符)")
-            
+
             # 生成校对提示词
             prompt = self._generate_calibrate_prompt(segment_text, True, title, "", description)
-            
+
             # 调用LLM进行校对
             calibrated_text = call_llm_api(
                 model=self.calibrate_model,
@@ -191,7 +195,9 @@ class SegmentedLLMProcessor:
                 api_key=self.api_key,
                 base_url=self.base_url,
                 max_retries=self.max_retries,
-                retry_delay=self.retry_delay
+                retry_delay=self.retry_delay,
+                reasoning_effort=self.calibrate_reasoning_effort,
+                task_type="calibrate_segment"
             )
             
             calibrated_segments[index] = calibrated_text
@@ -343,14 +349,16 @@ class SegmentedLLMProcessor:
         logger.info(f"检测到说话人数量: {speaker_count}，选择相应的总结策略")
         
         prompt = self._generate_summary_prompt(text, title, description, use_speaker_recognition, speaker_count)
-        
+
         summary = call_llm_api(
             model=self.summary_model,
             prompt=prompt,
             api_key=self.api_key,
             base_url=self.base_url,
             max_retries=self.max_retries,
-            retry_delay=self.retry_delay
+            retry_delay=self.retry_delay,
+            reasoning_effort=self.summary_reasoning_effort,
+            task_type="summary"
         )
         
         logger.info("文本总结完成")
@@ -380,14 +388,16 @@ class SegmentedLLMProcessor:
             
             # 对每个段落进行总结
             prompt = self._generate_segment_summary_prompt(segment, i+1, total_segments)
-            
+
             segment_summary = call_llm_api(
                 model=self.summary_model,
                 prompt=prompt,
                 api_key=self.api_key,
                 base_url=self.base_url,
                 max_retries=self.max_retries,
-                retry_delay=self.retry_delay
+                retry_delay=self.retry_delay,
+                reasoning_effort=self.summary_reasoning_effort,
+                task_type="segment_summary"
             )
             
             segment_summaries.append(segment_summary)
@@ -404,7 +414,9 @@ class SegmentedLLMProcessor:
             api_key=self.api_key,
             base_url=self.base_url,
             max_retries=self.max_retries,
-            retry_delay=self.retry_delay
+            retry_delay=self.retry_delay,
+            reasoning_effort=self.summary_reasoning_effort,
+            task_type="final_summary"
         )
         
         logger.info("分段总结完成")

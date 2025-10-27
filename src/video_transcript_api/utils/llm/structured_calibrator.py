@@ -33,7 +33,9 @@ class StructuredCalibrator:
         self.api_key = self.llm_config['api_key']
         self.base_url = self.llm_config['base_url']
         self.calibrate_model = self.llm_config['calibrate_model']
+        self.calibrate_reasoning_effort = self.llm_config.get('calibrate_reasoning_effort', 'none')
         self.validator_model = self.calibration_config.get('validator_model', self.calibrate_model)
+        self.validator_reasoning_effort = self.calibration_config.get('validator_reasoning_effort', 'none')
         self.max_retries = self.llm_config['max_retries']
         self.retry_delay = self.llm_config['retry_delay']
         
@@ -314,7 +316,9 @@ class StructuredCalibrator:
             api_key=self.api_key,
             base_url=self.base_url,
             max_retries=self.max_retries,
-            retry_delay=self.retry_delay
+            retry_delay=self.retry_delay,
+            reasoning_effort=self.calibrate_reasoning_effort,
+            task_type="calibrate_chunk"
         )
         
         # 解析响应
@@ -540,7 +544,9 @@ class StructuredCalibrator:
                 api_key=self.api_key,
                 base_url=self.base_url,
                 max_retries=self.max_retries,
-                retry_delay=self.retry_delay
+                retry_delay=self.retry_delay,
+                reasoning_effort=self.validator_reasoning_effort,
+                task_type="validate"
             )
             
             # 解析验证结果

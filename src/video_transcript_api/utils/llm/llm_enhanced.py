@@ -36,7 +36,9 @@ class EnhancedLLMProcessor:
         self.api_key = self.llm_config['api_key']
         self.base_url = self.llm_config['base_url']
         self.calibrate_model = self.llm_config['calibrate_model']
+        self.calibrate_reasoning_effort = self.llm_config.get('calibrate_reasoning_effort', 'none')
         self.summary_model = self.llm_config['summary_model']
+        self.summary_reasoning_effort = self.llm_config.get('summary_reasoning_effort', 'high')
         self.max_retries = self.llm_config['max_retries']
         self.retry_delay = self.llm_config['retry_delay']
         
@@ -259,14 +261,16 @@ class EnhancedLLMProcessor:
         
         def run_calibrate():
             result_dict['校对文本'] = call_llm_api(
-                self.calibrate_model, calibrate_prompt, self.api_key, 
-                self.base_url, self.max_retries, self.retry_delay
+                self.calibrate_model, calibrate_prompt, self.api_key,
+                self.base_url, self.max_retries, self.retry_delay,
+                self.calibrate_reasoning_effort, "calibrate"
             )
         
         def run_summary():
             result_dict['内容总结'] = call_llm_api(
-                self.summary_model, summary_prompt, self.api_key, 
-                self.base_url, self.max_retries, self.retry_delay
+                self.summary_model, summary_prompt, self.api_key,
+                self.base_url, self.max_retries, self.retry_delay,
+                self.summary_reasoning_effort, "summary"
             )
         
         # 启动并发线程
@@ -645,12 +649,14 @@ class EnhancedLLMProcessor:
             # 4. 调用LLM进行说话人推断
             logger.info("执行说话人推断")
             speaker_mapping_result = call_llm_api(
+                model=self.summary_model,
                 prompt=speaker_inference_prompt,
-                model=self.calibrate_model,
                 api_key=self.api_key,
                 base_url=self.base_url,
                 max_retries=self.max_retries,
-                retry_delay=self.retry_delay
+                retry_delay=self.retry_delay,
+                reasoning_effort=self.summary_reasoning_effort,
+                task_type="speaker_inference"
             )
             
             # 5. 解析说话人映射关系
@@ -990,12 +996,14 @@ class EnhancedLLMProcessor:
         )
         
         return call_llm_api(
-            prompt=summary_prompt,
             model=self.summary_model,
+            prompt=summary_prompt,
             api_key=self.api_key,
             base_url=self.base_url,
             max_retries=self.max_retries,
-            retry_delay=self.retry_delay
+            retry_delay=self.retry_delay,
+            reasoning_effort=self.summary_reasoning_effort,
+            task_type="summary"
         )
     
     def _save_structured_result(self, cache_dir: str, structured_result: Dict, calibrated_text: str, summary_text: str):
