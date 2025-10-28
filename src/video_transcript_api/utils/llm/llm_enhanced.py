@@ -850,10 +850,11 @@ class EnhancedLLMProcessor:
 - 不新增事实；若出现含混表述，请保持原意并注明不确定性
 - **只能使用中文书写，禁止添加任何常见的英文翻译或解释**
 - 如果有缩写，可以使用括号适当解释。
+- 以 Markdown 语法来强化全文的结构，提升可读性。# 标题层级请控制在二级-四级之间，无序列表请使用 “-”
 - 避免一个段落的内容过多，可以拆解成多个逻辑段落（使用bullet points）
-- 多使用 Markdown 来强化全文的结构，提升可读性，注意使用 `-` 来作为无序列表标识符
 - 多使用emoji增加可读性
 - 专注于总结，要求类的指令禁止体现出来（例如 不少于300字、多使用 emoji，分层 bullet points）
+- 只返回按照格式要求的内容，不要返回无关信息。
 """
 
     def process_llm_task_with_structure(self, cache_dir: str, funasr_data: Dict, video_metadata: Dict[str, Any], selected_summary_model: str, selected_reasoning_effort: str) -> Dict[str, Any]:
