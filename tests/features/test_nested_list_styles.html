@@ -3,8 +3,9 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}视频转录查看器{% endblock %}</title>
+    <title>嵌套列表样式测试</title>
     <style>
+        
         /* CSS变量定义 - 主题系统 */
         :root {
             /* 浅色主题 */
@@ -174,19 +175,19 @@
             line-height: 1.6;
         }
 
-        /* 嵌套列表样式 - 增加明显的缩进以显示层级 */
+        /* 嵌套列表样式 - 增加缩进以显示层级 */
         .content ul ul,
         .content ol ol,
         .content ul ol,
         .content ol ul {
-            padding-left: 40px;  /* 第2级：相对父级增加40px缩进，视觉差异明显 */
+            padding-left: 30px;  /* 嵌套列表增加额外缩进 */
             margin: 8px 0;       /* 减少嵌套列表的垂直间距 */
         }
 
         /* 第三层嵌套列表 */
         .content ul ul ul,
         .content ol ol ol {
-            padding-left: 40px;  /* 第3级：继续增加40px缩进 */
+            padding-left: 28px;
             margin: 6px 0;
         }
 
@@ -525,126 +526,96 @@
         [data-theme="dark"] .theme-toggle:hover {
             background: rgba(0, 0, 0, 0.3);
         }
+    
     </style>
-    {% block extra_css %}{% endblock %}
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <button id="theme-toggle" class="theme-toggle" title="切换主题">
-                🌙
-            </button>
-            <h1>{{ title or "视频转录查看器" }}</h1>
-            {% if author or url %}
+            <h1>嵌套列表样式修复测试</h1>
             <div class="meta">
-                {% if author %}👤 {{ author }}{% endif %}
-                {% if url %}
-                    <br>🔗 <a href="{{ url }}" target="_blank" rel="noopener">查看原视频</a>
-                {% endif %}
-                {% if created_at_display %}
-                    <br>⏰ {{ created_at_display }}
-                {% elif created_at %}
-                    <br>⏰ {{ created_at }}
-                {% endif %}
+                测试页面 - 验证不同层级列表的显示效果
             </div>
-            {% endif %}
         </div>
-        
-        {% block content %}{% endblock %}
+
+        <div class="section">
+            <h2>测试内容</h2>
+            <div class="content">
+                <h2 id="_1">🔍 看守所、拘留所与监狱的核心区别</h2>
+<ul>
+<li><strong>功能定位与适用场景</strong><ul>
+<li>拘留所：针对行政处罚案件（如嫖娼、酒驾），关押时间短（通常15天以内）</li>
+<li>看守所：作为"正常社会与监狱之间的摆渡区"，专门关押未判决的刑事案件嫌疑人</li>
+<li>监狱：仅接收已判刑的罪犯，进行劳动改造和教育管理</li>
+</ul>
+</li>
+<li><strong>关键差异点</strong><ul>
+<li>法律地位：拘留所对应行政违法，看守所对应刑事侦查阶段</li>
+<li>社会影响：拘留所记录不影响开具"无犯罪证明"</li>
+<li>人员构成：拘留所多为短期行为失范者</li>
+</ul>
+</li>
+<li><strong>作者特别强调</strong><ul>
+<li>原话保留："嫖娼和酒驾的人被关在一起"</li>
+<li>数字细节：酒驾等行政处罚罚款"千把来块"</li>
+</ul>
+</li>
+</ul>
+<h2 id="_2">测试三级嵌套</h2>
+<ul>
+<li>第一级列表项<ul>
+<li>第二级列表项 A</li>
+<li>第三级列表项 1</li>
+<li>第三级列表项 2</li>
+<li>第二级列表项 B</li>
+<li>第三级列表项 3</li>
+</ul>
+</li>
+<li>第一级列表项 2</li>
+</ul>
+<h2 id="_3">测试混合列表</h2>
+<ol>
+<li>有序列表第一项</li>
+<li>无序子项 A</li>
+<li>无序子项 B</li>
+<li>有序列表第二项</li>
+<li>有序子项 a</li>
+<li>有序子项 b
+            1. 三级有序 i
+            2. 三级有序 ii</li>
+</ol>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>预期效果说明</h2>
+            <div class="content">
+                <ul>
+                    <li><strong>第一级列表</strong>：应显示实心圆点 (●)</li>
+                    <li><strong>第二级列表</strong>：应显示空心圆 (○)，并有额外的左侧缩进</li>
+                    <li><strong>第三级列表</strong>：应显示实心方块 (■)，缩进进一步增加</li>
+                </ul>
+                <p><strong>有序列表：</strong></p>
+                <ol>
+                    <li>第一级：数字 (1, 2, 3)</li>
+                    <li>第二级：小写字母 (a, b, c)
+                        <ol>
+                            <li>第二级示例 a</li>
+                            <li>第二级示例 b</li>
+                        </ol>
+                    </li>
+                    <li>第三级：小写罗马数字 (i, ii, iii)
+                        <ol>
+                            <li>子项
+                                <ol>
+                                    <li>第三级示例</li>
+                                </ol>
+                            </li>
+                        </ol>
+                    </li>
+                </ol>
+            </div>
+        </div>
     </div>
-    
-    {% block extra_js %}{% endblock %}
-    
-    <!-- 主题切换脚本 -->
-    <script>
-        // 简化版主题切换功能（用于模板页面）
-        document.addEventListener('DOMContentLoaded', function() {
-            const THEME_KEY = 'vta_theme_preference';
-            
-            function getStoredTheme() {
-                try {
-                    const value = localStorage.getItem(THEME_KEY);
-                    return value ? JSON.parse(value) : null;
-                } catch (e) {
-                    return null;
-                }
-            }
-            
-            function setStoredTheme(theme) {
-                try {
-                    localStorage.setItem(THEME_KEY, JSON.stringify(theme));
-                } catch (e) {
-                    console.error('Failed to save theme preference');
-                }
-            }
-            
-            function detectSystemTheme() {
-                if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
-                    return 'dark';
-                }
-                return 'light';
-            }
-            
-            function applyTheme(theme) {
-                const body = document.body;
-                const themeToggle = document.getElementById('theme-toggle');
-                
-                if (theme === 'dark') {
-                    body.setAttribute('data-theme', 'dark');
-                    if (themeToggle) {
-                        themeToggle.textContent = '☀️';
-                        themeToggle.title = '切换到浅色模式';
-                    }
-                } else {
-                    body.removeAttribute('data-theme');
-                    if (themeToggle) {
-                        themeToggle.textContent = '🌙';
-                        themeToggle.title = '切换到深色模式';
-                    }
-                }
-            }
-            
-            function toggleTheme() {
-                const currentTheme = document.body.hasAttribute('data-theme') ? 'dark' : 'light';
-                const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-                const themeToggle = document.getElementById('theme-toggle');
-                
-                // 添加按钮旋转动画
-                if (themeToggle) {
-                    themeToggle.classList.add('switching');
-                    setTimeout(() => {
-                        themeToggle.classList.remove('switching');
-                    }, 600);
-                }
-                
-                setStoredTheme(newTheme);
-                
-                // 添加页面过渡动画
-                const body = document.body;
-                body.style.transition = 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)';
-                
-                // 应用新主题
-                setTimeout(() => {
-                    applyTheme(newTheme);
-                }, 50);
-                
-                // 清除过渡样式
-                setTimeout(() => {
-                    body.style.transition = '';
-                }, 350);
-            }
-            
-            // 初始化主题
-            const savedTheme = getStoredTheme();
-            const theme = savedTheme || detectSystemTheme();
-            applyTheme(theme);
-            
-            // 绑定切换按钮
-            const themeToggle = document.getElementById('theme-toggle');
-            if (themeToggle) {
-                themeToggle.addEventListener('click', toggleTheme);
-            }
-        });
-    </script>
 </body>
 </html>

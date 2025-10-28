@@ -66,6 +66,11 @@ def _fix_nested_list_indentation(text: str) -> str:
     Markdown 标准要求嵌套列表需要 4 个空格的缩进，但有些文档使用 2 个空格。
     本函数将 2 个空格缩进的列表项转换为 4 个空格缩进。
 
+    缩进转换规则：
+    - 2空格 → 4空格（第2级）
+    - 4空格 → 8空格（第3级）
+    - 6空格 → 12空格（第4级）
+
     Args:
         text: 原始文本
 
@@ -99,10 +104,12 @@ def _fix_nested_list_indentation(text: str) -> str:
             # 计算缩进空格数
             indent_count = len(indent)
 
-            # 如果缩进是 2 的倍数但不是 4 的倍数，转换为 4 的倍数
-            if indent_count > 0 and indent_count % 2 == 0 and indent_count % 4 != 0:
-                # 计算应该有多少个缩进级别（每级 2 个空格转换为 4 个空格）
+            # 将所有偶数空格缩进乘以2，确保足够的层级区分
+            # 2 → 4, 4 → 8, 6 → 12, 8 → 16
+            if indent_count > 0 and indent_count % 2 == 0:
+                # 计算嵌套级别（每2个空格为一级）
                 level = indent_count // 2
+                # 每级使用4个空格
                 new_indent = ' ' * (level * 4)
                 fixed_line = f"{new_indent}{marker}{space_after}{content}"
                 fixed_lines.append(fixed_line)
