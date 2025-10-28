@@ -59,6 +59,61 @@ def _fix_indented_tables(text: str) -> str:
 
     return '\n'.join(fixed_lines)
 
+def _fix_nested_list_indentation(text: str) -> str:
+    """
+    修复嵌套列表的缩进问题
+
+    Markdown 标准要求嵌套列表需要 4 个空格的缩进，但有些文档使用 2 个空格。
+    本函数将 2 个空格缩进的列表项转换为 4 个空格缩进。
+
+    Args:
+        text: 原始文本
+
+    Returns:
+        str: 修复后的文本
+    """
+    lines = text.split('\n')
+    fixed_lines = []
+    in_code_block = False
+
+    for line in lines:
+        # 跟踪代码块状态（围栏代码块）
+        if line.strip().startswith('```'):
+            in_code_block = not in_code_block
+
+        # 如果在代码块中，直接添加，不处理
+        if in_code_block:
+            fixed_lines.append(line)
+            continue
+
+        # 检测列表项的缩进级别
+        # 匹配：(空格) + (*, -, + 或数字.) + 空格
+        match = re.match(r'^(\s*)([\*\-\+]|\d+\.)(\s+)', line)
+
+        if match:
+            indent = match.group(1)  # 前导空格
+            marker = match.group(2)   # 列表标记
+            space_after = match.group(3)  # 标记后的空格
+            content = line[len(indent) + len(marker) + len(space_after):]  # 实际内容
+
+            # 计算缩进空格数
+            indent_count = len(indent)
+
+            # 如果缩进是 2 的倍数但不是 4 的倍数，转换为 4 的倍数
+            if indent_count > 0 and indent_count % 2 == 0 and indent_count % 4 != 0:
+                # 计算应该有多少个缩进级别（每级 2 个空格转换为 4 个空格）
+                level = indent_count // 2
+                new_indent = ' ' * (level * 4)
+                fixed_line = f"{new_indent}{marker}{space_after}{content}"
+                fixed_lines.append(fixed_line)
+                logger.debug(f"修正列表缩进: {indent_count} 空格 → {level * 4} 空格")
+            else:
+                fixed_lines.append(line)
+        else:
+            fixed_lines.append(line)
+
+    return '\n'.join(fixed_lines)
+
 def _fix_list_spacing(text: str) -> str:
     """
     自动在列表前添加空行，以符合 Markdown 规范
@@ -155,7 +210,10 @@ def render_markdown_to_html(markdown_text: str) -> str:
         # 预处理1：修复缩进的表格
         markdown_text = _fix_indented_tables(markdown_text)
 
-        # 预处理2：修复列表前的空行
+        # 预处理2：修复嵌套列表的缩进（2空格 → 4空格）
+        markdown_text = _fix_nested_list_indentation(markdown_text)
+
+        # 预处理3：修复列表前的空行
         markdown_text = _fix_list_spacing(markdown_text)
 
         md = markdown.Markdown(extensions=[
