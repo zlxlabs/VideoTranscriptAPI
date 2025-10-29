@@ -61,7 +61,7 @@ def call_llm_api(model: str, prompt: str, api_key: str, base_url: str,
             # DEBUG 级别：记录详细参数
             logger.debug(f"[{task_type.upper()}] Prompt length: {prompt_length} chars")
 
-            resp = requests.post(base_url, json=data, headers=headers, timeout=180)
+            resp = requests.post(base_url, json=data, headers=headers, timeout=360)
             resp.raise_for_status()
             result = resp.json()
 
