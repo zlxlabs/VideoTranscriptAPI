@@ -337,101 +337,142 @@ class DialogRenderer:
     def render_with_cache_analysis(self, cache_dir: str, fallback_text: Optional[str] = None) -> str:
         """
         基于缓存分析的智能渲染
-        
+
         Args:
             cache_dir: 缓存目录路径
             fallback_text: 降级文本内容
-            
+
         Returns:
             str: 渲染后的HTML
         """
         try:
+            logger.info(f"开始智能渲染，缓存目录: {cache_dir}")
+
             # 分析缓存能力
             capabilities = analyze_cache_capabilities(cache_dir)
-            
+
             # 根据能力选择渲染策略
             strategy = self._get_optimal_rendering_strategy(capabilities)
-            
-            logger.debug(f"缓存 {cache_dir} 使用渲染策略: {strategy}")
-            
+
+            logger.info(f"最终选择的渲染策略: {strategy}")
+
             if strategy == 'structured':
+                logger.info("执行结构化渲染路径")
                 return self._render_from_structured_data(cache_dir)
             elif strategy == 'mapped':
+                logger.info("执行映射渲染路径")
                 return self._render_from_speaker_mapping(cache_dir)
+            elif strategy == 'capswriter_long_text':
+                logger.info("执行CapsWriter长文本渲染路径")
+                return self._render_capswriter_long_text(cache_dir, fallback_text)
             elif strategy == 'detected':
+                logger.info("执行文本检测渲染路径")
                 return self._render_with_text_detection(cache_dir, fallback_text)
             else:
+                logger.info("执行普通文本渲染路径（降级）")
                 return self._render_normal_text_from_cache(cache_dir, fallback_text)
-                
+
         except Exception as e:
-            logger.error(f"智能渲染失败 {cache_dir}: {e}")
+            logger.error(f"智能渲染失败 {cache_dir}: {e}", exc_info=True)
             # 降级到基础文本渲染
             if fallback_text:
+                logger.warning("降级到基础文本渲染（使用fallback_text）")
                 return self.render_dialog_html(fallback_text)
             else:
+                logger.warning("降级到基础文本渲染（从缓存读取）")
                 return self._render_normal_text_from_cache(cache_dir, fallback_text)
     
     def render_original_transcript_with_cache_analysis(self, cache_dir: str, fallback_text: Optional[str] = None) -> str:
         """
         基于缓存分析的智能渲染（专门用于原始转录文本）
         当存在校对文本时，优先显示原始转录内容以避免重复
-        
+
         Args:
             cache_dir: 缓存目录路径
             fallback_text: 降级文本内容
-            
+
         Returns:
             str: 渲染后的HTML
         """
         try:
+            logger.info(f"开始原始转录智能渲染，缓存目录: {cache_dir}")
+
             # 分析缓存能力
             capabilities = analyze_cache_capabilities(cache_dir)
-            
+
             # 检查是否存在校对文本
             calibrated_file = os.path.join(cache_dir, 'llm_calibrated.txt')
             has_calibrated = os.path.exists(calibrated_file)
-            
+
             # 根据能力选择渲染策略
             strategy = self._get_optimal_rendering_strategy(capabilities)
-            
-            logger.debug(f"原始转录渲染，缓存 {cache_dir} 使用策略: {strategy}, 有校对文本: {has_calibrated}")
-            
+
+            logger.info(f"原始转录渲染策略: {strategy}, 有校对文本: {has_calibrated}")
+
             if strategy == 'structured':
+                logger.info("执行结构化渲染路径（原始转录）")
                 return self._render_from_structured_data(cache_dir)
             elif strategy == 'mapped':
+                logger.info("执行映射渲染路径（原始转录）")
                 return self._render_from_speaker_mapping(cache_dir)
+            elif strategy == 'capswriter_long_text':
+                logger.info("执行CapsWriter长文本渲染路径（原始转录）")
+                return self._render_capswriter_long_text(cache_dir, fallback_text)
             elif strategy == 'detected' and has_calibrated:
                 # 如果有校对文本，尝试显示原始转录而不是校对文本
+                logger.info("执行原始转录检测渲染（跳过校对文本）")
                 return self._render_original_transcript_detection(cache_dir, fallback_text)
             elif strategy == 'detected':
+                logger.info("执行文本检测渲染路径（原始转录）")
                 return self._render_with_text_detection(cache_dir, fallback_text)
             else:
+                logger.info("执行普通文本渲染路径（原始转录，降级）")
                 return self._render_normal_text_from_cache(cache_dir, fallback_text)
-                
+
         except Exception as e:
-            logger.error(f"原始转录智能渲染失败 {cache_dir}: {e}")
+            logger.error(f"原始转录智能渲染失败 {cache_dir}: {e}", exc_info=True)
             # 降级到基础文本渲染
             if fallback_text:
+                logger.warning("降级到基础文本渲染（原始转录，使用fallback_text）")
                 return self.render_dialog_html(fallback_text)
             else:
+                logger.warning("降级到基础文本渲染（原始转录，从缓存读取）")
                 return self._render_normal_text_from_cache(cache_dir, fallback_text)
     
     def _get_optimal_rendering_strategy(self, capabilities: CacheCapabilities) -> str:
         """根据缓存能力选择最优渲染策略"""
+        logger.info(f"开始选择渲染策略，缓存目录: {capabilities.cache_dir}")
+        logger.info(f"  - 主要引擎: {capabilities.primary_engine}")
+        logger.info(f"  - 有说话人数据: {capabilities.has_speaker_data}")
+        logger.info(f"  - 有结构化输出: {capabilities.has_structured_output}")
+        logger.info(f"  - 文件存在情况: {capabilities.files_present}")
+
         # 策略1: 结构化渲染 - 最优
         if capabilities.has_structured_output:
+            logger.info("  [Strategy] 'structured' - Structured rendering based on llm_processed.json")
             return 'structured'
-        
+
         # 策略2: 映射渲染 - 次优，基于FunASR数据和映射关系
-        if (capabilities.has_speaker_data and 
+        if (capabilities.has_speaker_data and
             capabilities.files_present.get('calibrated_text', False)):
+            logger.info("  [Strategy] 'mapped' - Mapping rendering based on FunASR data + calibrated text")
             return 'mapped'
-        
-        # 策略3: 文本检测渲染 - 基础
-        if capabilities.files_present.get('calibrated_text', False):
+
+        # 策略3: CapsWriter长文本渲染 - 针对CapsWriter转录且无说话人数据
+        # 重要：CapsWriter转录的文本没有说话人信息，应该使用长文本分段逻辑
+        if (capabilities.primary_engine == 'capswriter' and
+            not capabilities.has_speaker_data):
+            logger.info("  [Strategy] 'capswriter_long_text' - CapsWriter long text rendering (no speaker data)")
+            return 'capswriter_long_text'
+
+        # 策略4: 文本检测渲染 - 基础（仅当有说话人数据时才尝试检测对话）
+        if (capabilities.files_present.get('calibrated_text', False) and
+            capabilities.has_speaker_data):
+            logger.info("  [Strategy] 'detected' - Text detection rendering (dialog detection)")
             return 'detected'
-        
-        # 策略4: 普通文本渲染 - 降级
+
+        # 策略5: 普通文本渲染 - 降级
+        logger.info("  [Strategy] 'normal' - Normal text rendering (fallback)")
         return 'normal'
     
     def _render_from_structured_data(self, cache_dir: str) -> str:
@@ -519,26 +560,94 @@ class DialogRenderer:
             logger.error(f"映射渲染失败 {cache_dir}: {e}")
             raise
     
+    def _render_capswriter_long_text(self, cache_dir: str, fallback_text: Optional[str] = None) -> str:
+        """
+        CapsWriter长文本渲染 - 针对无说话人数据的纯文本转录
+        强制使用长文本分段逻辑，不尝试检测对话格式
+
+        Args:
+            cache_dir: 缓存目录路径
+            fallback_text: 降级文本内容
+
+        Returns:
+            str: 渲染后的HTML
+        """
+        try:
+            logger.info(f"开始CapsWriter长文本渲染: {cache_dir}")
+
+            # 文本优先级：校对文本 > 原始转录文本 > 降级文本
+            text_content = None
+            source_file = None
+
+            # 优先使用校对文本（LLM处理后的文本质量更高）
+            calibrated_file = os.path.join(cache_dir, 'llm_calibrated.txt')
+            if os.path.exists(calibrated_file):
+                with open(calibrated_file, 'r', encoding='utf-8') as f:
+                    text_content = f.read().strip()
+                source_file = 'llm_calibrated.txt'
+                logger.info(f"  使用校对文本作为源: {source_file}")
+
+            # 降级到原始CapsWriter转录文本
+            if not text_content:
+                capswriter_file = os.path.join(cache_dir, 'transcript_capswriter.txt')
+                if os.path.exists(capswriter_file):
+                    with open(capswriter_file, 'r', encoding='utf-8') as f:
+                        text_content = f.read().strip()
+                    source_file = 'transcript_capswriter.txt'
+                    logger.info(f"  使用CapsWriter原始转录: {source_file}")
+
+            # 最后降级到fallback_text
+            if not text_content:
+                text_content = fallback_text
+                source_file = 'fallback_text'
+                logger.info(f"  使用降级文本: {source_file}")
+
+            if not text_content:
+                raise ValueError("无可用文本内容")
+
+            logger.info(f"  文本长度: {len(text_content)} 字符")
+
+            # 强制使用长文本渲染，不检测对话格式
+            # 直接调用 _render_normal_text，跳过 detect_dialog_mode 检测
+            html_result = self._render_normal_text(text_content)
+
+            logger.info(f"  CapsWriter长文本渲染完成，HTML长度: {len(html_result)} 字符")
+            return html_result
+
+        except Exception as e:
+            logger.error(f"CapsWriter长文本渲染失败 {cache_dir}: {e}", exc_info=True)
+            raise
+
     def _render_with_text_detection(self, cache_dir: str, fallback_text: Optional[str] = None) -> str:
         """基于文本检测渲染 - 基础路径"""
         try:
+            logger.info(f"开始文本检测渲染: {cache_dir}")
+
             # 读取校对文本
             calibrated_file = os.path.join(cache_dir, 'llm_calibrated.txt')
-            
+
             if os.path.exists(calibrated_file):
                 with open(calibrated_file, 'r', encoding='utf-8') as f:
                     text_content = f.read()
+                logger.info(f"  使用校对文本，长度: {len(text_content)} 字符")
             else:
                 text_content = fallback_text
-            
+                logger.info(f"  使用降级文本，长度: {len(text_content) if text_content else 0} 字符")
+
             if not text_content:
                 raise ValueError("无可用文本内容")
-            
-            # 使用现有的文本检测渲染
-            return self.render_dialog_html(text_content)
-            
+
+            # 使用现有的文本检测渲染（会检测对话格式）
+            is_dialog = self.detect_dialog_mode(text_content)
+            logger.info(f"  检测到对话模式: {is_dialog}")
+
+            html_result = self.render_dialog_html(text_content)
+            logger.info(f"  文本检测渲染完成，HTML长度: {len(html_result)} 字符")
+
+            return html_result
+
         except Exception as e:
-            logger.error(f"文本检测渲染失败 {cache_dir}: {e}")
+            logger.error(f"文本检测渲染失败 {cache_dir}: {e}", exc_info=True)
             raise
     
     def _render_calibrated_text_detection(self, cache_dir: str) -> str:
@@ -800,53 +909,65 @@ def render_transcript_content_smart(cache_dir: str, fallback_text: Optional[str]
 def render_calibrated_content_smart(cache_dir: str) -> Optional[str]:
     """
     智能渲染校对文本内容的便捷函数，专门用于校对文本区块
-    
+
     Args:
         cache_dir: 缓存目录路径
-        
+
     Returns:
         str: 渲染后的HTML，如果没有校对文本则返回None
     """
     if not cache_dir or not os.path.exists(cache_dir):
+        logger.debug(f"校对文本渲染：缓存目录不存在: {cache_dir}")
         return None
-    
+
     # 检查是否存在校对文本文件
     calibrated_file = os.path.join(cache_dir, 'llm_calibrated.txt')
     if not os.path.exists(calibrated_file):
+        logger.debug(f"校对文本渲染：校对文本不存在: {calibrated_file}")
         return None
-    
+
     try:
+        logger.info(f"开始校对文本专用渲染: {cache_dir}")
+
         # 使用智能渲染系统处理校对文本，但强制使用校对文本内容
         renderer = DialogRenderer()
-        
+
         # 分析缓存能力
         capabilities = analyze_cache_capabilities(cache_dir)
-        
+
         # 根据能力选择渲染策略，但总是基于校对文本
         strategy = renderer._get_optimal_rendering_strategy(capabilities)
-        
-        logger.debug(f"校对文本专用渲染，缓存 {cache_dir} 使用策略: {strategy}")
-        
+
+        logger.info(f"校对文本专用渲染策略: {strategy}")
+
         # 强制使用校对文本内容进行渲染
         if strategy == 'structured':
             # 对于结构化数据，我们仍然使用结构化渲染，因为它包含了校对后的内容和时间信息
+            logger.info("校对文本使用结构化渲染")
             return renderer._render_from_structured_data(cache_dir)
         elif strategy == 'mapped':
             # 对于映射渲染，我们也使用它，因为它基于校对文本和说话人映射
+            logger.info("校对文本使用映射渲染")
             return renderer._render_from_speaker_mapping(cache_dir)
+        elif strategy == 'capswriter_long_text':
+            # CapsWriter转录的校对文本，使用长文本渲染
+            logger.info("校对文本使用CapsWriter长文本渲染")
+            return renderer._render_capswriter_long_text(cache_dir, None)
         else:
             # 对于其他情况，强制使用校对文本进行检测渲染
+            logger.info("校对文本使用检测渲染")
             return renderer._render_calibrated_text_detection(cache_dir)
-        
+
     except Exception as e:
-        logger.error(f"智能渲染校对文本失败 {cache_dir}: {e}")
+        logger.error(f"智能渲染校对文本失败 {cache_dir}: {e}", exc_info=True)
         # 降级到基础文本渲染
         try:
+            logger.warning("降级到基础校对文本渲染")
             with open(calibrated_file, 'r', encoding='utf-8') as f:
                 calibrated_text = f.read().strip()
             if calibrated_text:
                 renderer = DialogRenderer()
                 return renderer.render_dialog_html(calibrated_text)
         except Exception as fallback_e:
-            logger.error(f"降级渲染校对文本也失败 {cache_dir}: {fallback_e}")
+            logger.error(f"降级渲染校对文本也失败 {cache_dir}: {fallback_e}", exc_info=True)
         return None

@@ -46,42 +46,54 @@ class CacheCapabilityAnalyzer:
     def analyze_cache(self, cache_dir: str) -> CacheCapabilities:
         """
         分析缓存目录的完整能力信息
-        
+
         Args:
             cache_dir: 缓存目录路径
-            
+
         Returns:
             CacheCapabilities: 缓存能力信息
         """
         try:
+            logger.info(f"开始分析缓存能力: {cache_dir}")
             capabilities = CacheCapabilities(cache_dir=cache_dir)
-            
+
             # 检查文件存在性
             capabilities.files_present = self._check_files_existence(cache_dir)
-            
+            logger.info(f"  File existence status:")
+            for file_key, exists in capabilities.files_present.items():
+                if exists:
+                    logger.info(f"    [OK] {file_key}: {self.cache_files.get(file_key, 'unknown')}")
+
             # 检测格式版本
             capabilities.format_version = self._detect_format_version(cache_dir, capabilities.files_present)
             capabilities.has_structured_output = (capabilities.format_version == 'v2')
-            
+            logger.info(f"  格式版本: {capabilities.format_version}")
+            logger.info(f"  有结构化输出: {capabilities.has_structured_output}")
+
             # 分析转录引擎类型
             capabilities.primary_engine = self._detect_primary_engine(capabilities.files_present)
-            
+            logger.info(f"  主要引擎: {capabilities.primary_engine}")
+
             # 分析说话人数据
             if capabilities.primary_engine == 'funasr':
                 capabilities.has_speaker_data = True
                 capabilities.speakers_list = self._extract_speakers_from_funasr(cache_dir)
+                logger.info(f"  有说话人数据: True (FunASR)")
+                logger.info(f"  说话人列表: {capabilities.speakers_list}")
             else:
                 capabilities.has_speaker_data = False
                 capabilities.speakers_list = []
-            
+                logger.info(f"  有说话人数据: False (CapsWriter或其他)")
+
             # 计算升级优先级
             capabilities.upgrade_priority = self._calculate_upgrade_priority(cache_dir, capabilities)
-            
-            logger.debug(f"缓存分析完成 {cache_dir}: {capabilities}")
+            logger.info(f"  升级优先级: {capabilities.upgrade_priority}")
+
+            logger.info(f"缓存分析完成: {cache_dir}")
             return capabilities
-            
+
         except Exception as e:
-            logger.error(f"缓存分析失败 {cache_dir}: {e}")
+            logger.error(f"缓存分析失败 {cache_dir}: {e}", exc_info=True)
             # 返回默认能力信息
             return CacheCapabilities(
                 cache_dir=cache_dir,
