@@ -375,6 +375,18 @@ class EnhancedLLMProcessor:
                     f"{formatted_transcript}"
                 )
 
+            # 添加统计信息
+            original_length = len(transcript)
+            calibrated_length = len(result_dict.get('校对文本', ''))
+            summary_length = len(result_dict.get('内容总结', ''))
+
+            result_dict['skip_summary'] = False  # 分段处理总是生成总结
+            result_dict['stats'] = {
+                'original_length': original_length,
+                'calibrated_length': calibrated_length,
+                'summary_length': summary_length
+            }
+
             return result_dict
         finally:
             # 清理临时文件
@@ -443,6 +455,18 @@ class EnhancedLLMProcessor:
                     f"{'='*60}\n\n"
                     f"{formatted_transcript}"
                 )
+
+            # 添加统计信息
+            original_length = len(transcript)
+            calibrated_length = len(result_dict.get('校对文本', ''))
+            summary_length = len(result_dict.get('内容总结', ''))
+
+            result_dict['skip_summary'] = False  # 分段处理总是生成总结
+            result_dict['stats'] = {
+                'original_length': original_length,
+                'calibrated_length': calibrated_length,
+                'summary_length': summary_length
+            }
 
             return result_dict
         finally:
@@ -937,7 +961,7 @@ class EnhancedLLMProcessor:
             
             if not original_speakers:
                 logger.warning("FunASR数据中未找到说话人信息，降级到文本处理")
-                return self._process_without_speakers(funasr_data, video_metadata, cache_dir)
+                return self._process_without_speakers(funasr_data, video_metadata, cache_dir, selected_summary_model, selected_reasoning_effort)
             
             # 2. 生成说话人推断提示词
             speaker_inference_prompt = self._generate_speaker_inference_prompt(funasr_data, original_speakers, video_metadata)
@@ -995,16 +1019,32 @@ class EnhancedLLMProcessor:
             self._save_structured_result(cache_dir, structured_result, calibrated_text, summary_text)
             
             logger.info(f"结构化LLM处理完成，已保存llm_processed.json到: {cache_dir}")
+
+            # 计算统计信息
+            original_text = self._extract_text_from_funasr(funasr_data)
+            original_length = len(original_text)
+            calibrated_length = len(calibrated_text)
+            summary_length = len(summary_text) if summary_text else 0
+
+            # 判断是否跳过了总结（结构化处理总是生成总结）
+            skip_summary = False
+
             return {
                 '校对文本': calibrated_text,
                 '内容总结': summary_text,
-                '结构化数据': structured_result
+                '结构化数据': structured_result,
+                'skip_summary': skip_summary,
+                'stats': {
+                    'original_length': original_length,
+                    'calibrated_length': calibrated_length,
+                    'summary_length': summary_length
+                }
             }
             
         except Exception as e:
             logger.error(f"结构化LLM处理失败: {e}")
             # 降级到传统处理方式
-            return self._fallback_to_traditional_processing(funasr_data, video_metadata, cache_dir)
+            return self._fallback_to_traditional_processing(funasr_data, video_metadata, cache_dir, selected_summary_model, selected_reasoning_effort)
     
     def _generate_speaker_inference_prompt(self, funasr_data: Dict, original_speakers: List[str], video_metadata: Dict) -> str:
         """生成说话人推断提示词"""
@@ -1347,11 +1387,19 @@ class EnhancedLLMProcessor:
         
         logger.info(f"结构化结果已保存到: {cache_dir}")
     
-    def _process_without_speakers(self, funasr_data: Dict, video_metadata: Dict, cache_dir: str) -> Dict[str, Any]:
-        """处理无说话人数据的情况"""
+    def _process_without_speakers(self, funasr_data: Dict, video_metadata: Dict, cache_dir: str, selected_summary_model: str, selected_reasoning_effort: str) -> Dict[str, Any]:
+        """处理无说话人数据的情况
+
+        Args:
+            funasr_data: FunASR转录数据
+            video_metadata: 视频元数据
+            cache_dir: 缓存目录
+            selected_summary_model: 选定的总结模型
+            selected_reasoning_effort: 选定的 reasoning_effort
+        """
         # 提取纯文本
         text_content = self._extract_text_from_funasr(funasr_data)
-        
+
         # 使用传统LLM处理
         llm_task = {
             'task_id': 'structured_fallback',
@@ -1362,8 +1410,8 @@ class EnhancedLLMProcessor:
             'description': video_metadata.get('description', ''),
             'transcription_data': funasr_data
         }
-        
-        return self._process_original_logic(llm_task)
+
+        return self._process_original_logic(llm_task, selected_summary_model, selected_reasoning_effort)
     
     def _extract_text_from_funasr(self, funasr_data: Dict) -> str:
         """从FunASR数据中提取纯文本"""
@@ -1387,10 +1435,18 @@ class EnhancedLLMProcessor:
         
         return ' '.join(text_parts)
     
-    def _fallback_to_traditional_processing(self, funasr_data: Dict, video_metadata: Dict, cache_dir: str) -> Dict[str, Any]:
-        """降级到传统处理方式"""
+    def _fallback_to_traditional_processing(self, funasr_data: Dict, video_metadata: Dict, cache_dir: str, selected_summary_model: str, selected_reasoning_effort: str) -> Dict[str, Any]:
+        """降级到传统处理方式
+
+        Args:
+            funasr_data: FunASR转录数据
+            video_metadata: 视频元数据
+            cache_dir: 缓存目录
+            selected_summary_model: 选定的总结模型
+            selected_reasoning_effort: 选定的 reasoning_effort
+        """
         logger.warning("降级到传统LLM处理方式")
-        return self._process_without_speakers(funasr_data, video_metadata, cache_dir)
+        return self._process_without_speakers(funasr_data, video_metadata, cache_dir, selected_summary_model, selected_reasoning_effort)
     
     def _get_current_timestamp(self) -> str:
         """获取当前时间戳"""
