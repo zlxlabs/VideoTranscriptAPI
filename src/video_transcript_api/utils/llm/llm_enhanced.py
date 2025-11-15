@@ -481,23 +481,43 @@ class EnhancedLLMProcessor:
         result_dict = {}
 
         def run_calibrate():
-            result_dict['校对文本'] = call_llm_api(
-                self.calibrate_model, calibrate_prompt, self.api_key,
-                self.base_url, self.max_retries, self.retry_delay,
-                self.calibrate_reasoning_effort, "calibrate"
-            )
+            try:
+                calibrated = call_llm_api(
+                    self.calibrate_model, calibrate_prompt, self.api_key,
+                    self.base_url, self.max_retries, self.retry_delay,
+                    self.calibrate_reasoning_effort, "calibrate"
+                )
+                # 检查是否返回空内容
+                if not calibrated or not calibrated.strip():
+                    logger.warning(f"校对返回空内容: {task_id}")
+                    result_dict['校对文本'] = f"【LLM call failed】Empty response from calibrate API"
+                else:
+                    result_dict['校对文本'] = calibrated
+            except Exception as e:
+                logger.error(f"校对线程异常: {task_id}, 错误: {e}", exc_info=True)
+                result_dict['校对文本'] = f"【LLM call failed】Thread exception: {e}"
 
         def run_summary():
-            # 生成总结提示词
-            summary_prompt = self._generate_original_summary_prompt(
-                transcript, video_title, author, description, use_speaker_recognition, transcription_data
-            )
-            # 使用选定的总结模型和 reasoning_effort
-            result_dict['内容总结'] = call_llm_api(
-                selected_summary_model, summary_prompt, self.api_key,
-                self.base_url, self.max_retries, self.retry_delay,
-                selected_reasoning_effort, "summary"
-            )
+            try:
+                # 生成总结提示词
+                summary_prompt = self._generate_original_summary_prompt(
+                    transcript, video_title, author, description, use_speaker_recognition, transcription_data
+                )
+                # 使用选定的总结模型和 reasoning_effort
+                summary = call_llm_api(
+                    selected_summary_model, summary_prompt, self.api_key,
+                    self.base_url, self.max_retries, self.retry_delay,
+                    selected_reasoning_effort, "summary"
+                )
+                # 检查是否返回空内容
+                if not summary or not summary.strip():
+                    logger.warning(f"总结返回空内容: {task_id}")
+                    result_dict['内容总结'] = f"【LLM call failed】Empty response from summary API"
+                else:
+                    result_dict['内容总结'] = summary
+            except Exception as e:
+                logger.error(f"总结线程异常: {task_id}, 错误: {e}", exc_info=True)
+                result_dict['内容总结'] = f"【LLM call failed】Thread exception: {e}"
 
         # 启动校对线程
         t1 = threading.Thread(target=run_calibrate)
