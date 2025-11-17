@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import os
 import threading
+import time
 from typing import Optional, Dict, Any
 
 from fastapi import HTTPException, Header, Request
@@ -24,6 +25,7 @@ from ...downloaders import create_downloader
 from ...transcriber import FunASRSpeakerClient, Transcriber
 from ...utils.llm import call_llm_api
 from ...utils.notifications import WechatNotifier, send_long_text_wechat
+from ...utils.rendering import get_base_url
 
 logger = get_logger()
 config = get_config()
@@ -210,34 +212,120 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                 transcript = cache_data["transcript_data"]
                 logger.info("使用 CapsWriter 缓存文本")
 
+            has_llm_calibrated = "llm_calibrated" in cache_data
+            has_llm_summary = "llm_summary" in cache_data
+
+            if has_llm_calibrated and has_llm_summary:
+                logger.info("缓存中已有 LLM 结果，直接使用")
+                cache_type = "含说话人识别" if has_speaker_recognition else "普通转录"
+                engine_info = "FunASR" if has_speaker_recognition else "CapsWriter"
+                task_notifier.notify_task_status(
+                    url,
+                    f"使用已有缓存({cache_type}-{engine_info}，含LLM结果)",
+                    title=video_title,
+                    author=author,
+                    transcript="使用缓存的校对和总结文本...",
+                )
+
+                send_long_text_wechat(
+                    title=video_title,
+                    url=url,
+                    text=cache_data["llm_summary"],
+                    is_summary=True,
+                    has_speaker_recognition=has_speaker_recognition,
+                    webhook=wechat_webhook,
+                )
+                logger.info("缓存模式 - 发送总结文本")
+                time.sleep(0.1)
+
+                task_info = cache_manager.get_task_by_id(task_id)
+                if task_info and task_info.get("view_token"):
+                    base_url = get_base_url()
+                    view_url = f"{base_url}/view/{task_info['view_token']}"
+                    clean_url = WechatNotifier()._clean_url(url)
+                    sanitized_title = video_title or "转录任务"
+                    try:
+                        from ...utils.risk_control import is_enabled, sanitize_text
+
+                        if is_enabled():
+                            title_result = sanitize_text(sanitized_title, text_type="title")
+                            if title_result["has_sensitive"]:
+                                logger.info(
+                                    f"[风控] 完成通知标题包含 {len(title_result['sensitive_words'])} 个敏感词，已处理"
+                                )
+                                sanitized_title = title_result["sanitized_text"]
+                    except Exception as risk_exc:
+                        logger.exception(f"完成通知标题风控处理失败: {risk_exc}")
+
+                    completion_message = (
+                        f"# {sanitized_title}\n\n"
+                        f"{clean_url}\n\n"
+                        f"🔗 总结和校对：\n{view_url}\n\n"
+                        "✅ **【任务完成】**"
+                    )
+                    WechatNotifier(wechat_webhook).send_text(completion_message, skip_risk_control=True)
+                    logger.info("缓存模式 - 任务完成通知已发送")
+
+                cache_manager.update_task_status(
+                    task_id,
+                    "success",
+                    platform=cache_data.get("platform"),
+                    media_id=cache_data.get("media_id"),
+                    title=video_title,
+                    author=author,
+                    cache_id=cache_data.get("cache_id"),
+                )
+
+                return {
+                    "status": "success",
+                    "message": "使用已有缓存成功",
+                    "data": {
+                        "video_title": video_title,
+                        "author": author,
+                        "transcript": transcript,
+                        "cached": True,
+                        "speaker_recognition": has_speaker_recognition,
+                    },
+                }
+
+            task_notifier.notify_task_status(
+                url,
+                "使用已有缓存",
+                title=video_title,
+                author=author,
+                transcript="正在处理已存在的转录文本...",
+            )
+
             try:
                 llm_task_queue.put(
                     {
                         "task_id": task_id,
                         "url": url,
-                        "platform": platform,
-                        "media_id": video_id,
+                        "platform": cache_data.get("platform"),
+                        "media_id": cache_data.get("media_id"),
                         "video_title": video_title,
                         "author": author,
                         "description": description,
                         "transcript": transcript,
                         "use_speaker_recognition": has_speaker_recognition,
-                        "transcription_data": transcription_data,
-                        "is_generic": is_generic_downloader,
+                        "transcription_data": transcription_data if has_speaker_recognition else None,
+                        "is_generic": is_generic_downloader or is_from_generic,
                         "wechat_webhook": wechat_webhook,
                     }
                 )
+                logger.info(f"将LLM任务加入队列: {task_id}, 标题: {video_title}, 说话人识别: {has_speaker_recognition}")
             except Exception as exc:
                 logger.exception(f"将LLM任务加入队列失败（缓存）: {exc}")
                 task_notifier.send_text(f"【LLM任务加入队列失败】{exc}")
 
-            result = {
+            return {
                 "status": "success",
-                "message": "转录成功（来自缓存）",
+                "message": "使用已有缓存成功",
                 "data": {
                     "video_title": video_title,
                     "author": author,
                     "transcript": transcript,
+                    "cached": True,
                     "speaker_recognition": has_speaker_recognition,
                 },
             }
