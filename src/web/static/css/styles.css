@@ -954,3 +954,122 @@ body {
 ::-webkit-scrollbar-thumb:hover {
     background: var(--scrollbar-thumb-hover);
 }
+
+/* ========== 转录统计卡片样式 ========== */
+.stats-card {
+    background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-end) 100%);
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 2rem;
+    color: var(--header-text);
+    box-shadow: 0 4px 6px var(--shadow-light);
+    transition: all 0.3s ease;
+}
+
+.stats-card h3 {
+    margin: 0 0 1.25rem 0;
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: var(--header-text);
+    opacity: 0.95;
+}
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 1rem;
+}
+
+.stat-item {
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    padding: 1rem;
+    text-align: center;
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    transition: all 0.2s ease;
+}
+
+.stat-item:hover {
+    background: rgba(255, 255, 255, 0.25);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+}
+
+.stat-label {
+    display: block;
+    font-size: 0.85rem;
+    opacity: 0.9;
+    margin-bottom: 0.5rem;
+    font-weight: 500;
+    color: var(--header-text);
+}
+
+.stat-value {
+    display: block;
+    font-size: 1.75rem;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    line-height: 1.2;
+    margin-bottom: 0.25rem;
+    color: var(--header-text);
+}
+
+.stat-unit {
+    display: block;
+    font-size: 0.75rem;
+    opacity: 0.8;
+    font-weight: 500;
+    color: var(--header-text);
+}
+
+/* 深色主题适配 */
+[data-theme="dark"] .stats-card {
+    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+[data-theme="dark"] .stat-item {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.1);
+}
+
+[data-theme="dark"] .stat-item:hover {
+    background: rgba(255, 255, 255, 0.12);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+    .stats-grid {
+        grid-template-columns: 1fr;
+        gap: 0.75rem;
+    }
+
+    .stats-card {
+        padding: 1.25rem;
+    }
+
+    .stat-value {
+        font-size: 1.5rem;
+    }
+}
+
+@media (max-width: 480px) {
+    .stats-card h3 {
+        font-size: 1.1rem;
+    }
+
+    .stats-card {
+        padding: 1rem;
+        margin-bottom: 1.5rem;
+    }
+
+    .stat-item {
+        padding: 0.875rem;
+    }
+
+    .stat-value {
+        font-size: 1.35rem;
+    }
+}

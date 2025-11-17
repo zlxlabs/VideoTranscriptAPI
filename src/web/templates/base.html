@@ -525,6 +525,61 @@
         [data-theme="dark"] .theme-toggle:hover {
             background: rgba(0, 0, 0, 0.3);
         }
+
+        /* ========== 转录统计单行样式 ========== */
+        .stats-line {
+            padding: 12px 30px;
+            margin: 0;
+            background: rgba(0, 0, 0, 0.03);
+            border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+            font-size: 0.9rem;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .stats-icon {
+            font-size: 1rem;
+            opacity: 0.8;
+        }
+
+        .stats-label {
+            font-weight: 600;
+            opacity: 0.9;
+        }
+
+        .stats-content {
+            opacity: 0.85;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+
+        /* 深色主题适配 */
+        [data-theme="dark"] .stats-line {
+            background: rgba(255, 255, 255, 0.03);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        /* 响应式设计 */
+        @media (max-width: 768px) {
+            .stats-line {
+                padding: 10px 20px;
+                font-size: 0.85rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .stats-line {
+                padding: 10px 15px;
+                font-size: 0.8rem;
+                flex-wrap: wrap;
+            }
+
+            .stats-content {
+                flex-basis: 100%;
+                margin-top: 5px;
+            }
+        }
     </style>
     {% block extra_css %}{% endblock %}
 </head>

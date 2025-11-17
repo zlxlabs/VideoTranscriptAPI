@@ -221,11 +221,68 @@ async def view_transcript(view_token: str, request: Request, raw: Optional[str] 
                 view_data["summary_html"] = render_markdown_to_html(view_data["summary"])
 
             cache_dir = view_data.get("cache_dir")
+
+            # 计算字数统计
+            stats = {
+                'original_length': 0,
+                'calibrated_length': 0,
+                'summary_length': 0
+            }
+
             if cache_dir and os.path.exists(cache_dir):
                 # 统一进行一次缓存能力分析，避免重复
                 logger.debug("开始统一缓存能力分析: %s", cache_dir)
                 cache_capabilities = analyze_cache_capabilities(cache_dir)
                 logger.debug("缓存能力分析完成，复用于渲染和升级检查")
+
+                cache_dir_path = Path(cache_dir)
+
+                # 1. 计算原始转录字数
+                funasr_file = cache_dir_path / "transcript_funasr.json"
+                capswriter_file = cache_dir_path / "transcript_capswriter.txt"
+
+                if funasr_file.exists():
+                    # FunASR JSON 格式：提取 text 字段
+                    try:
+                        import json
+                        with open(funasr_file, 'r', encoding='utf-8') as f:
+                            funasr_data = json.load(f)
+                        # 复用现有的格式化方法
+                        from ...transcriber import FunASRSpeakerClient
+                        funasr_client = FunASRSpeakerClient()
+                        transcript_text = funasr_client.format_transcript_with_speakers(funasr_data)
+                        stats['original_length'] = len(transcript_text)
+                        logger.debug(f"原始转录字数(FunASR): {stats['original_length']}")
+                    except Exception as exc:
+                        logger.error(f"计算FunASR转录字数失败: {exc}")
+                elif capswriter_file.exists():
+                    # CapsWriter 纯文本格式
+                    try:
+                        with open(capswriter_file, 'r', encoding='utf-8') as f:
+                            stats['original_length'] = len(f.read())
+                        logger.debug(f"原始转录字数(CapsWriter): {stats['original_length']}")
+                    except Exception as exc:
+                        logger.error(f"计算CapsWriter转录字数失败: {exc}")
+
+                # 2. 计算校对文本字数
+                calibrated_file = cache_dir_path / "llm_calibrated.txt"
+                if calibrated_file.exists():
+                    try:
+                        with open(calibrated_file, 'r', encoding='utf-8') as f:
+                            stats['calibrated_length'] = len(f.read())
+                        logger.debug(f"校对文本字数: {stats['calibrated_length']}")
+                    except Exception as exc:
+                        logger.error(f"计算校对文本字数失败: {exc}")
+
+                # 3. 计算总结文本字数
+                summary_file = cache_dir_path / "llm_summary.txt"
+                if summary_file.exists():
+                    try:
+                        with open(summary_file, 'r', encoding='utf-8') as f:
+                            stats['summary_length'] = len(f.read())
+                        logger.debug(f"总结文本字数: {stats['summary_length']}")
+                    except Exception as exc:
+                        logger.error(f"计算总结文本字数失败: {exc}")
 
                 fallback_text = view_data.get("transcript", "")
                 transcript_path = Path(cache_dir) / "llm_calibrated.txt"
@@ -258,6 +315,9 @@ async def view_transcript(view_token: str, request: Request, raw: Optional[str] 
                 "summary": f"{base_url}/view/{view_token}?raw=summary",
                 "transcript": f"{base_url}/view/{view_token}?raw=transcript",
             }
+
+            # 传递字数统计数据给模板
+            view_data["stats"] = stats
 
             return templates.TemplateResponse(
                 "transcript.html",
