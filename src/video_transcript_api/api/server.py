@@ -9,7 +9,7 @@ import threading
 import queue
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks, Request
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, Response
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -1383,27 +1383,237 @@ async def get_webhook_status_info(webhook_url: str, user_info: dict = Depends(ve
     )
 
 
-@app.get("/view/{view_token}", response_class=HTMLResponse)
-async def view_transcript(view_token: str, request: Request):
+def sanitize_filename(filename: str) -> str:
     """
-    查看转录页面（无需认证）
-    
+    清理文件名中的非法字符
+
+    Args:
+        filename: 原始文件名
+
+    Returns:
+        str: 清理后的安全文件名
+    """
+    # 移除或替换 Windows 和 Linux 中的非法字符
+    invalid_chars = '<>:"/\\|?*'
+    for char in invalid_chars:
+        filename = filename.replace(char, '_')
+
+    # 移除控制字符
+    filename = ''.join(char for char in filename if ord(char) >= 32)
+
+    # 移除首尾空格和点
+    filename = filename.strip('. ')
+
+    # 如果为空，使用默认名称
+    if not filename:
+        filename = "未命名"
+
+    return filename
+
+
+def generate_download_filename(title: str, platform: str, content_type: str) -> str:
+    """
+    生成下载文件名：视频标题-校对文本-平台.txt
+
+    Args:
+        title: 视频标题
+        platform: 平台名称（youtube/bilibili/douyin等）
+        content_type: 内容类型（calibrated/summary/transcript）
+
+    Returns:
+        str: 格式化的文件名
+    """
+    # 清理标题中的非法字符
+    safe_title = sanitize_filename(title)
+
+    # 内容类型映射
+    type_map = {
+        "calibrated": "校对文本",
+        "summary": "总结文本",
+        "transcript": "原始转录"
+    }
+
+    # 平台名称映射
+    platform_map = {
+        "youtube": "YouTube",
+        "bilibili": "哔哩哔哩",
+        "douyin": "抖音",
+        "xiaohongshu": "小红书",
+        "xiaoyuzhou": "小宇宙",
+        "generic": "自定义"
+    }
+
+    content_name = type_map.get(content_type, content_type)
+    platform_name = platform_map.get(platform, platform)
+
+    # 限制标题长度，避免文件名过长
+    max_title_length = 50
+    if len(safe_title) > max_title_length:
+        safe_title = safe_title[:max_title_length] + "..."
+
+    return f"{safe_title}-{content_name}-{platform_name}.txt"
+
+
+def handle_file_export(view_data: Dict[str, Any], export_type: str) -> Response:
+    """
+    处理文件导出请求（GitHub Raw 模式）
+    - 浏览器：直接显示文本
+    - 下载工具：下载为指定文件名
+
+    Args:
+        view_data: 页面数据
+        export_type: 导出类型（calibrated/summary/transcript）
+
+    Returns:
+        Response: 文件响应
+    """
+    # 1. 检查任务状态
+    if view_data['status'] in ['queued', 'processing']:
+        return Response(
+            content="⏳ 校对文本正在生成中，请稍后再试...\n\n请刷新页面或稍后访问此链接。",
+            media_type="text/plain; charset=utf-8",
+            status_code=202
+        )
+
+    if view_data['status'] == 'file_cleaned':
+        return Response(
+            content="❌ 该文件已被清理\n\n如需重新获取，请重新提交转录任务。",
+            media_type="text/plain; charset=utf-8",
+            status_code=410
+        )
+
+    if view_data['status'] == 'failed':
+        return Response(
+            content="❌ 任务处理失败\n\n请重新提交转录任务。",
+            media_type="text/plain; charset=utf-8",
+            status_code=500
+        )
+
+    if view_data['status'] != 'success':
+        return Response(
+            content=f"❌ 任务状态异常: {view_data['status']}",
+            media_type="text/plain; charset=utf-8",
+            status_code=400
+        )
+
+    # 2. 获取缓存目录
+    cache_dir = view_data.get('cache_dir')
+    if not cache_dir or not os.path.exists(cache_dir):
+        return Response(
+            content="❌ 缓存文件不存在\n\n该文件可能已被清理。",
+            media_type="text/plain; charset=utf-8",
+            status_code=404
+        )
+
+    # 3. 根据导出类型确定文件路径
+    file_path = None
+
+    if export_type == 'calibrated':
+        file_path = Path(cache_dir) / 'llm_calibrated.txt'
+    elif export_type == 'summary':
+        file_path = Path(cache_dir) / 'llm_summary.txt'
+    elif export_type == 'transcript':
+        # 优先返回 FunASR JSON，降级到 CapsWriter TXT
+        funasr_file = Path(cache_dir) / 'transcript_funasr.json'
+        capswriter_file = Path(cache_dir) / 'transcript_capswriter.txt'
+
+        if funasr_file.exists():
+            file_path = funasr_file
+        elif capswriter_file.exists():
+            file_path = capswriter_file
+    else:
+        return Response(
+            content=f"❌ 不支持的导出类型: {export_type}\n\n支持的类型: calibrated, summary, transcript",
+            media_type="text/plain; charset=utf-8",
+            status_code=400
+        )
+
+    # 4. 检查文件是否存在
+    if not file_path or not file_path.exists():
+        content_type_cn = {
+            'calibrated': '校对文本',
+            'summary': '总结文本',
+            'transcript': '原始转录'
+        }.get(export_type, export_type)
+
+        return Response(
+            content=f"❌ {content_type_cn}文件不存在\n\n该任务可能未启用相关功能。",
+            media_type="text/plain; charset=utf-8",
+            status_code=404
+        )
+
+    # 5. 读取文件内容
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except Exception as e:
+        logger.error(f"读取文件失败: {file_path}, 错误: {e}")
+        return Response(
+            content=f"❌ 读取文件失败: {str(e)}",
+            media_type="text/plain; charset=utf-8",
+            status_code=500
+        )
+
+    # 6. 生成文件名
+    title = view_data.get('title', '未命名')
+    platform = view_data.get('platform', 'unknown')
+    filename = generate_download_filename(title, platform, export_type)
+
+    # 7. 对文件名进行 URL 编码（支持中文）
+    from urllib.parse import quote
+    encoded_filename = quote(filename)
+
+    # 8. 构建响应头（GitHub Raw 模式）
+    headers = {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Disposition": f'inline; filename*=UTF-8\'\'{encoded_filename}',
+        "X-Content-Type-Options": "nosniff",  # 防止浏览器嗅探内容类型
+    }
+
+    logger.info(f"导出文件: {export_type}, 文件名: {filename}, view_token: {view_data.get('view_token', 'unknown')[:20]}...")
+
+    # 9. 返回响应
+    return Response(
+        content=content,
+        media_type="text/plain; charset=utf-8",
+        headers=headers
+    )
+
+
+@app.get("/view/{view_token}", response_class=HTMLResponse)
+async def view_transcript(view_token: str, request: Request, raw: Optional[str] = None):
+    """
+    查看转录页面或获取原始文本（无需认证）
+
     Args:
         view_token: 查看token
         request: FastAPI请求对象
-        
+        raw: 获取原始文本（calibrated/summary/transcript），GitHub Raw 模式
+
     Returns:
-        HTMLResponse: 渲染后的HTML页面
+        HTMLResponse: 渲染后的HTML页面，或纯文本响应
     """
     try:
         # 获取页面数据
         view_data = cache_manager.get_view_data_by_token(view_token)
         if not view_data:
+            # 如果是 raw 模式，返回纯文本错误信息
+            if raw:
+                return Response(
+                    content="❌ 页面不存在\n\nview_token 无效或已过期。",
+                    media_type="text/plain; charset=utf-8",
+                    status_code=404
+                )
+            # HTML 模式
             return templates.TemplateResponse(
                 "error.html",
                 {"request": request, "message": "页面不存在", "title": "404 - 页面未找到"}
             )
-        
+
+        # 如果请求导出原始文件（GitHub Raw 模式）
+        if raw:
+            return handle_file_export(view_data, raw)
+
         # 格式化创建时间（所有状态页面都需要）
         if view_data.get('created_at'):
             view_data['created_at_display'] = format_datetime_for_display(view_data['created_at'])
