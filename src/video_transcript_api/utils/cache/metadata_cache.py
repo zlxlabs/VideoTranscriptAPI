@@ -1,6 +1,7 @@
 import os
 import json
 import datetime
+import re
 from ..logging import setup_logger, load_config
 
 # 创建日志记录器
@@ -38,7 +39,8 @@ class MetadataCache:
             video_info: 视频信息字典，包含 title、author、description 等
         """
         try:
-            metadata_filename = self._get_metadata_filename(base_filename)
+            safe_base = re.sub(r'[\\/:*?"<>|]', "_", base_filename)[:200] or "metadata"
+            metadata_filename = self._get_metadata_filename(safe_base)
             metadata_path = os.path.join(self.output_dir, metadata_filename)
             
             # 构建元数据
