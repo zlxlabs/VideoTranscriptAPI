@@ -98,7 +98,7 @@ def get_llm_processing_lock() -> threading.Lock:
 
 def get_template_dir() -> Path:
     """Return src/web/templates directory path."""
-    return Path(__file__).resolve().parents[3] / "web" / "templates"
+    return Path(__file__).resolve().parents[2] / "web" / "templates"
 
 
 def get_templates() -> Jinja2Templates:
@@ -110,4 +110,4 @@ def get_templates() -> Jinja2Templates:
 
 def get_static_dir() -> Path:
     """Return src/web/static directory path."""
-    return Path(__file__).resolve().parents[3] / "web" / "static"
+    return Path(__file__).resolve().parents[2] / "web" / "static"

@@ -340,20 +340,46 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
             description = video_info.get("description", "")
             is_from_generic = video_info.get("is_generic", False)
 
-            subtitle = downloader.get_subtitle(url)
-            if subtitle and subtitle.strip():
-                logger.info("获取到平台字幕，直接使用")
-                transcript = subtitle.strip()
-                use_speaker_recognition = False
+            # 根据 use_speaker_recognition 参数决定处理优先级
+            subtitle = None
+
+            if use_speaker_recognition:
+                # 如果需要说话人识别，强制跳过平台字幕，直接进行下载转录
+                logger.info(f"需要说话人识别，跳过平台字幕获取，强制下载转录: {url}")
+            else:
+                # 只有在不需要说话人识别时，才尝试获取平台字幕
+                if downloader.__class__.__name__ == "YoutubeDownloader":
+                    logger.info(f"不需要说话人识别，尝试获取YouTube平台字幕: {url}")
+                    subtitle = downloader.get_subtitle(url)
+
+            if subtitle:
+                # 如果有字幕，直接使用
+                logger.info(f"使用平台提供的字幕: {url}")
 
                 task_notifier.notify_task_status(
                     url,
-                    "使用平台字幕成功",
+                    "平台字幕获取成功 - 直接使用平台字幕",
                     title=video_title,
                     author=author,
-                    transcript=transcript,
                 )
 
+                # 使用新的缓存系统保存平台字幕
+                cache_result = cache_manager.save_cache(
+                    platform=video_info.get("platform"),
+                    url=url,
+                    media_id=video_info.get("video_id"),
+                    use_speaker_recognition=False,  # 平台字幕没有说话人识别
+                    transcript_data=subtitle,
+                    transcript_type="capswriter",  # 平台字幕按文本格式保存
+                    title=video_title,
+                    author=author,
+                    description=description,
+                )
+
+                if not cache_result:
+                    logger.error("保存平台字幕到缓存失败")
+
+                # 将LLM处理任务加入队列
                 try:
                     llm_task_queue.put(
                         {
@@ -364,8 +390,8 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                             "video_title": video_title,
                             "author": author,
                             "description": description,
-                            "transcript": transcript,
-                            "use_speaker_recognition": False,
+                            "transcript": subtitle,
+                            "use_speaker_recognition": False,  # 平台字幕没有说话人信息
                             "is_generic": is_generic_downloader or is_from_generic,
                             "wechat_webhook": wechat_webhook,
                         }
@@ -381,7 +407,7 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                     "data": {
                         "video_title": video_title,
                         "author": author,
-                        "transcript": transcript,
+                        "transcript": subtitle,
                     },
                 }
                 cache_manager.update_task_status(
@@ -393,143 +419,171 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                     author=author,
                 )
                 return result
-
-            logger.info("下载视频进行转录")
-            task_notifier.notify_task_status(url, f"正在下载视频 - {engine_info}", title=video_title, author=author)
-
-            local_file = None
-            if video_info.get("downloaded") and video_info.get("local_file"):
-                local_file = video_info.get("local_file")
-                logger.info(f"使用已下载文件: {local_file}")
             else:
-                download_url = video_info.get("download_url")
-                filename = video_info.get("filename")
+                # 没有字幕，需要下载音视频并转录
+                logger.info(f"下载视频进行转录: {url}")
+                task_notifier.notify_task_status(url, f"正在下载视频 - {engine_info}", title=video_title, author=author)
 
-                if hasattr(downloader, "download_video_with_priority") and (
-                    "youtube.com" in url or "youtu.be" in url
-                ):
-                    logger.info("YouTube 视频，优先使用 yt-dlp")
-                    local_file = downloader.download_video_with_priority(url, video_info)
-                elif download_url and filename:
-                    local_file = downloader.download_file(download_url, filename)
+                # 检查是否已通过BBDown下载
+                local_file = None
+                if video_info.get("downloaded") and video_info.get("local_file"):
+                    # 使用BBDown已下载的文件
+                    local_file = video_info.get("local_file")
+                    logger.info(f"使用BBDown已下载的文件: {local_file}")
                 else:
-                    error_msg = f"无法获取下载信息: {url}"
+                    # 常规下载流程
+                    download_url = video_info.get("download_url")
+                    filename = video_info.get("filename")
+
+                    # 如果是YouTube链接，使用优先级下载方式（yt-dlp优先，TikHub备用）
+                    if hasattr(downloader, "download_video_with_priority") and (
+                        "youtube.com" in url or "youtu.be" in url
+                    ):
+                        logger.info(f"YouTube视频，使用优先级下载（yt-dlp优先）: {url}")
+                        local_file = downloader.download_video_with_priority(url, video_info)
+                    elif download_url and filename:
+                        # 其他平台使用常规下载流程
+                        local_file = downloader.download_file(download_url, filename)
+                    else:
+                        error_msg = f"无法获取下载信息: {url}"
+                        logger.error(error_msg)
+                        task_notifier.notify_task_status(url, "下载失败", error_msg, title=video_title, author=author)
+                        return {"status": "failed", "message": error_msg}
+
+                if not local_file:
+                    error_msg = f"下载文件失败: {url}"
                     logger.error(error_msg)
                     task_notifier.notify_task_status(url, "下载失败", error_msg, title=video_title, author=author)
                     return {"status": "failed", "message": error_msg}
 
-            if not local_file:
-                error_msg = f"下载文件失败: {url}"
-                logger.error(error_msg)
-                task_notifier.notify_task_status(url, "下载失败", error_msg, title=video_title, author=author)
-                return {"status": "failed", "message": error_msg}
+                try:
+                    # 开始转录
+                    logger.info(f"开始转录音视频: {local_file}")
+                    task_notifier.notify_task_status(url, f"正在转录音视频 - {engine_info}", title=video_title, author=author)
 
-            try:
-                logger.info(f"开始转录音视频: {local_file}")
-                task_notifier.notify_task_status(url, f"正在转录音视频 - {engine_info}", title=video_title, author=author)
-                platform = video_info.get("platform")
-                media_id = video_info.get("video_id")
+                    # 获取平台和媒体ID
+                    platform = video_info.get("platform")
+                    media_id = video_info.get("video_id")
 
-                if use_speaker_recognition:
-                    funasr_client = FunASRSpeakerClient()
-                    funasr_result = funasr_client.transcribe_sync(local_file)
-                    transcript = funasr_result["formatted_text"]
-                    transcription_data = funasr_result["transcription_result"]
+                    # 根据是否需要说话人识别选择转录器
+                    if use_speaker_recognition:
+                        # 使用 FunASR 说话人识别服务器
+                        logger.info("使用 FunASR 说话人识别服务器进行转录")
+                        funasr_client = FunASRSpeakerClient()
+                        funasr_result = funasr_client.transcribe_sync(local_file)
 
-                    cache_result = cache_manager.save_cache(
-                        platform=platform,
-                        url=url,
-                        media_id=media_id,
-                        use_speaker_recognition=True,
-                        transcript_data=transcription_data,
-                        transcript_type="funasr",
-                        title=video_title,
-                        author=author,
-                        description=description,
-                    )
-                    if not cache_result:
-                        logger.error("保存 FunASR 转录结果到缓存失败")
+                        # 获取格式化的转录文本
+                        transcript = funasr_result["formatted_text"]
+                        transcription_data = funasr_result["transcription_result"]
 
-                    transcription_result = {
-                        "transcript": transcript,
-                        "speaker_recognition": True,
-                        "transcription_data": transcription_data,
-                    }
-                else:
-                    transcriber = Transcriber()
-                    temp_output_base = datetime.datetime.now().strftime("%y%m%d-%H%M%S")
-                    transcription_result = transcriber.transcribe(local_file, temp_output_base)
+                        # 使用新缓存系统保存
+                        cache_result = cache_manager.save_cache(
+                            platform=platform,
+                            url=url,
+                            media_id=media_id,
+                            use_speaker_recognition=True,
+                            transcript_data=transcription_data,
+                            transcript_type="funasr",
+                            title=video_title,
+                            author=author,
+                            description=description,
+                        )
+
+                        if not cache_result:
+                            logger.error("保存FunASR转录结果到缓存失败")
+
+                        # 构造与普通转录器兼容的结果
+                        transcription_result = {
+                            "transcript": transcript,
+                            "speaker_recognition": True,
+                            "transcription_data": transcription_data,
+                        }
+                    else:
+                        # 使用普通 CapsWriter 转录器
+                        transcriber = Transcriber()
+                        # 使用时间戳作为临时输出基础名
+                        temp_output_base = datetime.datetime.now().strftime("%y%m%d-%H%M%S")
+                        transcription_result = transcriber.transcribe(local_file, temp_output_base)
+                        transcript = transcription_result.get("transcript", "")
+
+                        # 使用新缓存系统保存
+                        cache_result = cache_manager.save_cache(
+                            platform=platform,
+                            url=url,
+                            media_id=media_id,
+                            use_speaker_recognition=False,
+                            transcript_data=transcript,
+                            transcript_type="capswriter",
+                            title=video_title,
+                            author=author,
+                            description=description,
+                        )
+
+                        if not cache_result:
+                            logger.error("保存CapsWriter转录结果到缓存失败")
+
+                    # 获取转录文本
                     transcript = transcription_result.get("transcript", "")
 
-                    cache_result = cache_manager.save_cache(
-                        platform=platform,
-                        url=url,
-                        media_id=media_id,
-                        use_speaker_recognition=False,
-                        transcript_data=transcript,
-                        transcript_type="capswriter",
+                    # 通知转录完成，包含转录文本预览和服务器类型信息
+                    task_notifier.notify_task_status(
+                        url,
+                        f"转录完成 - {engine_info}",
                         title=video_title,
                         author=author,
-                        description=description,
+                        transcript=transcript,
                     )
-                    if not cache_result:
-                        logger.error("保存 CapsWriter 转录结果到缓存失败")
 
-                transcript = transcription_result.get("transcript", "")
-                task_notifier.notify_task_status(
-                    url,
-                    f"转录完成 - {engine_info}",
-                    title=video_title,
-                    author=author,
-                    transcript=transcript,
-                )
+                    # 将LLM处理任务加入队列
+                    try:
+                        llm_task_queue.put(
+                            {
+                                "task_id": task_id,
+                                "url": url,
+                                "platform": platform,
+                                "media_id": media_id,
+                                "video_title": video_title,
+                                "author": author,
+                                "description": description,
+                                "transcript": transcript,
+                                "use_speaker_recognition": use_speaker_recognition,
+                                "transcription_data": transcription_result.get("transcription_data")
+                                if use_speaker_recognition
+                                else None,
+                                "is_generic": is_generic_downloader or is_from_generic,
+                                "wechat_webhook": wechat_webhook,
+                            }
+                        )
+                        logger.info(f"将LLM任务加入队列（常规转录）: {task_id}, 标题: {video_title}")
+                    except Exception as exc:
+                        logger.exception(f"将LLM任务加入队列失败（常规转录）: {exc}")
+                        task_notifier.send_text(f"【LLM任务加入队列失败】{exc}")
 
-                try:
-                    llm_task_queue.put(
-                        {
-                            "task_id": task_id,
-                            "url": url,
-                            "platform": platform,
-                            "media_id": media_id,
+                    # 返回结果
+                    result = {
+                        "status": "success",
+                        "message": "转录成功",
+                        "data": {
                             "video_title": video_title,
                             "author": author,
-                            "description": description,
                             "transcript": transcript,
-                            "use_speaker_recognition": use_speaker_recognition,
-                            "transcription_data": transcription_result.get("transcription_data")
-                            if use_speaker_recognition
-                            else None,
-                            "is_generic": is_generic_downloader or is_from_generic,
-                            "wechat_webhook": wechat_webhook,
-                        }
-                    )
-                    logger.info(f"将LLM任务加入队列（常规转录）: {task_id}, 标题: {video_title}")
-                except Exception as exc:
-                    logger.exception(f"将LLM任务加入队列失败（常规转录）: {exc}")
-                    task_notifier.send_text(f"【LLM任务加入队列失败】{exc}")
+                            "speaker_recognition": use_speaker_recognition,
+                        },
+                    }
+                finally:
+                    # 清理下载的文件
+                    logger.info(f"清理下载的文件: {local_file}")
+                    downloader.clean_up(local_file)
 
-                result = {
-                    "status": "success",
-                    "message": "转录成功",
-                    "data": {
-                        "video_title": video_title,
-                        "author": author,
-                        "transcript": transcript,
-                        "speaker_recognition": use_speaker_recognition,
-                    },
-                }
-            finally:
-                logger.info(f"清理下载的文件: {local_file}")
-                downloader.clean_up(local_file)
-
-            cache_manager.update_task_status(
-                task_id,
-                "success",
-                platform=video_info.get("platform"),
-                media_id=video_info.get("video_id"),
-                title=video_title,
-                author=author,
-            )
+                # 更新任务状态为成功
+                cache_manager.update_task_status(
+                    task_id,
+                    "success",
+                    platform=video_info.get("platform"),
+                    media_id=video_info.get("video_id"),
+                    title=video_title,
+                    author=author,
+                )
 
         return result
     except Exception as exc:
@@ -551,6 +605,7 @@ def process_llm_queue():
     while True:
         try:
             llm_task = llm_task_queue.get()
+
             with llm_processing_lock:
                 task_id = llm_task["task_id"]
                 url = llm_task["url"]
@@ -576,8 +631,9 @@ def process_llm_queue():
                                 "请根据以下音视频转录文本，生成一个简洁的标题（不超过20个字）。\n"
                                 "只返回标题文本，不要有任何其他说明或标点符号。\n"
                                 "如果无法从内容中提取有意义的标题，请返回'自定义文件总结'。\n\n"
-                                f"转录文本：\n{transcript[:1000]}"
+                                "转录文本：\n" + transcript[:1000]
                             )
+
                             try:
                                 config_llm = config.get("llm", {})
                                 api_key = config_llm.get("api_key")
@@ -593,23 +649,23 @@ def process_llm_queue():
                                     max_retries,
                                     retry_delay,
                                 )
+
                                 generated_title = generated_title.strip().strip('"').strip("'").strip("。").strip("，")
                                 if generated_title and len(generated_title) <= 30:
                                     video_title = generated_title
                                     logger.info(f"LLM生成的标题: {video_title}")
                                 else:
+                                    video_title = "自定义文件总结"
                                     logger.warning("LLM生成的标题不合规，使用默认标题")
                             except Exception as exc:
                                 logger.error(f"LLM生成标题失败: {exc}")
+                                video_title = "自定义文件总结"
 
                     llm_task["video_title"] = video_title
+                    logger.info(f"开始使用增强LLM处理器处理任务: {task_id}")
                     result_dict = enhanced_llm_processor.process_llm_task(llm_task)
-                    logger.info(f"LLM处理完成，开始保存结果和发送微信通知: {task_id}")
 
-                    calibrated_text = result_dict.get("校对文本", "")
-                    summary_text = result_dict.get("内容总结")
-                    skip_summary = result_dict.get("skip_summary", False)
-                    stats = result_dict.get("stats", {})
+                    logger.info(f"LLM处理完成，开始保存结果和发送微信通知: {task_id}")
 
                     if platform and media_id:
                         cache_manager.save_llm_result(
@@ -617,88 +673,61 @@ def process_llm_queue():
                             media_id=media_id,
                             use_speaker_recognition=use_speaker_recognition,
                             llm_type="calibrated",
-                            content=calibrated_text,
+                            content=result_dict['校对文本'],
                         )
 
-                        summary_content = calibrated_text if skip_summary else summary_text
                         cache_manager.save_llm_result(
                             platform=platform,
                             media_id=media_id,
                             use_speaker_recognition=use_speaker_recognition,
                             llm_type="summary",
-                            content=summary_content or "",
+                            content=result_dict['内容总结'],
                         )
-
-                    task_info = cache_manager.get_task_by_id(task_id)
-                    view_url = ""
-                    if task_info and task_info.get("view_token"):
-                        from ...utils.rendering import get_base_url
-
-                        base_url = get_base_url()
-                        view_url = f"{base_url}/view/{task_info['view_token']}"
-
-                    original_length = stats.get("original_length", 0)
-                    calibrated_length = stats.get("calibrated_length", 0)
-                    summary_length = stats.get("summary_length", 0)
-                    speaker_info = "（含说话人识别）" if use_speaker_recognition else ""
-
-                    if skip_summary:
-                        full_message = f"""## 总结和校对
-🌐 网页查看：{view_url}
-📄 直接获取：{view_url}?raw=calibrated
-
-## 转录统计
-原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 未生成
-
-## 校对文本{speaker_info}
-{calibrated_text}"""
-                    else:
-                        full_message = f"""## 总结和校对
-🌐 网页查看：{view_url}
-📄 直接获取：{view_url}?raw=calibrated
-
-## 转录统计
-原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_length:,} 字
-
-## 总结{speaker_info}
-{summary_text}"""
+                        logger.info(f"LLM结果已保存到缓存: {platform}/{media_id}")
 
                     send_long_text_wechat(
                         title=video_title,
                         url=url,
-                        text=full_message,
-                        is_summary=not skip_summary,
+                        text=result_dict['内容总结'],
+                        is_summary=True,
                         has_speaker_recognition=use_speaker_recognition,
                         webhook=wechat_webhook,
-                        skip_content_type_header=True,
                     )
 
                     import time
 
                     time.sleep(0.1)
 
-                    clean_url = WechatNotifier()._clean_url(url)
-                    sanitized_title = video_title or "转录任务"
-                    try:
-                        from ...utils.risk_control import is_enabled, sanitize_text
+                    task_info = cache_manager.get_task_by_id(task_id)
+                    if task_info and task_info.get("view_token"):
+                        base_url = get_base_url()
+                        view_url = f"{base_url}/view/{task_info['view_token']}"
 
-                        if is_enabled():
-                            title_result = sanitize_text(sanitized_title, text_type="title")
-                            if title_result["has_sensitive"]:
-                                logger.info(
-                                    f"[风控] 完成通知标题包含 {len(title_result['sensitive_words'])} 个敏感词，已处理"
-                                )
-                                sanitized_title = title_result["sanitized_text"]
-                    except Exception as risk_exc:
-                        logger.exception(f"完成通知标题风控处理失败: {risk_exc}")
+                        clean_url = WechatNotifier()._clean_url(url)
+                        sanitized_title = video_title or "转录任务"
+                        try:
+                            from ...utils.risk_control import is_enabled, sanitize_text
 
-                    completion_message = (
-                        f"# {sanitized_title}\n\n"
-                        f"{clean_url}\n\n"
-                        f"🔗 总结和校对：\n{view_url}\n\n"
-                        "✅ **【任务完成】**"
-                    )
-                    task_notifier.send_text(completion_message, skip_risk_control=True)
+                            if is_enabled():
+                                title_result = sanitize_text(sanitized_title, text_type="title")
+                                if title_result["has_sensitive"]:
+                                    logger.info(
+                                        f"[风控] 完成通知标题包含 {len(title_result['sensitive_words'])} 个敏感词，已处理"
+                                    )
+                                    sanitized_title = title_result["sanitized_text"]
+                        except Exception as risk_exc:
+                            logger.exception(f"完成通知标题风控处理失败: {risk_exc}")
+
+                        completion_message = (
+                            f"# {sanitized_title}\n\n"
+                            f"{clean_url}\n\n"
+                            f"🔗 总结和校对：\n{view_url}\n\n"
+                            "✅ **【任务完成】**"
+                        )
+                        task_notifier = WechatNotifier(wechat_webhook)
+                        task_notifier.send_text(completion_message, skip_risk_control=True)
+                        logger.info(f"任务完成通知已加入限流队列: {task_id}")
+
                     logger.info(f"LLM任务处理完成: {task_id}, 标题: {video_title}")
                 except Exception as exc:
                     logger.exception(f"LLM任务处理异常: {task_id}, 错误: {exc}")

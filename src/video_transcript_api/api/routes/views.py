@@ -213,7 +213,7 @@ async def view_transcript(view_token: str, request: Request, raw: Optional[str] 
             )
         if view_data["status"] == "file_cleaned":
             return templates.TemplateResponse(
-                "file_cleaned.html",
+                "cleaned.html",
                 {"request": request, **view_data},
             )
         if view_data["status"] == "success":
@@ -237,22 +237,21 @@ async def view_transcript(view_token: str, request: Request, raw: Optional[str] 
 
                 if Path(cache_dir, "llm_calibrated.txt").exists():
                     view_data["calibrated_html"] = render_calibrated_content_smart(cache_dir)
+
+                _trigger_cache_upgrade_if_needed(cache_dir, view_data)
             else:
                 fallback_text = view_data.get("transcript", "")
                 view_data["transcript_html"] = render_transcript_content(fallback_text)
 
-            base_url = get_base_url(request)
+            base_url = get_base_url()
             view_data["download_links"] = {
                 "calibrated": f"{base_url}/view/{view_token}?raw=calibrated",
                 "summary": f"{base_url}/view/{view_token}?raw=summary",
                 "transcript": f"{base_url}/view/{view_token}?raw=transcript",
             }
 
-            if view_data.get("should_upgrade_cache"):
-                _trigger_cache_upgrade_if_needed(cache_dir, view_data)
-
             return templates.TemplateResponse(
-                "view.html",
+                "transcript.html",
                 {"request": request, **view_data},
             )
 

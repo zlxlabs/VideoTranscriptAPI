@@ -84,11 +84,7 @@ async def transcribe_video(
                 "wechat_webhook": effective_webhook,
                 "user_info": user_info,
             }
-            try:
-                task_queue.put_nowait(task)
-            except asyncio.QueueFull:
-                logger.warning("任务队列已满，拒绝任务: %s", url)
-                raise HTTPException(status_code=503, detail="任务队列已满，请稍后重试")
+            await task_queue.put(task)
             logger.info("任务已加入队列: %s, URL: %s", task_id, url)
 
             try:
