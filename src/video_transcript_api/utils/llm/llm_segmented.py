@@ -119,19 +119,36 @@ class SegmentedLLMProcessor:
             """校对单个段落"""
             logger.info(f"开始校对第 {index+1}/{total_segments} 段 (长度: {len(segment)} 字符)")
 
-            prompt = self._generate_calibrate_prompt(segment, False, title, "", description)
-            calibrated_text = call_llm_api(
-                model=self.calibrate_model,
-                prompt=prompt,
-                api_key=self.api_key,
-                base_url=self.base_url,
-                max_retries=self.max_retries,
-                retry_delay=self.retry_delay,
-                reasoning_effort=self.calibrate_reasoning_effort,
-                task_type="calibrate_segment"
-            )
+            def run_calibration(retry_idx: int):
+                prompt = self._generate_calibrate_prompt(
+                    segment,
+                    False,
+                    title,
+                    "",
+                    description,
+                    length_retry_level=retry_idx,
+                )
+                return call_llm_api(
+                    model=self.calibrate_model,
+                    prompt=prompt,
+                    api_key=self.api_key,
+                    base_url=self.base_url,
+                    max_retries=self.max_retries,
+                    retry_delay=self.retry_delay,
+                    reasoning_effort=self.calibrate_reasoning_effort,
+                    task_type="calibrate_segment",
+                )
 
-            calibrated_text = self._enforce_segment_length(segment, calibrated_text, index, total_segments)
+            max_attempts = self.llm_config.get("segmentation", {}).get("length_retry_attempts", 3)
+            calibrated_text = run_calibration(0)
+            calibrated_text = self._enforce_segment_length(
+                segment,
+                calibrated_text,
+                index,
+                total_segments,
+                retry_fn=run_calibration,
+                max_attempts=max_attempts,
+            )
             calibrated_segments[index] = calibrated_text
             logger.info(f"第 {index+1} 段校对完成（原始 {len(segment)} 字，校对 {len(calibrated_text)} 字）")
             return calibrated_text
@@ -200,19 +217,36 @@ class SegmentedLLMProcessor:
 
             logger.info(f"开始校对第 {index+1}/{total_segments} 段 (长度: {text_length} 字符)")
 
-            prompt = self._generate_calibrate_prompt(segment_text, True, title, "", description)
-            calibrated_text = call_llm_api(
-                model=self.calibrate_model,
-                prompt=prompt,
-                api_key=self.api_key,
-                base_url=self.base_url,
-                max_retries=self.max_retries,
-                retry_delay=self.retry_delay,
-                reasoning_effort=self.calibrate_reasoning_effort,
-                task_type="calibrate_segment"
-            )
+            def run_calibration(retry_idx: int):
+                prompt = self._generate_calibrate_prompt(
+                    segment_text,
+                    True,
+                    title,
+                    "",
+                    description,
+                    length_retry_level=retry_idx,
+                )
+                return call_llm_api(
+                    model=self.calibrate_model,
+                    prompt=prompt,
+                    api_key=self.api_key,
+                    base_url=self.base_url,
+                    max_retries=self.max_retries,
+                    retry_delay=self.retry_delay,
+                    reasoning_effort=self.calibrate_reasoning_effort,
+                    task_type="calibrate_segment",
+                )
 
-            calibrated_text = self._enforce_segment_length(segment_text, calibrated_text, index, total_segments)
+            max_attempts = self.llm_config.get("segmentation", {}).get("length_retry_attempts", 3)
+            calibrated_text = run_calibration(0)
+            calibrated_text = self._enforce_segment_length(
+                segment_text,
+                calibrated_text,
+                index,
+                total_segments,
+                retry_fn=run_calibration,
+                max_attempts=max_attempts,
+            )
             calibrated_segments[index] = calibrated_text
             logger.info(f"第 {index+1} 段校对完成（原始 {text_length} 字，校对 {len(calibrated_text)} 字）")
             return calibrated_text
@@ -263,8 +297,15 @@ class SegmentedLLMProcessor:
         
         return "\n\n".join(text_parts)
     
-    def _generate_calibrate_prompt(self, text: str, use_speaker_recognition: bool = False, 
-                                   title: str = "", author: str = "", description: str = "") -> str:
+    def _generate_calibrate_prompt(
+        self,
+        text: str,
+        use_speaker_recognition: bool = False,
+        title: str = "",
+        author: str = "",
+        description: str = "",
+        length_retry_level: int = 0,
+    ) -> str:
         """
         生成校对提示词（与原始server.py保持一致）
         
@@ -300,9 +341,19 @@ class SegmentedLLMProcessor:
                 context_info += f"- 视频描述：{description[:500]}{'...' if len(description) > 500 else ''}\n"
             context_info += "\n"
         
-        length_requirement = (
-            "⚠️ **绝对限制：不得删减内容，校对后的文本长度必须保持在原文的 95% 以上**。"
+        min_ratio = self.llm_config.get("segmentation", {}).get(
+            "min_segment_ratio", self.llm_config.get("min_calibrate_ratio", 0.80)
         )
+
+        length_requirement = (
+            f"⚠️ **绝对限制：不得删减内容，校对后的文本长度必须保持在原文的 {int(min_ratio * 100)}% 以上**。"
+        )
+
+        if length_retry_level > 0:
+            length_requirement += (
+                f"\n‼️ 第 {length_retry_level + 1} 次尝试：上一次校对结果长度不足，请严格按照原文篇幅输出，"
+                "必要时完整保留原文内容，只修正标点和错别字。"
+            )
 
         calibrate_prompt = (
             "你将收到一段音频的转录文本。你的任务是对这段文本进行校对,提高其可读性,但**保持原文长度和信息完整性**。 "
@@ -328,8 +379,16 @@ class SegmentedLLMProcessor:
         
         return calibrate_prompt
 
-    def _enforce_segment_length(self, original: str, calibrated: str, index: int, total_segments: int) -> str:
-        """确保单个分段校对结果不短于原文 80%，否则回退原段"""
+    def _enforce_segment_length(
+        self,
+        original: str,
+        calibrated: str,
+        index: int,
+        total_segments: int,
+        retry_fn=None,
+        max_attempts: int = 1,
+    ) -> str:
+        """确保单个分段校对结果不短于原文阈值，必要时重试"""
         if not original:
             return calibrated
 
@@ -337,20 +396,31 @@ class SegmentedLLMProcessor:
             "min_segment_ratio", self.llm_config.get("min_calibrate_ratio", 0.80)
         )
         min_length = int(len(original) * min_ratio)
-        calibrated_length = len(calibrated or "")
-        ratio = (calibrated_length / len(original)) if original else 0
-        if calibrated_length < min_length:
+        attempt = 1
+
+        while True:
+            calibrated_length = len(calibrated or "")
+            ratio = (calibrated_length / len(original)) if original else 0
+            if calibrated_length >= min_length:
+                logger.info(
+                    f"第 {index + 1}/{total_segments} 段校对长度满足要求：原始 {len(original)} 字，校对 {calibrated_length} 字，"
+                    f"占比 {ratio * 100:.2f}%（第 {attempt} 次尝试）"
+                )
+                return calibrated
+
+            if not retry_fn or attempt >= max_attempts:
+                logger.warning(
+                    f"第 {index + 1}/{total_segments} 段校对后长度 {ratio * 100:.2f}% 小于阈值 {min_ratio * 100:.2f}%，"
+                    f"原始 {len(original)} 字，校对 {calibrated_length} 字，重试次数 {attempt}/{max_attempts}，回退原段"
+                )
+                return original
+
             logger.warning(
                 f"第 {index + 1}/{total_segments} 段校对后长度 {ratio * 100:.2f}% 小于阈值 {min_ratio * 100:.2f}%，"
-                f"原始 {len(original)} 字，校对 {calibrated_length} 字，回退原段"
+                f"准备进行第 {attempt + 1}/{max_attempts} 次重试"
             )
-            return original
-
-        logger.info(
-            f"第 {index + 1}/{total_segments} 段校对长度满足要求：原始 {len(original)} 字，校对 {calibrated_length} 字，"
-            f"占比 {ratio * 100:.2f}%"
-        )
-        return calibrated
+            attempt += 1
+            calibrated = retry_fn(attempt - 1)
     
     def summarize_text_segmented(self, text_for_summary: str, title: str = "", description: str = "", selected_summary_model: str = None, selected_reasoning_effort: str = None) -> str:
         """
