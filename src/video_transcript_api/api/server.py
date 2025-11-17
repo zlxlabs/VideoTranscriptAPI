@@ -356,6 +356,14 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
 
                 logger.info("缓存模式 - 发送总结文本")
 
+                # 获取查看链接
+                task_info = cache_manager.get_task_by_id(task_id)
+                view_url = ""
+                if task_info and task_info.get('view_token'):
+                    from ..utils.rendering import get_base_url
+                    base_url = get_base_url()
+                    view_url = f"{base_url}/view/{task_info['view_token']}"
+
                 # 计算统计信息
                 original_length = len(transcript)
                 calibrated_length = len(cache_data.get('llm_calibrated', ''))
@@ -369,7 +377,10 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                 if skip_summary:
                     # 短文本，未生成总结
                     speaker_info = "（含说话人识别）" if has_speaker_recognition else ""
-                    full_message = f"""## 转录统计
+                    full_message = f"""## 总结和校对
+{view_url}
+
+## 转录统计
 原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 未生成
 
 ## 校对文本{speaker_info}
@@ -379,7 +390,10 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                     # 长文本，有总结
                     summary_length = len(summary_text)
                     speaker_info = "（含说话人识别）" if has_speaker_recognition else ""
-                    full_message = f"""## 转录统计
+                    full_message = f"""## 总结和校对
+{view_url}
+
+## 转录统计
 原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_length:,} 字
 
 ## 总结{speaker_info}
@@ -922,6 +936,14 @@ def process_llm_queue():
                         )
                         logger.info(f"LLM结果已保存到缓存: {platform}/{media_id}")
 
+                    # 获取查看链接
+                    task_info = cache_manager.get_task_by_id(task_id)
+                    view_url = ""
+                    if task_info and task_info.get('view_token'):
+                        from ..utils.rendering import get_base_url
+                        base_url = get_base_url()
+                        view_url = f"{base_url}/view/{task_info['view_token']}"
+
                     # 构建统计信息文本
                     original_length = stats.get('original_length', 0)
                     calibrated_length = stats.get('calibrated_length', 0)
@@ -932,7 +954,10 @@ def process_llm_queue():
 
                     if skip_summary:
                         # 短文本，未生成总结
-                        full_message = f"""## 转录统计
+                        full_message = f"""## 总结和校对
+{view_url}
+
+## 转录统计
 原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 未生成
 
 ## 校对文本{speaker_info}
@@ -940,7 +965,10 @@ def process_llm_queue():
                         logger.info(f"发送校对文本（文本过短，未总结）: {task_id}")
                     else:
                         # 长文本，有总结
-                        full_message = f"""## 转录统计
+                        full_message = f"""## 总结和校对
+{view_url}
+
+## 转录统计
 原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_length:,} 字
 
 ## 总结{speaker_info}
