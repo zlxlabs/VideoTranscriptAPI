@@ -227,28 +227,84 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                     transcript="使用缓存的校对和总结文本...",
                 )
 
+                # 直接发送缓存的 LLM 结果（仅发送总结文本）
+                logger.info("缓存模式 - 发送总结文本")
+
+                # 获取查看链接
+                task_info = cache_manager.get_task_by_id(task_id)
+                view_url = ""
+                if task_info and task_info.get("view_token"):
+                    base_url = get_base_url()
+                    view_url = f"{base_url}/view/{task_info['view_token']}"
+
+                # 计算统计信息
+                original_length = len(transcript)
+                calibrated_length = len(cache_data.get("llm_calibrated", ""))
+                summary_text = cache_data["llm_summary"]
+                calibrated_text = cache_data.get("llm_calibrated", "")
+
+                # 判断是否跳过了总结（总结文本和校对文本相同）
+                skip_summary = summary_text == calibrated_text
+
+                # 构建完整的消息格式
+                speaker_info = "（含说话人识别）" if has_speaker_recognition else ""
+                if skip_summary:
+                    # 短文本，未生成总结
+                    full_message = f"""## 总结和校对
+🌐 网页查看：{view_url}
+📄 直接获取：{view_url}?raw=calibrated
+
+## 转录统计
+原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 未生成
+
+## 校对文本{speaker_info}
+{summary_text}"""
+                    logger.info("缓存模式 - 发送校对文本（未总结）")
+                else:
+                    # 长文本，有总结
+                    summary_length = len(summary_text)
+                    full_message = f"""## 总结和校对
+🌐 网页查看：{view_url}
+📄 直接获取：{view_url}?raw=calibrated
+
+## 转录统计
+原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_length:,} 字
+
+## 总结{speaker_info}
+{summary_text}"""
+                    logger.info("缓存模式 - 发送总结文本")
+
+                # 发送（跳过自动添加的内容类型标题）
                 send_long_text_wechat(
                     title=video_title,
                     url=url,
-                    text=cache_data["llm_summary"],
-                    is_summary=True,
+                    text=full_message,
+                    is_summary=not skip_summary,
                     has_speaker_recognition=has_speaker_recognition,
                     webhook=wechat_webhook,
+                    skip_content_type_header=True,
                 )
-                logger.info("缓存模式 - 发送总结文本")
+
+                # 确保总结文本完全加入队列后再发送完成通知
+                logger.info("[缓存模式] 总结文本发送完成，延迟100ms后发送完成通知")
                 time.sleep(0.1)
 
+                # 发送任务完成通知，包含查看链接
                 task_info = cache_manager.get_task_by_id(task_id)
                 if task_info and task_info.get("view_token"):
                     base_url = get_base_url()
                     view_url = f"{base_url}/view/{task_info['view_token']}"
+
+                    # 使用限流系统发送完成通知，确保顺序正确
                     clean_url = WechatNotifier()._clean_url(url)
-                    sanitized_title = video_title or "转录任务"
+
+                    # 对标题进行风控处理
+                    sanitized_title = video_title
                     try:
                         from ...utils.risk_control import is_enabled, sanitize_text
 
                         if is_enabled():
-                            title_result = sanitize_text(sanitized_title, text_type="title")
+                            title_result = sanitize_text(video_title, text_type="title")
                             if title_result["has_sensitive"]:
                                 logger.info(
                                     f"[风控] 完成通知标题包含 {len(title_result['sensitive_words'])} 个敏感词，已处理"
@@ -257,14 +313,13 @@ def process_transcription(task_id, url, use_speaker_recognition=False, wechat_we
                     except Exception as risk_exc:
                         logger.exception(f"完成通知标题风控处理失败: {risk_exc}")
 
-                    completion_message = (
-                        f"# {sanitized_title}\n\n"
-                        f"{clean_url}\n\n"
-                        f"🔗 总结和校对：\n{view_url}\n\n"
-                        "✅ **【任务完成】**"
-                    )
-                    WechatNotifier(wechat_webhook).send_text(completion_message, skip_risk_control=True)
-                    logger.info("缓存模式 - 任务完成通知已发送")
+                    completion_message = f"# {sanitized_title}\n\n{clean_url}\n\n🔗 总结和校对：\n{view_url}\n\n✅ **【任务完成】**"
+                    logger.info(f"[缓存模式] 准备发送任务完成通知: {sanitized_title}")
+                    task_notifier = WechatNotifier(wechat_webhook)
+                    task_notifier.send_text(completion_message, skip_risk_control=True)
+                    logger.info(f"[缓存模式] 任务完成通知已加入限流队列: {task_id}")
+
+                logger.info(f"已发送缓存的 LLM 结果: {video_title}")
 
                 cache_manager.update_task_status(
                     task_id,
@@ -662,54 +717,120 @@ def process_llm_queue():
                                 video_title = "自定义文件总结"
 
                     llm_task["video_title"] = video_title
+
+                    # 使用增强LLM处理器处理任务（自动判断是否需要分段）
                     logger.info(f"开始使用增强LLM处理器处理任务: {task_id}")
                     result_dict = enhanced_llm_processor.process_llm_task(llm_task)
 
                     logger.info(f"LLM处理完成，开始保存结果和发送微信通知: {task_id}")
 
+                    # 提取结果和统计信息
+                    calibrated_text = result_dict.get("校对文本", "")
+                    summary_text = result_dict.get("内容总结")
+                    skip_summary = result_dict.get("skip_summary", False)
+                    stats = result_dict.get("stats", {})
+
+                    # 保存校对文本到缓存
                     if platform and media_id:
                         cache_manager.save_llm_result(
                             platform=platform,
                             media_id=media_id,
                             use_speaker_recognition=use_speaker_recognition,
                             llm_type="calibrated",
-                            content=result_dict['校对文本'],
+                            content=calibrated_text,
                         )
+
+                        # 保存总结文本到缓存
+                        # 短文本：保存校对文本作为总结
+                        # 长文本：保存实际总结
+                        if skip_summary:
+                            summary_content = calibrated_text
+                            logger.info(f"文本过短，保存校对文本作为总结: {task_id}")
+                        else:
+                            summary_content = summary_text
+                            logger.info(f"保存LLM总结到缓存: {task_id}")
 
                         cache_manager.save_llm_result(
                             platform=platform,
                             media_id=media_id,
                             use_speaker_recognition=use_speaker_recognition,
                             llm_type="summary",
-                            content=result_dict['内容总结'],
+                            content=summary_content,
                         )
                         logger.info(f"LLM结果已保存到缓存: {platform}/{media_id}")
 
+                    # 获取查看链接
+                    task_info = cache_manager.get_task_by_id(task_id)
+                    view_url = ""
+                    if task_info and task_info.get("view_token"):
+                        base_url = get_base_url()
+                        view_url = f"{base_url}/view/{task_info['view_token']}"
+
+                    # 构建统计信息文本
+                    original_length = stats.get("original_length", 0)
+                    calibrated_length = stats.get("calibrated_length", 0)
+                    summary_length = stats.get("summary_length", 0)
+
+                    # 构建完整的消息格式
+                    speaker_info = "（含说话人识别）" if use_speaker_recognition else ""
+
+                    if skip_summary:
+                        # 短文本，未生成总结
+                        full_message = f"""## 总结和校对
+🌐 网页查看：{view_url}
+📄 直接获取：{view_url}?raw=calibrated
+
+## 转录统计
+原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 未生成
+
+## 校对文本{speaker_info}
+{calibrated_text}"""
+                        logger.info(f"发送校对文本（文本过短，未总结）: {task_id}")
+                    else:
+                        # 长文本，有总结
+                        full_message = f"""## 总结和校对
+🌐 网页查看：{view_url}
+📄 直接获取：{view_url}?raw=calibrated
+
+## 转录统计
+原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_length:,} 字
+
+## 总结{speaker_info}
+{summary_text}"""
+                        logger.info(f"发送总结文本: {task_id}")
+
+                    # 发送（跳过自动添加的内容类型标题）
                     send_long_text_wechat(
                         title=video_title,
                         url=url,
-                        text=result_dict['内容总结'],
-                        is_summary=True,
+                        text=full_message,
+                        is_summary=not skip_summary,
                         has_speaker_recognition=use_speaker_recognition,
                         webhook=wechat_webhook,
+                        skip_content_type_header=True,
                     )
 
+                    # 确保总结文本完全加入队列后再发送完成通知
                     import time
 
-                    time.sleep(0.1)
+                    time.sleep(0.1)  # 100ms延迟，确保总结文本已加入队列
 
+                    # 发送任务完成通知，包含查看链接
                     task_info = cache_manager.get_task_by_id(task_id)
                     if task_info and task_info.get("view_token"):
                         base_url = get_base_url()
                         view_url = f"{base_url}/view/{task_info['view_token']}"
 
+                        # 使用限流系统发送完成通知，确保顺序正确
                         clean_url = WechatNotifier()._clean_url(url)
-                        sanitized_title = video_title or "转录任务"
+
+                        # 对标题进行风控处理
+                        sanitized_title = video_title
                         try:
                             from ...utils.risk_control import is_enabled, sanitize_text
 
                             if is_enabled():
-                                title_result = sanitize_text(sanitized_title, text_type="title")
+                                title_result = sanitize_text(video_title, text_type="title")
                                 if title_result["has_sensitive"]:
                                     logger.info(
                                         f"[风控] 完成通知标题包含 {len(title_result['sensitive_words'])} 个敏感词，已处理"
@@ -718,12 +839,7 @@ def process_llm_queue():
                         except Exception as risk_exc:
                             logger.exception(f"完成通知标题风控处理失败: {risk_exc}")
 
-                        completion_message = (
-                            f"# {sanitized_title}\n\n"
-                            f"{clean_url}\n\n"
-                            f"🔗 总结和校对：\n{view_url}\n\n"
-                            "✅ **【任务完成】**"
-                        )
+                        completion_message = f"# {sanitized_title}\n\n{clean_url}\n\n🔗 总结和校对：\n{view_url}\n\n✅ **【任务完成】**"
                         task_notifier = WechatNotifier(wechat_webhook)
                         task_notifier.send_text(completion_message, skip_risk_control=True)
                         logger.info(f"任务完成通知已加入限流队列: {task_id}")
