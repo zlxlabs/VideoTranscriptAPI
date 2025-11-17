@@ -358,13 +358,13 @@ class EnhancedLLMProcessor:
                 summary_future = executor.submit(run_summary)
                 try:
                     calibrated_text = calib_future.result()
-                    logger.info("TXT长文本校对任务完成: %s", task_id)
+                    logger.info(f"TXT长文本校对任务完成: {task_id}")
                 except Exception as exc:
                     logger.error(f"TXT分段校对线程异常: {task_id}, 错误: {exc}", exc_info=True)
                     calibrated_text = f"【LLM call failed】Thread exception: {exc}"
                 try:
                     summary_text = summary_future.result()
-                    logger.info("TXT长文本总结任务完成: %s", task_id)
+                    logger.info(f"TXT长文本总结任务完成: {task_id}")
                 except Exception as exc:
                     logger.error(f"TXT分段总结线程异常: {task_id}, 错误: {exc}", exc_info=True)
                     summary_text = f"【LLM call failed】Thread exception: {exc}"

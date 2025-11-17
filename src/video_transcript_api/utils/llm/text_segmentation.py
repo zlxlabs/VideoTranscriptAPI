@@ -154,7 +154,7 @@ class TextSegmentationProcessor:
     def _segment_by_sentences(self, content: str) -> List[str]:
         """按标点符号分段"""
         segments = []
-        sentences = re.split(r'[。！？!?]', content)
+        sentences = re.split(r'[。！？!?\.…，,；;：:\n]', content)
 
         current_segment = ""
         for sentence in sentences:
