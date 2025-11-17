@@ -119,10 +119,7 @@ class SegmentedLLMProcessor:
             """校对单个段落"""
             logger.info(f"开始校对第 {index+1}/{total_segments} 段 (长度: {len(segment)} 字符)")
 
-            # 生成校对提示词
             prompt = self._generate_calibrate_prompt(segment, False, title, "", description)
-
-            # 调用LLM进行校对
             calibrated_text = call_llm_api(
                 model=self.calibrate_model,
                 prompt=prompt,
@@ -133,9 +130,10 @@ class SegmentedLLMProcessor:
                 reasoning_effort=self.calibrate_reasoning_effort,
                 task_type="calibrate_segment"
             )
-            
+
+            calibrated_text = self._enforce_segment_length(segment, calibrated_text, index, total_segments)
             calibrated_segments[index] = calibrated_text
-            logger.info(f"第 {index+1} 段校对完成")
+            logger.info(f"第 {index+1} 段校对完成（原始 {len(segment)} 字，校对 {len(calibrated_text)} 字）")
             return calibrated_text
         
         # 使用ThreadPoolExecutor进行并发处理
@@ -197,16 +195,12 @@ class SegmentedLLMProcessor:
         
         def calibrate_json_segment(index, segment_data):
             """校对单个JSON段落"""
-            # 将JSON段落转换为文本
             segment_text = self._json_segment_to_text(segment_data)
             text_length = len(segment_text)
 
             logger.info(f"开始校对第 {index+1}/{total_segments} 段 (长度: {text_length} 字符)")
 
-            # 生成校对提示词
             prompt = self._generate_calibrate_prompt(segment_text, True, title, "", description)
-
-            # 调用LLM进行校对
             calibrated_text = call_llm_api(
                 model=self.calibrate_model,
                 prompt=prompt,
@@ -217,9 +211,10 @@ class SegmentedLLMProcessor:
                 reasoning_effort=self.calibrate_reasoning_effort,
                 task_type="calibrate_segment"
             )
-            
+
+            calibrated_text = self._enforce_segment_length(segment_text, calibrated_text, index, total_segments)
             calibrated_segments[index] = calibrated_text
-            logger.info(f"第 {index+1} 段校对完成")
+            logger.info(f"第 {index+1} 段校对完成（原始 {text_length} 字，校对 {len(calibrated_text)} 字）")
             return calibrated_text
         
         # 使用ThreadPoolExecutor进行并发处理
@@ -305,10 +300,15 @@ class SegmentedLLMProcessor:
                 context_info += f"- 视频描述：{description[:500]}{'...' if len(description) > 500 else ''}\n"
             context_info += "\n"
         
+        length_requirement = (
+            "⚠️ **绝对限制：不得删减内容，校对后的文本长度必须保持在原文的 95% 以上**。"
+        )
+
         calibrate_prompt = (
             "你将收到一段音频的转录文本。你的任务是对这段文本进行校对,提高其可读性,但**保持原文长度和信息完整性**。 "
-            + context_info +
-            "请按照以下指示进行校对: "
+            + context_info
+            + length_requirement
+            + "\n请按照以下指示进行校对: "
             "1. **适当分段,使文本结构更清晰**。每当话题转换、时间跳跃或逻辑转折时应该分段。每个自然段落应该是一个完整的思想单元。 "
             "2. **不要删减或概括内容**，保留所有原始信息和细节。分段不等于删减,只是在合适的地方添加换行。 "
             "3. 修正明显的错别字和语法错误。特别注意根据上述辅助信息修正专有名词的拼写。 "
@@ -321,12 +321,36 @@ class SegmentedLLMProcessor:
             "**重要**：\n"
             "- 必须适当分段以提高可读性,在话题转换、逻辑转折或时间跳跃处换行。\n"
             "- 只进行文字校对、标点调整和分段，不要进行内容压缩或概括。\n"
-            "- 校对后的文本长度应该与原文相近（允许因添加标点符号而略有增加）。\n"
+            "- 校对后的文本长度必须保持在原文的95%以上，除修正明显错误外禁止缩短篇幅。\n"
             "只返回校对后的文本,不要包含任何其他解释或评论。 "
             "以下是需要校对的转录文本: <transcript>  " + text + "  </transcript>"
         )
         
         return calibrate_prompt
+
+    def _enforce_segment_length(self, original: str, calibrated: str, index: int, total_segments: int) -> str:
+        """确保单个分段校对结果不短于原文 80%，否则回退原段"""
+        if not original:
+            return calibrated
+
+        min_ratio = self.llm_config.get("segmentation", {}).get(
+            "min_segment_ratio", self.llm_config.get("min_calibrate_ratio", 0.80)
+        )
+        min_length = int(len(original) * min_ratio)
+        calibrated_length = len(calibrated or "")
+        ratio = (calibrated_length / len(original)) if original else 0
+        if calibrated_length < min_length:
+            logger.warning(
+                f"第 {index + 1}/{total_segments} 段校对后长度 {ratio * 100:.2f}% 小于阈值 {min_ratio * 100:.2f}%，"
+                f"原始 {len(original)} 字，校对 {calibrated_length} 字，回退原段"
+            )
+            return original
+
+        logger.info(
+            f"第 {index + 1}/{total_segments} 段校对长度满足要求：原始 {len(original)} 字，校对 {calibrated_length} 字，"
+            f"占比 {ratio * 100:.2f}%"
+        )
+        return calibrated
     
     def summarize_text_segmented(self, text_for_summary: str, title: str = "", description: str = "", selected_summary_model: str = None, selected_reasoning_effort: str = None) -> str:
         """

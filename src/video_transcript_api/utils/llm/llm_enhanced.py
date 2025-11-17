@@ -385,6 +385,10 @@ class EnhancedLLMProcessor:
                     f"{'='*60}\n\n"
                     f"{formatted_transcript}"
                 )
+            else:
+                result_dict['校对文本'] = self._ensure_min_length(
+                    transcript, result_dict.get('校对文本', ''), task_id, context="txt_segmented"
+                )
 
             # 处理总结失败的情况：在错误信息后附加原始转录文本
             if result_dict.get('内容总结', '').startswith('【LLM call failed】'):
@@ -503,6 +507,10 @@ class EnhancedLLMProcessor:
                     f"以下是原始转录文本：\n"
                     f"{'='*60}\n\n"
                     f"{formatted_transcript}"
+                )
+            else:
+                result_dict['校对文本'] = self._ensure_min_length(
+                    transcript, result_dict.get('校对文本', ''), task_id, context="json_segmented"
                 )
 
             # 处理总结失败的情况：在错误信息后附加原始转录文本
@@ -662,6 +670,10 @@ class EnhancedLLMProcessor:
                 f"{'='*60}\n\n"
                 f"{formatted_transcript}"
             )
+        else:
+            result_dict['校对文本'] = self._ensure_min_length(
+                transcript, result_dict.get('校对文本', ''), task_id, context="short_txt"
+            )
 
         # 处理总结失败的情况：在错误信息后附加原始转录文本
         if result_dict.get('内容总结') and result_dict.get('内容总结', '').startswith('【LLM call failed】'):
@@ -690,6 +702,27 @@ class EnhancedLLMProcessor:
         }
 
         return result_dict
+
+    def _ensure_min_length(self, original: str, calibrated: str, task_id: str, context: str) -> str:
+        """确保校对结果不少于原文 95%，否则回退到原文"""
+        if not original:
+            return calibrated
+
+        min_ratio = self.llm_config.get("min_calibrate_ratio", 0.80)
+        min_length = int(len(original) * min_ratio)
+        calibrated_length = len(calibrated or "")
+        ratio = (calibrated_length / len(original)) if original else 0
+        if calibrated_length < min_length:
+            self.logger.warning(
+                f"任务 {task_id} ({context}) 校对文本过短，原始 {len(original)} 字，校对 {calibrated_length} 字，"
+                f"比例 {ratio * 100:.2f}% < {min_ratio * 100:.2f}% ，回退原文"
+            )
+            return original
+        self.logger.info(
+            f"任务 {task_id} ({context}) 校对文本长度满足要求：原始 {len(original)} 字，校对 {calibrated_length} 字，"
+            f"占比 {ratio * 100:.2f}%"
+        )
+        return calibrated
     
     def _generate_original_calibrate_prompt(self, transcript: str, video_title: str, 
                                           author: str, description: str, 
@@ -717,10 +750,15 @@ class EnhancedLLMProcessor:
                 context_info += f"- 视频描述：{description[:500]}{'...' if len(description) > 500 else ''}\n"
             context_info += "\n"
         
+        length_requirement = (
+            "⚠️ **绝对要求：不得删减内容。校对后的文本长度必须保持在原文的 95% 以上**。"
+        )
+
         calibrate_prompt = (
             "你将收到一段音频的转录文本。你的任务是对这段文本进行校对,提高其可读性,但不改变原意。 "
-            + context_info +
-            "请按照以下指示进行校对: "
+            + context_info
+            + length_requirement
+            + "\n请按照以下指示进行校对: "
             "1. 适当分段,使文本结构更清晰。每个自然段落应该是一个完整的思想单元。 "
             "2. 修正明显的错别字和语法错误。特别注意根据上述辅助信息修正专有名词的拼写。 "
             "3. 调整标点符号的使用,确保其正确性和一致性。 "
