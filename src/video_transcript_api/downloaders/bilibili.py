@@ -101,7 +101,20 @@ class BilibiliDownloader(BaseDownloader):
             if not os.path.exists(bbdown_path):
                 logger.error(f"BBDown可执行文件不存在: {bbdown_path}")
                 raise FileNotFoundError(f"BBDown可执行文件不存在: {bbdown_path}")
-            
+
+            # 在非Windows系统上检查并设置执行权限
+            if system_platform != "windows":
+                if not os.access(bbdown_path, os.X_OK):
+                    logger.warning(f"BBDown缺少执行权限，正在自动添加: {bbdown_path}")
+                    try:
+                        os.chmod(bbdown_path, 0o755)
+                        logger.info(f"已成功添加BBDown执行权限")
+                    except OSError as e:
+                        logger.error(f"无法设置BBDown执行权限: {e}")
+                        raise PermissionError(
+                            f"BBDown缺少执行权限且无法自动设置，请手动执行: chmod +x {bbdown_path}"
+                        )
+
             # 准备下载参数
             audio_only = bbdown_config.get("audio_only", True)
             
