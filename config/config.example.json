@@ -100,5 +100,17 @@
             "https://raw.githubusercontent.com/konsheng/Sensitive-lexicon/refs/heads/main/Vocabulary/%E6%96%B0%E6%80%9D%E6%83%B3%E5%90%AF%E8%92%99.txt"
         ],
         "cache_file": "./data/risk_control/sensitive_words.txt"
+    },
+    "ytdlp": {
+        "socket_timeout": 30,
+        "retries": 10,
+        "fragment_retries": 10,
+        "extractor_retries": 5,
+        "player_client": ["android_vr", "android_music", "android", "ios", "tv_embedded"],
+        "youtube_cookie": {
+            "enabled": false,
+            "file_path": "./config/youtube_cookies.txt",
+            "fallback_without_cookie": true
+        }
     }
 }
