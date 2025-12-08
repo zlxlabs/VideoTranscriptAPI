@@ -39,6 +39,7 @@
         "use_bbdown": true,
         "executable": "BBDown/BBDown.exe",
         "executable_linux": "BBDown/BBDown",
+        "executable_mac": "BBDown/BBDown_Mac",
         "audio_only": true,
         "timeout": 300
     },

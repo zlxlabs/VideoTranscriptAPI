@@ -88,14 +88,16 @@ class BilibiliDownloader(BaseDownloader):
             
             if system_platform == "windows":
                 bbdown_path = bbdown_config.get("executable", "BBDown/BBDown.exe")
-                # 将相对路径转换为绝对路径
-                if not os.path.isabs(bbdown_path):
-                    bbdown_path = os.path.join(current_dir, bbdown_path)
+            elif system_platform == "darwin":
+                # macOS
+                bbdown_path = bbdown_config.get("executable_mac", "BBDown/BBDown_Mac")
             else:
+                # Linux
                 bbdown_path = bbdown_config.get("executable_linux", "BBDown/BBDown")
-                # 将相对路径转换为绝对路径
-                if not os.path.isabs(bbdown_path):
-                    bbdown_path = os.path.join(current_dir, bbdown_path)
+
+            # 将相对路径转换为绝对路径
+            if not os.path.isabs(bbdown_path):
+                bbdown_path = os.path.join(current_dir, bbdown_path)
             
             # 检查BBDown可执行文件是否存在
             if not os.path.exists(bbdown_path):
