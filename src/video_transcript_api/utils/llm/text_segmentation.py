@@ -129,61 +129,73 @@ class TextSegmentationProcessor:
 
         if is_capswriter_format:
             logger.info("检测到短句换行格式（CapsWriter），按行分段处理")
-            # CapsWriter 格式：按行分割，每行是一个短句
             lines = [line.strip() for line in content.split('\n') if line.strip()]
+
+            if len(lines) <= 1:
+                logger.info("CapsWriter 文本缺少有效换行，回退到标点分段策略")
+                segments = self._segment_by_sentences(content)
+                logger.info(f"TXT文本分段完成: {len(segments)} 个段落")
+                return segments
 
             current_segment = ""
             for line in lines:
-                # 如果添加这一行不会超过最大限制
-                if len(current_segment + line) < self.max_segment_size:
-                    if current_segment:
-                        current_segment += line
-                    else:
-                        current_segment = line
-                else:
-                    # 如果当前段落已经达到合适大小，保存并开始新段落
-                    if len(current_segment) >= self.segment_size:
-                        segments.append(current_segment.strip())
-                        current_segment = line
-                    else:
-                        # 当前段落还不够大，但加上新行会超限，强制添加
-                        current_segment += line
-                        segments.append(current_segment.strip())
-                        current_segment = ""
+                current_segment = self._append_fragment(line, segments, current_segment)
         else:
-            logger.info("检测到标准标点格式，按句子分段处理")
-            # 标准格式：按句号、问号、感叹号分割
-            sentences = re.split(r'[。！？!?]', content)
+            segments = self._segment_by_sentences(content)
+            logger.info(f"TXT文本分段完成: {len(segments)} 个段落")
+            return segments
 
-            current_segment = ""
-            for sentence in sentences:
-                sentence = sentence.strip()
-                if not sentence:
-                    continue
-
-                # 如果添加这个句子不会超过最大限制
-                if len(current_segment + sentence) < self.max_segment_size:
-                    if current_segment:
-                        current_segment += sentence + "。"
-                    else:
-                        current_segment = sentence + "。"
-                else:
-                    # 如果当前段落已经达到合适大小，保存并开始新段落
-                    if len(current_segment) >= self.segment_size:
-                        segments.append(current_segment.strip())
-                        current_segment = sentence + "。"
-                    else:
-                        # 当前段落还不够大，但加上新句子会超限，强制添加
-                        current_segment += sentence + "。"
-                        segments.append(current_segment.strip())
-                        current_segment = ""
-
-        # 添加最后一段
         if current_segment.strip():
             segments.append(current_segment.strip())
 
         logger.info(f"TXT文本分段完成: {len(segments)} 个段落")
         return segments
+
+    def _segment_by_sentences(self, content: str) -> List[str]:
+        """按标点符号分段"""
+        segments = []
+        sentences = re.split(r'[。！？!?\.…，,；;：:\n]', content)
+
+        current_segment = ""
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            fragment = sentence + "。"
+            current_segment = self._append_fragment(fragment, segments, current_segment)
+
+        if current_segment.strip():
+            segments.append(current_segment.strip())
+
+        return segments
+
+    def _append_fragment(self, fragment: str, segments: List[str], current_segment: str) -> str:
+        """确保单个片段不会超过 max_segment_size，并根据 segment_size 及时落盘"""
+        fragment = fragment.strip()
+        if not fragment:
+            return current_segment
+
+        while fragment:
+            available = self.max_segment_size - len(current_segment)
+            if available <= 0:
+                if current_segment.strip():
+                    segments.append(current_segment.strip())
+                current_segment = ""
+                available = self.max_segment_size
+
+            take = min(len(fragment), available)
+            current_segment += fragment[:take]
+            fragment = fragment[take:]
+
+            if len(current_segment) >= self.max_segment_size:
+                segments.append(current_segment.strip())
+                current_segment = ""
+
+        if len(current_segment) >= self.segment_size:
+            segments.append(current_segment.strip())
+            current_segment = ""
+
+        return current_segment
     
     def extract_speaker_mapping_from_json(self, file_path: str, title: str = "", description: str = "") -> Dict[str, str]:
         """

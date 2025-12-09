@@ -2,9 +2,10 @@ import asyncio
 import concurrent.futures
 import queue
 import threading
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict
 
 from fastapi.templating import Jinja2Templates
 
@@ -22,8 +23,10 @@ _task_results: Dict[str, Dict[str, Any]] = {}
 _task_queue: asyncio.Queue | None = None
 _executor: concurrent.futures.ThreadPoolExecutor | None = None
 _llm_task_queue: queue.Queue | None = None
-_llm_processing_lock = threading.Lock()
+_llm_executor: concurrent.futures.ThreadPoolExecutor | None = None
 _templates: Jinja2Templates | None = None
+_task_locks: Dict[str, threading.Lock] = {}
+_task_locks_guard = threading.Lock()
 
 
 @lru_cache
@@ -92,8 +95,32 @@ def get_llm_queue() -> queue.Queue:
     return _llm_task_queue
 
 
-def get_llm_processing_lock() -> threading.Lock:
-    return _llm_processing_lock
+def get_llm_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """Thread pool dedicated to LLM post-processing."""
+    global _llm_executor
+    if _llm_executor is None:
+        max_workers = get_config().get("concurrent", {}).get("llm_max_workers", 10)
+        _llm_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    return _llm_executor
+
+
+@contextmanager
+def task_lock(task_id: str | None):
+    """Context manager guarding operations for the same task_id."""
+    key = task_id or "default"
+    with _task_locks_guard:
+        lock = _task_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _task_locks[key] = lock
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+        with _task_locks_guard:
+            if not lock.locked():
+                _task_locks.pop(key, None)
 
 
 def get_template_dir() -> Path:

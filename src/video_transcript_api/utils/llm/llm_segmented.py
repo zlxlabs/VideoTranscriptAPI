@@ -51,8 +51,14 @@ class SegmentedLLMProcessor:
         
         logger.info(f"分段LLM处理器初始化完成，并发数: {self.concurrent_workers}")
     
-    def calibrate_text_segmented(self, file_path: str, file_type: str, 
-                                title: str = "", description: str = "") -> str:
+    def calibrate_text_segmented(
+        self,
+        file_path: str,
+        file_type: str,
+        title: str = "",
+        description: str = "",
+        speaker_mapping: Optional[Dict[str, str]] = None,
+    ) -> str:
         """
         对文本进行分段校对
         
@@ -71,7 +77,12 @@ class SegmentedLLMProcessor:
             if file_type == 'txt':
                 return self._calibrate_txt_segmented(file_path)
             elif file_type == 'json':
-                return self._calibrate_json_segmented(file_path, title, description)
+                return self._calibrate_json_segmented(
+                    file_path,
+                    title,
+                    description,
+                    speaker_mapping=speaker_mapping,
+                )
             else:
                 raise ValueError(f"不支持的文件类型: {file_type}")
         except Exception as e:
@@ -108,23 +119,38 @@ class SegmentedLLMProcessor:
             """校对单个段落"""
             logger.info(f"开始校对第 {index+1}/{total_segments} 段 (长度: {len(segment)} 字符)")
 
-            # 生成校对提示词
-            prompt = self._generate_calibrate_prompt(segment, False, title, "", description)
+            def run_calibration(retry_idx: int):
+                prompt = self._generate_calibrate_prompt(
+                    segment,
+                    False,
+                    title,
+                    "",
+                    description,
+                    length_retry_level=retry_idx,
+                )
+                return call_llm_api(
+                    model=self.calibrate_model,
+                    prompt=prompt,
+                    api_key=self.api_key,
+                    base_url=self.base_url,
+                    max_retries=self.max_retries,
+                    retry_delay=self.retry_delay,
+                    reasoning_effort=self.calibrate_reasoning_effort,
+                    task_type="calibrate_segment",
+                )
 
-            # 调用LLM进行校对
-            calibrated_text = call_llm_api(
-                model=self.calibrate_model,
-                prompt=prompt,
-                api_key=self.api_key,
-                base_url=self.base_url,
-                max_retries=self.max_retries,
-                retry_delay=self.retry_delay,
-                reasoning_effort=self.calibrate_reasoning_effort,
-                task_type="calibrate_segment"
+            max_attempts = self.llm_config.get("segmentation", {}).get("length_retry_attempts", 3)
+            calibrated_text = run_calibration(0)
+            calibrated_text = self._enforce_segment_length(
+                segment,
+                calibrated_text,
+                index,
+                total_segments,
+                retry_fn=run_calibration,
+                max_attempts=max_attempts,
             )
-            
             calibrated_segments[index] = calibrated_text
-            logger.info(f"第 {index+1} 段校对完成")
+            logger.info(f"第 {index+1} 段校对完成（原始 {len(segment)} 字，校对 {len(calibrated_text)} 字）")
             return calibrated_text
         
         # 使用ThreadPoolExecutor进行并发处理
@@ -149,7 +175,13 @@ class SegmentedLLMProcessor:
         logger.info(f"TXT并发分段校对完成，最终长度: {len(final_result)} 字符")
         return final_result
     
-    def _calibrate_json_segmented(self, file_path: str, title: str, description: str) -> str:
+    def _calibrate_json_segmented(
+        self,
+        file_path: str,
+        title: str,
+        description: str,
+        speaker_mapping: Optional[Dict[str, str]] = None,
+    ) -> str:
         """
         对JSON文件进行并发分段校对
         
@@ -164,10 +196,11 @@ class SegmentedLLMProcessor:
         import concurrent.futures
         
         # 首先生成说话人映射
-        logger.info("生成全局说话人映射")
-        speaker_mapping = self.segmentation_processor.extract_speaker_mapping_from_json(
-            file_path, title, description
-        )
+        if speaker_mapping is None:
+            logger.info("生成全局说话人映射")
+            speaker_mapping = self.segmentation_processor.extract_speaker_mapping_from_json(
+                file_path, title, description
+            )
         
         # 应用说话人映射并分段
         segments = self.segmentation_processor.segment_json_content(file_path, speaker_mapping)
@@ -179,29 +212,43 @@ class SegmentedLLMProcessor:
         
         def calibrate_json_segment(index, segment_data):
             """校对单个JSON段落"""
-            # 将JSON段落转换为文本
             segment_text = self._json_segment_to_text(segment_data)
             text_length = len(segment_text)
 
             logger.info(f"开始校对第 {index+1}/{total_segments} 段 (长度: {text_length} 字符)")
 
-            # 生成校对提示词
-            prompt = self._generate_calibrate_prompt(segment_text, True, title, "", description)
+            def run_calibration(retry_idx: int):
+                prompt = self._generate_calibrate_prompt(
+                    segment_text,
+                    True,
+                    title,
+                    "",
+                    description,
+                    length_retry_level=retry_idx,
+                )
+                return call_llm_api(
+                    model=self.calibrate_model,
+                    prompt=prompt,
+                    api_key=self.api_key,
+                    base_url=self.base_url,
+                    max_retries=self.max_retries,
+                    retry_delay=self.retry_delay,
+                    reasoning_effort=self.calibrate_reasoning_effort,
+                    task_type="calibrate_segment",
+                )
 
-            # 调用LLM进行校对
-            calibrated_text = call_llm_api(
-                model=self.calibrate_model,
-                prompt=prompt,
-                api_key=self.api_key,
-                base_url=self.base_url,
-                max_retries=self.max_retries,
-                retry_delay=self.retry_delay,
-                reasoning_effort=self.calibrate_reasoning_effort,
-                task_type="calibrate_segment"
+            max_attempts = self.llm_config.get("segmentation", {}).get("length_retry_attempts", 3)
+            calibrated_text = run_calibration(0)
+            calibrated_text = self._enforce_segment_length(
+                segment_text,
+                calibrated_text,
+                index,
+                total_segments,
+                retry_fn=run_calibration,
+                max_attempts=max_attempts,
             )
-            
             calibrated_segments[index] = calibrated_text
-            logger.info(f"第 {index+1} 段校对完成")
+            logger.info(f"第 {index+1} 段校对完成（原始 {text_length} 字，校对 {len(calibrated_text)} 字）")
             return calibrated_text
         
         # 使用ThreadPoolExecutor进行并发处理
@@ -250,8 +297,15 @@ class SegmentedLLMProcessor:
         
         return "\n\n".join(text_parts)
     
-    def _generate_calibrate_prompt(self, text: str, use_speaker_recognition: bool = False, 
-                                   title: str = "", author: str = "", description: str = "") -> str:
+    def _generate_calibrate_prompt(
+        self,
+        text: str,
+        use_speaker_recognition: bool = False,
+        title: str = "",
+        author: str = "",
+        description: str = "",
+        length_retry_level: int = 0,
+    ) -> str:
         """
         生成校对提示词（与原始server.py保持一致）
         
@@ -287,10 +341,25 @@ class SegmentedLLMProcessor:
                 context_info += f"- 视频描述：{description[:500]}{'...' if len(description) > 500 else ''}\n"
             context_info += "\n"
         
+        min_ratio = self.llm_config.get("segmentation", {}).get(
+            "min_segment_ratio", self.llm_config.get("min_calibrate_ratio", 0.80)
+        )
+
+        length_requirement = (
+            f"⚠️ **绝对限制：不得删减内容，校对后的文本长度必须保持在原文的 {int(min_ratio * 100)}% 以上**。"
+        )
+
+        if length_retry_level > 0:
+            length_requirement += (
+                f"\n‼️ 第 {length_retry_level + 1} 次尝试：上一次校对结果长度不足，请严格按照原文篇幅输出，"
+                "必要时完整保留原文内容，只修正标点和错别字。"
+            )
+
         calibrate_prompt = (
             "你将收到一段音频的转录文本。你的任务是对这段文本进行校对,提高其可读性,但**保持原文长度和信息完整性**。 "
-            + context_info +
-            "请按照以下指示进行校对: "
+            + context_info
+            + length_requirement
+            + "\n请按照以下指示进行校对: "
             "1. **适当分段,使文本结构更清晰**。每当话题转换、时间跳跃或逻辑转折时应该分段。每个自然段落应该是一个完整的思想单元。 "
             "2. **不要删减或概括内容**，保留所有原始信息和细节。分段不等于删减,只是在合适的地方添加换行。 "
             "3. 修正明显的错别字和语法错误。特别注意根据上述辅助信息修正专有名词的拼写。 "
@@ -303,19 +372,62 @@ class SegmentedLLMProcessor:
             "**重要**：\n"
             "- 必须适当分段以提高可读性,在话题转换、逻辑转折或时间跳跃处换行。\n"
             "- 只进行文字校对、标点调整和分段，不要进行内容压缩或概括。\n"
-            "- 校对后的文本长度应该与原文相近（允许因添加标点符号而略有增加）。\n"
+            "- 校对后的文本长度必须保持在原文的95%以上，除修正明显错误外禁止缩短篇幅。\n"
             "只返回校对后的文本,不要包含任何其他解释或评论。 "
             "以下是需要校对的转录文本: <transcript>  " + text + "  </transcript>"
         )
         
         return calibrate_prompt
+
+    def _enforce_segment_length(
+        self,
+        original: str,
+        calibrated: str,
+        index: int,
+        total_segments: int,
+        retry_fn=None,
+        max_attempts: int = 1,
+    ) -> str:
+        """确保单个分段校对结果不短于原文阈值，必要时重试"""
+        if not original:
+            return calibrated
+
+        min_ratio = self.llm_config.get("segmentation", {}).get(
+            "min_segment_ratio", self.llm_config.get("min_calibrate_ratio", 0.80)
+        )
+        min_length = int(len(original) * min_ratio)
+        attempt = 1
+
+        while True:
+            calibrated_length = len(calibrated or "")
+            ratio = (calibrated_length / len(original)) if original else 0
+            if calibrated_length >= min_length:
+                logger.info(
+                    f"第 {index + 1}/{total_segments} 段校对长度满足要求：原始 {len(original)} 字，校对 {calibrated_length} 字，"
+                    f"占比 {ratio * 100:.2f}%（第 {attempt} 次尝试）"
+                )
+                return calibrated
+
+            if not retry_fn or attempt >= max_attempts:
+                logger.warning(
+                    f"第 {index + 1}/{total_segments} 段校对后长度 {ratio * 100:.2f}% 小于阈值 {min_ratio * 100:.2f}%，"
+                    f"原始 {len(original)} 字，校对 {calibrated_length} 字，重试次数 {attempt}/{max_attempts}，回退原段"
+                )
+                return original
+
+            logger.warning(
+                f"第 {index + 1}/{total_segments} 段校对后长度 {ratio * 100:.2f}% 小于阈值 {min_ratio * 100:.2f}%，"
+                f"准备进行第 {attempt + 1}/{max_attempts} 次重试"
+            )
+            attempt += 1
+            calibrated = retry_fn(attempt - 1)
     
-    def summarize_text_segmented(self, calibrated_text: str, title: str = "", description: str = "", selected_summary_model: str = None, selected_reasoning_effort: str = None) -> str:
+    def summarize_text_segmented(self, text_for_summary: str, title: str = "", description: str = "", selected_summary_model: str = None, selected_reasoning_effort: str = None) -> str:
         """
-        对校对后的文本进行总结（不分段，直接发送全文）
+        对文本进行单次总结（不分段，文本可以是原始或校对结果）
 
         Args:
-            calibrated_text: 校对后的文本
+            text_for_summary: 用于总结的文本
             title: 视频标题
             description: 视频描述
             selected_summary_model: 选定的总结模型（如果为None则使用默认模型）
@@ -324,7 +436,7 @@ class SegmentedLLMProcessor:
         Returns:
             总结文本
         """
-        logger.info(f"开始文本总结，长度: {len(calibrated_text)} 字符")
+        logger.info(f"开始文本总结，长度: {len(text_for_summary)} 字符")
 
         # 如果未指定模型，使用默认模型
         if selected_summary_model is None:
@@ -335,7 +447,7 @@ class SegmentedLLMProcessor:
             selected_reasoning_effort = self.summary_reasoning_effort
 
         # 不再分段，直接对全文进行总结，让LLM有全局理解
-        return self._summarize_single_text(calibrated_text, title, description, selected_summary_model, selected_reasoning_effort)
+        return self._summarize_single_text(text_for_summary, title, description, selected_summary_model, selected_reasoning_effort)
     
     def _summarize_single_text(self, text: str, title: str, description: str, selected_summary_model: str, selected_reasoning_effort: str) -> str:
         """

@@ -906,12 +906,13 @@ def render_transcript_content_smart(cache_dir: str, fallback_text: Optional[str]
     renderer = DialogRenderer()
     return renderer.render_original_transcript_with_cache_analysis(cache_dir, fallback_text)
 
-def render_calibrated_content_smart(cache_dir: str) -> Optional[str]:
+def render_calibrated_content_smart(cache_dir: str, capabilities: Optional['CacheCapabilities'] = None) -> Optional[str]:
     """
     智能渲染校对文本内容的便捷函数，专门用于校对文本区块
 
     Args:
         cache_dir: 缓存目录路径
+        capabilities: 可选的缓存能力信息，如果提供则直接使用，避免重复分析
 
     Returns:
         str: 渲染后的HTML，如果没有校对文本则返回None
@@ -932,8 +933,11 @@ def render_calibrated_content_smart(cache_dir: str) -> Optional[str]:
         # 使用智能渲染系统处理校对文本，但强制使用校对文本内容
         renderer = DialogRenderer()
 
-        # 分析缓存能力
-        capabilities = analyze_cache_capabilities(cache_dir)
+        # 分析缓存能力（如果未提供则进行分析）
+        if capabilities is None:
+            capabilities = analyze_cache_capabilities(cache_dir)
+        else:
+            logger.debug("复用已有的缓存能力分析结果")
 
         # 根据能力选择渲染策略，但总是基于校对文本
         strategy = renderer._get_optimal_rendering_strategy(capabilities)

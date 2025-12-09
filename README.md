@@ -155,7 +155,19 @@ venv\Scripts\activate     # Windows
 pip install -r requirements.txt
 ```
 
-4. 启动转录服务器（需要单独部署）
+4. 设置 BBDown 可执行权限（仅 macOS/Linux）
+
+```bash
+# macOS
+chmod +x BBDown/BBDown_Mac
+
+# Linux
+chmod +x BBDown/BBDown
+```
+
+> **注意**：从 Git 克隆后，BBDown 可能缺少可执行权限，导致 `[Errno 13] Permission denied` 错误。
+
+5. 启动转录服务器（需要单独部署）
 
 根据需求启动相应的转录服务器：
 
@@ -169,7 +181,7 @@ pip install -r requirements.txt
 - 默认监听端口：8767
 - 请参考 FunASR 项目文档启动服务器
 
-5. 修改配置文件
+6. 修改配置文件
 
 编辑`config/config.json`配置文件，设置相关参数：
 
@@ -552,9 +564,11 @@ python scripts/cleanup_cache.py
 python scripts/run_tests.py
 ```
 
-## 许可证
+## 🚫 开源协议 & 使用限制
+本项目基于 MIT 协议 + Commons Clause 附加条款开源，**严禁任何商业用途**：
+- ✅ 允许：非商业用途的学习、修改、分发、自用；
+- ❌ 禁止：售卖本软件、基于本软件提供付费服务、将本软件集成到商业产品中获利等一切商业行为。
 
-[License Name]
 
 ## 作者
 

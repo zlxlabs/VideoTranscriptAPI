@@ -14,12 +14,13 @@ from ..context import (
     get_config,
     get_enhanced_llm_processor,
     get_executor,
-    get_llm_processing_lock,
+    get_llm_executor,
     get_llm_queue,
     get_logger,
     get_task_queue,
     get_task_results,
     get_user_manager,
+    task_lock,
 )
 from ...downloaders import create_downloader
 from ...transcriber import FunASRSpeakerClient, Transcriber
@@ -36,7 +37,7 @@ enhanced_llm_processor = get_enhanced_llm_processor()
 task_results = get_task_results()
 task_queue = get_task_queue()
 llm_task_queue = get_llm_queue()
-llm_processing_lock = get_llm_processing_lock()
+llm_executor = get_llm_executor()
 executor = get_executor()
 
 
@@ -660,123 +661,137 @@ def process_llm_queue():
     while True:
         try:
             llm_task = llm_task_queue.get()
+            try:
+                logger.info(
+                    "LLM任务出队: %s，提交到线程池（当前队列任务完成数: %s）",
+                    llm_task.get("task_id"),
+                    getattr(llm_task_queue, "completed", "未知"),
+                )
+                llm_executor.submit(_handle_llm_task, llm_task)
+            except Exception as exc:
+                logger.exception(f"提交LLM任务失败: {exc}")
+                llm_task_queue.task_done()
+        except Exception as exc:
+            logger.exception(f"LLM队列处理器异常: {exc}")
+            import time
 
-            with llm_processing_lock:
-                task_id = llm_task["task_id"]
-                url = llm_task["url"]
-                platform = llm_task.get("platform")
-                media_id = llm_task.get("media_id")
-                video_title = llm_task["video_title"]
-                author = llm_task["author"]
-                description = llm_task.get("description", "")
-                transcript = llm_task["transcript"]
-                use_speaker_recognition = llm_task.get("use_speaker_recognition", False)
-                transcription_data = llm_task.get("transcription_data")
-                wechat_webhook = llm_task.get("wechat_webhook")
+            time.sleep(1)
 
-                task_notifier = WechatNotifier(wechat_webhook) if wechat_webhook else WechatNotifier()
-                logger.info(f"开始处理LLM任务: {task_id}, 标题: {video_title}")
 
-                try:
-                    if video_title == "":
-                        is_generic = llm_task.get("is_generic", False)
-                        if is_generic:
-                            logger.info("通用下载器文件没有标题，使用LLM生成")
-                            title_prompt = (
-                                "请根据以下音视频转录文本，生成一个简洁的标题（不超过20个字）。\n"
-                                "只返回标题文本，不要有任何其他说明或标点符号。\n"
-                                "如果无法从内容中提取有意义的标题，请返回'自定义文件总结'。\n\n"
-                                "转录文本：\n" + transcript[:1000]
+def _handle_llm_task(llm_task: dict):
+    """Worker entry for processing a single LLM task."""
+    task_id = llm_task.get("task_id")
+
+    try:
+        with task_lock(task_id):
+            url = llm_task["url"]
+            platform = llm_task.get("platform")
+            media_id = llm_task.get("media_id")
+            video_title = llm_task["video_title"]
+            transcript = llm_task["transcript"]
+            use_speaker_recognition = llm_task.get("use_speaker_recognition", False)
+            wechat_webhook = llm_task.get("wechat_webhook")
+
+            task_notifier = WechatNotifier(wechat_webhook) if wechat_webhook else WechatNotifier()
+            logger.info(f"开始处理LLM任务: {task_id}, 标题: {video_title}")
+
+            try:
+                if video_title == "":
+                    is_generic = llm_task.get("is_generic", False)
+                    if is_generic:
+                        logger.info("通用下载器文件没有标题，使用LLM生成")
+                        title_prompt = (
+                            "请根据以下音视频转录文本，生成一个简洁的标题（不超过20个字）。\n"
+                            "只返回标题文本，不要有任何其他说明或标点符号。\n"
+                            "如果无法从内容中提取有意义的标题，请返回'自定义文件总结'。\n\n"
+                            "转录文本：\n" + transcript[:1000]
+                        )
+
+                        try:
+                            config_llm = config.get("llm", {})
+                            api_key = config_llm.get("api_key")
+                            base_url = config_llm.get("base_url")
+                            summary_model = config_llm.get("summary_model")
+                            max_retries = config_llm.get("max_retries", 2)
+                            retry_delay = config_llm.get("retry_delay", 5)
+                            generated_title = call_llm_api(
+                                summary_model,
+                                title_prompt,
+                                api_key,
+                                base_url,
+                                max_retries,
+                                retry_delay,
                             )
 
-                            try:
-                                config_llm = config.get("llm", {})
-                                api_key = config_llm.get("api_key")
-                                base_url = config_llm.get("base_url")
-                                summary_model = config_llm.get("summary_model")
-                                max_retries = config_llm.get("max_retries", 2)
-                                retry_delay = config_llm.get("retry_delay", 5)
-                                generated_title = call_llm_api(
-                                    summary_model,
-                                    title_prompt,
-                                    api_key,
-                                    base_url,
-                                    max_retries,
-                                    retry_delay,
-                                )
-
-                                generated_title = generated_title.strip().strip('"').strip("'").strip("。").strip("，")
-                                if generated_title and len(generated_title) <= 30:
-                                    video_title = generated_title
-                                    logger.info(f"LLM生成的标题: {video_title}")
-                                else:
-                                    video_title = "自定义文件总结"
-                                    logger.warning("LLM生成的标题不合规，使用默认标题")
-                            except Exception as exc:
-                                logger.error(f"LLM生成标题失败: {exc}")
+                            generated_title = generated_title.strip().strip('"').strip("'").strip("。").strip("，")
+                            if generated_title and len(generated_title) <= 30:
+                                video_title = generated_title
+                                logger.info(f"LLM生成的标题: {video_title}")
+                            else:
                                 video_title = "自定义文件总结"
+                                logger.warning("LLM生成的标题不合规，使用默认标题")
+                        except Exception as exc:
+                            logger.error(f"LLM生成标题失败: {exc}")
+                            video_title = "自定义文件总结"
 
-                    llm_task["video_title"] = video_title
+                llm_task["video_title"] = video_title
 
-                    # 使用增强LLM处理器处理任务（自动判断是否需要分段）
-                    logger.info(f"开始使用增强LLM处理器处理任务: {task_id}")
-                    result_dict = enhanced_llm_processor.process_llm_task(llm_task)
+                # 使用增强LLM处理器处理任务（自动判断是否需要分段）
+                logger.info(f"开始使用增强LLM处理器处理任务: {task_id}")
+                result_dict = enhanced_llm_processor.process_llm_task(llm_task)
 
-                    logger.info(f"LLM处理完成，开始保存结果和发送微信通知: {task_id}")
+                logger.info(f"LLM处理完成，开始保存结果和发送微信通知: {task_id}")
 
-                    # 提取结果和统计信息
-                    calibrated_text = result_dict.get("校对文本", "")
-                    summary_text = result_dict.get("内容总结")
-                    skip_summary = result_dict.get("skip_summary", False)
-                    stats = result_dict.get("stats", {})
+                # 提取结果和统计信息
+                calibrated_text = result_dict.get("校对文本", "")
+                summary_text = result_dict.get("内容总结")
+                skip_summary = result_dict.get("skip_summary", False)
+                stats = result_dict.get("stats", {})
 
-                    # 保存校对文本到缓存
-                    if platform and media_id:
-                        cache_manager.save_llm_result(
-                            platform=platform,
-                            media_id=media_id,
-                            use_speaker_recognition=use_speaker_recognition,
-                            llm_type="calibrated",
-                            content=calibrated_text,
-                        )
+                # 保存校对文本到缓存
+                if platform and media_id:
+                    cache_manager.save_llm_result(
+                        platform=platform,
+                        media_id=media_id,
+                        use_speaker_recognition=use_speaker_recognition,
+                        llm_type="calibrated",
+                        content=calibrated_text,
+                    )
 
-                        # 保存总结文本到缓存
-                        # 短文本：保存校对文本作为总结
-                        # 长文本：保存实际总结
-                        if skip_summary:
-                            summary_content = calibrated_text
-                            logger.info(f"文本过短，保存校对文本作为总结: {task_id}")
-                        else:
-                            summary_content = summary_text
-                            logger.info(f"保存LLM总结到缓存: {task_id}")
-
-                        cache_manager.save_llm_result(
-                            platform=platform,
-                            media_id=media_id,
-                            use_speaker_recognition=use_speaker_recognition,
-                            llm_type="summary",
-                            content=summary_content,
-                        )
-                        logger.info(f"LLM结果已保存到缓存: {platform}/{media_id}")
-
-                    # 获取查看链接
-                    task_info = cache_manager.get_task_by_id(task_id)
-                    view_url = ""
-                    if task_info and task_info.get("view_token"):
-                        base_url = get_base_url()
-                        view_url = f"{base_url}/view/{task_info['view_token']}"
-
-                    # 构建统计信息文本
-                    original_length = stats.get("original_length", 0)
-                    calibrated_length = stats.get("calibrated_length", 0)
-                    summary_length = stats.get("summary_length", 0)
-
-                    # 构建完整的消息格式
-                    speaker_info = "（含说话人识别）" if use_speaker_recognition else ""
-
+                    # 保存总结文本到缓存
                     if skip_summary:
-                        # 短文本，未生成总结
-                        full_message = f"""## 总结和校对
+                        summary_content = calibrated_text
+                        logger.info(f"文本过短，保存校对文本作为总结: {task_id}")
+                    else:
+                        summary_content = summary_text
+                        logger.info(f"保存LLM总结到缓存: {task_id}")
+
+                    cache_manager.save_llm_result(
+                        platform=platform,
+                        media_id=media_id,
+                        use_speaker_recognition=use_speaker_recognition,
+                        llm_type="summary",
+                        content=summary_content,
+                    )
+                    logger.info(f"LLM结果已保存到缓存: {platform}/{media_id}")
+
+                # 获取查看链接
+                task_info = cache_manager.get_task_by_id(task_id)
+                view_url = ""
+                if task_info and task_info.get("view_token"):
+                    base_url = get_base_url()
+                    view_url = f"{base_url}/view/{task_info['view_token']}"
+
+                # 构建统计信息文本
+                original_length = stats.get("original_length", 0)
+                calibrated_length = stats.get("calibrated_length", 0)
+                summary_length = stats.get("summary_length", 0)
+
+                # 构建完整的消息格式
+                speaker_info = "（含说话人识别）" if use_speaker_recognition else ""
+
+                if skip_summary:
+                    full_message = f"""## 总结和校对
 🌐 网页查看：{view_url}
 📄 直接获取：{view_url}?raw=calibrated
 
@@ -785,10 +800,9 @@ def process_llm_queue():
 
 ## 校对文本{speaker_info}
 {calibrated_text}"""
-                        logger.info(f"发送校对文本（文本过短，未总结）: {task_id}")
-                    else:
-                        # 长文本，有总结
-                        full_message = f"""## 总结和校对
+                    logger.info(f"发送校对文本（文本过短，未总结）: {task_id}")
+                else:
+                    full_message = f"""## 总结和校对
 🌐 网页查看：{view_url}
 📄 直接获取：{view_url}?raw=calibrated
 
@@ -797,61 +811,51 @@ def process_llm_queue():
 
 ## 总结{speaker_info}
 {summary_text}"""
-                        logger.info(f"发送总结文本: {task_id}")
+                    logger.info(f"发送总结文本: {task_id}")
 
-                    # 发送（跳过自动添加的内容类型标题）
-                    send_long_text_wechat(
-                        title=video_title,
-                        url=url,
-                        text=full_message,
-                        is_summary=not skip_summary,
-                        has_speaker_recognition=use_speaker_recognition,
-                        webhook=wechat_webhook,
-                        skip_content_type_header=True,
-                    )
+                send_long_text_wechat(
+                    title=video_title,
+                    url=url,
+                    text=full_message,
+                    is_summary=not skip_summary,
+                    has_speaker_recognition=use_speaker_recognition,
+                    webhook=wechat_webhook,
+                    skip_content_type_header=True,
+                )
 
-                    # 确保总结文本完全加入队列后再发送完成通知
-                    import time
+                import time
 
-                    time.sleep(0.1)  # 100ms延迟，确保总结文本已加入队列
+                time.sleep(0.1)  # 100ms延迟，确保总结文本已加入队列
 
-                    # 发送任务完成通知，包含查看链接
-                    task_info = cache_manager.get_task_by_id(task_id)
-                    if task_info and task_info.get("view_token"):
-                        base_url = get_base_url()
-                        view_url = f"{base_url}/view/{task_info['view_token']}"
+                task_info = cache_manager.get_task_by_id(task_id)
+                if task_info and task_info.get("view_token"):
+                    base_url = get_base_url()
+                    view_url = f"{base_url}/view/{task_info['view_token']}"
 
-                        # 使用限流系统发送完成通知，确保顺序正确
-                        clean_url = WechatNotifier()._clean_url(url)
+                    clean_url = WechatNotifier()._clean_url(url)
 
-                        # 对标题进行风控处理
-                        sanitized_title = video_title
-                        try:
-                            from ...utils.risk_control import is_enabled, sanitize_text
+                    sanitized_title = video_title
+                    try:
+                        from ...utils.risk_control import is_enabled, sanitize_text
 
-                            if is_enabled():
-                                title_result = sanitize_text(video_title, text_type="title")
-                                if title_result["has_sensitive"]:
-                                    logger.info(
-                                        f"[风控] 完成通知标题包含 {len(title_result['sensitive_words'])} 个敏感词，已处理"
-                                    )
-                                    sanitized_title = title_result["sanitized_text"]
-                        except Exception as risk_exc:
-                            logger.exception(f"完成通知标题风控处理失败: {risk_exc}")
+                        if is_enabled():
+                            title_result = sanitize_text(video_title, text_type="title")
+                            if title_result["has_sensitive"]:
+                                logger.info(
+                                    f"[风控] 完成通知标题包含 {len(title_result['sensitive_words'])} 个敏感词，已处理"
+                                )
+                                sanitized_title = title_result["sanitized_text"]
+                    except Exception as risk_exc:
+                        logger.exception(f"完成通知标题风控处理失败: {risk_exc}")
 
-                        completion_message = f"# {sanitized_title}\n\n{clean_url}\n\n🔗 总结和校对：\n{view_url}\n\n✅ **【任务完成】**"
-                        task_notifier = WechatNotifier(wechat_webhook)
-                        task_notifier.send_text(completion_message, skip_risk_control=True)
-                        logger.info(f"任务完成通知已加入限流队列: {task_id}")
+                    completion_message = f"# {sanitized_title}\n\n{clean_url}\n\n🔗 总结和校对：\n{view_url}\n\n✅ **【任务完成】**"
+                    task_notifier = WechatNotifier(wechat_webhook)
+                    task_notifier.send_text(completion_message, skip_risk_control=True)
+                    logger.info(f"任务完成通知已加入限流队列: {task_id}")
 
-                    logger.info(f"LLM任务处理完成: {task_id}, 标题: {video_title}")
-                except Exception as exc:
-                    logger.exception(f"LLM任务处理异常: {task_id}, 错误: {exc}")
-                    task_notifier.send_text(f"【LLM API调用异常】{exc}")
-                finally:
-                    llm_task_queue.task_done()
-        except Exception as exc:
-            logger.exception(f"LLM队列处理器异常: {exc}")
-            import time
-
-            time.sleep(1)
+                logger.info(f"LLM任务处理完成: {task_id}, 标题: {video_title}")
+            except Exception as exc:
+                logger.exception(f"LLM任务处理异常: {task_id}, 错误: {exc}")
+                task_notifier.send_text(f"【LLM API调用异常】{exc}")
+    finally:
+        llm_task_queue.task_done()

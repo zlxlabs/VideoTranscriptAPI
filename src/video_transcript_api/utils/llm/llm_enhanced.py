@@ -2,9 +2,10 @@
 增强的LLM处理模块
 集成分段处理逻辑，自动判断是否需要分段
 """
+import concurrent.futures
 import os
 import threading
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, List, Optional
 from ..logging import setup_logger
 from .llm import call_llm_api
 from .llm_segmented import SegmentedLLMProcessor
@@ -336,19 +337,41 @@ class EnhancedLLMProcessor:
             temp_file_path = temp_file.name
 
         try:
-            # 使用分段处理器进行校对
-            calibrated_text = self.segmented_llm_processor.calibrate_text_segmented(
-                temp_file_path, 'txt', video_title, description
-            )
+            calibrated_text = ""
+            summary_text = ""
 
-            # 进行总结（使用选定的模型和 reasoning_effort）
-            summary_text = self.segmented_llm_processor.summarize_text_segmented(
-                calibrated_text, video_title, description, selected_summary_model, selected_reasoning_effort
-            )
+            def run_calibrate():
+                logger.info("TXT长文本校对任务开始: %s", task_id)
+                return self.segmented_llm_processor.calibrate_text_segmented(
+                    temp_file_path, "txt", video_title, description
+                )
+
+            def run_summary():
+                # 总结不需要分段，直接基于原始文本生成，避免等待校对完成
+                logger.info("TXT长文本总结任务开始: %s", task_id)
+                return self.segmented_llm_processor.summarize_text_segmented(
+                    transcript, video_title, description, selected_summary_model, selected_reasoning_effort
+                )
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                calib_future = executor.submit(run_calibrate)
+                summary_future = executor.submit(run_summary)
+                try:
+                    calibrated_text = calib_future.result()
+                    logger.info(f"TXT长文本校对任务完成: {task_id}")
+                except Exception as exc:
+                    logger.error(f"TXT分段校对线程异常: {task_id}, 错误: {exc}", exc_info=True)
+                    calibrated_text = f"【LLM call failed】Thread exception: {exc}"
+                try:
+                    summary_text = summary_future.result()
+                    logger.info(f"TXT长文本总结任务完成: {task_id}")
+                except Exception as exc:
+                    logger.error(f"TXT分段总结线程异常: {task_id}, 错误: {exc}", exc_info=True)
+                    summary_text = f"【LLM call failed】Thread exception: {exc}"
 
             result_dict = {
-                '校对文本': calibrated_text,
-                '内容总结': summary_text
+                "校对文本": calibrated_text,
+                "内容总结": summary_text,
             }
 
             # 处理校对失败的情况：在错误信息后附加原始转录文本
@@ -361,6 +384,10 @@ class EnhancedLLMProcessor:
                     f"以下是原始转录文本：\n"
                     f"{'='*60}\n\n"
                     f"{formatted_transcript}"
+                )
+            else:
+                result_dict['校对文本'] = self._ensure_min_length(
+                    transcript, result_dict.get('校对文本', ''), task_id, context="txt_segmented"
                 )
 
             # 处理总结失败的情况：在错误信息后附加原始转录文本
@@ -417,19 +444,57 @@ class EnhancedLLMProcessor:
             temp_file_path = temp_file.name
 
         try:
-            # 使用分段处理器进行校对
-            calibrated_text = self.segmented_llm_processor.calibrate_text_segmented(
-                temp_file_path, 'json', video_title, description
+            calibrated_text = ""
+            summary_text = ""
+            seg_processor = self.segmented_llm_processor.segmentation_processor
+            speaker_mapping = seg_processor.extract_speaker_mapping_from_json(
+                temp_file_path, video_title, description
             )
+            summary_source_text = self._build_json_summary_text(
+                transcription_data, speaker_mapping
+            )
+            if not summary_source_text:
+                summary_source_text = transcript
 
-            # 进行总结（使用选定的模型和 reasoning_effort）
-            summary_text = self.segmented_llm_processor.summarize_text_segmented(
-                calibrated_text, video_title, description, selected_summary_model, selected_reasoning_effort
-            )
+            def run_calibrate():
+                logger.info("JSON长文本校对任务开始: %s", task_id)
+                return self.segmented_llm_processor.calibrate_text_segmented(
+                    temp_file_path,
+                    "json",
+                    video_title,
+                    description,
+                    speaker_mapping=speaker_mapping,
+                )
+
+            def run_summary():
+                logger.info("JSON长文本总结任务开始: %s", task_id)
+                return self.segmented_llm_processor.summarize_text_segmented(
+                    summary_source_text,
+                    video_title,
+                    description,
+                    selected_summary_model,
+                    selected_reasoning_effort,
+                )
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                calib_future = executor.submit(run_calibrate)
+                summary_future = executor.submit(run_summary)
+                try:
+                    calibrated_text = calib_future.result()
+                    logger.info("JSON长文本校对任务完成: %s", task_id)
+                except Exception as exc:
+                    logger.error(f"JSON分段校对线程异常: {task_id}, 错误: {exc}", exc_info=True)
+                    calibrated_text = f"【LLM call failed】Thread exception: {exc}"
+                try:
+                    summary_text = summary_future.result()
+                    logger.info("JSON长文本总结任务完成: %s", task_id)
+                except Exception as exc:
+                    logger.error(f"JSON分段总结线程异常: {task_id}, 错误: {exc}", exc_info=True)
+                    summary_text = f"【LLM call failed】Thread exception: {exc}"
 
             result_dict = {
-                '校对文本': calibrated_text,
-                '内容总结': summary_text
+                "校对文本": calibrated_text,
+                "内容总结": summary_text,
             }
 
             # 处理校对失败的情况：在错误信息后附加原始转录文本
@@ -442,6 +507,10 @@ class EnhancedLLMProcessor:
                     f"以下是原始转录文本：\n"
                     f"{'='*60}\n\n"
                     f"{formatted_transcript}"
+                )
+            else:
+                result_dict['校对文本'] = self._ensure_min_length(
+                    transcript, result_dict.get('校对文本', ''), task_id, context="json_segmented"
                 )
 
             # 处理总结失败的情况：在错误信息后附加原始转录文本
@@ -473,6 +542,27 @@ class EnhancedLLMProcessor:
             # 清理临时文件
             if os.path.exists(temp_file_path):
                 os.unlink(temp_file_path)
+
+    @staticmethod
+    def _build_json_summary_text(transcription_data: Dict[str, Any], speaker_mapping: Dict[str, str]) -> str:
+        """根据原始JSON转录和说话人映射生成总结输入文本。"""
+        segments = (transcription_data or {}).get("segments", [])
+        if not segments:
+            return ""
+
+        lines = []
+        for item in segments:
+            text = item.get("text", "").strip()
+            if not text:
+                continue
+            speaker = item.get("speaker", "")
+            if speaker_mapping and speaker in speaker_mapping:
+                speaker = speaker_mapping[speaker]
+            if speaker:
+                lines.append(f"{speaker}：{text}")
+            else:
+                lines.append(text)
+        return "\n\n".join(lines)
     
     def _process_original_logic(self, llm_task: Dict[str, Any], selected_summary_model: str, selected_reasoning_effort: str) -> Dict[str, str]:
         """使用原有逻辑处理短文本
@@ -506,6 +596,7 @@ class EnhancedLLMProcessor:
 
         def run_calibrate():
             try:
+                logger.info("短文本校对任务开始: %s", task_id)
                 calibrated = call_llm_api(
                     self.calibrate_model, calibrate_prompt, self.api_key,
                     self.base_url, self.max_retries, self.retry_delay,
@@ -520,9 +611,12 @@ class EnhancedLLMProcessor:
             except Exception as e:
                 logger.error(f"校对线程异常: {task_id}, 错误: {e}", exc_info=True)
                 result_dict['校对文本'] = f"【LLM call failed】Thread exception: {e}"
+            else:
+                logger.info("短文本校对任务完成: %s", task_id)
 
         def run_summary():
             try:
+                logger.info("短文本总结任务开始: %s", task_id)
                 # 生成总结提示词
                 summary_prompt = self._generate_original_summary_prompt(
                     transcript, video_title, author, description, use_speaker_recognition, transcription_data
@@ -542,6 +636,8 @@ class EnhancedLLMProcessor:
             except Exception as e:
                 logger.error(f"总结线程异常: {task_id}, 错误: {e}", exc_info=True)
                 result_dict['内容总结'] = f"【LLM call failed】Thread exception: {e}"
+            else:
+                logger.info("短文本总结任务完成: %s", task_id)
 
         # 启动校对线程
         t1 = threading.Thread(target=run_calibrate)
@@ -574,6 +670,10 @@ class EnhancedLLMProcessor:
                 f"{'='*60}\n\n"
                 f"{formatted_transcript}"
             )
+        else:
+            result_dict['校对文本'] = self._ensure_min_length(
+                transcript, result_dict.get('校对文本', ''), task_id, context="short_txt"
+            )
 
         # 处理总结失败的情况：在错误信息后附加原始转录文本
         if result_dict.get('内容总结') and result_dict.get('内容总结', '').startswith('【LLM call failed】'):
@@ -602,6 +702,27 @@ class EnhancedLLMProcessor:
         }
 
         return result_dict
+
+    def _ensure_min_length(self, original: str, calibrated: str, task_id: str, context: str) -> str:
+        """确保校对结果不少于原文 95%，否则回退到原文"""
+        if not original:
+            return calibrated
+
+        min_ratio = self.llm_config.get("min_calibrate_ratio", 0.80)
+        min_length = int(len(original) * min_ratio)
+        calibrated_length = len(calibrated or "")
+        ratio = (calibrated_length / len(original)) if original else 0
+        if calibrated_length < min_length:
+            self.logger.warning(
+                f"任务 {task_id} ({context}) 校对文本过短，原始 {len(original)} 字，校对 {calibrated_length} 字，"
+                f"比例 {ratio * 100:.2f}% < {min_ratio * 100:.2f}% ，回退原文"
+            )
+            return self._format_transcript_for_display(original)
+        self.logger.info(
+            f"任务 {task_id} ({context}) 校对文本长度满足要求：原始 {len(original)} 字，校对 {calibrated_length} 字，"
+            f"占比 {ratio * 100:.2f}%"
+        )
+        return calibrated
     
     def _generate_original_calibrate_prompt(self, transcript: str, video_title: str, 
                                           author: str, description: str, 
@@ -629,10 +750,15 @@ class EnhancedLLMProcessor:
                 context_info += f"- 视频描述：{description[:500]}{'...' if len(description) > 500 else ''}\n"
             context_info += "\n"
         
+        length_requirement = (
+            "⚠️ **绝对要求：不得删减内容。校对后的文本长度必须保持在原文的 95% 以上**。"
+        )
+
         calibrate_prompt = (
             "你将收到一段音频的转录文本。你的任务是对这段文本进行校对,提高其可读性,但不改变原意。 "
-            + context_info +
-            "请按照以下指示进行校对: "
+            + context_info
+            + length_requirement
+            + "\n请按照以下指示进行校对: "
             "1. 适当分段,使文本结构更清晰。每个自然段落应该是一个完整的思想单元。 "
             "2. 修正明显的错别字和语法错误。特别注意根据上述辅助信息修正专有名词的拼写。 "
             "3. 调整标点符号的使用,确保其正确性和一致性。 "

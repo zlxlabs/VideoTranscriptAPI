@@ -13,7 +13,7 @@ from ..context import (
     get_static_dir,
     get_templates,
 )
-from ...utils.cache import should_upgrade_cache
+from ...utils.cache import should_upgrade_cache, analyze_cache_capabilities, CacheCapabilities
 from ...utils.llm import EnhancedLLMProcessor
 from ...utils.rendering import (
     get_base_url,
@@ -221,7 +221,69 @@ async def view_transcript(view_token: str, request: Request, raw: Optional[str] 
                 view_data["summary_html"] = render_markdown_to_html(view_data["summary"])
 
             cache_dir = view_data.get("cache_dir")
+
+            # 计算字数统计
+            stats = {
+                'original_length': 0,
+                'calibrated_length': 0,
+                'summary_length': 0
+            }
+
             if cache_dir and os.path.exists(cache_dir):
+                # 统一进行一次缓存能力分析，避免重复
+                logger.debug("开始统一缓存能力分析: %s", cache_dir)
+                cache_capabilities = analyze_cache_capabilities(cache_dir)
+                logger.debug("缓存能力分析完成，复用于渲染和升级检查")
+
+                cache_dir_path = Path(cache_dir)
+
+                # 1. 计算原始转录字数
+                funasr_file = cache_dir_path / "transcript_funasr.json"
+                capswriter_file = cache_dir_path / "transcript_capswriter.txt"
+
+                if funasr_file.exists():
+                    # FunASR JSON 格式：提取 text 字段
+                    try:
+                        import json
+                        with open(funasr_file, 'r', encoding='utf-8') as f:
+                            funasr_data = json.load(f)
+                        # 复用现有的格式化方法
+                        from ...transcriber import FunASRSpeakerClient
+                        funasr_client = FunASRSpeakerClient()
+                        transcript_text = funasr_client.format_transcript_with_speakers(funasr_data)
+                        stats['original_length'] = len(transcript_text)
+                        logger.debug(f"原始转录字数(FunASR): {stats['original_length']}")
+                    except Exception as exc:
+                        logger.error(f"计算FunASR转录字数失败: {exc}")
+                elif capswriter_file.exists():
+                    # CapsWriter 纯文本格式
+                    try:
+                        with open(capswriter_file, 'r', encoding='utf-8') as f:
+                            stats['original_length'] = len(f.read())
+                        logger.debug(f"原始转录字数(CapsWriter): {stats['original_length']}")
+                    except Exception as exc:
+                        logger.error(f"计算CapsWriter转录字数失败: {exc}")
+
+                # 2. 计算校对文本字数
+                calibrated_file = cache_dir_path / "llm_calibrated.txt"
+                if calibrated_file.exists():
+                    try:
+                        with open(calibrated_file, 'r', encoding='utf-8') as f:
+                            stats['calibrated_length'] = len(f.read())
+                        logger.debug(f"校对文本字数: {stats['calibrated_length']}")
+                    except Exception as exc:
+                        logger.error(f"计算校对文本字数失败: {exc}")
+
+                # 3. 计算总结文本字数
+                summary_file = cache_dir_path / "llm_summary.txt"
+                if summary_file.exists():
+                    try:
+                        with open(summary_file, 'r', encoding='utf-8') as f:
+                            stats['summary_length'] = len(f.read())
+                        logger.debug(f"总结文本字数: {stats['summary_length']}")
+                    except Exception as exc:
+                        logger.error(f"计算总结文本字数失败: {exc}")
+
                 fallback_text = view_data.get("transcript", "")
                 transcript_path = Path(cache_dir) / "llm_calibrated.txt"
                 if transcript_path.exists():
@@ -236,9 +298,13 @@ async def view_transcript(view_token: str, request: Request, raw: Optional[str] 
                     view_data["transcript_html"] = render_transcript_content(fallback_text)
 
                 if Path(cache_dir, "llm_calibrated.txt").exists():
-                    view_data["calibrated_html"] = render_calibrated_content_smart(cache_dir)
+                    # 传递缓存能力信息，避免重复分析
+                    view_data["calibrated_html"] = render_calibrated_content_smart(
+                        cache_dir, capabilities=cache_capabilities
+                    )
 
-                _trigger_cache_upgrade_if_needed(cache_dir, view_data)
+                # 传递缓存能力信息，避免重复分析
+                _trigger_cache_upgrade_if_needed(cache_dir, view_data, capabilities=cache_capabilities)
             else:
                 fallback_text = view_data.get("transcript", "")
                 view_data["transcript_html"] = render_transcript_content(fallback_text)
@@ -249,6 +315,9 @@ async def view_transcript(view_token: str, request: Request, raw: Optional[str] 
                 "summary": f"{base_url}/view/{view_token}?raw=summary",
                 "transcript": f"{base_url}/view/{view_token}?raw=transcript",
             }
+
+            # 传递字数统计数据给模板
+            view_data["stats"] = stats
 
             return templates.TemplateResponse(
                 "transcript.html",
@@ -267,10 +336,29 @@ async def view_transcript(view_token: str, request: Request, raw: Optional[str] 
         )
 
 
-def _trigger_cache_upgrade_if_needed(cache_dir: str, view_data: dict):
+def _trigger_cache_upgrade_if_needed(cache_dir: str, view_data: dict, capabilities: Optional[CacheCapabilities] = None):
+    """
+    检查并触发缓存升级（如果需要）
+
+    Args:
+        cache_dir: 缓存目录路径
+        view_data: 视图数据
+        capabilities: 可选的缓存能力信息，如果提供则直接使用，避免重复分析
+    """
     try:
         logger.info("进入缓存升级检查: %s", cache_dir)
-        should_upgrade = should_upgrade_cache(cache_dir)
+
+        # 如果未提供缓存能力信息，则进行分析（保持向后兼容）
+        if capabilities is None:
+            logger.debug("未提供缓存能力信息，开始分析")
+            should_upgrade = should_upgrade_cache(cache_dir)
+        else:
+            logger.debug("复用已有的缓存能力分析结果")
+            # 使用分析器判断是否应该升级
+            from ...utils.cache.cache_analyzer import CacheCapabilityAnalyzer
+            analyzer = CacheCapabilityAnalyzer()
+            should_upgrade = analyzer.should_upgrade_cache(capabilities)
+
         logger.info("缓存升级检查结果: %s -> %s", cache_dir, should_upgrade)
 
         if not should_upgrade:

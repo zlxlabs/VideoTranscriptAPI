@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from ..utils.notifications import init_global_notifier, shutdown_global_notifier
+from ..utils.ytdlp import YtdlpConfigBuilder
 from .context import get_config, get_logger, get_static_dir
 from .routes import audit, tasks, users, views
 from .services.transcription import process_llm_queue, process_task_queue
@@ -41,6 +42,13 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def startup_event():
         init_global_notifier()
+
+        # 初始化 yt-dlp 配置并验证 YouTube cookie
+        logger.info("Initializing yt-dlp configuration...")
+        ytdlp_builder = YtdlpConfigBuilder(config)
+        ytdlp_builder.validate_cookie_on_startup()
+        app.state.ytdlp_builder = ytdlp_builder
+
         logger.info("启动任务队列处理器")
         asyncio.create_task(process_task_queue())
 

@@ -13,6 +13,7 @@ from youtube_transcript_api._errors import TranscriptsDisabled, VideoUnavailable
 from .base import BaseDownloader
 from ..utils.logging import setup_logger
 from ..utils import create_debug_dir
+from ..utils.ytdlp import YtdlpConfigBuilder
 
 # 创建日志记录器
 logger = setup_logger("youtube_downloader")
@@ -29,6 +30,15 @@ class YoutubeDownloader(BaseDownloader):
         super().__init__(*args, **kwargs)
         # 初始化 YouTube Transcript API
         self.ytt_api = YouTubeTranscriptApi()
+        # 延迟初始化 yt-dlp 配置构建器
+        self._ytdlp_builder: YtdlpConfigBuilder | None = None
+
+    @property
+    def ytdlp_builder(self) -> YtdlpConfigBuilder:
+        """延迟初始化并返回 yt-dlp 配置构建器"""
+        if self._ytdlp_builder is None:
+            self._ytdlp_builder = YtdlpConfigBuilder(self.config)
+        return self._ytdlp_builder
     def can_handle(self, url):
         """
         判断是否可以处理该URL
@@ -460,64 +470,47 @@ class YoutubeDownloader(BaseDownloader):
             logger.exception(f"解析Youtube字幕XML异常: {str(e)}")
             return None
     
-    def _get_video_info_with_ytdlp(self, url):
+    def _get_video_info_with_ytdlp(self, url, use_cookie: bool = True):
         """
         使用 yt-dlp 获取视频信息（不下载）
-        
+
         参数:
             url: 视频URL
-            
+            use_cookie: 是否使用 cookie（如果可用）
+
         返回:
             dict: 包含视频信息的字典
         """
         try:
             video_id = self._extract_video_id(url)
-            
-            # 配置 yt-dlp 仅提取信息，不下载
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': False,  # 获取完整信息
-                'skip_download': True,  # 不下载视频
-                'no_check_certificate': True,
-                'ignoreerrors': False,
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-us,en;q=0.5',
-                    'Accept-Encoding': 'gzip, deflate',
-                    'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.7'
-                },
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['tv', 'android', 'ios', 'web'],
-                        'player_skip': [],
-                        'skip': [],
-                        'player_js_version': ['actual']
-                    }
-                }
-            }
-            
+
+            # 使用配置构建器获取 yt-dlp 选项
+            ydl_opts = self.ytdlp_builder.build_info_opts(use_cookie=use_cookie)
+            ydl_opts['ignoreerrors'] = False
+
+            cookie_status = "with cookie" if (use_cookie and self.ytdlp_builder.is_cookie_available()) else "without cookie"
+            logger.info(f"[youtube] Getting video info ({cookie_status}): {video_id}")
+
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                
+
                 # 提取必要信息
                 video_title = info.get('title', f'youtube_{video_id}')
                 author = info.get('channel', info.get('uploader', '未知作者'))
                 description = info.get('description', '')
-                
+
                 # 查找音频格式
                 formats = info.get('formats', [])
                 audio_url = None
                 file_ext = "m4a"
-                
+
                 # 优先选择 m4a 音频
                 for fmt in formats:
                     if fmt.get('acodec') != 'none' and fmt.get('vcodec') == 'none':
                         if fmt.get('ext') == 'm4a':
                             audio_url = fmt.get('url')
                             break
-                
+
                 # 如果没有找到 m4a，选择任意音频格式
                 if not audio_url:
                     for fmt in formats:
@@ -525,19 +518,19 @@ class YoutubeDownloader(BaseDownloader):
                             audio_url = fmt.get('url')
                             file_ext = fmt.get('ext', 'm4a')
                             break
-                
+
                 if audio_url:
-                    logger.info(f"找到音频下载URL (yt-dlp)")
-                
+                    logger.info(f"[youtube] Found audio download URL (yt-dlp)")
+
                 # 清理文件名中的非法字符
                 safe_title = re.sub(r'[\\/*?:"<>|]', "_", video_title)
                 filename = f"youtube_{video_id}_{int(time.time())}.{file_ext}"
-                
+
                 # 检查是否有字幕
                 subtitles = info.get('subtitles', {})
                 automatic_captions = info.get('automatic_captions', {})
                 all_subtitles = {**subtitles, **automatic_captions}
-                
+
                 subtitle_info = None
                 if all_subtitles:
                     # 优先选择中文字幕，其次是英文字幕
@@ -549,9 +542,9 @@ class YoutubeDownloader(BaseDownloader):
                                     "code": lang_code,
                                     "url": subtitle_entries[0].get('url')
                                 }
-                                logger.info(f"找到字幕: 语言={lang_code} (yt-dlp)")
+                                logger.info(f"[youtube] Found subtitle: lang={lang_code} (yt-dlp)")
                                 break
-                
+
                 result = {
                     "video_id": video_id,
                     "video_title": video_title,
@@ -562,12 +555,12 @@ class YoutubeDownloader(BaseDownloader):
                     "platform": "youtube",
                     "subtitle_info": subtitle_info
                 }
-                
-                logger.info(f"成功使用 yt-dlp 获取 YouTube 视频信息: ID={video_id}")
+
+                logger.info(f"[youtube] Successfully got video info via yt-dlp: ID={video_id}")
                 return result
-                
+
         except Exception as e:
-            logger.error(f"yt-dlp 获取视频信息异常: {e}")
+            logger.error(f"[youtube] yt-dlp get video info error: {e}")
             raise
     
     def download_video_with_priority(self, url, video_info=None):
@@ -621,93 +614,107 @@ class YoutubeDownloader(BaseDownloader):
     
     def download_audio_for_transcription(self, url):
         """
-        使用yt-dlp下载音频用于转录
-        
+        使用 yt-dlp 下载音频用于转录
+
+        下载策略:
+        1. 如果 cookie 可用，先尝试带 cookie 下载
+        2. 带 cookie 失败且允许 fallback，降级为无 cookie 下载
+        3. 返回结果或 None
+
         参数:
             url: 视频URL
-            
+
         返回:
-            dict: 包含音频文件路径和视频信息的字典
+            dict: 包含音频文件路径和视频信息的字典，失败返回 None
         """
+        video_id = self._extract_video_id(url)
+        if not video_id:
+            logger.error("[youtube] Failed to extract video ID")
+            return None
+
+        # 策略1: 尝试带 cookie 下载
+        if self.ytdlp_builder.is_cookie_available():
+            logger.info(f"[youtube] Starting download (with cookie): {video_id}")
+            result = self._download_with_ytdlp(video_id, use_cookie=True)
+            if result:
+                return result
+
+            logger.warning(f"[youtube] Download with cookie failed: {video_id}")
+
+            # 检查是否允许降级
+            if not self.ytdlp_builder.should_fallback():
+                logger.error(f"[youtube] Fallback disabled, download aborted: {video_id}")
+                return None
+
+            logger.info(f"[youtube] Falling back to cookie-less download: {video_id}")
+
+        # 策略2: 无 cookie 下载
+        logger.info(f"[youtube] Starting download (without cookie): {video_id}")
+        return self._download_with_ytdlp(video_id, use_cookie=False)
+
+    def _download_with_ytdlp(self, video_id: str, use_cookie: bool = False) -> dict | None:
+        """
+        执行 yt-dlp 下载
+
+        参数:
+            video_id: YouTube 视频 ID
+            use_cookie: 是否使用 cookie
+
+        返回:
+            dict: 包含音频文件路径和视频信息的字典，失败返回 None
+        """
+        temp_dir = None
         try:
-            video_id = self._extract_video_id(url)
-            if not video_id:
-                raise ValueError("无法提取视频ID")
-            
             # 创建临时目录
             temp_dir = tempfile.mkdtemp()
+            output_template = str(Path(temp_dir) / f"{video_id}.%(ext)s")
             output_path = str(Path(temp_dir) / f"{video_id}.mp3")
-            
-            # 配置yt-dlp
-            ydl_opts = {
-                'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best',
-                'outtmpl': output_path.replace('.mp3', '.%(ext)s'),
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
-                'quiet': False,
-                'no_warnings': False,
-                'verbose': True,
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-us,en;q=0.5',
-                    'Accept-Encoding': 'gzip, deflate',
-                    'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.7'
-                },
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['tv', 'android', 'ios', 'web'],
-                        'player_skip': [],
-                        'skip': [],
-                        'player_js_version': ['actual']
-                    }
-                },
-                'retries': 10,
-                'fragment_retries': 10,
-                'skip_unavailable_fragments': False,
-                'socket_timeout': 30,
-                'nocheckcertificate': True,
-                'hls_prefer_native': True,
-                'progress': True,
-                'noprogress': False,
-            }
-            
-            logger.info(f"开始使用 yt-dlp 下载音频: https://www.youtube.com/watch?v={video_id}")
-            
+
+            # 使用配置构建器获取 yt-dlp 选项
+            ydl_opts = self.ytdlp_builder.build_download_opts(
+                output_template=output_template,
+                use_cookie=use_cookie,
+                audio_only=True
+            )
+
+            cookie_status = "with cookie" if (use_cookie and self.ytdlp_builder.is_cookie_available()) else "without cookie"
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            logger.info(f"[youtube] yt-dlp downloading ({cookie_status}): {video_url}")
+
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=True)
-                logger.info(f"yt-dlp 提取信息成功: {info.get('title', 'Unknown')}")
-            
+                info = ydl.extract_info(video_url, download=True)
+                logger.info(f"[youtube] yt-dlp extract info success: {info.get('title', 'Unknown')}")
+
             # 查找下载的音频文件
             if Path(output_path).exists():
-                logger.info(f"音频文件已生成: {output_path}")
+                logger.info(f"[youtube] Audio file generated: {output_path}")
                 return {
                     "audio_path": output_path,
                     "video_title": info.get('title', f'youtube_{video_id}'),
                     "author": info.get('channel', '未知作者'),
                     "description": info.get('description', '')
                 }
-            else:
-                # 查找其他格式
-                for file in Path(temp_dir).glob(f"{video_id}.*"):
-                    if file.suffix in ['.mp3', '.m4a', '.wav', '.webm', '.opus']:
-                        logger.info(f"找到音频文件: {file}")
-                        return {
-                            "audio_path": str(file),
-                            "video_title": info.get('title', f'youtube_{video_id}'),
-                            "author": info.get('channel', '未知作者'),
-                            "description": info.get('description', '')
-                        }
-            
-            logger.error(f"未找到下载的音频文件: {video_id}")
+
+            # 查找其他格式
+            for file in Path(temp_dir).glob(f"{video_id}.*"):
+                if file.suffix in ['.mp3', '.m4a', '.wav', '.webm', '.opus']:
+                    logger.info(f"[youtube] Found audio file: {file}")
+                    return {
+                        "audio_path": str(file),
+                        "video_title": info.get('title', f'youtube_{video_id}'),
+                        "author": info.get('channel', '未知作者'),
+                        "description": info.get('description', '')
+                    }
+
+            logger.error(f"[youtube] Audio file not found after download: {video_id}")
             return None
-            
+
         except Exception as e:
             error_str = str(e)
             if "403" in error_str or "Forbidden" in error_str:
-                logger.error(f"yt-dlp 下载被禁止(403)，YouTube 视频无法下载")
-            logger.error(f"下载音频失败 {url}: {e}")
-            return None 
+                logger.error(f"[youtube] yt-dlp download forbidden (403)")
+            elif "Sign in" in error_str or "age" in error_str.lower():
+                logger.error(f"[youtube] Video requires authentication or age verification")
+            else:
+                logger.error(f"[youtube] yt-dlp download error: {e}")
+            return None
