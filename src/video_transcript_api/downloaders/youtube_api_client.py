@@ -338,8 +338,8 @@ class YouTubeApiClient:
             error_code = error.get("code")
             error_message = error.get("message")
 
-        # 解析结果标志
-        result_data = data.get("result", {})
+        # 解析结果标志（注意：result 可能是 null，需要用 or {} 处理）
+        result_data = data.get("result") or {}
         has_transcript = result_data.get("has_transcript", False)
         audio_fallback = result_data.get("audio_fallback", False)
 
