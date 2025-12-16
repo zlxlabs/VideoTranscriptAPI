@@ -11,7 +11,6 @@
         "timeout": 30
     },
     "capswriter": {
-        "path": "./CapsWriter-Offline",
         "server_url": "ws://localhost:6016",
         "max_retries": 5,
         "retry_delay": 3,
