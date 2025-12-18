@@ -580,6 +580,117 @@
                 margin-top: 5px;
             }
         }
+
+        /* ========== LLM 模型配置折叠区块样式 ========== */
+        .llm-config-details {
+            padding: 8px 30px;
+            margin: 0;
+            background: rgba(0, 0, 0, 0.02);
+            border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+            font-size: 0.85rem;
+        }
+
+        .llm-config-details summary {
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 0;
+            user-select: none;
+            list-style: none;
+        }
+
+        .llm-config-details summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .llm-config-details summary::before {
+            content: '▶';
+            font-size: 0.7rem;
+            transition: transform 0.2s ease;
+            color: var(--text-secondary);
+        }
+
+        .llm-config-details[open] summary::before {
+            transform: rotate(90deg);
+        }
+
+        .config-icon {
+            font-size: 0.9rem;
+            opacity: 0.8;
+        }
+
+        .config-label {
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+
+        .risk-badge {
+            background: #dc2626;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            margin-left: 8px;
+        }
+
+        .llm-config-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 8px 16px;
+            padding: 12px 0 8px 20px;
+        }
+
+        .config-item {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .config-key {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .config-value {
+            font-size: 0.85rem;
+            color: var(--text-primary);
+            font-family: "SFMono-Regular", Monaco, "Cascadia Code", "Roboto Mono", Consolas, monospace;
+        }
+
+        .reasoning-tag {
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 0.75rem;
+            margin-left: 4px;
+        }
+
+        /* 深色主题适配 */
+        [data-theme="dark"] .llm-config-details {
+            background: rgba(255, 255, 255, 0.02);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }
+
+        [data-theme="dark"] .risk-badge {
+            background: #ef4444;
+        }
+
+        /* 响应式设计 */
+        @media (max-width: 768px) {
+            .llm-config-details {
+                padding: 8px 20px;
+            }
+
+            .llm-config-grid {
+                grid-template-columns: 1fr;
+                padding-left: 16px;
+            }
+        }
     </style>
     {% block extra_css %}{% endblock %}
 </head>

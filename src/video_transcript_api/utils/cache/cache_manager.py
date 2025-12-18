@@ -98,6 +98,7 @@ class CacheManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     completed_at TIMESTAMP,
                     cache_id INTEGER,
+                    llm_config TEXT,
                     FOREIGN KEY (cache_id) REFERENCES video_cache(id)
                 )
             ''')
@@ -112,66 +113,92 @@ class CacheManager:
         self._migrate_database()
     
     def _migrate_database(self):
-        """执行数据库迁移，移除view_token的UNIQUE约束"""
+        """执行数据库迁移"""
         try:
             with self._get_cursor() as cursor:
                 # 获取表的创建SQL语句
                 cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='task_status'")
                 result = cursor.fetchone()
-                
-                if result and 'UNIQUE' in result[0] and 'view_token' in result[0]:
+
+                if not result:
+                    logger.debug("task_status 表不存在，跳过迁移")
+                    return
+
+                table_sql = result[0]
+
+                # 迁移1: 移除view_token UNIQUE约束
+                if 'UNIQUE' in table_sql and 'view_token' in table_sql:
                     logger.info("检测到view_token UNIQUE约束，开始数据库迁移...")
-                    
-                    # 备份现有数据
-                    cursor.execute("SELECT * FROM task_status")
-                    existing_data = cursor.fetchall()
-                    
-                    # 获取列信息
-                    cursor.execute("PRAGMA table_info(task_status)")
-                    columns = cursor.fetchall()
-                    
-                    # 删除旧表
-                    cursor.execute("DROP TABLE task_status")
-                    
-                    # 重新创建表（没有UNIQUE约束）
-                    cursor.execute('''
-                        CREATE TABLE task_status (
-                            task_id TEXT PRIMARY KEY,
-                            view_token TEXT NOT NULL,
-                            url TEXT NOT NULL,
-                            platform TEXT,
-                            media_id TEXT,
-                            use_speaker_recognition BOOLEAN DEFAULT 0,
-                            status TEXT NOT NULL DEFAULT 'queued',
-                            title TEXT,
-                            author TEXT,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            completed_at TIMESTAMP,
-                            cache_id INTEGER,
-                            FOREIGN KEY (cache_id) REFERENCES video_cache(id)
-                        )
-                    ''')
-                    
-                    # 重新创建索引
-                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_view_token ON task_status(view_token)')
-                    cursor.execute('CREATE INDEX IF NOT EXISTS idx_task_status ON task_status(status)')
-                    
-                    # 恢复数据
-                    for row in existing_data:
-                        cursor.execute('''
-                            INSERT INTO task_status 
-                            (task_id, view_token, url, platform, media_id, use_speaker_recognition, 
-                             status, title, author, created_at, completed_at, cache_id)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ''', row)
-                    
-                    logger.info(f"数据库迁移完成，恢复了 {len(existing_data)} 条记录")
+                    self._rebuild_task_status_table(cursor)
+                    return
+
+                # 迁移2: 添加 llm_config 字段
+                cursor.execute("PRAGMA table_info(task_status)")
+                columns = [col[1] for col in cursor.fetchall()]
+
+                if 'llm_config' not in columns:
+                    logger.info("添加 llm_config 字段到 task_status 表...")
+                    cursor.execute("ALTER TABLE task_status ADD COLUMN llm_config TEXT")
+                    logger.info("llm_config 字段添加成功")
                 else:
                     logger.debug("数据库结构正常，无需迁移")
-                    
+
         except Exception as e:
             logger.error(f"数据库迁移失败: {e}")
             # 迁移失败不应该影响程序运行
+
+    def _rebuild_task_status_table(self, cursor):
+        """重建 task_status 表（用于移除 UNIQUE 约束）"""
+        # 备份现有数据
+        cursor.execute("SELECT * FROM task_status")
+        existing_data = cursor.fetchall()
+
+        # 获取原表列数
+        cursor.execute("PRAGMA table_info(task_status)")
+        old_columns = cursor.fetchall()
+        old_column_count = len(old_columns)
+
+        # 删除旧表
+        cursor.execute("DROP TABLE task_status")
+
+        # 重新创建表（包含 llm_config 字段）
+        cursor.execute('''
+            CREATE TABLE task_status (
+                task_id TEXT PRIMARY KEY,
+                view_token TEXT NOT NULL,
+                url TEXT NOT NULL,
+                platform TEXT,
+                media_id TEXT,
+                use_speaker_recognition BOOLEAN DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'queued',
+                title TEXT,
+                author TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP,
+                cache_id INTEGER,
+                llm_config TEXT,
+                FOREIGN KEY (cache_id) REFERENCES video_cache(id)
+            )
+        ''')
+
+        # 重新创建索引
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_view_token ON task_status(view_token)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_task_status ON task_status(status)')
+
+        # 恢复数据（处理列数差异）
+        for row in existing_data:
+            row_data = tuple(row)
+            if old_column_count == 12:
+                # 旧表没有 llm_config 字段，补充 None
+                row_data = row_data + (None,)
+            cursor.execute('''
+                INSERT INTO task_status
+                (task_id, view_token, url, platform, media_id, use_speaker_recognition,
+                 status, title, author, created_at, completed_at, cache_id, llm_config)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', row_data)
+
+        logger.info(f"数据库迁移完成，恢复了 {len(existing_data)} 条记录")
             
     def _get_file_path(self, platform: str, media_id: str, date: datetime.datetime = None) -> Path:
         """
@@ -799,22 +826,26 @@ class CacheManager:
                     summary = cache_data.get('llm_summary', '总结处理中...')
                     if not isinstance(summary, str):
                         summary = str(summary) if summary is not None else '总结处理中...'
-                    
+
                     transcript = cache_data.get('llm_calibrated') or cache_data.get('transcript_data', '转录文本获取中...')
                     if not isinstance(transcript, str):
                         transcript = str(transcript) if transcript is not None else '转录文本获取中...'
-                    
+
+                    # 获取 LLM 模型配置
+                    llm_config = self.get_task_llm_config(task_info['task_id'])
+
                     return {
                         'status': 'success',
                         'title': cache_data.get('title', ''),
                         'author': cache_data.get('author', ''),
-                        'description': cache_data.get('description', ''),  # 添加缺失的description字段
+                        'description': cache_data.get('description', ''),
                         'url': task_info['url'],
                         'summary': summary,
                         'transcript': transcript,
                         'use_speaker_recognition': cache_data.get('use_speaker_recognition', False),
                         'created_at': task_info['created_at'],
-                        'cache_dir': cache_data.get('file_path')  # 使用缓存数据中的文件路径
+                        'cache_dir': cache_data.get('file_path'),
+                        'llm_config': llm_config  # 添加 LLM 模型配置
                     }
                 else:
                     # 底层文件已清理
@@ -888,7 +919,76 @@ class CacheManager:
                 else:
                     logger.debug(f"未找到现有任务: URL={url}, use_speaker_recognition={use_speaker_recognition}")
                     return None
-                    
+
         except Exception as e:
             logger.error(f"查找现有任务失败: {e}")
+            return None
+
+    def update_task_llm_config(self, task_id: str, llm_config: Dict[str, Any]) -> bool:
+        """
+        更新任务的 LLM 模型配置信息
+
+        Args:
+            task_id: 任务ID
+            llm_config: LLM 模型配置字典，包含:
+                - calibrate_model: 校对模型
+                - calibrate_reasoning_effort: 校对模型推理强度
+                - summary_model: 总结模型
+                - summary_reasoning_effort: 总结模型推理强度
+                - validator_model: 校验模型
+                - validator_reasoning_effort: 校验模型推理强度
+                - risk_detected: 是否检测到风险内容
+                - recorded_at: 记录时间
+
+        Returns:
+            bool: 是否更新成功
+        """
+        try:
+            # 添加记录时间
+            if 'recorded_at' not in llm_config:
+                llm_config['recorded_at'] = datetime.datetime.now().isoformat()
+
+            llm_config_json = json.dumps(llm_config, ensure_ascii=False)
+
+            with self._get_cursor() as cursor:
+                cursor.execute(
+                    "UPDATE task_status SET llm_config = ? WHERE task_id = ?",
+                    (llm_config_json, task_id)
+                )
+
+                if cursor.rowcount > 0:
+                    logger.info(f"LLM配置已保存: task_id={task_id}, risk_detected={llm_config.get('risk_detected', False)}")
+                    return True
+                else:
+                    logger.warning(f"未找到任务: {task_id}")
+                    return False
+
+        except Exception as e:
+            logger.error(f"更新LLM配置失败: {e}")
+            return False
+
+    def get_task_llm_config(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """
+        获取任务的 LLM 模型配置信息
+
+        Args:
+            task_id: 任务ID
+
+        Returns:
+            Dict: LLM 模型配置字典，如果不存在则返回 None
+        """
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute(
+                    "SELECT llm_config FROM task_status WHERE task_id = ?",
+                    (task_id,)
+                )
+                row = cursor.fetchone()
+
+                if row and row['llm_config']:
+                    return json.loads(row['llm_config'])
+                return None
+
+        except Exception as e:
+            logger.error(f"获取LLM配置失败: {e}")
             return None

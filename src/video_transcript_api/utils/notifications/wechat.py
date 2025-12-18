@@ -547,3 +547,39 @@ def send_wechat_notification(
         author=author,
         transcript=transcript,
     )
+
+
+def format_llm_config_markdown(models_used: dict) -> str:
+    """
+    将 LLM 模型配置格式化为 Markdown 文本（仅展示校对和总结模型）
+
+    Args:
+        models_used: 模型配置字典
+
+    Returns:
+        str: 格式化后的 Markdown 文本
+    """
+    if not models_used:
+        return ""
+
+    lines = ["**模型配置：**"]
+
+    # 校对模型
+    calibrate_model = models_used.get('calibrate_model', '')
+    calibrate_effort = models_used.get('calibrate_reasoning_effort')
+    if calibrate_model:
+        effort_str = f" (reasoning: {calibrate_effort})" if calibrate_effort else ""
+        lines.append(f"> 校对: {calibrate_model}{effort_str}")
+
+    # 总结模型
+    summary_model = models_used.get('summary_model', '')
+    summary_effort = models_used.get('summary_reasoning_effort')
+    if summary_model:
+        effort_str = f" (reasoning: {summary_effort})" if summary_effort else ""
+        lines.append(f"> 总结: {summary_model}{effort_str}")
+
+    # 风险降级标记
+    if models_used.get('has_risk', False):
+        lines.append("> [风险降级]")
+
+    return "\n".join(lines)

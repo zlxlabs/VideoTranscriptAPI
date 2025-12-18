@@ -25,7 +25,7 @@ from ..context import (
 from ...downloaders import create_downloader
 from ...transcriber import FunASRSpeakerClient, Transcriber
 from ...utils.llm import call_llm_api
-from ...utils.notifications import WechatNotifier, send_long_text_wechat
+from ...utils.notifications import WechatNotifier, send_long_text_wechat, format_llm_config_markdown
 from ...utils.rendering import get_base_url
 
 logger = get_logger()
@@ -935,6 +935,12 @@ def _handle_llm_task(llm_task: dict):
                 summary_text = result_dict.get("内容总结")
                 skip_summary = result_dict.get("skip_summary", False)
                 stats = result_dict.get("stats", {})
+                models_used = result_dict.get("models_used", {})
+
+                # 保存 LLM 模型配置到数据库
+                if models_used:
+                    cache_manager.update_task_llm_config(task_id, models_used)
+                    logger.info(f"LLM模型配置已保存: {task_id}, risk_detected={models_used.get('has_risk', False)}")
 
                 # 保存校对文本到缓存
                 if platform and media_id:
@@ -978,6 +984,9 @@ def _handle_llm_task(llm_task: dict):
                 # 构建完整的消息格式
                 speaker_info = "（含说话人识别）" if use_speaker_recognition else ""
 
+                # 格式化模型配置信息
+                model_config_text = format_llm_config_markdown(models_used)
+
                 if skip_summary:
                     full_message = f"""## 总结和校对
 🌐 网页查看：{view_url}
@@ -985,6 +994,8 @@ def _handle_llm_task(llm_task: dict):
 
 ## 转录统计
 原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 未生成
+
+{model_config_text}
 
 ## 校对文本{speaker_info}
 {calibrated_text}"""
@@ -996,6 +1007,8 @@ def _handle_llm_task(llm_task: dict):
 
 ## 转录统计
 原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_length:,} 字
+
+{model_config_text}
 
 ## 总结{speaker_info}
 {summary_text}"""

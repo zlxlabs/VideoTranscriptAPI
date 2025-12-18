@@ -295,47 +295,48 @@ class EnhancedLLMProcessor:
         # 优先使用结构化处理（仅限说话人识别场景）
         if use_speaker_recognition and transcription_data and platform and media_id:
             logger.info(f"检测到说话人识别场景，使用结构化处理: {task_id}, 平台: {platform}, 媒体ID: {media_id}")
-            return self._process_with_structured_output(
+            result = self._process_with_structured_output(
                 llm_task, selected_summary_model, selected_summary_effort,
                 selected_calibrate_model, selected_calibrate_effort,
                 selected_validator_model, selected_validator_effort
             )
-        
-        # 根据transcription_data判断文件类型和处理方式
-        if use_speaker_recognition and transcription_data:
-            # FunASR JSON格式，需要创建临时文件进行处理
-            file_type = 'json'
-            temp_file_needed = True
-        else:
-            # CapsWriter TXT格式或纯文本
-            file_type = 'txt'
-            temp_file_needed = False
-        
-        # 判断是否需要分段处理
-        text_length = len(transcript)
-        need_segmentation = text_length > self.segmentation_processor.enable_threshold
-        
-        logger.info(f"文本长度: {text_length}, 需要分段: {need_segmentation}")
-        
-        if need_segmentation:
-            if temp_file_needed:
-                # 创建临时JSON文件进行分段处理
-                return self._process_json_segmented(
+        elif use_speaker_recognition and transcription_data:
+            # FunASR JSON格式，需要创建临时文件进行分段处理
+            text_length = len(transcript)
+            need_segmentation = text_length > self.segmentation_processor.enable_threshold
+            logger.info(f"文本长度: {text_length}, 需要分段: {need_segmentation}")
+
+            if need_segmentation:
+                result = self._process_json_segmented(
                     llm_task, selected_summary_model, selected_summary_effort,
                     selected_calibrate_model, selected_calibrate_effort
                 )
             else:
-                # 直接对文本进行分段处理
-                return self._process_txt_segmented(
+                result = self._process_original_logic(
                     llm_task, selected_summary_model, selected_summary_effort,
                     selected_calibrate_model, selected_calibrate_effort
                 )
         else:
-            # 使用原有逻辑处理
-            return self._process_original_logic(
-                llm_task, selected_summary_model, selected_summary_effort,
-                selected_calibrate_model, selected_calibrate_effort
-            )
+            # CapsWriter TXT格式或纯文本
+            text_length = len(transcript)
+            need_segmentation = text_length > self.segmentation_processor.enable_threshold
+            logger.info(f"文本长度: {text_length}, 需要分段: {need_segmentation}")
+
+            if need_segmentation:
+                result = self._process_txt_segmented(
+                    llm_task, selected_summary_model, selected_summary_effort,
+                    selected_calibrate_model, selected_calibrate_effort
+                )
+            else:
+                result = self._process_original_logic(
+                    llm_task, selected_summary_model, selected_summary_effort,
+                    selected_calibrate_model, selected_calibrate_effort
+                )
+
+        # 添加模型配置信息到返回结果
+        result['models_used'] = selected_models
+
+        return result
     
     def _process_with_structured_output(
         self, llm_task: Dict[str, Any],
