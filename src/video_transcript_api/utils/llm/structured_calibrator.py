@@ -55,33 +55,48 @@ class StructuredCalibrator:
         
         logger.info(f"结构化校对器初始化完成，配置: chunk长度[{self.min_chunk_length}-{self.max_chunk_length}], 并发限制: {self.calibration_concurrent_limit}")
     
-    def calibrate_structured_dialogs(self, dialogs_with_time: List[Dict[str, Any]], video_metadata: Dict[str, str]) -> List[Dict[str, Any]]:
+    def calibrate_structured_dialogs(
+        self, dialogs_with_time: List[Dict[str, Any]], video_metadata: Dict[str, str],
+        selected_calibrate_model: str = None, selected_calibrate_effort: str = None
+    ) -> List[Dict[str, Any]]:
         """
         校对结构化对话数据
-        
+
         Args:
             dialogs_with_time: 包含时间信息的对话列表
             video_metadata: 视频元数据
-            
+            selected_calibrate_model: 选定的校对模型（可选，默认使用配置的模型）
+            selected_calibrate_effort: 选定的校对 reasoning_effort（可选）
+
         Returns:
             List[Dict]: 校对后的对话数据
         """
-        logger.info(f"开始结构化校对，对话数量: {len(dialogs_with_time)}")
-        
+        # 如果指定了模型，临时覆盖实例变量（用于本次调用）
+        original_calibrate_model = self.calibrate_model
+        original_calibrate_effort = self.calibrate_reasoning_effort
+
+        if selected_calibrate_model is not None:
+            self.calibrate_model = selected_calibrate_model
+            logger.info(f"使用指定的校对模型: {selected_calibrate_model}")
+        if selected_calibrate_effort is not None:
+            self.calibrate_reasoning_effort = selected_calibrate_effort
+
+        logger.info(f"开始结构化校对，对话数量: {len(dialogs_with_time)}, 模型: {self.calibrate_model}")
+
         try:
             # 1. 智能分块
             chunks = self._intelligent_chunking(dialogs_with_time)
             logger.info(f"分块完成，共 {len(chunks)} 个chunk")
-            
+
             # 2. 并发校对处理
             calibrated_chunks = self._process_chunks_concurrent(chunks, video_metadata)
-            
+
             # 3. 合并结果
             calibrated_dialogs = self._merge_calibrated_chunks(calibrated_chunks)
-            
+
             logger.info(f"结构化校对完成，输出对话数量: {len(calibrated_dialogs)}")
             return calibrated_dialogs
-            
+
         except Exception as e:
             logger.error(f"结构化校对失败: {e}")
             # 降级处理：返回原始数据
@@ -90,6 +105,10 @@ class StructuredCalibrator:
                 return dialogs_with_time
             else:
                 raise
+        finally:
+            # 恢复原始配置
+            self.calibrate_model = original_calibrate_model
+            self.calibrate_reasoning_effort = original_calibrate_effort
     
     def _intelligent_chunking(self, dialogs: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
         """

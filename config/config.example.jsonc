@@ -123,8 +123,11 @@
         // ------------------------------------------------------
         // 风险内容模型配置
         // 当检测到敏感内容时，自动切换到此模型
+        // 校对和总结共享风险检测结果：一次检测，两处生效
         // ------------------------------------------------------
-        "risk_summary_model": "gpt-4o-mini",    // 风险内容使用的模型
+        "risk_calibrate_model": "gpt-4o-mini",  // 风险内容校对使用的模型（可选，为空则不切换）
+        "risk_calibrate_reasoning_effort": null,
+        "risk_summary_model": "gpt-4o-mini",    // 风险内容总结使用的模型
         "risk_summary_reasoning_effort": "medium",
         "enable_risk_model_selection": false,   // 是否启用风险模型自动选择
 

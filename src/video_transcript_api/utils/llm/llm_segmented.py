@@ -58,30 +58,43 @@ class SegmentedLLMProcessor:
         title: str = "",
         description: str = "",
         speaker_mapping: Optional[Dict[str, str]] = None,
+        selected_calibrate_model: str = None,
+        selected_calibrate_effort: str = None,
     ) -> str:
         """
         对文本进行分段校对
-        
+
         Args:
             file_path: 文件路径
             file_type: 文件类型 ('txt' 或 'json')
             title: 视频标题
             description: 视频描述
-            
+            speaker_mapping: 说话人映射（可选）
+            selected_calibrate_model: 选定的校对模型（可选，默认使用配置的模型）
+            selected_calibrate_effort: 选定的校对 reasoning_effort（可选）
+
         Returns:
             校对后的完整文本
         """
-        logger.info(f"开始分段校对: {os.path.basename(file_path)} (类型: {file_type})")
-        
+        # 如果未指定模型，使用默认配置
+        if selected_calibrate_model is None:
+            selected_calibrate_model = self.calibrate_model
+        if selected_calibrate_effort is None:
+            selected_calibrate_effort = self.calibrate_reasoning_effort
+        logger.info(f"开始分段校对: {os.path.basename(file_path)} (类型: {file_type}), 模型: {selected_calibrate_model}")
+
         try:
             if file_type == 'txt':
-                return self._calibrate_txt_segmented(file_path)
+                return self._calibrate_txt_segmented(
+                    file_path, title, description,
+                    selected_calibrate_model, selected_calibrate_effort
+                )
             elif file_type == 'json':
                 return self._calibrate_json_segmented(
-                    file_path,
-                    title,
-                    description,
+                    file_path, title, description,
                     speaker_mapping=speaker_mapping,
+                    selected_calibrate_model=selected_calibrate_model,
+                    selected_calibrate_effort=selected_calibrate_effort,
                 )
             else:
                 raise ValueError(f"不支持的文件类型: {file_type}")
@@ -89,18 +102,28 @@ class SegmentedLLMProcessor:
             logger.error(f"分段校对失败 {file_path}: {e}")
             return f"【分段校对失败】{e}"
     
-    def _calibrate_txt_segmented(self, file_path: str, title: str = "", description: str = "") -> str:
+    def _calibrate_txt_segmented(
+        self, file_path: str, title: str = "", description: str = "",
+        selected_calibrate_model: str = None, selected_calibrate_effort: str = None
+    ) -> str:
         """
         对TXT文件进行并发分段校对
-        
+
         Args:
             file_path: TXT文件路径
             title: 视频标题
             description: 视频描述
-            
+            selected_calibrate_model: 选定的校对模型
+            selected_calibrate_effort: 选定的校对 reasoning_effort
+
         Returns:
             校对后的完整文本
         """
+        # 如果未指定模型，使用默认配置
+        if selected_calibrate_model is None:
+            selected_calibrate_model = self.calibrate_model
+        if selected_calibrate_effort is None:
+            selected_calibrate_effort = self.calibrate_reasoning_effort
         import threading
         import concurrent.futures
         
@@ -129,13 +152,13 @@ class SegmentedLLMProcessor:
                     length_retry_level=retry_idx,
                 )
                 return call_llm_api(
-                    model=self.calibrate_model,
+                    model=selected_calibrate_model,
                     prompt=prompt,
                     api_key=self.api_key,
                     base_url=self.base_url,
                     max_retries=self.max_retries,
                     retry_delay=self.retry_delay,
-                    reasoning_effort=self.calibrate_reasoning_effort,
+                    reasoning_effort=selected_calibrate_effort,
                     task_type="calibrate_segment",
                 )
 
@@ -181,18 +204,28 @@ class SegmentedLLMProcessor:
         title: str,
         description: str,
         speaker_mapping: Optional[Dict[str, str]] = None,
+        selected_calibrate_model: str = None,
+        selected_calibrate_effort: str = None,
     ) -> str:
         """
         对JSON文件进行并发分段校对
-        
+
         Args:
             file_path: JSON文件路径
             title: 视频标题
             description: 视频描述
-            
+            speaker_mapping: 说话人映射（可选）
+            selected_calibrate_model: 选定的校对模型
+            selected_calibrate_effort: 选定的校对 reasoning_effort
+
         Returns:
             校对后的完整文本
         """
+        # 如果未指定模型，使用默认配置
+        if selected_calibrate_model is None:
+            selected_calibrate_model = self.calibrate_model
+        if selected_calibrate_effort is None:
+            selected_calibrate_effort = self.calibrate_reasoning_effort
         import concurrent.futures
         
         # 首先生成说话人映射
@@ -227,13 +260,13 @@ class SegmentedLLMProcessor:
                     length_retry_level=retry_idx,
                 )
                 return call_llm_api(
-                    model=self.calibrate_model,
+                    model=selected_calibrate_model,
                     prompt=prompt,
                     api_key=self.api_key,
                     base_url=self.base_url,
                     max_retries=self.max_retries,
                     retry_delay=self.retry_delay,
-                    reasoning_effort=self.calibrate_reasoning_effort,
+                    reasoning_effort=selected_calibrate_effort,
                     task_type="calibrate_segment",
                 )
 

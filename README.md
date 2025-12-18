@@ -254,6 +254,9 @@ chmod +x BBDown/BBDown
   - `base_url`: LLM API基础URL
   - `calibrate_model`: 校对文本使用的模型
   - `summary_model`: 内容总结使用的模型
+  - `risk_calibrate_model`: 风险内容校对使用的模型（可选，为空则不切换）
+  - `risk_summary_model`: 风险内容总结使用的模型
+  - `enable_risk_model_selection`: 是否启用风险模型自动选择（检测到敏感内容时自动切换模型）
   - `max_retries`: 最大重试次数（默认2次）
   - `retry_delay`: 重试间隔秒数（默认5秒）
 
