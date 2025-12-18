@@ -1241,7 +1241,7 @@ class EnhancedLLMProcessor:
             calibrated_text = self._generate_text_from_calibrated_dialogs(calibrated_dialogs)
 
             # 8. 生成总结（检查是否可以复用已有结果）
-            summary_text = self._get_or_generate_summary(cache_dir, calibrated_text, video_metadata, selected_summary_model, selected_summary_effort)
+            summary_text = self._get_or_generate_summary(cache_dir, calibrated_text, video_metadata, speaker_mapping, selected_summary_model, selected_summary_effort)
             
             # 9. 构建结构化结果
             structured_result = {
@@ -1540,13 +1540,14 @@ class EnhancedLLMProcessor:
         
         return '\n\n'.join(text_lines)
     
-    def _get_or_generate_summary(self, cache_dir: str, calibrated_text: str, video_metadata: Dict, selected_summary_model: str, selected_reasoning_effort: str) -> str:
+    def _get_or_generate_summary(self, cache_dir: str, calibrated_text: str, video_metadata: Dict, speaker_mapping: Dict[str, str], selected_summary_model: str, selected_reasoning_effort: str) -> str:
         """获取或生成总结（优先复用已有结果）
 
         Args:
             cache_dir: 缓存目录
             calibrated_text: 校对后的文本
             video_metadata: 视频元数据
+            speaker_mapping: 说话人映射字典，如 {'Speaker1': '小杨', 'Speaker2': 'Tim'}
             selected_summary_model: 选定的总结模型
             selected_reasoning_effort: 选定的 reasoning_effort
         """
@@ -1570,14 +1571,15 @@ class EnhancedLLMProcessor:
 
         # 生成新的总结
         logger.info("生成新的总结")
-        return self._generate_summary_from_structured_content(calibrated_text, video_metadata, selected_summary_model, selected_reasoning_effort)
+        return self._generate_summary_from_structured_content(calibrated_text, video_metadata, speaker_mapping, selected_summary_model, selected_reasoning_effort)
     
-    def _generate_summary_from_structured_content(self, calibrated_text: str, video_metadata: Dict, selected_summary_model: str, selected_reasoning_effort: str) -> str:
+    def _generate_summary_from_structured_content(self, calibrated_text: str, video_metadata: Dict, speaker_mapping: Dict[str, str], selected_summary_model: str, selected_reasoning_effort: str) -> str:
         """基于结构化内容生成总结
 
         Args:
             calibrated_text: 校对后的文本
             video_metadata: 视频元数据
+            speaker_mapping: 说话人映射字典，如 {'Speaker1': '小杨', 'Speaker2': 'Tim'}
             selected_summary_model: 选定的总结模型
             selected_reasoning_effort: 选定的 reasoning_effort
         """
@@ -1586,17 +1588,15 @@ class EnhancedLLMProcessor:
         author = video_metadata.get('author', '')
         description = video_metadata.get('description', '')
 
-        # 从校对文本中检测说话人数量
-        import re
-        speaker_pattern = r'[一-鿿]+：'  # 中文名字+冒号
-        unique_speakers = set(re.findall(speaker_pattern, calibrated_text))
-        mock_transcription_data = {
-            'speakers': [speaker.rstrip('：') for speaker in unique_speakers]
-        } if unique_speakers else None
+        # 直接从 speaker_mapping 获取说话人列表
+        speakers = list(speaker_mapping.values()) if speaker_mapping else []
+        transcription_data = {
+            'speakers': speakers
+        } if speakers else None
 
         summary_prompt = self._generate_original_summary_prompt(
             calibrated_text, video_title, author, description,
-            use_speaker_recognition=True, transcription_data=mock_transcription_data
+            use_speaker_recognition=True, transcription_data=transcription_data
         )
 
         # 使用选定的总结模型和 reasoning_effort
