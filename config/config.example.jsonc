@@ -174,8 +174,10 @@
             },
             "enable_validation": true,   // 是否对校对结果进行质量验证
             "fallback_to_original": true,    // 校对失败时是否回退到原文
-            "validator_model": "gpt-4.1-mini",   // 质量验证使用的模型
-            "validator_reasoning_effort": null   // null=不支持, "none"=关闭, "low"/"medium"/"high"
+            "validator_model": "deepseek-chat",   // 质量验证使用的模型
+            "validator_reasoning_effort": null,  // null=不支持, "none"=关闭, "low"/"medium"/"high"
+            "risk_validator_model": "gpt-4.1-mini",      // 风险内容校验使用的模型（可选，为空则不切换）
+            "risk_validator_reasoning_effort": null  // 风险校验模型的 reasoning_effort
         },
 
         // ------------------------------------------------------

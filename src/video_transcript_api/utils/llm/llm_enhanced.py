@@ -51,6 +51,13 @@ class EnhancedLLMProcessor:
         self.risk_summary_reasoning_effort = self.llm_config.get('risk_summary_reasoning_effort', None)
         self.enable_risk_model_selection = self.llm_config.get('enable_risk_model_selection', False)
 
+        # 结构化校对的校验模型配置
+        calibration_config = self.llm_config.get('structured_calibration', {})
+        self.validator_model = calibration_config.get('validator_model', self.calibrate_model)
+        self.validator_reasoning_effort = calibration_config.get('validator_reasoning_effort', None)
+        self.risk_validator_model = calibration_config.get('risk_validator_model')
+        self.risk_validator_reasoning_effort = calibration_config.get('risk_validator_reasoning_effort', None)
+
         # 配置验证
         if self.enable_risk_model_selection:
             if not self.risk_summary_model:
@@ -160,7 +167,7 @@ class EnhancedLLMProcessor:
 
     def _select_models(self, task_id: str, title: str, author: str, description: str) -> dict:
         """
-        根据元数据风险检测结果选择校对和总结模型（共享检测结果）
+        根据元数据风险检测结果选择校对、总结和校验模型（共享检测结果）
 
         Args:
             task_id: 任务ID
@@ -169,11 +176,13 @@ class EnhancedLLMProcessor:
             description: 视频描述
 
         Returns:
-            dict: 包含校对和总结模型选择结果
+            dict: 包含校对、总结和校验模型选择结果
                 - calibrate_model: 校对模型
                 - calibrate_reasoning_effort: 校对 reasoning_effort
                 - summary_model: 总结模型
                 - summary_reasoning_effort: 总结 reasoning_effort
+                - validator_model: 校验模型
+                - validator_reasoning_effort: 校验 reasoning_effort
                 - has_risk: 是否检测到风险
         """
         # 默认使用配置的模型
@@ -182,17 +191,19 @@ class EnhancedLLMProcessor:
             'calibrate_reasoning_effort': self.calibrate_reasoning_effort,
             'summary_model': self.summary_model,
             'summary_reasoning_effort': self.summary_reasoning_effort,
+            'validator_model': self.validator_model,
+            'validator_reasoning_effort': self.validator_reasoning_effort,
             'has_risk': False
         }
 
         if not self.enable_risk_model_selection:
             self.logger.info(
                 f"Task {task_id}: Risk model selection disabled, using default models: "
-                f"calibrate={self.calibrate_model}, summary={self.summary_model}"
+                f"calibrate={self.calibrate_model}, summary={self.summary_model}, validator={self.validator_model}"
             )
             return result
 
-        # 一次检测，两处使用
+        # 一次检测，三处使用
         has_risk, sensitive_words = self._detect_risk_in_metadata(title, author, description)
 
         if has_risk:
@@ -212,15 +223,22 @@ class EnhancedLLMProcessor:
                 result['calibrate_model'] = self.risk_calibrate_model
                 result['calibrate_reasoning_effort'] = self.risk_calibrate_reasoning_effort
 
+            # 校验模型：如果配置了风险校验模型则切换，否则保持默认
+            if self.risk_validator_model:
+                result['validator_model'] = self.risk_validator_model
+                result['validator_reasoning_effort'] = self.risk_validator_reasoning_effort
+
             self.logger.warning(
                 f"Task {task_id}: Risk content detected in metadata. "
                 f"Sensitive words found: {sensitive_words_display_str}. "
-                f"Switching models - calibrate: {result['calibrate_model']}, summary: {result['summary_model']}"
+                f"Switching models - calibrate: {result['calibrate_model']}, "
+                f"summary: {result['summary_model']}, validator: {result['validator_model']}"
             )
         else:
             self.logger.info(
                 f"Task {task_id}: No risk detected in metadata. "
-                f"Using default models: calibrate={self.calibrate_model}, summary={self.summary_model}"
+                f"Using default models: calibrate={self.calibrate_model}, "
+                f"summary={self.summary_model}, validator={self.validator_model}"
             )
 
         return result
@@ -265,19 +283,22 @@ class EnhancedLLMProcessor:
 
         logger.info(f"开始处理LLM任务: {task_id}, 标题: {video_title}")
 
-        # 选择校对和总结模型（基于元数据风险检测，共享检测结果）
+        # 选择校对、总结和校验模型（基于元数据风险检测，共享检测结果）
         selected_models = self._select_models(task_id, video_title, author, description)
         selected_calibrate_model = selected_models['calibrate_model']
         selected_calibrate_effort = selected_models['calibrate_reasoning_effort']
         selected_summary_model = selected_models['summary_model']
         selected_summary_effort = selected_models['summary_reasoning_effort']
+        selected_validator_model = selected_models['validator_model']
+        selected_validator_effort = selected_models['validator_reasoning_effort']
 
         # 优先使用结构化处理（仅限说话人识别场景）
         if use_speaker_recognition and transcription_data and platform and media_id:
             logger.info(f"检测到说话人识别场景，使用结构化处理: {task_id}, 平台: {platform}, 媒体ID: {media_id}")
             return self._process_with_structured_output(
                 llm_task, selected_summary_model, selected_summary_effort,
-                selected_calibrate_model, selected_calibrate_effort
+                selected_calibrate_model, selected_calibrate_effort,
+                selected_validator_model, selected_validator_effort
             )
         
         # 根据transcription_data判断文件类型和处理方式
@@ -319,7 +340,8 @@ class EnhancedLLMProcessor:
     def _process_with_structured_output(
         self, llm_task: Dict[str, Any],
         selected_summary_model: str, selected_summary_effort: str,
-        selected_calibrate_model: str = None, selected_calibrate_effort: str = None
+        selected_calibrate_model: str = None, selected_calibrate_effort: str = None,
+        selected_validator_model: str = None, selected_validator_effort: str = None
     ) -> Dict[str, Any]:
         """
         使用结构化输出处理说话人识别任务
@@ -330,6 +352,8 @@ class EnhancedLLMProcessor:
             selected_summary_effort: 选定的总结 reasoning_effort
             selected_calibrate_model: 选定的校对模型（可选）
             selected_calibrate_effort: 选定的校对 reasoning_effort（可选）
+            selected_validator_model: 选定的校验模型（可选）
+            selected_validator_effort: 选定的校验 reasoning_effort（可选）
 
         Returns:
             包含校对文本、总结文本和结构化数据的字典
@@ -353,7 +377,9 @@ class EnhancedLLMProcessor:
                 selected_summary_model=selected_summary_model,
                 selected_summary_effort=selected_summary_effort,
                 selected_calibrate_model=selected_calibrate_model,
-                selected_calibrate_effort=selected_calibrate_effort
+                selected_calibrate_effort=selected_calibrate_effort,
+                selected_validator_model=selected_validator_model,
+                selected_validator_effort=selected_validator_effort
             )
 
             logger.info(f"结构化处理完成: {llm_task['task_id']}")
@@ -1162,7 +1188,8 @@ class EnhancedLLMProcessor:
     def process_llm_task_with_structure(
         self, cache_dir: str, funasr_data: Dict, video_metadata: Dict[str, Any],
         selected_summary_model: str, selected_summary_effort: str,
-        selected_calibrate_model: str = None, selected_calibrate_effort: str = None
+        selected_calibrate_model: str = None, selected_calibrate_effort: str = None,
+        selected_validator_model: str = None, selected_validator_effort: str = None
     ) -> Dict[str, Any]:
         """
         处理LLM任务并生成结构化输出（新格式，含校对）
@@ -1175,6 +1202,8 @@ class EnhancedLLMProcessor:
             selected_summary_effort: 选定的总结 reasoning_effort
             selected_calibrate_model: 选定的校对模型（可选）
             selected_calibrate_effort: 选定的校对 reasoning_effort（可选）
+            selected_validator_model: 选定的校验模型（可选）
+            selected_validator_effort: 选定的校验 reasoning_effort（可选）
 
         Returns:
             Dict: 包含结构化对话数据和映射关系
@@ -1234,7 +1263,9 @@ class EnhancedLLMProcessor:
             calibrated_dialogs = self.structured_calibrator.calibrate_structured_dialogs(
                 dialogs_with_time, video_metadata,
                 selected_calibrate_model=selected_calibrate_model,
-                selected_calibrate_effort=selected_calibrate_effort
+                selected_calibrate_effort=selected_calibrate_effort,
+                selected_validator_model=selected_validator_model,
+                selected_validator_effort=selected_validator_effort
             )
             
             # 7. 生成兼容性文本版本

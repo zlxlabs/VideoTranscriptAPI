@@ -22,14 +22,14 @@ class StructuredCalibrator:
     def __init__(self, config: Dict[str, Any]):
         """
         初始化结构化校对处理器
-        
+
         Args:
             config: 配置字典
         """
         self.config = config
         self.llm_config = config.get('llm', {})
         self.calibration_config = self.llm_config.get('structured_calibration', {})
-        
+
         # LLM API 配置
         self.api_key = self.llm_config['api_key']
         self.base_url = self.llm_config['base_url']
@@ -37,6 +37,9 @@ class StructuredCalibrator:
         self.calibrate_reasoning_effort = self.llm_config.get('calibrate_reasoning_effort', None)
         self.validator_model = self.calibration_config.get('validator_model', self.calibrate_model)
         self.validator_reasoning_effort = self.calibration_config.get('validator_reasoning_effort', None)
+        # 风险校验模型配置
+        self.risk_validator_model = self.calibration_config.get('risk_validator_model')
+        self.risk_validator_reasoning_effort = self.calibration_config.get('risk_validator_reasoning_effort', None)
         self.max_retries = self.llm_config['max_retries']
         self.retry_delay = self.llm_config['retry_delay']
         
@@ -58,7 +61,8 @@ class StructuredCalibrator:
     
     def calibrate_structured_dialogs(
         self, dialogs_with_time: List[Dict[str, Any]], video_metadata: Dict[str, str],
-        selected_calibrate_model: str = None, selected_calibrate_effort: str = None
+        selected_calibrate_model: str = None, selected_calibrate_effort: str = None,
+        selected_validator_model: str = None, selected_validator_effort: str = None
     ) -> List[Dict[str, Any]]:
         """
         校对结构化对话数据
@@ -68,6 +72,8 @@ class StructuredCalibrator:
             video_metadata: 视频元数据
             selected_calibrate_model: 选定的校对模型（可选，默认使用配置的模型）
             selected_calibrate_effort: 选定的校对 reasoning_effort（可选）
+            selected_validator_model: 选定的校验模型（可选，默认使用配置的模型）
+            selected_validator_effort: 选定的校验 reasoning_effort（可选）
 
         Returns:
             List[Dict]: 校对后的对话数据
@@ -75,14 +81,21 @@ class StructuredCalibrator:
         # 如果指定了模型，临时覆盖实例变量（用于本次调用）
         original_calibrate_model = self.calibrate_model
         original_calibrate_effort = self.calibrate_reasoning_effort
+        original_validator_model = self.validator_model
+        original_validator_effort = self.validator_reasoning_effort
 
         if selected_calibrate_model is not None:
             self.calibrate_model = selected_calibrate_model
             logger.info(f"使用指定的校对模型: {selected_calibrate_model}")
         if selected_calibrate_effort is not None:
             self.calibrate_reasoning_effort = selected_calibrate_effort
+        if selected_validator_model is not None:
+            self.validator_model = selected_validator_model
+            logger.info(f"使用指定的校验模型: {selected_validator_model}")
+        if selected_validator_effort is not None:
+            self.validator_reasoning_effort = selected_validator_effort
 
-        logger.info(f"开始结构化校对，对话数量: {len(dialogs_with_time)}, 模型: {self.calibrate_model}")
+        logger.info(f"开始结构化校对，对话数量: {len(dialogs_with_time)}, 模型: {self.calibrate_model}, 校验模型: {self.validator_model}")
 
         try:
             # 1. 智能分块
@@ -110,6 +123,8 @@ class StructuredCalibrator:
             # 恢复原始配置
             self.calibrate_model = original_calibrate_model
             self.calibrate_reasoning_effort = original_calibrate_effort
+            self.validator_model = original_validator_model
+            self.validator_reasoning_effort = original_validator_effort
     
     def _intelligent_chunking(self, dialogs: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
         """
