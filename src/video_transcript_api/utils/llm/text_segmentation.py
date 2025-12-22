@@ -7,6 +7,7 @@ import re
 import os
 from typing import List, Dict, Any, Tuple, Optional
 from ..logging import setup_logger
+from . import normalize_reasoning_effort
 from .llm import call_llm_api
 
 logger = setup_logger(__name__)
@@ -40,7 +41,8 @@ class TextSegmentationProcessor:
 
         # 读取 reasoning_effort 配置
         llm_config = config.get('llm', {})
-        self.calibrate_reasoning_effort = llm_config.get('calibrate_reasoning_effort', None)
+        self.calibrate_reasoning_effort = normalize_reasoning_effort(
+            llm_config.get('calibrate_reasoning_effort'))
 
         logger.info(f"文本分段处理器初始化完成 - 阈值: {self.enable_threshold}, 分段大小: {self.segment_size}")
     

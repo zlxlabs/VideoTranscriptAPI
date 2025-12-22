@@ -6,6 +6,7 @@ import json
 import os
 from typing import List, Dict, Any, Optional, Tuple
 from ..logging import setup_logger
+from . import normalize_reasoning_effort
 from .llm import call_llm_api
 from .text_segmentation import TextSegmentationProcessor
 
@@ -34,9 +35,11 @@ class SegmentedLLMProcessor:
         self.api_key = self.llm_config['api_key']
         self.base_url = self.llm_config['base_url']
         self.calibrate_model = self.llm_config['calibrate_model']
-        self.calibrate_reasoning_effort = self.llm_config.get('calibrate_reasoning_effort', None)
+        self.calibrate_reasoning_effort = normalize_reasoning_effort(
+            self.llm_config.get('calibrate_reasoning_effort'))
         self.summary_model = self.llm_config['summary_model']
-        self.summary_reasoning_effort = self.llm_config.get('summary_reasoning_effort', None)
+        self.summary_reasoning_effort = normalize_reasoning_effort(
+            self.llm_config.get('summary_reasoning_effort'))
         self.max_retries = self.llm_config['max_retries']
         self.retry_delay = self.llm_config['retry_delay']
         

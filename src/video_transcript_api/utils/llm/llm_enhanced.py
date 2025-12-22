@@ -7,6 +7,7 @@ import os
 import threading
 from typing import Any, Dict, List, Optional
 from ..logging import setup_logger
+from . import normalize_reasoning_effort
 from .llm import call_llm_api, StructuredResult
 from .llm_segmented import SegmentedLLMProcessor
 from .schemas import SPEAKER_MAPPING_SCHEMA
@@ -38,25 +39,31 @@ class EnhancedLLMProcessor:
         self.api_key = self.llm_config['api_key']
         self.base_url = self.llm_config['base_url']
         self.calibrate_model = self.llm_config['calibrate_model']
-        self.calibrate_reasoning_effort = self.llm_config.get('calibrate_reasoning_effort', None)
+        self.calibrate_reasoning_effort = normalize_reasoning_effort(
+            self.llm_config.get('calibrate_reasoning_effort'))
         self.summary_model = self.llm_config['summary_model']
-        self.summary_reasoning_effort = self.llm_config.get('summary_reasoning_effort', None)
+        self.summary_reasoning_effort = normalize_reasoning_effort(
+            self.llm_config.get('summary_reasoning_effort'))
         self.max_retries = self.llm_config['max_retries']
         self.retry_delay = self.llm_config['retry_delay']
 
         # 风险模型配置（校对和总结共享检测结果）
         self.risk_calibrate_model = self.llm_config.get('risk_calibrate_model')
-        self.risk_calibrate_reasoning_effort = self.llm_config.get('risk_calibrate_reasoning_effort', None)
+        self.risk_calibrate_reasoning_effort = normalize_reasoning_effort(
+            self.llm_config.get('risk_calibrate_reasoning_effort'))
         self.risk_summary_model = self.llm_config.get('risk_summary_model')
-        self.risk_summary_reasoning_effort = self.llm_config.get('risk_summary_reasoning_effort', None)
+        self.risk_summary_reasoning_effort = normalize_reasoning_effort(
+            self.llm_config.get('risk_summary_reasoning_effort'))
         self.enable_risk_model_selection = self.llm_config.get('enable_risk_model_selection', False)
 
         # 结构化校对的校验模型配置
         calibration_config = self.llm_config.get('structured_calibration', {})
         self.validator_model = calibration_config.get('validator_model', self.calibrate_model)
-        self.validator_reasoning_effort = calibration_config.get('validator_reasoning_effort', None)
+        self.validator_reasoning_effort = normalize_reasoning_effort(
+            calibration_config.get('validator_reasoning_effort'))
         self.risk_validator_model = calibration_config.get('risk_validator_model')
-        self.risk_validator_reasoning_effort = calibration_config.get('risk_validator_reasoning_effort', None)
+        self.risk_validator_reasoning_effort = normalize_reasoning_effort(
+            calibration_config.get('risk_validator_reasoning_effort'))
 
         # 配置验证
         if self.enable_risk_model_selection:

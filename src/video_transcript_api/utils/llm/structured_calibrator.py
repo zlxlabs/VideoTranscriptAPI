@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 import concurrent.futures
 
 from ..logging import setup_logger
+from . import normalize_reasoning_effort
 from .llm import call_llm_api, StructuredResult
 from .schemas import CALIBRATION_RESULT_SCHEMA, VALIDATION_RESULT_SCHEMA
 
@@ -34,12 +35,15 @@ class StructuredCalibrator:
         self.api_key = self.llm_config['api_key']
         self.base_url = self.llm_config['base_url']
         self.calibrate_model = self.llm_config['calibrate_model']
-        self.calibrate_reasoning_effort = self.llm_config.get('calibrate_reasoning_effort', None)
+        self.calibrate_reasoning_effort = normalize_reasoning_effort(
+            self.llm_config.get('calibrate_reasoning_effort'))
         self.validator_model = self.calibration_config.get('validator_model', self.calibrate_model)
-        self.validator_reasoning_effort = self.calibration_config.get('validator_reasoning_effort', None)
+        self.validator_reasoning_effort = normalize_reasoning_effort(
+            self.calibration_config.get('validator_reasoning_effort'))
         # 风险校验模型配置
         self.risk_validator_model = self.calibration_config.get('risk_validator_model')
-        self.risk_validator_reasoning_effort = self.calibration_config.get('risk_validator_reasoning_effort', None)
+        self.risk_validator_reasoning_effort = normalize_reasoning_effort(
+            self.calibration_config.get('risk_validator_reasoning_effort'))
         self.max_retries = self.llm_config['max_retries']
         self.retry_delay = self.llm_config['retry_delay']
         
