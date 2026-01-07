@@ -3,7 +3,6 @@ from .cache_analyzer import (
     CacheCapabilityAnalyzer,
     CacheCapabilities,
     analyze_cache_capabilities,
-    should_upgrade_cache,
 )
 
 __all__ = [
@@ -11,5 +10,4 @@ __all__ = [
     "CacheCapabilityAnalyzer",
     "CacheCapabilities",
     "analyze_cache_capabilities",
-    "should_upgrade_cache",
 ]
