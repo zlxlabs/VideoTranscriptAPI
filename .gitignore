@@ -72,6 +72,7 @@ dist/
 *.temp
 .DS_Store
 Thumbs.db
+data/workspace
 
 # 文档构建
 docs/_build/
