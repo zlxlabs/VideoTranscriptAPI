@@ -5,7 +5,62 @@
 Core code lives in `src/video_transcript_api`: `api/server.py` hosts FastAPI, `downloaders/` contains platform adapters, `transcriber/` wraps CapsWriter and FunASR clients, and `utils/` now splits into focused subpackages (`logging/`, `cache/`, `llm/`, `rendering/`, `notifications/`, `accounts/`, `timeutil/`, `risk_control/`). Templates remain in `src/web/templates`. Tests are separated within `tests/` by scope (unit, integration, performance, manual, llm, cache, features, platforms). Configuration examples sit in `config/*.example.json`, while live secrets stay in `config/config.json`. Runtime caches, SQLite stores, and logs go to `data/`; automation helpers live in `scripts/`. Launch the API through `main.py`.
 
 ## Build, Test, and Development Commands
-Create a virtual environment (`python -m venv venv`) and install dependencies with `pip install -r requirements.txt`. Start the API when transcription backends are reachable via `python main.py --start`. Run unit and integration suites through `python -m pytest tests/unit` and `python -m pytest tests/integration`; invoke `python tests/performance/test_concurrent.py` or `python tests/manual/test_transcribe.py <audio_path>` only when services and credentials are configured. Use `python scripts/run_tests.py` if you need unittest-style discovery.
+
+### Using uv (Recommended)
+
+```bash
+# Install uv (if not already installed)
+pip install uv
+
+# Sync dependencies (auto-creates .venv)
+uv sync
+
+# Start the API when transcription backends are reachable
+uv run python main.py --start
+
+# Run unit and integration suites
+uv run pytest tests/unit
+uv run pytest tests/integration
+
+# Run performance or manual tests (when services and credentials are configured)
+uv run python tests/performance/test_concurrent.py
+uv run python tests/manual/test_transcribe.py <audio_path>
+
+# Run all tests (unittest-style discovery)
+uv run python scripts/run_tests.py
+
+# Add new dependencies
+uv add <package-name>
+
+# Update lockfile
+uv lock
+```
+
+### Using pip (Traditional)
+
+```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+venv\Scripts\activate     # Windows
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Start the API when transcription backends are reachable
+python main.py --start
+
+# Run unit and integration suites
+python -m pytest tests/unit
+python -m pytest tests/integration
+
+# Run performance or manual tests (when services and credentials are configured)
+python tests/performance/test_concurrent.py
+python tests/manual/test_transcribe.py <audio_path>
+
+# Run all tests (unittest-style discovery)
+python scripts/run_tests.py
+```
 
 ## Coding Style & Naming Conventions
 Target Python 3.11+, keep PEP 8 spacing (4-space indents), and use snake_case for modules, functions, and variables. Follow the established Google-style docstrings on public APIs. Route logging through `video_transcript_api.utils.logging.setup_logger` so loguru manages stdout and rotation in `logs/`, and keep console output ASCII-only per `CLAUDE.md`. Prefer type hints and build on helpers inside the relevant `utils.*` subpackages to keep features modular.

@@ -134,6 +134,53 @@ video_transcript_api/
 
 ### 安装步骤
 
+#### 方式一：使用 uv（推荐）
+
+uv 是一个超快的 Python 包管理器，相比 pip 有显著的性能提升。
+
+1. 克隆代码仓库
+
+```bash
+git clone <repository-url>
+cd 视频转录API
+```
+
+2. 安装 uv（如果尚未安装）
+
+```bash
+# 方式 1：通过 pip 安装
+pip install uv
+
+# 方式 2：使用官方脚本（Linux/Mac）
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 方式 3：使用 PowerShell（Windows）
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# 方式 4：使用 Homebrew（macOS）
+brew install uv
+```
+
+3. 同步依赖
+
+```bash
+uv sync
+```
+
+4. 启动 API 服务
+
+```bash
+uv run python main.py --start
+```
+
+**uv 优势**：
+- 🚀 安装速度比 pip 快 10-100 倍
+- 🔒 跨平台一致的 lockfile（uv.lock）
+- 🎯 自动虚拟环境管理（.venv）
+- 📦 一体化工具（替代 pip、virtualenv、pip-tools 等）
+
+#### 方式二：使用 pip（传统方式）
+
 1. 克隆代码仓库
 
 ```bash
