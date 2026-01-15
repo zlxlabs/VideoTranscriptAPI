@@ -5,7 +5,18 @@
 ## 功能特点
 
 - 提供API接口，接收视频URL，返回视频的转录文本
-- 支持多种平台：抖音、Bilibili、小红书、YouTube、小宇宙播客
+- 支持多种平台：抖音、Bilibili、小红书、YouTube、小宇宙播客、通用链接
+
+### 平台支持详情
+
+| 平台 | 获取方式 | 特殊功能 |
+|------|---------|---------|
+| **YouTube** | 多级回退：原生字幕 → API服务器 → yt-dlp | 支持SRT字幕、Cookie绕过风控、代理下载 |
+| **Bilibili** | 双模支持：TikHub API / BBDown工具 | 支持4K高码率、分P解析、付费视频 |
+| **抖音** | TikHub API | 优先获取高质量MP3音频、无水印流 |
+| **小红书** | TikHub v3接口 | 处理分享文本、H.264备份URL提取 |
+| **小宇宙播客** | 网页爬虫 | 解析JSON-LD和meta标签提取音频 |
+| **通用链接** | 直接流式下载 | 支持断点续传、大文件进度通知 |
 - **双转录引擎支持**：
   - **CapsWriter-Offline**：高效的通用语音转录
   - **FunASR**：支持说话人识别的转录服务
@@ -16,7 +27,8 @@
 - 支持并发处理多个转录任务
 - 提供企业微信通知功能，实时通知任务状态
 - 完善的日志系统，方便问题排查
-- LLM集成：支持转录文本的校对和总结
+- **LLM深度集成**：支持转录文本的校对、总结、说话人推断、风险检测
+- **多用户管理**：支持API Key鉴权、用户配置隔离
 - **智能缓存系统**：基于SQLite数据库的缓存管理，支持自动清理和完整性验证
 
 ## 项目结构
@@ -263,39 +275,70 @@ chmod +x BBDown/BBDown
 
 ### 配置说明
 
+#### 核心配置（必需）
 - `api`: API服务配置
-  - `port`: 服务端口
-  - `host`: 服务主机地址
-  - `auth_token`: API访问令牌
-- `tikhub`: TikHub API配置
+  - `port`: 服务端口（默认8000）
+  - `host`: 服务主机地址（默认0.0.0.0）
+  - `auth_token`: API访问令牌（必填）
+- `tikhub`: TikHub API配置（必填，用于抖音/小红书/B站）
   - `api_key`: TikHub API密钥
+  - `max_retries`: 最大重试次数（默认2）
+  - `retry_delay`: 重试延迟（秒，默认5）
+  - `timeout`: 请求超时时间（秒，默认30）
+
+#### 转录引擎配置
 - `capswriter`: CapsWriter-Offline配置
-  - `server_url`: CapsWriter-Offline服务器URL
-  - `max_retries`: 最大重试次数
-  - `retry_delay`: 重试延迟（秒）
+  - `server_url`: WebSocket服务地址（默认ws://localhost:6016）
+  - `max_retries`: 连接最大重试次数（默认5）
+  - `retry_delay`: 重试间隔（秒，默认3）
+  - `connection_timeout`: 连接超时时间（秒，默认10）
 - `funasr_spk_server`: FunASR说话人识别服务器配置
-  - `server_url`: FunASR服务器URL
-  - `max_retries`: 最大重试次数
-  - `retry_delay`: 重试延迟（秒）
-  - `connection_timeout`: 连接超时时间（秒）
-- `transcriber`: 转录器配置
-  - `default_engine`: 默认转录引擎（capswriter/funasr）
-  - `use_speaker_recognition`: 是否默认启用说话人识别
+  - `server_url`: WebSocket服务地址（默认ws://localhost:8767）
+  - `max_retries`: 最大重试次数（默认3）
+  - `retry_delay`: 重试间隔（秒，默认5）
+  - `connection_timeout`: 连接超时时间（秒，默认30）
+
+#### LLM配置（可选但推荐）
+- `llm`: 大语言模型配置
+  - `api_key`: LLM API密钥（必填，启用LLM功能时）
+  - `base_url`: LLM API基础URL（兼容OpenAI格式）
+  - `calibrate_model`: 校对使用的模型（如gpt-4.1-mini）
+  - `summary_model`: 总结使用的模型（如deepseek-chat）
+  - `risk_calibrate_model`: 风险内容校对模型（可选）
+  - `risk_summary_model`: 风险内容总结模型（可选）
+  - `enable_risk_model_selection`: 是否启用风险模型自动选择（默认false）
+  - `segmentation`: 分段处理配置
+    - `enable_threshold`: 触发分段的文本长度阈值（默认20000字符）
+    - `segment_size`: 每段的目标大小（默认8000字符）
+    - `concurrent_workers`: 并发处理的段落数（默认10）
+  - `structured_calibration`: 结构化校准配置（带说话人识别时）
+    - `min_chunk_length`: 单个校对块的最小长度（默认800）
+    - `max_chunk_length`: 单个校对块的最大长度（默认3000）
+    - `preferred_chunk_length`: 首选块长度（默认2000）
+  - `json_output`: JSON结构化输出配置
+    - `mode_by_model`: 按模型名匹配输出模式（支持通配符）
+    - `enable_fallback`: 是否启用模式降级（默认true）
+
+#### 其他配置
 - `concurrent`: 并发配置
-  - `max_workers`: 最大并发任务数
-  - `queue_size`: 队列大小
+  - `max_workers`: 转录任务最大并发数（默认3）
+  - `queue_size`: 任务队列大小（默认10）
+  - `llm_max_workers`: LLM处理最大并发数（默认10）
 - `storage`: 存储配置
-  - `temp_dir`: 临时文件目录
-  - `cache_dir`: 智能缓存系统目录
-  - `cache_retention_days`: 缓存保留天数（默认360天）
+  - `temp_dir`: 临时文件目录（默认./data/temp）
+  - `workspace_dir`: 转录工作目录（默认./data/workspace）
+  - `cache_dir`: 智能缓存系统目录（默认./data/cache）
+  - `cache_retention_days`: 缓存保留天数（默认360）
 - `wechat`: 企业微信配置
   - `webhook`: 企业微信webhook地址
-- `log`: 日志配置
-  - `level`: 日志级别
-  - `format`: 日志格式
-  - `file`: 日志文件路径
-  - `max_size`: 日志文件大小限制
-  - `backup_count`: 日志文件备份数量
+- `bbdown`: BBDown下载器配置（B站专用）
+  - `use_bbdown`: 是否使用BBDown（默认true）
+  - `audio_only`: 是否只下载音频（默认true）
+  - `timeout`: 下载超时时间（秒，默认300）
+- `risk_control`: 风控配置
+  - `enabled`: 是否启用风控（默认false）
+  - `sensitive_word_urls`: 敏感词库URL列表
+  - `cache_file`: 敏感词缓存文件路径
 - `llm`: 大语言模型配置
   - `api_key`: LLM API密钥
   - `base_url`: LLM API基础URL
@@ -316,8 +359,25 @@ chmod +x BBDown/BBDown
 ### 启动API服务
 
 ```bash
+# 使用 uv 启动（推荐）
+uv run python main.py --start
+
+# 或使用传统方式启动
 python main.py --start
 ```
+
+### API端点总览
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/transcribe` | POST | 提交视频转录任务 |
+| `/api/task/{task_id}` | GET | 查询任务处理状态 |
+| `/api/audit/stats` | GET | 获取用户调用统计 |
+| `/api/audit/calls` | GET | 获取最近调用记录 |
+| `/api/users/profile` | GET | 获取当前用户信息 |
+| `/add_task_by_web` | GET | Web任务提交页面 |
+| `/view/{view_token}` | GET | 结果查看页面 |
+| `/export/{view_token}/{type}` | GET | 导出处理结果（calibrated/summary/transcript） |
 
 ### 企业微信通知最佳实践
 
@@ -479,12 +539,34 @@ python tests/manual/test_transcribe.py path/to/audio/file.mp3
 #### 运行自动化测试
 
 ```bash
+# 运行所有测试（unittest方式）
+python scripts/run_tests.py
+
+# 或使用 pytest 运行特定类型测试
 # 运行单元测试
 python -m pytest tests/unit/
 
-# 运行所有测试
-python run_tests.py
+# 运行集成测试
+python -m pytest tests/integration/
+
+# 运行性能测试
+python tests/performance/test_concurrent.py
 ```
+
+### 测试分类说明
+
+项目采用结构化的测试体系：
+
+| 测试类型 | 目录 | 说明 |
+|---------|------|------|
+| **单元测试** | `tests/unit/` | 测试各组件独立功能（下载器、转录器、渲染系统、LLM等） |
+| **集成测试** | `tests/integration/` | 端到端功能测试（API调用、URL处理） |
+| **性能测试** | `tests/performance/` | 并发处理能力测试 |
+| **手动测试** | `tests/manual/` | 开发调试工具（转录测试、通知测试等） |
+| **LLM测试** | `tests/llm/` | LLM功能专项测试（分段校对、结构化校对等） |
+| **缓存测试** | `tests/cache/` | 缓存管理功能测试 |
+| **特性测试** | `tests/features/` | 核心功能测试（通知、风控、多用户等） |
+| **平台测试** | `tests/platforms/` | 各平台适配测试 |
 
 ## 语音转文字服务说明
 
@@ -520,8 +602,25 @@ python run_tests.py
 2. **下载处理**：从平台下载视频/音频文件
 3. **引擎选择**：根据参数选择合适的转录引擎
 4. **音频转录**：将文件发送给对应服务器处理
-5. **结果处理**：处理转录结果，支持文本校对和总结
+5. **LLM后处理**：智能文本校对、总结、说话人推断
 6. **返回结果**：返回格式化的转录文本和相关信息
+
+### 🤖 LLM智能处理流程
+
+**智能分段策略**：
+- **长文本分段**：文本长度≥20000字符时，自动分段并发校对（每段8000字符）
+- **结构化校对**：带说话人标识时，按对话分块校对，保留对话结构
+- **质量验证**：自动评估校对质量，低于阈值时回退到原文
+
+**风险检测与处理**：
+- 自动检测敏感内容
+- 检测到风险时切换到专用风险模型
+- 校对和总结共享风险检测结果，避免重复检测
+
+**说话人推断**：
+- 结合视频元数据（作者、标题）
+- 对比转录原文与校对文本
+- 智能推断匿名说话人（Speaker 0/1）的真实姓名
 
 ### ⚙️ 配置示例
 
@@ -587,6 +686,9 @@ cache_dir/
 ```bash
 # 清理超过保留期限的旧缓存，并验证完整性
 python scripts/cleanup_cache.py
+
+# 或使用 uv
+uv run python scripts/cleanup_cache.py
 ```
 
 **配置缓存保留时间**：
@@ -615,8 +717,75 @@ python scripts/cleanup_cache.py
 ## 运行测试
 
 ```bash
+# 使用传统方式
 python scripts/run_tests.py
+
+# 或使用 uv
+uv run python scripts/run_tests.py
 ```
+
+## 核心功能详解
+
+### 风控系统
+
+项目内置智能风控系统，可自动检测和处理敏感内容：
+
+**功能特性**：
+- 支持从远程 URL 动态加载敏感词库
+- 本地缓存敏感词，减少网络请求
+- 针对标题、总结、正文提供不同脱敏策略
+- 自动 URL 豁免（保留可点击链接）
+
+**工作流程**：
+1. 转录完成后，自动检测文本中的敏感词
+2. 如检测到风险内容，自动切换到专用风险模型进行校对和总结
+3. LLM 输出会进行二次敏感词检测
+4. 检测结果会记录到审计日志
+
+### 多用户管理
+
+支持多用户环境下的API访问控制：
+
+**鉴权机制**：
+- Bearer Token 认证
+- 支持从 `config/users.json` 加载多用户配置
+- 自动禁用失效用户
+
+**用户配置格式**：
+```json
+{
+  "users": [
+    {
+      "user_id": "user1",
+      "api_key": "your-api-key-here",
+      "wechat_webhook": "https://qyapi.weixin.qq.com/...",
+      "enabled": true
+    }
+  ]
+}
+```
+
+**用户隔离**：
+- 每个用户独立的审计日志
+- 支持按用户查询调用统计
+- API Key 脱敏显示
+
+### 企业微信通知增强
+
+基于 `wecom-notifier` 库实现的企业微信通知功能：
+
+**核心特性**：
+- 全局单例模式，统一频率控制（20条/分钟）
+- 超长文本自动分段发送
+- URL 保护模式，防止链接被拦截
+- 发送状态 Emoji 自动匹配
+- 支持多用户独立 webhook
+
+**通知时机**：
+- 任务创建时（包含查看链接）
+- 任务开始处理
+- 任务完成成功/失败
+- 长文件下载进度通知（30%/60%/90%）
 
 ## 🚫 开源协议 & 使用限制
 本项目基于 MIT 协议 + Commons Clause 附加条款开源，**严禁任何商业用途**：
