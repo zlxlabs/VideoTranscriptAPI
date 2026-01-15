@@ -14,7 +14,7 @@
 - [核心特性](#核心特性)
 - [架构概览](#架构概览)
 - [快速开始](#快速开始)
-- [设计决策](#设计决策)
+- [功能详解](#功能详解)
 - [文档索引](#文档索引)
 - [开发指南](#开发指南)
 - [开源协议](#开源协议)
@@ -25,53 +25,223 @@
 
 本项目提供统一的视频/音频转录 API，支持从多个主流平台下载内容，并使用两种 ASR 引擎（CapsWriter-Offline / FunASR）进行语音识别。转录后的文本通过 LLM 进行智能校对、总结和说话人推断，同时内置缓存系统、风控机制和企业微信通知功能。
 
-**适用场景**：
-- 播客转文字
-- 会议记录生成
-- 视频内容索引
-- 多语言字幕制作
-
 ---
 
 ## 核心特性
 
 ### 🎯 多平台支持
 
-| 平台 | 下载方式 | 特殊能力 |
+项目使用工厂模式动态匹配下载器，支持以下平台：
+
+| 平台 | 下载器类 | 特殊能力 |
 |------|---------|---------|
-| **YouTube** | 原生字幕 / API 服务器 / yt-dlp | SRT 字幕、Cookie 绕过、代理下载 |
-| **Bilibili** | TikHub API / BBDown | 4K 高码率、分 P 解析、付费视频 |
-| **抖音** | TikHub API | 高质量 MP3、无水印流 |
-| **小红书** | TikHub v3 | 分享文本、H.264 备份 URL |
-| **小宇宙播客** | 网页爬虫 | JSON-LD 解析、meta 标签提取 |
-| **通用链接** | 直接流式下载 | 断点续传、进度通知 |
+| **YouTube** | YoutubeDownloader | 原生字幕、远程 API 服务器、yt-dlp 下载 |
+| **Bilibili** | BilibiliDownloader | TikHub API、BBDown 工具支持 |
+| **抖音** | DouyinDownloader | TikHub API 获取无水印流 |
+| **小红书** | XiaohongshuDownloader | TikHub v3 接口 |
+| **小宇宙播客** | XiaoyuzhouDownloader | 网页爬虫解析 |
+| **通用链接** | GenericDownloader | 直接流式下载、断点续传 |
+
+**工厂模式实现**：
+```python
+def create_downloader(url):
+    # 依次尝试平台特定下载器
+    platform_downloaders = [
+        DouyinDownloader(),
+        BilibiliDownloader(),
+        XiaohongshuDownloader(),
+        YoutubeDownloader(),
+        XiaoyuzhouDownloader()
+    ]
+    for downloader in platform_downloaders:
+        if downloader.can_handle(url):
+            return downloader
+    # 兜底：通用下载器
+    return GenericDownloader()
+```
 
 ### 🤖 双引擎转录
 
-**CapsWriter-Offline**
-- 高性能通用转录，适合批量处理
-- WebSocket 实时流式传输
-- 低资源消耗，快速响应
+#### CapsWriter-Offline（通用转录）
 
-**FunASR**
-- 说话人识别（Diarization）
-- 时间戳和情感分析
-- 适合多人对话、会议记录
+**技术实现**：
+- WebSocket 实时流式传输
+- 音频分段处理：25s 片段 + 2s 重叠
+- 自动格式转换（支持 MP3/WAV/M4A 等）
+- 生成 FunASR 兼容格式的 JSON 输出
+- 默认端口：6006
+
+**配置参数**：
+```json
+{
+  "capswriter": {
+    "server_url": "ws://localhost:6006",
+    "file_seg_duration": 25,
+    "file_seg_overlap": 2,
+    "max_retries": 5,
+    "retry_delay": 3
+  }
+}
+```
+
+#### FunASR（说话人识别）
+
+**技术实现**：
+- WebSocket 连接管理（心跳间隔 60s）
+- 支持分片上传（1MB/片）
+- MD5 哈希校验，支持服务器缓存
+- 队列状态查询（task_queued 消息）
+- 说话人分离（Diarization）
+- 默认端口：8767
+
+**配置参数**：
+```json
+{
+  "funasr_spk_server": {
+    "server_url": "ws://localhost:8767",
+    "max_retries": 3,
+    "retry_delay": 5,
+    "connection_timeout": 30
+  }
+}
+```
 
 ### 🧠 智能文本处理
 
-- **自动校对**：修正同音字、语法错误
-- **内容总结**：生成分段摘要或核心要点
-- **说话人推断**：结合元数据推断真实姓名
-- **风险检测**：敏感词过滤，自动切换风险模型
+**核心功能**（基于 `EnhancedLLMProcessor`）：
+
+1. **自动校对（Calibration）**
+   - 修正语音识别中的同音字和语法错误
+   - 标点符号规范化
+   - 支持长文本自动分段并发处理
+   - 配置模型：`calibrate_model`
+
+2. **内容总结（Summary）**
+   - 生成分段摘要或核心要点
+   - 支持单说话人和多说话人模式
+   - 配置模型：`summary_model`
+   - 最小文本阈值：`min_summary_threshold`（默认 500 字符）
+
+3. **说话人推断（Speaker Inference）**
+   - 结合视频元数据推断真实姓名
+   - 将匿名标识（`spk_0`, `spk_1`）映射为具体人名
+   - 支持对话结构保留
+
+4. **风险模型切换**
+   - 自动检测敏感内容
+   - 切换到专用风险模型：`risk_calibrate_model`、`risk_summary_model`
+   - 配置开关：`enable_risk_model_selection`
+
+**分段处理策略**：
+- 触发阈值：`enable_threshold`（默认 20000 字符）
+- 每段大小：`segment_size`（默认 8000 字符）
+- 最大段大小：`max_segment_size`（默认 12000 字符）
+- 并发数：`concurrent_workers`（默认 10）
+
+**结构化校对**（带说话人识别时）：
+- 单块最小长度：`min_chunk_length`（默认 800）
+- 单块最大长度：`max_chunk_length`（默认 3000）
+- 首选块长度：`preferred_chunk_length`（默认 2000）
+- 质量验证：`enable_validation`（默认 true）
+
+**JSON 输出模式**：
+- 按模型名匹配输出模式：`mode_by_model`
+- 支持 `json_object` 和 `json_schema` 两种模式
+- 自动重试：`max_retries`（默认 2 次）
 
 ### 🏗️ 企业级功能
 
-- **智能缓存**：SQLite 元数据 + 文件系统内容，自动清理
-- **多用户管理**：Bearer Token 鉴权，用户隔离
-- **审计日志**：API 调用追踪、使用统计
-- **企业微信通知**：任务状态实时通知
-- **风控系统**：敏感词库动态加载、内容脱敏
+#### 智能缓存系统
+
+**数据存储结构**：
+- **SQLite 数据库**（`cache.db`）：
+  - `video_cache` 表：平台、URL、标题、作者、媒体 ID、说话人标识、文件位置
+  - `task_status` 表：任务 ID、查看令牌、状态、创建/完成时间
+- **文件系统**：存储实际内容（转录文本、LLM 校对、LLM 总结）
+
+**查询逻辑**：
+```python
+cache_data = cache_manager.get_cache(
+    platform=platform,
+    media_id=video_id,
+    use_speaker_recognition=use_speaker_recognition
+)
+```
+
+**智能缓存策略**：
+- 当 `use_speaker_recognition=true` 时，查询带说话人识别的缓存
+- 当 `use_speaker_recognition=false` 时，优先使用带说话人识别的缓存（信息更丰富）
+- 自动验证文件完整性，删除无效记录
+
+#### 多用户管理
+
+**认证方式**：Bearer Token
+
+**配置文件**（`config/users.json`）：
+```json
+{
+  "users": {
+    "sk-xxx": {
+      "user_id": "user1",
+      "name": "用户名",
+      "enabled": true
+    }
+  }
+}
+```
+
+**支持功能**：
+- 用户启用/禁用：`enabled` 字段
+- 单 Token 回退模式：不支持多用户时使用 `api.auth_token`
+- API Key 脱敏显示：只显示前 8 位
+
+#### 审计日志
+
+**记录内容**：
+- API 端点
+- 请求时间、响应时间
+- 处理耗时
+- 状态码
+- 用户 ID、API Key（脱敏）
+- 视频地址、任务 ID
+
+**查询接口**：
+- `GET /api/audit/stats?days=30`：获取最近 N 天的统计
+- `GET /api/audit/calls?limit=100`：获取最近 N 条调用记录
+
+#### 企业微信通知
+
+**基于 `wecom-notifier` 库**：
+
+**核心特性**：
+- 全局单例模式：统一频率控制（20 条/分钟）
+- 超长文本自动分段
+- URL 保护模式：避免被风控误处理
+- 支持自定义 webhook（用户级覆盖）
+
+**通知时机**（从代码确认）：
+- 任务创建时（包含查看链接）
+- 任务开始处理（`开始处理 - {engine_info}`）
+- 缓存命中时（`使用已有缓存，含 LLM 结果`）
+- 任务完成时（`【任务完成】`）
+
+#### 风控系统
+
+**敏感词管理**：
+- 支持从远程 URL 动态加载敏感词库：`sensitive_word_urls`
+- 本地缓存：`cache_file`
+- 多策略脱敏：`summary`（整体替换）、`title`（前 6 字符）、`general`（移除所有）
+- URL 豁免：自动识别并保留 URL
+
+**文本脱敏策略**：
+```python
+text_sanitizer.sanitize(text, text_type)
+# text_type 可选：
+# - "summary": 如有敏感词则整体替换为"内容风险，请通过 url 查看"
+# - "title": 移除敏感词后取前 6 字符
+# - "author": 移除敏感词后取前 6 字符
+# - "general": 移除所有敏感词
+```
 
 ---
 
@@ -80,37 +250,39 @@
 ### 系统架构
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         用户请求层                               │
-├─────────────────────────────────────────────────────────────────────┤
-│  FastAPI → 认证中间件 → 审计日志 → 任务队列（异步）          │
-└────────────────────────┬────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                     用户请求层                          │
+├─────────────────────────────────────────────────────────────┤
+│  FastAPI → verify_token → audit_logger → task_queue (异步) │
+└────────────────────────┬────────────────────────────────────┘
                          │
          ┌───────────────┼───────────────┐
          │               │               │
     ┌────▼────┐    ┌────▼────┐    ┌──▼─────────┐
-    │ 下载器  │    │ 转录引擎 │    │  LLM 处理  │
-    │  工厂   │    │  双队列   │    │   流水线   │
+    │ 下载器  │    │ 转录器  │    │  LLM 处理器 │
+    │  工厂   │    │ 双引擎   │    │  增强处理器  │
     └────┬────┘    └────┬────┘    └────┬──────┘
          │              │               │
          │              │               │
     ┌────▼──────────────▼──────────────▼────┐
-    │         智能缓存系统               │
+    │         智能缓存系统                │
     │  (SQLite 元数据 + 文件系统)         │
     └─────────────────────────────────────┘
 ```
 
 ### 核心模块
 
-| 模块 | 职责 | 技术栈 |
-|------|------|---------|
-| **API 服务** | FastAPI 应用、路由、依赖注入 | FastAPI, Uvicorn, Pydantic |
-| **下载器** | 多平台内容获取、工厂模式 | TikHub API, yt-dlp, BeautifulSoup |
-| **转录器** | 语音识别、说话人识别 | WebSocket, FFmpeg |
-| **LLM 引擎** | 文本校对、总结、推断 | OpenAI 兼容 API, 结构化输出 |
-| **缓存系统** | 元数据存储、文件管理 | SQLite, 文件系统 |
-| **通知系统** | 企业微信消息推送 | WeComNotifier（异步） |
-| **风控模块** | 敏感词检测、内容脱敏 | 动态词库、正则匹配 |
+| 模块 | 文件路径 | 职责 |
+|------|---------|------|
+| **API 服务** | `api/` | FastAPI 应用、路由、依赖注入 |
+| **下载器** | `downloaders/` | 多平台内容获取、工厂模式 |
+| **转录器** | `transcriber/` | 语音识别、说话人识别 |
+| **LLM 引擎** | `utils/llm/` | 文本校对、总结、分段、结构化校对 |
+| **缓存系统** | `utils/cache/` | 元数据存储、文件管理 |
+| **通知系统** | `utils/notifications/` | 企业微信消息推送（WeComNotifier） |
+| **风控模块** | `utils/risk_control/` | 敏感词检测、内容脱敏 |
+| **用户管理** | `utils/accounts/` | 多用户鉴权、配置管理 |
+| **审计日志** | `utils/logging/audit_logger.py` | API 调用追踪、统计 |
 
 ---
 
@@ -120,9 +292,9 @@
 
 - **Python**: 3.11+
 - **转录服务器**（二选一或同时部署）：
-  - CapsWriter-Offline：通用转录（默认端口 6006）
-  - FunASR：说话人识别（默认端口 8767）
-- **依赖工具**：FFmpeg（音频处理）、uv（包管理器，推荐）
+  - CapsWriter-Offline：默认端口 6006
+  - FunASR：默认端口 8767
+- **依赖工具**：FFmpeg（音频处理）、uv（包管理器）
 
 ### 安装步骤
 
@@ -139,7 +311,11 @@ uv sync
 
 # 4. 配置服务
 cp config/config.example.jsonc config/config.jsonc
-# 编辑 config/config.jsonc，填写 API 密钥等配置
+# 编辑 config/config.jsonc，填写必要配置：
+# - api.auth_token
+# - tikhub.api_key
+# - llm.api_key（启用 LLM 功能时）
+# - wechat.webhook（可选）
 
 # 5. 启动服务
 uv run python main.py --start
@@ -157,14 +333,37 @@ curl -X POST "http://localhost:8000/api/transcribe" \
     "use_speaker_recognition": true
   }'
 
-# 响应: {"code": 202, "message": "任务已提交", "data": {"task_id": "task_xxx", "view_token": "view_xxx"}}
+# 响应:
+{
+  "code": 202,
+  "message": "任务已提交",
+  "data": {
+    "task_id": "task_xxx",
+    "view_token": "view_xxx"
+  }
+}
 
 # 2. 查询任务状态
 curl -X GET "http://localhost:8000/api/task/task_xxx" \
   -H "Authorization: Bearer your-auth-token"
 
+# 响应:
+{
+  "code": 200,
+  "message": "转录成功",
+  "data": {
+    "video_title": "...",
+    "transcript": "..."
+  }
+}
+
 # 3. 查看结果（Web 界面）
 # 访问: http://localhost:8000/view/view_xxx
+
+# 4. 导出结果
+# 导出校对文本: http://localhost:8000/export/view_xxx/calibrated
+# 导出总结: http://localhost:8000/export/view_xxx/summary
+# 导出原始转录: http://localhost:8000/export/view_xxx/transcript
 ```
 
 ### 运行测试
@@ -176,103 +375,47 @@ uv run python scripts/run_tests.py
 # 运行特定测试套件
 uv run pytest tests/unit/
 uv run pytest tests/integration/
+uv run pytest tests/llm/
+uv run pytest tests/cache/
 ```
 
 ---
 
-## 设计决策
+## 功能详解
 
-### 🚀 异步优先
+### API 端点
 
-**决策**：FastAPI + asyncio + 双队列架构
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/transcribe` | POST | 提交视频转录任务 |
+| `/api/task/{task_id}` | GET | 查询任务处理状态 |
+| `/api/audit/stats` | GET | 获取用户调用统计 |
+| `/api/audit/calls` | GET | 获取最近调用记录 |
+| `/api/users/profile` | GET | 获取当前用户信息 |
+| `/add_task_by_web` | GET | Web 任务提交页面 |
+| `/view/{view_token}` | GET | 结果查看页面 |
+| `/export/{view_token}/{type}` | GET | 导出处理结果 |
 
-**原因**：
-- 视频下载和网络 I/O 是阻塞操作，异步处理提升并发能力
-- 转录队列和 LLM 队列分离，避免长任务阻塞短任务
-- WebSocket 客户端天然适配异步模型
+### 请求参数
 
-**实现**：
-```python
-async def process_task_queue():
-    """转录任务队列处理器"""
-    while True:
-        task = await task_queue.get()
-        await executor.submit(download_and_transcribe, task)
-
-async def process_llm_queue():
-    """LLM 处理队列处理器"""
-    while True:
-        task = await llm_queue.get()
-        await llm_executor.submit(calibrate_and_summarize, task)
+**`POST /api/transcribe`**：
+```json
+{
+  "url": "视频URL（必填）",
+  "use_speaker_recognition": "是否使用说话人识别（默认 false）",
+  "wechat_webhook": "企业微信 webhook 地址（可选）"
+}
 ```
 
-### 🏛️ 模块化设计
+### 响应状态码
 
-**决策**：工厂模式 + 依赖注入 + 领域驱动
-
-**原因**：
-- 下载器工厂简化新平台适配
-- FastAPI `Depends` 实现依赖注入，便于测试
-- 按业务领域拆分 utils 子包（logging/、cache/、llm/、rendering/）
-
-**结构**：
-```
-api/
-├── app.py              # 应用装配
-├── context.py          # 依赖注入容器
-├── routes/            # REST 路由
-└── services/          # 业务逻辑
-
-utils/
-├── logging/           # 日志领域
-├── cache/             # 缓存领域
-├── llm/               # LLM 领域
-└── rendering/         # 渲染领域
-```
-
-### 💾 缓存策略
-
-**决策**：SQLite 元数据 + 文件系统内容，双层验证
-
-**原因**：
-- SQLite 支持复杂查询（按平台、时间、说话人识别筛选）
-- 文件系统存储大文件（转录文本、LLM 结果）更高效
-- 双层验证（数据库记录 + 文件存在）保证数据一致性
-
-**流程**：
-```python
-# 查询时自动验证
-result = cache_manager.get_by_url(url)
-if not result or not os.path.exists(result['cache_dir']):
-    cache_manager.invalidate(result['id'])
-    return None  # 触发重新下载和转录
-```
-
-### 📖 文档驱动
-
-**决策**：Docstring + Sphinx + Markdown 分离
-
-**原因**：
-- Google 风格 docstring 作为 API 的唯一真实来源（SSOT）
-- Markdown 文档用于架构设计、使用指南等高层内容
-- 自动生成文档站点，避免手动维护
-
-**规范**：
-```python
-def calibrate_text(text: str) -> dict:
-    """校对转录文本。
-
-    Args:
-        text: 原始转录文本。
-
-    Returns:
-        包含校对文本和质量评分的字典。
-
-    Raises:
-        LLMTimeoutError: LLM 调用超时。
-    """
-    pass
-```
+| 状态码 | 含义 |
+|-------|------|
+| 200 | 任务成功完成 |
+| 202 | 任务已提交或处理中 |
+| 401 | 授权失败 |
+| 404 | 任务不存在 |
+| 500 | 服务器内部错误 |
 
 ---
 
@@ -282,7 +425,7 @@ def calibrate_text(text: str) -> dict:
 
 ### 📖 使用指南
 
-- [企业微信通知配置](docs/guides/wechat_notification.md) - WeComNotifier 最佳实践
+- [企业微信通知配置](docs/guides/wechat_notification.md) - WeComNotifier 使用指南
 - [多用户系统配置](docs/guides/multi_user_setup.md) - 用户管理、权限控制
 - [API 使用指南](docs/guides/api/) - 各平台 API 详细说明
 
@@ -315,7 +458,10 @@ video-transcript-api/
 ├── tests/                    # 测试套件
 │   ├── unit/                # 单元测试
 │   ├── integration/          # 集成测试
-│   └── performance/          # 性能测试
+│   ├── llm/                 # LLM 功能测试
+│   ├── cache/               # 缓存功能测试
+│   ├── features/            # 核心功能测试
+│   └── platforms/           # 平台适配测试
 ├── docs/                     # 文档中心
 │   ├── guides/              # 使用指南
 │   ├── development/          # 开发文档
@@ -328,8 +474,12 @@ video-transcript-api/
 ### 添加新平台
 
 1. 在 `src/video_transcript_api/downloaders/` 创建新的下载器类
-2. 继承 `BaseDownloader`，实现 `can_handle()`、`get_video_info()` 等方法
-3. 在 `factory.py` 中注册新下载器
+2. 继承 `BaseDownloader`，实现：
+   - `can_handle(url)`: 判断是否支持该 URL
+   - `get_video_info(url)`: 提取视频元数据
+   - `get_subtitle(url)`: 提取字幕（可选）
+   - `download_file(url)`: 下载视频/音频
+3. 在 `factory.py` 的 `platform_downloaders` 列表中注册
 4. 添加对应的测试用例
 
 ### 代码规范
@@ -369,5 +519,5 @@ video-transcript-api/
 ---
 
 <p align="center">
-  <i>Built with ❤️ by the Video Transcript API Team</i>
+  <i>Built with ❤️ by Video Transcript API Team</i>
 </p>
