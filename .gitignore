@@ -92,3 +92,6 @@ data/debug
 logs
 tests/output
 *nul
+
+# Claude Code 临时目录
+tmpclaude-*

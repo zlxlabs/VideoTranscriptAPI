@@ -366,7 +366,101 @@ curl -X GET "http://localhost:8000/api/task/task_xxx" \
 # 导出原始转录: http://localhost:8000/export/view_xxx/transcript
 ```
 
-### 运行测试
+## Web 界面使用
+
+### 📝 Web 任务提交
+
+**访问地址**：`GET /add_task_by_web`
+
+**功能说明**：
+- 图形化界面提交视频转录任务
+- 输入视频 URL
+- 选择是否启用说话人识别
+- 提交后获得任务 ID 和查看链接
+
+**页面模板**：`src/web/templates/index.html`
+
+### 👁 查看转录结果
+
+**访问地址**：`GET /view/{view_token}`
+
+**页面状态**：
+| 状态 | 说明 | 模板 |
+|------|------|------|
+| `processing` | 任务正在处理中 | `processing.html` |
+| `success` | 任务完成成功 | `transcript.html` |
+| `failed` | 任务处理失败 | `error.html` |
+| `file_cleaned` | 文件已被清理 | `cleaned.html` |
+
+**成功页面展示内容**：
+1. **转录统计**：
+   - 原始转录字数
+   - 校对文本字数
+   - 总结文本字数
+
+2. **LLM 配置信息**：
+   - 校对模型（calibrate_model）
+   - 总结模型（summary_model）
+   - Reasoning Effort 参数
+   - 风险降级标识（has_risk）
+
+3. **内容区域**：
+   - 📝 **内容总结**：LLM 生成的摘要（Markdown 格式）
+   - ✨ **校对文本**：LLM 校对后的文本（支持说话人识别对话格式）
+   - 浮动目录（TOC）：支持快速跳转
+
+4. **导出按钮**：
+   - 导出校对文本
+   - 导出总结文本
+   - 导出原始转录
+
+### 📄 Raw 模式导出
+
+**访问地址**：`GET /view/{view_token}?raw=calibrated`
+
+**功能说明**：
+- 直接返回纯文本，不渲染 HTML 页面
+- Content-Type: `text/plain; charset=utf-8`
+- 适合复制到第三方 AI 平台（如 ChatGPT、Claude）继续提问
+
+**响应示例**：
+```http
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+
+[主持人] 今天我们请到了张三
+[张三] 大家好，我是张三
+...
+```
+
+### 📥 文件导出
+
+**访问地址**：`GET /export/{view_token}/{export_type}`
+
+**支持的导出类型**：
+| 类型 | 文件路径 | 说明 |
+|------|---------|------|
+| `calibrated` | `llm_calibrated.txt` | LLM 校对后的文本 |
+| `summary` | `llm_summary.txt` | LLM 生成的总结 |
+| `transcript` | `transcript_funasr.json` 或 `transcript_capswriter.txt` | 原始转录（优先 FunASR，否则 CapsWriter） |
+
+**文件名格式**：`{平台}_{标题}_{类型}.txt`
+
+**响应头**：
+```http
+Content-Type: text/plain; charset=utf-8
+Content-Disposition: inline; filename*=UTF-8''{encoded_filename}
+X-Content-Type-Options: nosniff
+```
+
+**使用场景**：
+- 下载校对文本进行人工审阅
+- 下载总结文本快速了解内容
+- 下载原始转录进行二次处理
+
+---
+
+## 运行测试
 
 ```bash
 # 运行所有测试
@@ -392,8 +486,9 @@ uv run pytest tests/cache/
 | `/api/audit/stats` | GET | 获取用户调用统计 |
 | `/api/audit/calls` | GET | 获取最近调用记录 |
 | `/api/users/profile` | GET | 获取当前用户信息 |
-| `/add_task_by_web` | GET | Web 任务提交页面 |
+| `/add_task_by_web` | GET | Web任务提交页面 |
 | `/view/{view_token}` | GET | 结果查看页面 |
+| `/view/{view_token}?raw=calibrated` | GET | Raw 模式（纯文本输出） |
 | `/export/{view_token}/{type}` | GET | 导出处理结果 |
 
 ### 请求参数
@@ -416,6 +511,100 @@ uv run pytest tests/cache/
 | 401 | 授权失败 |
 | 404 | 任务不存在 |
 | 500 | 服务器内部错误 |
+
+---
+
+## Web 界面使用
+
+### 📝 Web 任务提交
+
+**访问地址**：`GET /add_task_by_web`
+
+**功能说明**：
+- 图形化界面提交视频转录任务
+- 输入视频 URL
+- 选择是否启用说话人识别
+- 提交后获得任务 ID 和查看链接
+
+**页面模板**：`src/web/templates/index.html`
+
+### 👁 查看转录结果
+
+**访问地址**：`GET /view/{view_token}`
+
+**页面状态**：
+| 状态 | 说明 | 模板 |
+|------|------|------|
+| `processing` | 任务正在处理中 | `processing.html` |
+| `success` | 任务完成成功 | `transcript.html` |
+| `failed` | 任务处理失败 | `error.html` |
+| `file_cleaned` | 文件已被清理 | `cleaned.html` |
+
+**成功页面展示内容**：
+1. **转录统计**：
+   - 原始转录字数
+   - 校对文本字数
+   - 总结文本字数
+
+2. **LLM 配置信息**：
+   - 校对模型（calibrate_model）
+   - 总结模型（summary_model）
+   - Reasoning Effort 参数
+   - 风险降级标识（has_risk）
+
+3. **内容区域**：
+   - 📝 **内容总结**：LLM 生成的摘要（Markdown 格式）
+   - ✨ **校对文本**：LLM 校对后的文本（支持说话人识别对话格式）
+   - 浮动目录（TOC）：支持快速跳转
+
+4. **导出按钮**：
+   - 导出校对文本
+   - 导出总结文本
+   - 导出原始转录
+
+### 📄 Raw 模式导出
+
+**访问地址**：`GET /view/{view_token}?raw=calibrated`
+
+**功能说明**：
+- 直接返回纯文本，不渲染 HTML 页面
+- Content-Type: `text/plain; charset=utf-8`
+- 适合复制到第三方 AI 平台（如 ChatGPT、Claude）继续提问
+
+**响应示例**：
+```http
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+
+[主持人] 今天我们请到了张三
+[张三] 大家好，我是张三
+...
+```
+
+### 📥 文件导出
+
+**访问地址**：`GET /export/{view_token}/{export_type}`
+
+**支持的导出类型**：
+| 类型 | 文件路径 | 说明 |
+|------|---------|------|
+| `calibrated` | `llm_calibrated.txt` | LLM 校对后的文本 |
+| `summary` | `llm_summary.txt` | LLM 生成的总结 |
+| `transcript` | `transcript_funasr.json` 或 `transcript_capswriter.txt` | 原始转录（优先 FunASR，否则 CapsWriter） |
+
+**文件名格式**：`{平台}_{标题}_{类型}.txt`
+
+**响应头**：
+```http
+Content-Type: text/plain; charset=utf-8
+Content-Disposition: inline; filename*=UTF-8''{encoded_filename}
+X-Content-Type-Options: nosniff
+```
+
+**使用场景**：
+- 下载校对文本进行人工审阅
+- 下载总结文本快速了解内容
+- 下载原始转录进行二次处理
 
 ---
 
