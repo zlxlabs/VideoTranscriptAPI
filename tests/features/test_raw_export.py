@@ -8,7 +8,7 @@ import os
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from src.video_transcript_api.api.server import sanitize_filename, generate_download_filename
+from src.video_transcript_api.api.routes.views import sanitize_filename, generate_download_filename
 
 
 def test_sanitize_filename():

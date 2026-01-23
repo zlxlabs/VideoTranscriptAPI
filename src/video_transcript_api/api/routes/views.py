@@ -31,6 +31,182 @@ static_dir = get_static_dir()
 router = APIRouter()
 
 
+def sanitize_filename(filename: str) -> str:
+    """
+    清理文件名中的非法字符
+
+    Args:
+        filename: 原始文件名
+
+    Returns:
+        str: 清理后的安全文件名
+    """
+    # 移除或替换 Windows 和 Linux 中的非法字符
+    invalid_chars = '<>:"/\\|?*'
+    for char in invalid_chars:
+        filename = filename.replace(char, "_")
+
+    # 移除控制字符
+    filename = "".join(char for char in filename if ord(char) >= 32)
+
+    # 移除首尾空格和点
+    filename = filename.strip(". ")
+
+    # 如果文件名为空，返回默认值
+    if not filename:
+        filename = "未命名"
+
+    return filename
+
+
+def generate_download_filename(title: str, platform: str, content_type: str) -> str:
+    """
+    生成下载文件名：视频标题-校对文本-平台.txt
+
+    Args:
+        title: 视频标题
+        platform: 平台名称（youtube/bilibili/douyin等）
+        content_type: 内容类型（calibrated/summary/transcript）
+
+    Returns:
+        str: 格式化的文件名
+    """
+    # 清理标题中的非法字符
+    safe_title = sanitize_filename(title)
+
+    # 内容类型映射
+    type_map = {
+        "calibrated": "校对文本",
+        "summary": "总结文本",
+        "transcript": "原始转录",
+    }
+
+    # 平台名称映射
+    platform_map = {
+        "youtube": "YouTube",
+        "bilibili": "哔哩哔哩",
+        "douyin": "抖音",
+        "xiaohongshu": "小红书",
+        "xiaoyuzhou": "小宇宙",
+        "generic": "自定义",
+    }
+
+    content_name = type_map.get(content_type, content_type)
+    platform_name = platform_map.get(platform, platform)
+
+    # 限制标题长度，避免文件名过长
+    max_title_length = 50
+    if len(safe_title) > max_title_length:
+        safe_title = safe_title[:max_title_length] + "..."
+
+    return f"{safe_title}-{content_name}-{platform_name}.txt"
+
+
+def handle_raw_export(view_data: Dict[str, Any], export_type: str) -> Response:
+    """
+    处理 Raw 模式导出请求（GitHub Raw 模式）
+
+    Args:
+        view_data: 页面数据
+        export_type: 导出类型（calibrated/summary/transcript）
+
+    Returns:
+        Response: 纯文本响应
+    """
+    # 1. 检查任务状态
+    status = view_data.get("status")
+
+    if status in ["queued", "processing"]:
+        return Response(
+            content="⏳ 校对文本正在生成中，请稍后再试...\n\n请刷新页面或稍后访问此链接。",
+            media_type="text/plain; charset=utf-8",
+            status_code=202,
+        )
+
+    if status == "file_cleaned":
+        return Response(
+            content="❌ 该文件已被清理\n\n如需重新获取，请重新提交转录任务。",
+            media_type="text/plain; charset=utf-8",
+            status_code=410,
+        )
+
+    if status == "failed":
+        return Response(
+            content="❌ 任务处理失败\n\n请重新提交转录任务。",
+            media_type="text/plain; charset=utf-8",
+            status_code=500,
+        )
+
+    if status != "success":
+        return Response(
+            content=f"❌ 任务状态异常: {status}",
+            media_type="text/plain; charset=utf-8",
+            status_code=400,
+        )
+
+    # 2. 获取缓存目录
+    cache_dir = view_data.get("cache_dir")
+    if not cache_dir or not os.path.exists(cache_dir):
+        return Response(
+            content="❌ 缓存文件不存在\n\n该文件可能已被清理。",
+            media_type="text/plain; charset=utf-8",
+            status_code=404,
+        )
+
+    # 3. 根据导出类型确定文件路径
+    file_path = None
+
+    if export_type == "calibrated":
+        file_path = Path(cache_dir) / "llm_calibrated.txt"
+    elif export_type == "summary":
+        file_path = Path(cache_dir) / "llm_summary.txt"
+    elif export_type == "transcript":
+        # 优先返回 FunASR JSON，降级到 CapsWriter TXT
+        funasr_file = Path(cache_dir) / "transcript_funasr.json"
+        capswriter_file = Path(cache_dir) / "transcript_capswriter.txt"
+        file_path = funasr_file if funasr_file.exists() else capswriter_file
+    else:
+        return Response(
+            content=f"❌ 不支持的导出类型: {export_type}\n\n支持的类型: calibrated, summary, transcript",
+            media_type="text/plain; charset=utf-8",
+            status_code=400,
+        )
+
+    # 4. 检查文件是否存在
+    if not file_path or not file_path.exists():
+        content_type_cn = {
+            "calibrated": "校对文本",
+            "summary": "总结文本",
+            "transcript": "原始转录",
+        }.get(export_type, export_type)
+
+        return Response(
+            content=f"❌ {content_type_cn}文件不存在\n\n该任务可能未启用相关功能。",
+            media_type="text/plain; charset=utf-8",
+            status_code=404,
+        )
+
+    # 5. 读取文件内容
+    try:
+        content = file_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        logger.error("读取文件失败: %s, 错误: %s", file_path, exc)
+        return Response(
+            content=f"❌ 读取文件失败: {exc}",
+            media_type="text/plain; charset=utf-8",
+            status_code=500,
+        )
+
+    # 6. 返回纯文本响应（Raw 模式不需要文件名头）
+    logger.info(
+        "Raw 模式导出: %s, view_token: %s",
+        export_type,
+        view_data.get("view_token", "unknown")[:20],
+    )
+
+    return Response(content=content, media_type="text/plain; charset=utf-8")
+
+
 @router.get("/add_task_by_web", response_class=HTMLResponse)
 async def add_task_by_web(request: Request):
     """Web任务添加页面"""
@@ -168,6 +344,10 @@ async def view_transcript(view_token: str, request: Request, raw: Optional[str] 
                         "message": "view_token 无效或已过期",
                     },
                 )
+
+        # 如果请求导出原始文件（GitHub Raw 模式）
+        if raw:
+            return handle_raw_export(view_data, raw)
 
         if view_data.get("created_at"):
             view_data["created_at_display"] = format_datetime_for_display(
