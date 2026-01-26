@@ -663,6 +663,10 @@ class CacheManager:
         """
         task_id = self.generate_task_id()
 
+        # 将空字符串转换为 None，避免存储无意义的空字符串
+        if source_url is not None and not source_url.strip():
+            source_url = None
+
         # 检查是否已有相同URL的任务，如果有则复用其view_token（无论任务状态）
         existing_task = self.get_existing_task_by_url(url, use_speaker_recognition)
         if existing_task:
@@ -706,6 +710,10 @@ class CacheManager:
             source_url: 原始平台URL
         """
         try:
+            # 将空字符串转换为 None，避免存储无意义的空字符串
+            if source_url is not None and isinstance(source_url, str) and not source_url.strip():
+                source_url = None
+
             with self._get_cursor() as cursor:
                 # 构建更新语句
                 update_fields = ["status = ?"]
@@ -726,7 +734,7 @@ class CacheManager:
                 if cache_id:
                     update_fields.append("cache_id = ?")
                     params.append(cache_id)
-                if source_url is not None:  # 允许显式设置为空字符串
+                if source_url is not None:  # 只有非空的 source_url 才更新
                     update_fields.append("source_url = ?")
                     params.append(source_url)
 
@@ -821,9 +829,10 @@ class CacheManager:
             task_info = self.get_task_by_view_token(view_token)
             if not task_info:
                 return None
-            
-            # 优先使用 source_url，回退到 url
-            display_url = task_info.get('source_url') or task_info['url']
+
+            # 优先使用 source_url（如果存在且非空），否则回退到 url
+            source_url_value = task_info.get('source_url')
+            display_url = source_url_value if (source_url_value and source_url_value.strip()) else task_info['url']
 
             # 如果任务还在进行中
             if task_info['status'] in ['queued', 'processing']:

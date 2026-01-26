@@ -273,6 +273,10 @@ def process_transcription(
         metadata_override: 元数据覆盖（dict）
     """
     try:
+        # 规范化 source_url：将空字符串转换为 None
+        if source_url is not None and isinstance(source_url, str) and not source_url.strip():
+            source_url = None
+
         logger.info(f"开始处理转录任务: {task_id}, URL: {url}, source_url: {source_url}")
 
         # 优先使用 source_url 用于通知显示（保持原始平台链接的可读性）
