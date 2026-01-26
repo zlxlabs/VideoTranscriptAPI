@@ -309,7 +309,8 @@ def process_transcription(
                 parsed_metadata = metadata_downloader.get_video_info(source_url)
                 logger.info(
                     f"成功从 source_url 解析元数据: platform={parsed_metadata.get('platform')}, "
-                    f"media_id={parsed_metadata.get('video_id')}, title={parsed_metadata.get('video_title', '')[:50]}"
+                    f"media_id={parsed_metadata.get('video_id')}, title={parsed_metadata.get('video_title', '')[:50]}, "
+                    f"author={parsed_metadata.get('author', 'N/A')}"
                 )
             except Exception as e:
                 logger.warning(f"解析 source_url 失败: {e}，将使用 metadata_override 作为兜底")
