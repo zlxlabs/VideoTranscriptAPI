@@ -224,7 +224,9 @@ async def process_task_queue():
                             "message": f"转录任务失败: {exc}",
                             "error": str(exc),
                         }
-                        WechatNotifier().notify_task_status(url, "转录失败", str(exc))
+                        # 优先使用 source_url 用于通知显示
+                        display_url = source_url or url
+                        WechatNotifier().notify_task_status(display_url, "转录失败", str(exc))
 
                 future.add_done_callback(task_completed)
                 logger.info(f"任务已提交到线程池: {task_id}, URL: {url}")
@@ -262,13 +264,17 @@ def process_transcription(
     try:
         logger.info(f"开始处理转录任务: {task_id}, URL: {url}, source_url: {source_url}")
 
+        # 优先使用 source_url 用于通知显示（保持原始平台链接的可读性）
+        display_url = source_url or url
+        logger.info(f"企业微信通知将使用URL: {display_url}")
+
         task_notifier = (
             WechatNotifier(wechat_webhook) if wechat_webhook else WechatNotifier()
         )
         engine_info = (
             "说话人识别(FunASR)" if use_speaker_recognition else "普通转录(CapsWriter)"
         )
-        task_notifier.notify_task_status(url, f"开始处理 - {engine_info}")
+        task_notifier.notify_task_status(display_url, f"开始处理 - {engine_info}")
 
         # === 新增：元数据解析和合并逻辑 ===
         parsed_metadata = None
@@ -299,6 +305,7 @@ def process_transcription(
         description = final_metadata.get('description', '')
         platform = final_metadata.get('platform', 'generic')
         video_id = final_metadata.get('video_id', generate_media_id_from_url(url))
+        media_id = video_id  # media_id 是 video_id 的别名，保持兼容性
 
         # 实际下载使用 GenericDownloader（统一处理）
         from ...downloaders.generic import GenericDownloader
@@ -346,7 +353,7 @@ def process_transcription(
                 cache_type = "含说话人识别" if has_speaker_recognition else "普通转录"
                 engine_info = "FunASR" if has_speaker_recognition else "CapsWriter"
                 task_notifier.notify_task_status(
-                    url,
+                    display_url,
                     f"使用已有缓存({cache_type}-{engine_info}，含LLM结果)",
                     title=video_title,
                     author=author,
@@ -403,7 +410,7 @@ def process_transcription(
                 # 发送（跳过自动添加的内容类型标题）
                 send_long_text_wechat(
                     title=video_title,
-                    url=url,
+                    url=display_url,
                     text=full_message,
                     is_summary=not skip_summary,
                     has_speaker_recognition=has_speaker_recognition,
@@ -422,7 +429,7 @@ def process_transcription(
                     view_url = f"{base_url}/view/{task_info['view_token']}"
 
                     # 使用限流系统发送完成通知，确保顺序正确
-                    clean_url = WechatNotifier()._clean_url(url)
+                    clean_url = WechatNotifier()._clean_url(display_url)
 
                     # 对标题进行风控处理
                     sanitized_title = video_title
@@ -470,7 +477,7 @@ def process_transcription(
                 }
 
             task_notifier.notify_task_status(
-                url,
+                display_url,
                 "使用已有缓存",
                 title=video_title,
                 author=author,
@@ -482,6 +489,7 @@ def process_transcription(
                     {
                         "task_id": task_id,
                         "url": url,
+                        "display_url": display_url,
                         "platform": cache_data.get("platform"),
                         "media_id": cache_data.get("media_id"),
                         "video_title": video_title,
@@ -547,7 +555,7 @@ def process_transcription(
                         )
 
                         task_notifier.notify_task_status(
-                            url,
+                            display_url,
                             "平台字幕获取成功 - 使用 YouTube API Server",
                             title=video_title,
                             author=author,
@@ -576,6 +584,7 @@ def process_transcription(
                                 {
                                     "task_id": task_id,
                                     "url": url,
+                                    "display_url": display_url,
                                     "platform": platform,
                                     "media_id": media_id,
                                     "video_title": video_title,
@@ -619,7 +628,7 @@ def process_transcription(
                         )
 
                         task_notifier.notify_task_status(
-                            url,
+                            display_url,
                             f"正在转录音视频 - {engine_info}",
                             title=video_title,
                             author=author,
@@ -680,7 +689,7 @@ def process_transcription(
                             )
 
                         task_notifier.notify_task_status(
-                            url,
+                            display_url,
                             f"转录完成 - {engine_info}",
                             title=video_title,
                             author=author,
@@ -693,6 +702,7 @@ def process_transcription(
                                 {
                                     "task_id": task_id,
                                     "url": url,
+                                    "display_url": display_url,
                                     "platform": platform,
                                     "media_id": media_id,
                                     "video_title": video_title,
@@ -739,14 +749,14 @@ def process_transcription(
                     # API Server 失败，不降级，直接返回错误
                     error_msg = f"YouTube API Server error: [{api_error.code}] {api_error.message}"
                     logger.error(f"[youtube-api] {error_msg}")
-                    task_notifier.notify_task_status(url, "下载失败", error_msg)
+                    task_notifier.notify_task_status(display_url, "下载失败", error_msg)
                     return {"status": "failed", "message": error_msg}
 
                 except Exception as exc:
                     # 其他异常也不降级
                     error_msg = f"YouTube API Server unexpected error: {exc}"
                     logger.exception(f"[youtube-api] {error_msg}")
-                    task_notifier.notify_task_status(url, "下载失败", error_msg)
+                    task_notifier.notify_task_status(display_url, "下载失败", error_msg)
                     return {"status": "failed", "message": error_msg}
 
             # ========== 原有逻辑（非 YouTube API Server 路径）==========
@@ -764,9 +774,10 @@ def process_transcription(
                 is_from_generic = video_info.get("is_generic", False)
                 platform = video_info.get("platform")
                 video_id = video_info.get("video_id")
+                media_id = video_id  # 保持兼容性
             else:
                 logger.info("已提供 source_url，使用解析的元数据，跳过传统下载器的 get_video_info")
-                # video_title, author, description, platform, video_id 已在前面设置
+                # video_title, author, description, platform, video_id, media_id 已在前面设置
 
             # 根据 use_speaker_recognition 参数决定处理优先级
             subtitle = None
@@ -792,7 +803,7 @@ def process_transcription(
                 logger.info(f"使用平台提供的字幕: {url}")
 
                 task_notifier.notify_task_status(
-                    url,
+                    display_url,
                     "平台字幕获取成功 - 直接使用平台字幕",
                     title=video_title,
                     author=author,
@@ -820,6 +831,7 @@ def process_transcription(
                         {
                             "task_id": task_id,
                             "url": url,
+                            "display_url": display_url,
                             "platform": video_info.get("platform"),
                             "media_id": video_info.get("video_id"),
                             "video_title": video_title,
@@ -860,7 +872,7 @@ def process_transcription(
                 # 没有字幕，需要下载音视频并转录
                 logger.info(f"下载视频进行转录: {url}")
                 task_notifier.notify_task_status(
-                    url,
+                    display_url,
                     f"正在下载视频 - {engine_info}",
                     title=video_title,
                     author=author,
@@ -908,7 +920,7 @@ def process_transcription(
                             error_msg = f"无法获取下载信息: {url}"
                             logger.error(error_msg)
                             task_notifier.notify_task_status(
-                                url, "下载失败", error_msg, title=video_title, author=author
+                                display_url, "下载失败", error_msg, title=video_title, author=author
                             )
                             return {"status": "failed", "message": error_msg}
 
@@ -916,7 +928,7 @@ def process_transcription(
                     error_msg = f"下载文件失败: {url}"
                     logger.error(error_msg)
                     task_notifier.notify_task_status(
-                        url, "下载失败", error_msg, title=video_title, author=author
+                        display_url, "下载失败", error_msg, title=video_title, author=author
                     )
                     return {"status": "failed", "message": error_msg}
 
@@ -924,7 +936,7 @@ def process_transcription(
                     # 开始转录
                     logger.info(f"开始转录音视频: {local_file}")
                     task_notifier.notify_task_status(
-                        url,
+                        display_url,
                         f"正在转录音视频 - {engine_info}",
                         title=video_title,
                         author=author,
@@ -998,7 +1010,7 @@ def process_transcription(
 
                     # 通知转录完成，包含转录文本预览和服务器类型信息
                     task_notifier.notify_task_status(
-                        url,
+                        display_url,
                         f"转录完成 - {engine_info}",
                         title=video_title,
                         author=author,
@@ -1011,6 +1023,7 @@ def process_transcription(
                             {
                                 "task_id": task_id,
                                 "url": url,
+                                "display_url": display_url,
                                 "platform": platform,
                                 "media_id": media_id,
                                 "video_title": video_title,
@@ -1061,10 +1074,12 @@ def process_transcription(
         return result
     except Exception as exc:
         logger.exception(f"转录处理异常: {exc}")
+        # 优先使用 source_url 用于通知显示
+        display_url = source_url or url
         task_notifier = (
             WechatNotifier(wechat_webhook) if wechat_webhook else WechatNotifier()
         )
-        task_notifier.notify_task_status(url, "转录异常", str(exc))
+        task_notifier.notify_task_status(display_url, "转录异常", str(exc))
         cache_manager.update_task_status(task_id, "failed")
         return {
             "status": "failed",
@@ -1104,6 +1119,8 @@ def _handle_llm_task(llm_task: dict):
     try:
         with task_lock(task_id):
             url = llm_task["url"]
+            # 优先使用 display_url 用于通知显示
+            display_url = llm_task.get("display_url", url)
             platform = llm_task.get("platform")
             media_id = llm_task.get("media_id")
             video_title = llm_task["video_title"]
@@ -1280,7 +1297,7 @@ def _handle_llm_task(llm_task: dict):
 
                 send_long_text_wechat(
                     title=video_title,
-                    url=url,
+                    url=display_url,
                     text=full_message,
                     is_summary=not skip_summary,
                     has_speaker_recognition=use_speaker_recognition,
@@ -1297,7 +1314,7 @@ def _handle_llm_task(llm_task: dict):
                     base_url = get_base_url()
                     view_url = f"{base_url}/view/{task_info['view_token']}"
 
-                    clean_url = WechatNotifier()._clean_url(url)
+                    clean_url = WechatNotifier()._clean_url(display_url)
 
                     sanitized_title = video_title
                     try:

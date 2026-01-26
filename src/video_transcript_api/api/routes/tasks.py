@@ -96,25 +96,34 @@ async def transcribe_video(
                 raise HTTPException(status_code=503, detail="任务队列已满，请稍后重试")
 
             try:
-                title = "转录任务已创建"
-                if "youtube.com" in url or "youtu.be" in url:
-                    title = "YouTube视频转录"
-                elif "bilibili.com" in url:
-                    title = "Bilibili视频转录"
-                elif "xiaoyuzhoufm.com" in url:
-                    title = "小宇宙播客转录"
-                elif "xiaohongshu.com" in url:
-                    title = "小红书内容转录"
-                elif "douyin.com" in url:
-                    title = "抖音视频转录"
+                # 优先使用 source_url 用于平台识别和通知显示
+                display_url = request_body.source_url or url
+
+                # 如果用户提供了 metadata_override.title，优先使用它
+                if request_body.metadata_override and request_body.metadata_override.title:
+                    title = request_body.metadata_override.title
+                    logger.info("使用用户提供的标题: %s", title)
+                else:
+                    # 根据平台生成默认标题
+                    title = "转录任务已创建"
+                    if "youtube.com" in display_url or "youtu.be" in display_url:
+                        title = "YouTube视频转录"
+                    elif "bilibili.com" in display_url or "b23.tv" in display_url:
+                        title = "Bilibili视频转录"
+                    elif "xiaoyuzhoufm.com" in display_url:
+                        title = "小宇宙播客转录"
+                    elif "xiaohongshu.com" in display_url or "xhslink.com" in display_url:
+                        title = "小红书内容转录"
+                    elif "douyin.com" in display_url:
+                        title = "抖音视频转录"
 
                 send_view_link_wechat(
                     title=f"🎬 {title}",
                     view_token=view_token,
                     webhook=effective_webhook,
-                    original_url=url,
+                    original_url=display_url,
                 )
-                logger.info("已发送任务创建通知: %s", task_id)
+                logger.info("已发送任务创建通知: %s，使用URL: %s", task_id, display_url)
             except Exception as exc:
                 logger.exception("发送任务创建通知失败: %s, 错误: %s", task_id, exc)
         except Exception as queue_exc:
