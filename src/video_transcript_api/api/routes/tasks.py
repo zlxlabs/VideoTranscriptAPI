@@ -60,7 +60,11 @@ async def transcribe_video(
     )
 
     try:
-        task_info = cache_manager.create_task(url, request_body.use_speaker_recognition)
+        task_info = cache_manager.create_task(
+            url=url,
+            use_speaker_recognition=request_body.use_speaker_recognition,
+            source_url=request_body.source_url
+        )
         task_id = task_info["task_id"]
         view_token = task_info["view_token"]
 

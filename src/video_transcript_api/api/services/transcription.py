@@ -209,7 +209,7 @@ async def process_task_queue():
                     "status": "processing",
                     "message": "正在处理转录任务",
                 }
-                cache_manager.update_task_status(task_id, "processing")
+                cache_manager.update_task_status(task_id, "processing", source_url=source_url)
 
                 future = executor.submit(
                     process_transcription,
@@ -473,6 +473,7 @@ def process_transcription(
                     title=video_title,
                     author=author,
                     cache_id=cache_data.get("cache_id"),
+                    source_url=source_url,
                 )
 
                 return {
@@ -621,6 +622,7 @@ def process_transcription(
                             media_id=media_id,
                             title=video_title,
                             author=author,
+                            source_url=source_url,
                         )
                         return {
                             "status": "success",
@@ -744,6 +746,7 @@ def process_transcription(
                             media_id=media_id,
                             title=video_title,
                             author=author,
+                            source_url=source_url,
                         )
                         return {
                             "status": "success",
@@ -877,6 +880,7 @@ def process_transcription(
                     media_id=video_id,
                     title=video_title,
                     author=author,
+                    source_url=source_url,
                 )
                 return result
             else:
@@ -1080,6 +1084,7 @@ def process_transcription(
                     media_id=video_id,
                     title=video_title,
                     author=author,
+                    source_url=source_url,
                 )
 
         return result
@@ -1091,7 +1096,7 @@ def process_transcription(
             WechatNotifier(wechat_webhook) if wechat_webhook else WechatNotifier()
         )
         task_notifier.notify_task_status(display_url, "转录异常", str(exc))
-        cache_manager.update_task_status(task_id, "failed")
+        cache_manager.update_task_status(task_id, "failed", source_url=source_url)
         return {
             "status": "failed",
             "message": f"转录任务异常: {exc}",
