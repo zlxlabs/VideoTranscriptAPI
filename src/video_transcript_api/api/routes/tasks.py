@@ -38,10 +38,11 @@ async def transcribe_video(
         raise HTTPException(status_code=400, detail="视频URL不能为空")
 
     logger.info(
-        "收到转录API请求 - URL: %s, 说话人识别: %s, 自定义企微webhook: %s, 完整请求体: %s",
+        "收到转录API请求 - URL: %s, 说话人识别: %s, 自定义企微webhook: %s, source_url: %s, 完整请求体: %s",
         url,
         request_body.use_speaker_recognition,
         request_body.wechat_webhook is not None,
+        request_body.source_url,
         request_body.model_dump(),
     )
 
@@ -83,6 +84,8 @@ async def transcribe_video(
                 "use_speaker_recognition": request_body.use_speaker_recognition,
                 "wechat_webhook": effective_webhook,
                 "user_info": user_info,
+                "source_url": request_body.source_url,
+                "metadata_override": request_body.metadata_override.model_dump() if request_body.metadata_override else None,
             }
 
             try:
