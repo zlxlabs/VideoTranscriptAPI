@@ -129,7 +129,9 @@ def merge_metadata(parsed_metadata: Optional[dict], metadata_override: Optional[
     # 步骤1：元数据合并
     if parsed_metadata is not None:
         # 解析成功：metadata_override 作为补充
-        final_metadata = {**parsed_metadata, **(metadata_override or {})}
+        # 注意：过滤掉 metadata_override 中的 None 值，避免覆盖解析出的有效值
+        filtered_override = {k: v for k, v in (metadata_override or {}).items() if v is not None}
+        final_metadata = {**parsed_metadata, **filtered_override}
         logger.info("元数据解析成功，使用 metadata_override 作为补充")
 
         # 字段名标准化：将 video_title 映射为 title（如果存在）
