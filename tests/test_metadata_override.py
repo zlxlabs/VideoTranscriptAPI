@@ -44,7 +44,7 @@ def test_merge_metadata_with_parsed_success():
         "description": "Parsed Description",
         "author": "Parsed Author",
         "platform": "youtube",
-        "media_id": "abc123"
+        "video_id": "abc123"
     }
 
     metadata_override = {
@@ -61,7 +61,7 @@ def test_merge_metadata_with_parsed_success():
     assert result["description"] == "Override Description"
     assert result["author"] == "Parsed Author"  # Not overridden
     assert result["platform"] == "youtube"
-    assert result["media_id"] == "abc123"
+    assert result["video_id"] == "abc123"
 
 
 def test_merge_metadata_with_parsed_failure():
@@ -80,7 +80,7 @@ def test_merge_metadata_with_parsed_failure():
     assert result["author"] == "Override Author"
     assert result["description"] == ""  # Default value
     assert result["platform"] == "generic"  # Default value
-    assert len(result["media_id"]) == 16  # Generated from URL
+    assert len(result["video_id"]) == 16  # Generated from URL
 
 
 def test_merge_metadata_with_defaults():
@@ -94,7 +94,7 @@ def test_merge_metadata_with_defaults():
     assert result["description"] == ""
     assert result["author"] == "Unknown"
     assert result["platform"] == "generic"
-    assert len(result["media_id"]) == 16
+    assert len(result["video_id"]) == 16
 
 
 def test_merge_metadata_partial_override():
@@ -104,7 +104,7 @@ def test_merge_metadata_partial_override():
         "description": "Parsed Description",
         "author": "Parsed Author",
         "platform": "youtube",
-        "media_id": "abc123"
+        "video_id": "abc123"
     }
 
     # Only override title
@@ -120,7 +120,7 @@ def test_merge_metadata_partial_override():
     assert result["description"] == "Parsed Description"
     assert result["author"] == "Parsed Author"
     assert result["platform"] == "youtube"
-    assert result["media_id"] == "abc123"
+    assert result["video_id"] == "abc123"
 
 
 if __name__ == "__main__":

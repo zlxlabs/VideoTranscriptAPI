@@ -141,12 +141,12 @@ def merge_metadata(parsed_metadata: Optional[dict], metadata_override: Optional[
     final_metadata.setdefault('description', "")
     final_metadata.setdefault('author', "Unknown")
     final_metadata.setdefault('platform', 'generic')
-    final_metadata.setdefault('media_id', generate_media_id_from_url(url))
+    final_metadata.setdefault('video_id', generate_media_id_from_url(url))
 
     logger.info(
-        "最终元数据: platform=%s, media_id=%s, title=%s, author=%s",
+        "最终元数据: platform=%s, video_id=%s, title=%s, author=%s",
         final_metadata['platform'],
-        final_metadata['media_id'],
+        final_metadata['video_id'],
         final_metadata['title'][:50],
         final_metadata['author']
     )
@@ -298,7 +298,7 @@ def process_transcription(
         author = final_metadata.get('author', '')
         description = final_metadata.get('description', '')
         platform = final_metadata.get('platform', 'generic')
-        video_id = final_metadata.get('media_id', generate_media_id_from_url(url))
+        video_id = final_metadata.get('video_id', generate_media_id_from_url(url))
 
         # 实际下载使用 GenericDownloader（统一处理）
         from ...downloaders.generic import GenericDownloader

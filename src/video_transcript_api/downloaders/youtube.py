@@ -238,37 +238,20 @@ class YoutubeDownloader(BaseDownloader):
     
     def get_video_info(self, url):
         """
-        获取视频信息，优先使用 yt-dlp，失败时使用 TikHub API 作为备用
-        
+        获取视频信息，直接使用 TikHub API（避免 yt-dlp 触发机器人风控）
+
         参数:
             url: 视频URL
-            
+
         返回:
             dict: 包含视频信息的字典
         """
         try:
             # 提取视频ID
             video_id = self._extract_video_id(url)
-            
-            # 优先尝试使用 yt-dlp 获取视频信息和下载链接
-            logger.info(f"尝试使用 yt-dlp 获取 YouTube 视频信息: {video_id}")
-            try:
-                video_info = self._get_video_info_with_ytdlp(url)
-                # 只要能获取到基本视频信息就认为成功，不强制要求 download_url
-                # 因为 download_audio_for_transcription 方法不需要直接 URL
-                if video_info and video_info.get("video_title"):
-                    logger.info(f"成功使用 yt-dlp 获取视频信息: {video_info['video_title']}")
-                    video_info["download_method"] = "yt-dlp"
-                    if not video_info.get("download_url"):
-                        logger.info("yt-dlp 未提取到直接下载链接，将使用 yt-dlp 下载方法")
-                    return video_info
-                else:
-                    logger.warning("yt-dlp 获取的视频信息不完整")
-            except Exception as e:
-                logger.warning(f"yt-dlp 获取视频信息失败: {e}")
-            
-            # 如果 yt-dlp 失败，使用 TikHub API 作为备用
-            logger.info("降级到 TikHub API 获取视频信息")
+
+            # 使用 TikHub API 获取视频信息
+            logger.info(f"使用 TikHub API 获取 YouTube 视频信息: {video_id}")
             endpoint = f"/api/v1/youtube/web/get_video_info"
             params = {"video_id": video_id}
             
