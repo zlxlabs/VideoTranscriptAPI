@@ -129,8 +129,12 @@ def merge_metadata(parsed_metadata: Optional[dict], metadata_override: Optional[
     # 步骤1：元数据合并
     if parsed_metadata is not None:
         # 解析成功：metadata_override 作为补充
-        # 注意：过滤掉 metadata_override 中的 None 值，避免覆盖解析出的有效值
-        filtered_override = {k: v for k, v in (metadata_override or {}).items() if v is not None}
+        # 注意：过滤掉 metadata_override 中的 None 值和空字符串，避免覆盖解析出的有效值
+        filtered_override = {
+            k: v
+            for k, v in (metadata_override or {}).items()
+            if v is not None and (not isinstance(v, str) or v.strip())
+        }
         final_metadata = {**parsed_metadata, **filtered_override}
         logger.info("元数据解析成功，使用 metadata_override 作为补充")
 
