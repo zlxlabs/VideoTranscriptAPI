@@ -813,13 +813,29 @@ def process_transcription(
                 logger.info("已提供 source_url，使用解析的元数据，跳过传统下载器的 get_video_info")
                 # video_title, author, description, platform, video_id, media_id 已在前面设置
 
+            # 判断是否同时提供了 url 和 source_url
+            # 如果同时提供且不同，说明 url 是直接下载地址，source_url 仅用于元数据解析
+            has_separate_download_url = (
+                source_url is not None and
+                source_url.strip() != "" and
+                source_url != url
+            )
+
             # 根据 use_speaker_recognition 参数决定处理优先级
             subtitle = None
 
-            # 如果提供了 source_url 且需要获取字幕，则使用 metadata_downloader
-            if use_speaker_recognition:
+            if has_separate_download_url:
+                # 同时提供了 url 和 source_url，说明用户已有下载地址
+                # 跳过字幕获取，直接使用 url 进行下载和转录
+                logger.info(
+                    f"检测到提供了独立的下载地址，跳过字幕获取，直接使用 url 进行转录: "
+                    f"url={url}, source_url={source_url}"
+                )
+                subtitle = None
+            elif use_speaker_recognition:
                 # 如果需要说话人识别，强制跳过平台字幕，直接进行下载转录
                 logger.info(f"需要说话人识别，跳过平台字幕获取，强制下载转录: {url}")
+                subtitle = None
             else:
                 # 只有在不需要说话人识别时，才尝试获取平台字幕
                 if metadata_downloader and metadata_downloader.__class__.__name__ == "YoutubeDownloader" and source_url:
