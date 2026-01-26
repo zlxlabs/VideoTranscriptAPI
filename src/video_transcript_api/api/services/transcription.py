@@ -131,6 +131,11 @@ def merge_metadata(parsed_metadata: Optional[dict], metadata_override: Optional[
         # 解析成功：metadata_override 作为补充
         final_metadata = {**parsed_metadata, **(metadata_override or {})}
         logger.info("元数据解析成功，使用 metadata_override 作为补充")
+
+        # 字段名标准化：将 video_title 映射为 title（如果存在）
+        if 'video_title' in final_metadata and 'title' not in final_metadata:
+            final_metadata['title'] = final_metadata['video_title']
+            logger.debug("已将 video_title 映射为 title")
     else:
         # 解析失败或未提供：metadata_override 作为覆盖
         final_metadata = metadata_override or {}
