@@ -283,7 +283,7 @@ text_sanitizer.sanitize(text, text_type)
 | **API 服务** | `api/` | FastAPI 应用、路由、依赖注入 |
 | **下载器** | `downloaders/` | 多平台内容获取、工厂模式 |
 | **转录器** | `transcriber/` | 语音识别、说话人识别 |
-| **LLM 引擎** | `utils/llm/` | 文本校对、总结、分段、结构化校对 |
+| **LLM 引擎** | `utils/llm/` | 文本校对、总结、分段、结构化校对（已重构为模块化架构） |
 | **缓存系统** | `utils/cache/` | 元数据存储、文件管理 |
 | **通知系统** | `utils/notifications/` | 企业微信消息推送（WeComNotifier） |
 | **风控模块** | `utils/risk_control/` | 敏感词检测、内容脱敏 |
@@ -677,6 +677,8 @@ X-Content-Type-Options: nosniff
 ### 🔧 开发文档
 
 - [LLM 工程指南](docs/development/llm/engineering_guide.md) - Prompt 优化、结构化输出
+- [LLM 重构方案](docs/development/llm/refactoring_plan.md) - 模块化架构设计方案
+- [LLM 重构完成报告](docs/development/llm/refactoring_completed.md) - 重构实施总结
 - [并发处理架构](docs/development/concurrency.md) - 双队列设计、性能优化
 - [风控模块开发](docs/development/risk_control.md) - 敏感词管理、审核策略
 - [日志系统指南](docs/development/logging.md) - Loguru 配置、日志分析

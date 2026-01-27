@@ -78,6 +78,25 @@ from .prompts import (
     build_final_summary_user_prompt,
 )
 
+# 新架构模块
+from .coordinator import LLMCoordinator
+from .core import (
+    LLMConfig,
+    LLMClient,
+    LLMResponse,
+    CacheManager,
+    KeyInfo,
+    KeyInfoExtractor,
+    SpeakerInferencer,
+    QualityValidator,
+    LLMError,
+    RetryableError,
+    FatalError,
+    classify_error,
+)
+from .segmenters import TextSegmenter, DialogSegmenter
+from .processors import PlainTextProcessor, SpeakerAwareProcessor
+
 __all__ = [
     # Utils
     "normalize_reasoning_effort",
@@ -91,13 +110,31 @@ __all__ = [
     "get_llm_stats",
     "reset_llm_stats",
     "log_llm_stats",
-    # Processors
+    # Processors (Legacy)
     "EnhancedLLMProcessor",
     "SegmentedLLMProcessor",
     "StructuredCalibrator",
     "TextSegmentationProcessor",
     "SpeakerMappingInference",
     "infer_speaker_mapping_from_cache",
+    # New Architecture
+    "LLMCoordinator",
+    "LLMConfig",
+    "LLMClient",
+    "LLMResponse",
+    "CacheManager",
+    "KeyInfo",
+    "KeyInfoExtractor",
+    "SpeakerInferencer",
+    "QualityValidator",
+    "LLMError",
+    "RetryableError",
+    "FatalError",
+    "classify_error",
+    "TextSegmenter",
+    "DialogSegmenter",
+    "PlainTextProcessor",
+    "SpeakerAwareProcessor",
     # Schemas
     "CALIBRATION_RESULT_SCHEMA",
     "VALIDATION_RESULT_SCHEMA",

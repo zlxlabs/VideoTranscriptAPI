@@ -49,6 +49,7 @@ def build_calibrate_user_prompt(
     video_title: str = "",
     author: str = "",
     description: str = "",
+    key_info: str = "",
     min_ratio: float = 0.95,
     retry_hint: str = ""
 ) -> str:
@@ -62,6 +63,7 @@ def build_calibrate_user_prompt(
         video_title: 视频标题
         author: 作者/频道
         description: 视频描述
+        key_info: 关键信息（格式化后的字符串）
         min_ratio: 最小长度比例
         retry_hint: 重试提示（追加在末尾）
 
@@ -87,6 +89,11 @@ def build_calibrate_user_prompt(
         if description:
             desc_truncated = description[:500] + ('...' if len(description) > 500 else '')
             parts.append(f"- 视频描述：{desc_truncated}")
+
+    # 关键信息
+    if key_info:
+        parts.append("\n**关键信息**（用于参考专有名词拼写）：")
+        parts.append(key_info)
 
     # 待校对文本（放在最后）
     parts.append("\n**待校对的转录文本**：")
