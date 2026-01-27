@@ -15,13 +15,13 @@ from pathlib import Path
 src_path = Path(__file__).parent.parent.parent / "src"
 sys.path.insert(0, str(src_path))
 
-from video_transcript_api.utils.llm.core.config import LLMConfig
-from video_transcript_api.utils.llm.core.llm_client import LLMClient
-from video_transcript_api.utils.llm.core.key_info_extractor import KeyInfoExtractor
-from video_transcript_api.utils.llm.core.speaker_inferencer import SpeakerInferencer
-from video_transcript_api.utils.llm.core.quality_validator import QualityValidator
-from video_transcript_api.utils.llm.core.cache_manager import CacheManager
-from video_transcript_api.utils.llm.processors.speaker_aware_processor import SpeakerAwareProcessor
+from video_transcript_api.llm.core.config import LLMConfig
+from video_transcript_api.llm.core.llm_client import LLMClient
+from video_transcript_api.llm.core.key_info_extractor import KeyInfoExtractor
+from video_transcript_api.llm.core.speaker_inferencer import SpeakerInferencer
+from video_transcript_api.llm.core.quality_validator import QualityValidator
+from video_transcript_api.llm.core.cache_manager import CacheManager
+from video_transcript_api.llm.processors.speaker_aware_processor import SpeakerAwareProcessor
 
 
 def load_config():

@@ -2,7 +2,7 @@
 
 import unittest
 from unittest.mock import Mock, patch
-from video_transcript_api.utils.llm import LLMCoordinator
+from video_transcript_api.llm import LLMCoordinator
 
 
 class TestNewArchitecture(unittest.TestCase):
@@ -36,7 +36,7 @@ class TestNewArchitecture(unittest.TestCase):
         self.assertIsNotNone(coordinator.plain_text_processor)
         self.assertIsNotNone(coordinator.speaker_aware_processor)
 
-    @patch('video_transcript_api.utils.llm.core.llm_client.LLMClient.call')
+    @patch('video_transcript_api.llm.core.llm_client.LLMClient.call')
     def test_coordinator_plain_text_processing(self, mock_call):
         """测试纯文本处理"""
         # 模拟LLM响应
@@ -70,7 +70,7 @@ class TestNewArchitecture(unittest.TestCase):
         self.assertIn("key_info", result)
         self.assertIn("stats", result)
 
-    @patch('video_transcript_api.utils.llm.core.llm_client.LLMClient.call')
+    @patch('video_transcript_api.llm.core.llm_client.LLMClient.call')
     def test_coordinator_speaker_aware_processing(self, mock_call):
         """测试说话人感知处理"""
         # 模拟多个LLM响应
@@ -128,7 +128,7 @@ class TestNewArchitecture(unittest.TestCase):
 
     def test_prompt_function_backward_compatibility(self):
         """测试prompt函数的向后兼容性"""
-        from video_transcript_api.utils.llm.prompts import build_structured_calibrate_user_prompt
+        from video_transcript_api.llm.prompts import build_structured_calibrate_user_prompt
 
         # 测试旧版调用方式
         input_data = {

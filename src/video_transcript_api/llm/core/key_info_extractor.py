@@ -3,7 +3,7 @@
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
-from ...logging import setup_logger
+from ...utils.logging import setup_logger
 from .llm_client import LLMClient
 from .cache_manager import CacheManager
 from ..prompts.schemas.key_info import (

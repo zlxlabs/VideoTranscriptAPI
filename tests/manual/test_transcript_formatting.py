@@ -8,7 +8,7 @@ import os
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.insert(0, project_root)
 
-from src.video_transcript_api.utils.llm import PlainTextProcessor
+from src.video_transcript_api.llm import PlainTextProcessor
 
 
 def _format_text(text: str) -> str:

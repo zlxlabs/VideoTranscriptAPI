@@ -18,7 +18,7 @@ project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 sys.path.insert(0, project_root)
 sys.path.insert(0, os.path.join(project_root, 'src'))
 
-from video_transcript_api.utils.llm import LLMConfig
+from video_transcript_api.llm import LLMConfig
 
 
 def load_config():

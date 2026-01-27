@@ -11,7 +11,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 from video_transcript_api.utils.rendering import DialogRenderer
-from video_transcript_api.utils.cache import analyze_cache_capabilities
+from video_transcript_api.cache import analyze_cache_capabilities
 
 
 def main():

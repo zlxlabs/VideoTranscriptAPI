@@ -2,7 +2,7 @@
 
 from typing import Dict, Optional
 
-from ...logging import setup_logger
+from ...utils.logging import setup_logger
 from ..core.config import LLMConfig
 from ..core.llm_client import LLMClient
 from ..prompts import (

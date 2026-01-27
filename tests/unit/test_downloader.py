@@ -7,13 +7,13 @@ from unittest.mock import MagicMock, patch
 # 添加项目根目录到导入路径
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from downloaders import create_downloader
-from downloaders.base import BaseDownloader
-from downloaders.douyin import DouyinDownloader
-from downloaders.bilibili import BilibiliDownloader
-from downloaders.xiaohongshu import XiaohongshuDownloader
-from downloaders.youtube import YoutubeDownloader
-from downloaders.xiaoyuzhou import XiaoyuzhouDownloader
+from video_transcript_api.downloaders import create_downloader
+from video_transcript_api.downloaders.base import BaseDownloader
+from video_transcript_api.downloaders.douyin import DouyinDownloader
+from video_transcript_api.downloaders.bilibili import BilibiliDownloader
+from video_transcript_api.downloaders.xiaohongshu import XiaohongshuDownloader
+from video_transcript_api.downloaders.youtube import YoutubeDownloader
+from video_transcript_api.downloaders.xiaoyuzhou import XiaoyuzhouDownloader
 
 
 class TestDownloaderFactory(unittest.TestCase):

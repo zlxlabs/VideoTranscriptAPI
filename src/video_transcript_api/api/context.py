@@ -10,8 +10,8 @@ from typing import Any, Dict
 from fastapi.templating import Jinja2Templates
 
 from ..utils.accounts import get_user_manager as _get_user_manager_impl
-from ..utils.cache import CacheManager
-from ..utils.llm import LLMCoordinator
+from ..cache import CacheManager
+from ..llm import LLMCoordinator
 from ..utils.logging import get_audit_logger as _get_audit_logger_impl
 from ..utils.logging import load_config as _load_config_impl
 from ..utils.logging import setup_logger

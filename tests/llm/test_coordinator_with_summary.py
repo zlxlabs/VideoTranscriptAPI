@@ -2,7 +2,7 @@
 
 import unittest
 from unittest.mock import Mock, patch
-from video_transcript_api.utils.llm import LLMCoordinator
+from video_transcript_api.llm import LLMCoordinator
 
 
 class TestCoordinatorWithSummary(unittest.TestCase):
@@ -34,7 +34,7 @@ class TestCoordinatorWithSummary(unittest.TestCase):
 
         self.assertIsNotNone(coordinator.summary_processor)
 
-    @patch('video_transcript_api.utils.llm.core.llm_client.LLMClient.call')
+    @patch('video_transcript_api.llm.core.llm_client.LLMClient.call')
     def test_short_text_skips_summary(self, mock_call):
         """Test short text skips summary generation"""
         # Mock calibration response (key info extraction + calibration)
@@ -77,7 +77,7 @@ class TestCoordinatorWithSummary(unittest.TestCase):
         self.assertIsNone(result["summary_text"])
         self.assertEqual(result["stats"]["summary_length"], 0)
 
-    @patch('video_transcript_api.utils.llm.core.llm_client.LLMClient.call')
+    @patch('video_transcript_api.llm.core.llm_client.LLMClient.call')
     def test_long_text_generates_summary(self, mock_call):
         """Test long text generates summary"""
         # Mock responses for different tasks
@@ -125,7 +125,7 @@ class TestCoordinatorWithSummary(unittest.TestCase):
         self.assertIn("Overview", result["summary_text"])
         self.assertGreater(result["stats"]["summary_length"], 0)
 
-    @patch('video_transcript_api.utils.llm.core.llm_client.LLMClient.call')
+    @patch('video_transcript_api.llm.core.llm_client.LLMClient.call')
     def test_result_structure(self, mock_call):
         """Test result structure includes all expected fields"""
         # Mock calibration response
@@ -169,7 +169,7 @@ class TestCoordinatorWithSummary(unittest.TestCase):
         self.assertIn("stats", result)
         self.assertIn("summary_length", result["stats"])
 
-    @patch('video_transcript_api.utils.llm.core.llm_client.LLMClient.call')
+    @patch('video_transcript_api.llm.core.llm_client.LLMClient.call')
     def test_speaker_count_extraction_plain_text(self, mock_call):
         """Test speaker count extraction for plain text (should be 0)"""
         # Mock calibration response

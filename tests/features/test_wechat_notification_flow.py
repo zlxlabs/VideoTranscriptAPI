@@ -19,7 +19,7 @@ from src.video_transcript_api.utils.notifications import (
     send_view_link_wechat,
 )
 from src.video_transcript_api.utils.logging import load_config
-from src.video_transcript_api.utils.risk_control import init_risk_control, is_enabled
+from src.video_transcript_api.risk_control import init_risk_control, is_enabled
 
 
 def load_test_summary():

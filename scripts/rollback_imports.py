@@ -53,7 +53,7 @@ def rollback_import_line(
     modified = False
 
     for module in modules:
-        # 模式 1: from ...llm → from ...utils.llm
+        # 模式 1: from ...llm → from ...llm
         pattern1 = rf"(from\s+)(\.+)({module})"
         if re.search(pattern1, line) and "utils" not in line:
             # 检查是否已经包含 utils.
@@ -61,25 +61,25 @@ def rollback_import_line(
                 line = re.sub(pattern1, rf"\1\2utils.\3", line)
                 modified = True
 
-        # 模式 2: from video_transcript_api.llm → from video_transcript_api.utils.llm
+        # 模式 2: from video_transcript_api.llm → from video_transcript_api.llm
         pattern2 = rf"(from\s+video_transcript_api\.)({module})"
         if re.search(pattern2, line) and "utils" not in line:
             line = re.sub(pattern2, rf"\1utils.\2", line)
             modified = True
 
-        # 模式 3: import video_transcript_api.llm → import video_transcript_api.utils.llm
+        # 模式 3: import video_transcript_api.llm → import video_transcript_api.llm
         pattern3 = rf"(import\s+video_transcript_api\.)({module})"
         if re.search(pattern3, line) and "utils" not in line:
             line = re.sub(pattern3, rf"\1utils.\2", line)
             modified = True
 
-        # 模式 4: from src.video_transcript_api.llm → from src.video_transcript_api.utils.llm
+        # 模式 4: from src.video_transcript_api.llm → from src.video_transcript_api.llm
         pattern4 = rf"(from\s+src\.video_transcript_api\.)({module})"
         if re.search(pattern4, line) and "utils" not in line:
             line = re.sub(pattern4, rf"\1utils.\2", line)
             modified = True
 
-        # 模式 5: import src.video_transcript_api.llm → import src.video_transcript_api.utils.llm
+        # 模式 5: import src.video_transcript_api.llm → import src.video_transcript_api.llm
         pattern5 = rf"(import\s+src\.video_transcript_api\.)({module})"
         if re.search(pattern5, line) and "utils" not in line:
             line = re.sub(pattern5, rf"\1utils.\2", line)

@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from ..utils.notifications import init_global_notifier, shutdown_global_notifier
 from ..utils.ytdlp import YtdlpConfigBuilder
-from ..utils.llm import set_default_config, log_llm_stats
+from ..llm import set_default_config, log_llm_stats
 from .context import get_config, get_logger, get_static_dir, get_temp_manager
 from .routes import audit, tasks, users, views
 from .services.transcription import process_llm_queue, process_task_queue
@@ -71,7 +71,7 @@ def create_app() -> FastAPI:
         if risk_config.get("enabled", False):
             logger.info("正在初始化风控模块...")
             try:
-                from ..utils.risk_control import init_risk_control
+                from ..risk_control import init_risk_control
 
                 init_risk_control(config)
                 logger.info("风控模块初始化完成")

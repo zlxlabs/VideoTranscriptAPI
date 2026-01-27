@@ -53,7 +53,7 @@ def test_plain_text_e2e():
     # Step 3: Initialize LLM Coordinator
     print("\n[Step 3] Initializing LLM Coordinator...")
     try:
-        from video_transcript_api.utils.llm import LLMCoordinator
+        from video_transcript_api.llm import LLMCoordinator
 
         cache_dir = config.get("storage", {}).get("cache_dir", "./data/cache")
         coordinator = LLMCoordinator(config_dict=config, cache_dir=cache_dir)

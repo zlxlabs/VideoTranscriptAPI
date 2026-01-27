@@ -16,7 +16,7 @@ def test_core_features():
         # 1. 测试数据库初始化和任务创建
         print("\n步骤1: 测试数据库初始化和任务创建...")
         
-        from video_transcript_api.utils.cache import CacheManager
+        from video_transcript_api.cache import CacheManager
         cache_manager = CacheManager("./test_cache")
         
         # 创建测试任务

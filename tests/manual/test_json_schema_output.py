@@ -13,7 +13,7 @@ import os
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
-from video_transcript_api.utils.llm import (
+from video_transcript_api.llm import (
     call_llm_api,
     set_default_config,
     StructuredResult,
@@ -21,7 +21,7 @@ from video_transcript_api.utils.llm import (
     reset_llm_stats,
     log_llm_stats,
 )
-from video_transcript_api.utils.llm.schemas import (
+from video_transcript_api.llm.schemas import (
     CALIBRATION_RESULT_SCHEMA,
     SPEAKER_MAPPING_SCHEMA,
 )

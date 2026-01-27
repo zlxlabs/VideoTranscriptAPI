@@ -5,7 +5,7 @@ import sys
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.insert(0, os.path.join(project_root, 'src'))
 
-from video_transcript_api.utils.llm import call_llm_api
+from video_transcript_api.llm import call_llm_api
 from video_transcript_api.utils.logging import load_config
 
 def main():

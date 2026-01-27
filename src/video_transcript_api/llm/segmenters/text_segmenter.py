@@ -6,7 +6,7 @@
 import re
 from typing import List
 
-from ...logging import setup_logger
+from ...utils.logging import setup_logger
 from ..core.config import LLMConfig
 
 logger = setup_logger(__name__)

@@ -2,8 +2,8 @@
 
 import unittest
 from unittest.mock import Mock, patch
-from video_transcript_api.utils.llm.processors.summary_processor import SummaryProcessor
-from video_transcript_api.utils.llm.core.config import LLMConfig
+from video_transcript_api.llm.processors.summary_processor import SummaryProcessor
+from video_transcript_api.llm.core.config import LLMConfig
 
 
 class TestSummaryProcessor(unittest.TestCase):
@@ -35,7 +35,7 @@ class TestSummaryProcessor(unittest.TestCase):
         )
         self.assertIsNone(result)
 
-    @patch('video_transcript_api.utils.llm.core.llm_client.LLMClient.call')
+    @patch('video_transcript_api.llm.core.llm_client.LLMClient.call')
     def test_long_text_generates_summary(self, mock_call):
         """Test long text generates summary"""
         # Mock LLM response
@@ -73,7 +73,7 @@ class TestSummaryProcessor(unittest.TestCase):
         # Verify single and multi prompts are different
         self.assertNotEqual(single_prompt, multi_prompt)
 
-    @patch('video_transcript_api.utils.llm.core.llm_client.LLMClient.call')
+    @patch('video_transcript_api.llm.core.llm_client.LLMClient.call')
     def test_task_type_parameter(self, mock_call):
         """Test task_type parameter is correctly passed"""
         # Mock LLM response
@@ -92,7 +92,7 @@ class TestSummaryProcessor(unittest.TestCase):
         call_kwargs = self.llm_client.call.call_args[1]
         self.assertEqual(call_kwargs.get("task_type"), "summary")
 
-    @patch('video_transcript_api.utils.llm.core.llm_client.LLMClient.call')
+    @patch('video_transcript_api.llm.core.llm_client.LLMClient.call')
     def test_summary_too_short_returns_none(self, mock_call):
         """Test summary generation returns None if result too short"""
         # Mock LLM response with very short text
@@ -107,7 +107,7 @@ class TestSummaryProcessor(unittest.TestCase):
 
         self.assertIsNone(result)
 
-    @patch('video_transcript_api.utils.llm.core.llm_client.LLMClient.call')
+    @patch('video_transcript_api.llm.core.llm_client.LLMClient.call')
     def test_exception_handling(self, mock_call):
         """Test exception handling returns None gracefully"""
         # Mock LLM call to raise exception
@@ -121,7 +121,7 @@ class TestSummaryProcessor(unittest.TestCase):
         # Should return None instead of raising exception
         self.assertIsNone(result)
 
-    @patch('video_transcript_api.utils.llm.core.llm_client.LLMClient.call')
+    @patch('video_transcript_api.llm.core.llm_client.LLMClient.call')
     def test_selected_models_parameter(self, mock_call):
         """Test selected_models parameter overrides config"""
         # Mock LLM response

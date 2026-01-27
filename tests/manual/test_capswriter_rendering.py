@@ -15,7 +15,7 @@ from video_transcript_api.utils.rendering.dialog_renderer import (
     render_transcript_content_smart,
     render_calibrated_content_smart
 )
-from video_transcript_api.utils.cache.cache_analyzer import analyze_cache_capabilities
+from video_transcript_api.cache.cache_analyzer import analyze_cache_capabilities
 from video_transcript_api.utils.logging import setup_logger
 
 logger = setup_logger("test_capswriter_rendering")

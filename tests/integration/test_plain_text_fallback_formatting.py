@@ -2,9 +2,9 @@
 
 import pytest
 from unittest.mock import Mock, MagicMock
-from src.video_transcript_api.utils.llm.processors.plain_text_processor import PlainTextProcessor
-from src.video_transcript_api.utils.llm.core.config import LLMConfig
-from src.video_transcript_api.utils.llm.core.key_info_extractor import KeyInfo
+from src.video_transcript_api.llm.processors.plain_text_processor import PlainTextProcessor
+from src.video_transcript_api.llm.core.config import LLMConfig
+from src.video_transcript_api.llm.core.key_info_extractor import KeyInfo
 
 
 class TestPlainTextFallbackFormatting:

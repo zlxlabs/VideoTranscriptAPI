@@ -19,7 +19,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
 import logging
-from video_transcript_api.utils.cache import analyze_cache_capabilities
+from video_transcript_api.cache import analyze_cache_capabilities
 from video_transcript_api.utils.rendering import render_calibrated_content_smart
 
 # 配置日志，监控 analyze_cache 调用

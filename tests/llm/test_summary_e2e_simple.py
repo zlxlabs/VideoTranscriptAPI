@@ -9,8 +9,8 @@ Run manually: uv run pytest tests/llm/test_summary_e2e_simple.py -v -s
 
 import unittest
 from pathlib import Path
-from video_transcript_api.utils.config_loader import get_config
-from video_transcript_api.utils.llm import LLMCoordinator
+from video_transcript_api.api.context import get_config
+from video_transcript_api.llm import LLMCoordinator
 
 
 class TestSummaryE2ESimple(unittest.TestCase):

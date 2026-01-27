@@ -2,7 +2,7 @@
 
 import pytest
 from unittest.mock import Mock, MagicMock, patch
-from video_transcript_api.utils.llm.coordinator import LLMCoordinator
+from video_transcript_api.llm.coordinator import LLMCoordinator
 
 
 @pytest.fixture
@@ -45,11 +45,11 @@ def mock_config_dict():
 def coordinator(mock_config_dict, tmp_path):
     """Create a coordinator instance with mocked dependencies"""
     with patch(
-        "video_transcript_api.utils.llm.coordinator.PlainTextProcessor"
+        "video_transcript_api.llm.coordinator.PlainTextProcessor"
     ) as MockPlainProcessor, patch(
-        "video_transcript_api.utils.llm.coordinator.SpeakerAwareProcessor"
+        "video_transcript_api.llm.coordinator.SpeakerAwareProcessor"
     ) as MockSpeakerProcessor, patch(
-        "video_transcript_api.utils.llm.coordinator.SummaryProcessor"
+        "video_transcript_api.llm.coordinator.SummaryProcessor"
     ):
         coordinator = LLMCoordinator(
             config_dict=mock_config_dict, cache_dir=str(tmp_path)

@@ -25,7 +25,7 @@ from ..context import (
 )
 from ...downloaders import create_downloader
 from ...transcriber import FunASRSpeakerClient, Transcriber
-from ...utils.llm import call_llm_api
+from ...llm import call_llm_api
 from ...utils.notifications import (
     WechatNotifier,
     send_long_text_wechat,
@@ -453,7 +453,7 @@ def process_transcription(
                     # 对标题进行风控处理
                     sanitized_title = video_title
                     try:
-                        from ...utils.risk_control import is_enabled, sanitize_text
+                        from ...risk_control import is_enabled, sanitize_text
 
                         if is_enabled():
                             title_result = sanitize_text(video_title, text_type="title")
@@ -1337,7 +1337,7 @@ def _handle_llm_task(llm_task: dict):
                 # 检测风险内容（用于模型选择）
                 has_risk = False
                 try:
-                    from ...utils.risk_control import is_enabled, sanitize_text
+                    from ...risk_control import is_enabled, sanitize_text
 
                     if is_enabled():
                         # 合并元数据用于风险检测
@@ -1547,7 +1547,7 @@ def _handle_llm_task(llm_task: dict):
 
                     sanitized_title = video_title
                     try:
-                        from ...utils.risk_control import is_enabled, sanitize_text
+                        from ...risk_control import is_enabled, sanitize_text
 
                         if is_enabled():
                             title_result = sanitize_text(video_title, text_type="title")

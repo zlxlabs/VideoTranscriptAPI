@@ -11,7 +11,7 @@
 import os
 import requests
 from typing import Set, List
-from ..logging import setup_logger
+from ..utils.logging import setup_logger
 
 logger = setup_logger("sensitive_words_manager")
 

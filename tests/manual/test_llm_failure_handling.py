@@ -16,7 +16,7 @@ sys.path.insert(0, project_root)
 
 def test_llm_call_error_exception():
     """Test that LLMCallError is properly defined and can be raised"""
-    from src.video_transcript_api.utils.llm import LLMCallError
+    from src.video_transcript_api.llm import LLMCallError
 
     # Test exception can be created with message
     error = LLMCallError("Test error message")

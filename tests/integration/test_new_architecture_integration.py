@@ -16,7 +16,7 @@ def test_imports():
         from video_transcript_api.api.context import get_llm_coordinator, get_config
         print("[PASS] context imported successfully")
 
-        from video_transcript_api.utils.llm import LLMCoordinator
+        from video_transcript_api.llm import LLMCoordinator
         print("[PASS] LLMCoordinator imported successfully")
 
         print("\nAll import tests passed!")
@@ -32,7 +32,7 @@ def test_coordinator_initialization():
 
     try:
         from video_transcript_api.api.context import get_config
-        from video_transcript_api.utils.llm import LLMCoordinator
+        from video_transcript_api.llm import LLMCoordinator
 
         config = get_config()
         cache_dir = config.get("storage", {}).get("cache_dir", "./data/cache")

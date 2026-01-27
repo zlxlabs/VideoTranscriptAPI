@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import concurrent.futures
 import re
 
-from ...logging import setup_logger
+from ...utils.logging import setup_logger
 from ..core.config import LLMConfig
 from ..core.llm_client import LLMClient
 from ..core.key_info_extractor import KeyInfoExtractor, KeyInfo

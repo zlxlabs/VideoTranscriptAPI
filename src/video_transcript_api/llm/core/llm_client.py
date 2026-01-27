@@ -4,7 +4,7 @@ import time
 from typing import Dict, Optional
 from dataclasses import dataclass
 
-from ...logging import setup_logger
+from ...utils.logging import setup_logger
 from ..llm import call_llm_api, LLMCallError, StructuredResult
 from .errors import classify_error, RetryableError, FatalError
 

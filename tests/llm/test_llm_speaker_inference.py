@@ -12,7 +12,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..
 sys.path.append(os.path.join(project_root, 'src'))
 
 from video_transcript_api.utils.logging import load_config
-from video_transcript_api.utils.llm import LLMCoordinator
+from video_transcript_api.llm import LLMCoordinator
 
 
 def _load_funasr_segments(json_file: str):

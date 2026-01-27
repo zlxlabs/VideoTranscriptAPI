@@ -2,7 +2,7 @@
 
 from typing import Dict, List, Optional
 
-from ...logging import setup_logger
+from ...utils.logging import setup_logger
 from .llm_client import LLMClient
 from .cache_manager import CacheManager
 from .key_info_extractor import KeyInfo

@@ -10,7 +10,7 @@ import time
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, os.path.join(project_root, 'src'))
 
-from video_transcript_api.utils.llm import LLMCoordinator
+from video_transcript_api.llm import LLMCoordinator
 from video_transcript_api.utils.logging import load_config
 
 

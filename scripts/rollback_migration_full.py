@@ -104,7 +104,7 @@ def main():
     context_file = src_dir / "api" / "context.py"
     if context_file.exists():
         content = context_file.read_text(encoding="utf-8")
-        if "from ..utils.llm" in content or "from ...utils.llm" in content:
+        if "from ..llm" in content or "from ...llm" in content:
             log_success("Verified: Old import paths restored in context.py")
         else:
             log_warning("Warning: Some import paths may not be fully restored")

@@ -13,7 +13,7 @@ import os
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.join(project_root, "src"))
 
-from video_transcript_api.utils.cache import CacheManager
+from video_transcript_api.cache import CacheManager
 
 def test_view_token_reuse():
     """测试view_token复用功能"""

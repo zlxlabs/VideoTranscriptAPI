@@ -54,7 +54,7 @@ def check_old_imports(file_path: Path, modules: List[str]) -> List[Tuple[int, st
 
     for i, line in enumerate(lines, start=1):
         for module in modules:
-            # 检查是否包含 utils.llm / utils.cache / utils.risk_control
+            # 检查是否包含旧的 utils 路径（已迁移到顶级）
             pattern = rf"utils\.{module}"
             if re.search(pattern, line):
                 issues.append((i, line.rstrip()))

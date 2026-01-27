@@ -62,32 +62,32 @@ def migrate_import_line(
     modified = False
 
     for module in modules:
-        # 模式 1: from ...utils.llm import ...
+        # 模式 1: from ...llm import ...
         pattern1 = rf"(from\s+)(\.+)(utils\.{module})"
         if re.search(pattern1, line):
             # 移除 utils. 部分
             line = re.sub(pattern1, rf"\1\2{module}", line)
             modified = True
 
-        # 模式 2: from video_transcript_api.utils.llm import ...
+        # 模式 2: from video_transcript_api.llm import ...
         pattern2 = rf"(from\s+video_transcript_api\.)(utils\.{module})"
         if re.search(pattern2, line):
             line = re.sub(pattern2, rf"\1{module}", line)
             modified = True
 
-        # 模式 3: import video_transcript_api.utils.llm
+        # 模式 3: import video_transcript_api.llm
         pattern3 = rf"(import\s+video_transcript_api\.)(utils\.{module})"
         if re.search(pattern3, line):
             line = re.sub(pattern3, rf"\1{module}", line)
             modified = True
 
-        # 模式 4: from src.video_transcript_api.utils.llm import ...
+        # 模式 4: from src.video_transcript_api.llm import ...
         pattern4 = rf"(from\s+src\.video_transcript_api\.)(utils\.{module})"
         if re.search(pattern4, line):
             line = re.sub(pattern4, rf"\1{module}", line)
             modified = True
 
-        # 模式 5: import src.video_transcript_api.utils.llm
+        # 模式 5: import src.video_transcript_api.llm
         pattern5 = rf"(import\s+src\.video_transcript_api\.)(utils\.{module})"
         if re.search(pattern5, line):
             line = re.sub(pattern5, rf"\1{module}", line)

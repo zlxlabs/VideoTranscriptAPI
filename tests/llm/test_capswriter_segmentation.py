@@ -18,7 +18,7 @@ except ImportError:
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.insert(0, project_root)
 
-from src.video_transcript_api.utils.llm import (
+from src.video_transcript_api.llm import (
     LLMConfig,
     TextSegmenter,
     CALIBRATE_SYSTEM_PROMPT,

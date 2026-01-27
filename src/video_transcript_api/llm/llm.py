@@ -619,7 +619,7 @@ def call_llm_api(
 
     Examples:
         # 应用启动时设置默认配置（只需一次）
-        from video_transcript_api.utils.llm import set_default_config
+        from video_transcript_api.llm import set_default_config
         set_default_config(app_config)
 
         # 纯文本输出（兼容现有调用）
