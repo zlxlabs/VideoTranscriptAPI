@@ -376,6 +376,8 @@ def process_transcription(
             author = cache_data.get("author", "")
             description = cache_data.get("description", "")
             has_speaker_recognition = cache_data.get("use_speaker_recognition", False)
+            # 缓存命中时，is_from_generic 必然是 False（第 365 行条件保证了 generic 不会被缓存）
+            is_from_generic = False
 
             transcript = ""
             transcription_data = None
@@ -878,6 +880,8 @@ def process_transcription(
             else:
                 logger.info("已提供 source_url，使用解析的元数据，跳过传统下载器的 get_video_info")
                 # video_title, author, description, platform, video_id, media_id 已在前面设置
+                # 从 platform 推断 is_from_generic
+                is_from_generic = (platform == 'generic')
 
             # 判断是否同时提供了 url 和 source_url
             # 如果同时提供且不同，说明 url 是直接下载地址，source_url 仅用于元数据解析
