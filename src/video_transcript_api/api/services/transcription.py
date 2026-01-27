@@ -326,8 +326,9 @@ def process_transcription(
             else:
                 platform = 'youtube'
                 logger.info(f"识别为 youtube 链接，需要解析: {check_url}")
-        elif 'douyin.com' in check_url:
-            match = re.search(r'/video/(\d+)', check_url)
+        elif 'douyin.com' in check_url or 'v.douyin.com' in check_url:
+            # 抖音支持多种URL格式和短链
+            match = re.search(r'(?:video/|note/)(\d+)', check_url)
             if match:
                 platform = 'douyin'
                 video_id = match.group(1)
@@ -335,6 +336,29 @@ def process_transcription(
             else:
                 platform = 'douyin'
                 logger.info(f"识别为 douyin 链接，需要解析: {check_url}")
+        elif 'xiaoyuzhoufm.com' in check_url:
+            # 小宇宙播客 URL格式: https://www.xiaoyuzhoufm.com/episode/68f7975f456ffec65ede5e47
+            match = re.search(r'/episode/([a-z0-9]+)', check_url)
+            if match:
+                platform = 'xiaoyuzhou'
+                video_id = match.group(1)
+                logger.info(f"快速提取: platform={platform}, video_id={video_id}")
+            else:
+                platform = 'xiaoyuzhou'
+                logger.info(f"识别为 xiaoyuzhou 链接，需要解析: {check_url}")
+        elif 'xiaohongshu.com' in check_url or 'xhslink.com' in check_url:
+            # 小红书支持主域名和短链，ID为24位
+            match = re.search(r'(?:explore/|discovery/item/|items/)(\w+)', check_url)
+            if not match:
+                # 尝试匹配24位ID
+                match = re.search(r'/(\w{24})', check_url)
+            if match:
+                platform = 'xiaohongshu'
+                video_id = match.group(1)
+                logger.info(f"快速提取: platform={platform}, video_id={video_id}")
+            else:
+                platform = 'xiaohongshu'
+                logger.info(f"识别为 xiaohongshu 链接，需要解析: {check_url}")
 
         # 如果识别出平台但未提取到 video_id，使用下载器的轻量级方法
         if platform and platform != 'generic' and not video_id:
