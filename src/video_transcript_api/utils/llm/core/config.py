@@ -60,7 +60,7 @@ class LLMConfig:
     preferred_chunk_length: int = 800
     max_calibration_retries: int = 2
     calibration_concurrent_limit: int = 3
-    enable_validation: bool = True
+    enable_validation: bool = False  # 是否启用分段质量验证（每个chunk独立打分，不再进行整体验证）
 
     # 质量阈值
     overall_score_threshold: float = 8.0
@@ -160,7 +160,8 @@ class LLMConfig:
             calibration_concurrent_limit=calibration_config.get(
                 "calibration_concurrent_limit", 3
             ),
-            enable_validation=calibration_config.get("enable_validation", True),
+            # enable_validation 现在控制分段质量验证（每个chunk独立打分）
+            enable_validation=calibration_config.get("enable_validation", False)
 
             # 质量阈值
             overall_score_threshold=quality_config.get("overall_score", 8.0),

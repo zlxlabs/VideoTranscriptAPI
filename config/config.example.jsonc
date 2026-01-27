@@ -173,7 +173,11 @@
                 "overall_score": 8.0,    // 校对质量整体分数阈值（0-10）
                 "minimum_single_score": 7.0  // 单项（流畅度/准确度等）最低分
             },
-            "enable_validation": true,   // 是否对校对结果进行质量验证
+            // 质量验证开关
+            // - true: 对每个分段独立打分验证，不通过的分段降级到原文
+            // - false: 不进行质量验证，直接使用校对结果
+            // 注意：已移除"合并后整体验证"，现在只在分段时独立验证
+            "enable_validation": false,
             "fallback_to_original": true,    // 校对失败时是否回退到原文
             "validator_model": "deepseek-chat",   // 质量验证使用的模型
             "validator_reasoning_effort": null,  // null=不支持, "none"=关闭, "low"/"medium"/"high"

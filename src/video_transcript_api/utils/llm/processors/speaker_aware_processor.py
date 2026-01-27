@@ -100,9 +100,10 @@ class SpeakerAwareProcessor:
         chunks = self.segmenter.segment(dialogs)
         logger.info(f"Dialogs segmented: {len(chunks)} chunks")
 
-        # 步骤3: 分段校对
+        # 步骤3: 分段校对（每段独立验证）
         calibrated_chunks = self._calibrate_chunks(
             chunks=chunks,
+            original_chunks=chunks,  # 传入原始chunk用于验证
             key_info=key_info,
             speaker_mapping=speaker_mapping,
             title=title,
@@ -110,34 +111,14 @@ class SpeakerAwareProcessor:
             selected_models=selected_models,
         )
 
-        # 合并校对结果
+        # 合并校对结果（不再进行整体验证）
         calibrated_dialogs = []
         for chunk in calibrated_chunks:
             calibrated_dialogs.extend(chunk)
 
-        # 步骤4: 质量判断
-        # 4.1 长度检查（每个分段）
+        # 构建文本用于统计
         original_text = self._build_text_from_dialogs(dialogs)
         calibrated_text = self._build_text_from_dialogs(calibrated_dialogs)
-
-        if len(calibrated_text) < len(original_text) * self.config.min_calibrate_ratio:
-            logger.warning("Calibrated text too short, falling back to original")
-            calibrated_dialogs = dialogs
-            calibrated_text = original_text
-
-        # 4.2 全量打分（可选）
-        if self.config.enable_validation:
-            validation_result = self.quality_validator.validate_by_score(
-                original=dialogs,
-                calibrated=calibrated_dialogs,
-                video_metadata={"title": title, "author": author, "description": description},
-                selected_models=selected_models,
-            )
-
-            if not validation_result["passed"]:
-                logger.warning("Quality validation failed, falling back to original")
-                calibrated_dialogs = dialogs
-                calibrated_text = original_text
 
         logger.info(
             f"Speaker-aware text processing completed: "
@@ -162,16 +143,18 @@ class SpeakerAwareProcessor:
     def _calibrate_chunks(
         self,
         chunks: List[List[Dict]],
+        original_chunks: List[List[Dict]],
         key_info: KeyInfo,
         speaker_mapping: Dict[str, str],
         title: str,
         description: str,
         selected_models: Optional[Dict],
     ) -> List[List[Dict]]:
-        """校对分块对话（并发处理）
+        """校对分块对话（并发处理，每块独立验证）
 
         Args:
             chunks: 分块列表
+            original_chunks: 原始分块列表（用于验证失败时降级）
             key_info: 关键信息
             speaker_mapping: 说话人映射
             title: 视频标题
@@ -179,7 +162,7 @@ class SpeakerAwareProcessor:
             selected_models: 选定的模型
 
         Returns:
-            校对后的分块列表
+            校对后的分块列表（包含成功+降级的混合结果）
         """
         model = selected_models["calibrate_model"] if selected_models else self.config.calibrate_model
         reasoning_effort = selected_models.get("calibrate_reasoning_effort") if selected_models else self.config.calibrate_reasoning_effort
@@ -190,7 +173,7 @@ class SpeakerAwareProcessor:
         calibrated_chunks = [None] * len(chunks)
 
         def calibrate_single_chunk(index: int, chunk: List[Dict]):
-            """校对单个 chunk"""
+            """校对单个 chunk（含质量验证）"""
             try:
                 chunk_length = sum(len(d.get("text", "")) for d in chunk)
                 logger.info(f"Calibrating chunk {index + 1}/{len(chunks)}, dialog count: {len(chunk)}, length: {chunk_length}")
@@ -224,9 +207,31 @@ class SpeakerAwareProcessor:
                 if len(calibrated_dialogs) != len(chunk):
                     logger.warning(f"Chunk {index + 1} calibration result count mismatch, falling back to original")
                     calibrated_chunks[index] = chunk
-                else:
-                    calibrated_chunks[index] = calibrated_dialogs
+                    return
 
+                # 步骤4: 分段质量验证（可选）
+                if self.config.enable_validation:
+                    logger.info(f"Validating chunk {index + 1}/{len(chunks)}")
+
+                    validation_result = self.quality_validator.validate_by_score(
+                        original=chunk,
+                        calibrated=calibrated_dialogs,
+                        video_metadata={"title": title, "author": "", "description": description},
+                        selected_models=selected_models,
+                    )
+
+                    if not validation_result["passed"]:
+                        logger.warning(
+                            f"Chunk {index + 1} validation failed "
+                            f"(score: {validation_result.get('overall_score', 'N/A')}), "
+                            f"falling back to original"
+                        )
+                        calibrated_chunks[index] = chunk
+                        return
+
+                    logger.info(f"Chunk {index + 1} validation passed (score: {validation_result.get('overall_score', 'N/A')})")
+
+                calibrated_chunks[index] = calibrated_dialogs
                 logger.info(f"Chunk {index + 1} calibration completed")
 
             except Exception as e:
