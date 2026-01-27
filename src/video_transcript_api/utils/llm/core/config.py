@@ -85,7 +85,7 @@ class LLMConfig:
         quality_config = calibration_config.get("quality_threshold", {})
 
         # 导入 normalize_reasoning_effort 函数
-        from ..llm import normalize_reasoning_effort
+        from .. import normalize_reasoning_effort
 
         return cls(
             # API 配置

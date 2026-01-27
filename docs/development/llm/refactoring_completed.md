@@ -189,11 +189,22 @@ key_info = extractor.extract(
 print(key_info.format_for_prompt())
 ```
 
-## 六、待优化项
+## 六、后续优化（已完成）
 
-1. **prompt 更新**: `build_structured_calibrate_user_prompt` 需要更新签名以支持新参数
-2. **测试覆盖**: 为新模块添加专门的单元测试
-3. **文档**: 更新 API 文档和使用指南
+✅ **prompt 更新**: `build_structured_calibrate_user_prompt` 已更新以支持新旧两种调用方式
+- 旧版：`input_data` (dict) - 向后兼容现有代码
+- 新版：`dialogs_text` (str) + `key_info` - 用于新架构
+
+✅ **测试覆盖**: 新增 `test_new_architecture.py`
+- 协调器初始化测试
+- 纯文本处理测试
+- 说话人感知处理测试
+- Prompt 函数向后兼容性测试
+
+✅ **导入修复**: 修复 `core/config.py` 中的导入路径
+- `from ..llm import normalize_reasoning_effort` → `from .. import normalize_reasoning_effort`
+
+**最新测试结果**: 20/21 通过（95%）
 
 ## 七、迁移指南（可选）
 
