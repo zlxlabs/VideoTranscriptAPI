@@ -1336,6 +1336,33 @@ def _handle_llm_task(llm_task: dict):
                     # 无说话人识别：使用纯文本
                     content = transcript
 
+                # 检测风险内容（用于模型选择）
+                has_risk = False
+                try:
+                    from ...utils.risk_control import is_enabled, sanitize_text
+
+                    if is_enabled():
+                        # 合并元数据用于风险检测
+                        metadata_text = " ".join(
+                            [
+                                llm_task.get("video_title", ""),
+                                llm_task.get("author", ""),
+                                llm_task.get("description", ""),
+                            ]
+                        ).strip()
+
+                        if metadata_text:
+                            # 使用 general 类型检测敏感词（不脱敏，仅检测）
+                            risk_result = sanitize_text(metadata_text, text_type="general")
+                            if risk_result["has_sensitive"]:
+                                has_risk = True
+                                logger.warning(
+                                    f"[风控] 检测到 {len(risk_result['sensitive_words'])} 个敏感词，将切换到风险模型: "
+                                    f"{risk_result['sensitive_words'][:5]}"  # 最多显示前5个
+                                )
+                except Exception as e:
+                    logger.error(f"风险检测失败，使用默认模型: {e}")
+
                 # 调用新架构
                 coordinator_result = llm_coordinator.process(
                     content=content,
@@ -1344,7 +1371,7 @@ def _handle_llm_task(llm_task: dict):
                     description=llm_task.get("description", ""),
                     platform=platform or "",
                     media_id=media_id or "",
-                    has_risk=False,  # 新架构会自动检测风险
+                    has_risk=has_risk,  # 传递风险检测结果
                 )
 
                 # 适配返回格式为旧架构格式（保持后续代码兼容）

@@ -114,7 +114,70 @@ def create_downloader(url):
 
 ### 🧠 智能文本处理
 
-**核心功能**（基于 `EnhancedLLMProcessor`）：
+**核心功能**（基于重构后的模块化架构）：
+
+新架构采用 **"协调器-处理器-核心组件"** 的三层设计，实现了高度模块化和可扩展性。
+
+#### 新架构概览
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   LLMCoordinator                        │
+│                  (统一入口 + 场景路由)                     │
+├─────────────────────────────────────────────────────────────┤
+│                                                         │
+│  统一入口: process(content, title, ...) → Dict          │
+│                                                         │
+│  ┌────────────────────────────────────────────────┐    │
+│  │  步骤 1: 模型选择（风险降级）                    │    │
+│  │                                                 │    │
+│  │  selected_models = config.select_models_for_task(  │    │
+│  │      has_risk  # 根据 enable_risk_model_selection    │    │
+│  │  )                                               │    │
+│  └────────────────────────────────────────────────┘    │
+│                          ↓                              │
+│  ┌────────────────────────────────────────────────┐    │
+│  │  步骤 2: 校对处理（场景路由）                   │    │
+│  │                                                 │    │
+│  │  if isinstance(content, str):                   │    │
+│  │      → PlainTextProcessor.process()             │    │
+│  │  elif isinstance(content, list):                │    │
+│  │      → SpeakerAwareProcessor.process()          │    │
+│  │                                                 │    │
+│  │  返回：                                          │    │
+│  │  {                                              │    │
+│  │      "calibrated_text": str,                    │    │
+│  │      "key_info": dict,                          │    │
+│  │      "structured_data": dict (可选)             │    │
+│  │  }                                              │    │
+│  └────────────────────────────────────────────────┘    │
+│                          ↓                              │
+│  ┌────────────────────────────────────────────────┐    │
+│  │  步骤 3: 总结生成（基于校对文本）             │    │
+│  │                                                 │    │
+│  │  if len(calibrated_text) >= min_threshold:      │    │
+│  │      → SummaryProcessor.process()               │    │
+│  │          输入：calibrated_text                   │    │
+│  │          返回：summary_text                      │    │
+│  │  else:                                          │    │
+│  │      summary_text = None                        │    │
+│  └────────────────────────────────────────────────┘    │
+│                          ↓                              │
+│  ┌────────────────────────────────────────────────┐    │
+│  │  步骤 4: 合并结果                               │    │
+│  │                                                 │    │
+│  │  return {                                       │    │
+│  │      "calibrated_text": str,                    │    │
+│  │      "summary_text": Optional[str],              │    │
+│  │      "key_info": dict,                          │    │
+│  │      "stats": dict,                             │    │
+│  │      "structured_data": dict (可选)             │    │
+│  │  }                                              │    │
+│  └────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### 核心功能
 
 1. **自动校对（Calibration）**
    - 修正语音识别中的同音字和语法错误
@@ -122,48 +185,124 @@ def create_downloader(url):
    - 支持长文本自动分段并发处理
    - 配置模型：`calibrate_model`
 
+   **校对流程（4 步）**：
+   - **步骤 1：提取关键信息** - 从视频元数据提取人名、术语、品牌等（KeyInfoExtractor）
+   - **步骤 1.5：说话人推断**（仅对话流）- 结合上下文推断真实姓名（SpeakerInferencer）
+   - **步骤 2：智能分段** - 根据文本类型选择分段策略（TextSegmenter / DialogSegmenter）
+   - **步骤 3：分段校对** - 并发处理每个分段，质量验证（PlainTextProcessor / SpeakerAwareProcessor）
+   - **步骤 4：质量验证** - 长度检查 + 可选的 LLM 打分（QualityValidator）
+
 2. **内容总结（Summary）**
-   - 生成分段摘要或核心要点
+   - **基于校对后的文本生成总结**（质量更高）
    - 支持单说话人和多说话人模式
    - 配置模型：`summary_model`
    - 最小文本阈值：`min_summary_threshold`（默认 500 字符）
+   - **串行执行**：先校对，再总结（约增加 15 秒处理时间）
+
+   **总结流程**：
+   - 长度检查（< 500 字符则跳过）
+   - 选择 Prompt（单说话人 / 多说话人）
+   - 调用 LLM 生成总结
+   - 结果验证（> 50 字符）
 
 3. **说话人推断（Speaker Inference）**
    - 结合视频元数据推断真实姓名
    - 将匿名标识（`spk_0`, `spk_1`）映射为具体人名
    - 支持对话结构保留
+   - 基于前 1000 字符对话样本推断
+   - 结果缓存（按 platform + media_id）
 
 4. **风险模型切换**
    - 自动检测敏感内容
    - 切换到专用风险模型：`risk_calibrate_model`、`risk_summary_model`
    - 配置开关：`enable_risk_model_selection`
+   - 统一配置类 `LLMConfig` 管理所有模型选择
+
+#### 核心组件
+
+| 组件 | 类名 | 主要职责 |
+|------|------|---------|
+| **统一配置** | `LLMConfig` | 集中管理所有 LLM 相关配置（模型、阈值、并发数等） |
+| **可靠调用** | `LLMClient` | 封装底层 API，实现**指数退避重试**（5s → 10s → 20s → 40s → 60s） |
+| **信息辅助** | `KeyInfoExtractor` | 提取视频中的人名、术语、品牌等，作为 Prompt 的上下文 |
+| **角色还原** | `SpeakerInferencer` | 将 `spk_0` 等匿名标识映射为真实姓名 |
+| **质量防线** | `QualityValidator` | 通过 LLM 打分（准确性、流畅度、格式）或长度比例验证校对结果 |
+| **状态持久化** | `CacheManager` | 缓存 `KeyInfo` 和 `SpeakerMapping` 到视频目录，避免重复调用 |
+
+#### 处理器
+
+| 处理器 | 输入类型 | 核心流程 |
+|--------|---------|---------|
+| **PlainTextProcessor** | `str` (纯文本) | 提取关键信息 → 按句子/行分段 → 分段校对 → 质量验证 |
+| **SpeakerAwareProcessor** | `List[Dict]` (对话流) | 提取关键信息 → 说话人推断 → 按对话长度分段 → 结构化校对 → 质量验证 |
+| **SummaryProcessor** | `str` (校对文本) | 长度检查 → 选择 Prompt → 调用 LLM → 验证结果 |
+
+#### 分段器
+
+| 分段器 | 适用场景 | 分段策略 |
+|--------|---------|---------|
+| **TextSegmenter** | 无说话人文本 | 标点密度检测（< 5/1000 按行，否则按句子） |
+| **DialogSegmenter** | 有说话人对话 | 按对话长度分段（保持对话完整性） |
+
+#### 配置参数
 
 **分段处理策略**：
-- 触发阈值：`enable_threshold`（默认 20000 字符）
-- 每段大小：`segment_size`（默认 8000 字符）
-- 最大段大小：`max_segment_size`（默认 12000 字符）
+- 触发阈值：`enable_threshold`（默认 5000 字符）
+- 每段大小：`segment_size`（默认 2000 字符）
+- 最大段大小：`max_segment_size`（默认 3000 字符）
 - 并发数：`concurrent_workers`（默认 10）
 
 **结构化校对**（带说话人识别时）：
-- 单块最小长度：`min_chunk_length`（默认 800）
-- 单块最大长度：`max_chunk_length`（默认 3000）
-- 首选块长度：`preferred_chunk_length`（默认 2000）
-- 质量验证：`enable_validation`（默认 true）
+- 单块最小长度：`min_chunk_length`（默认 300）
+- 单块最大长度：`max_chunk_length`（默认 1500）
+- 首选块长度：`preferred_chunk_length`（默认 800）
+- 质量验证：`enable_validation`（默认 false）
 
 **JSON 输出模式**：
 - 按模型名匹配输出模式：`mode_by_model`
 - 支持 `json_object` 和 `json_schema` 两种模式
 - 自动重试：`max_retries`（默认 2 次）
 
+**智能重试**（LLMClient）：
+- 错误分类：区分 `FatalError`（不可重试）和 `RetryableError`（可重试）
+- 指数退避：5s → 10s → 20s → 40s → 60s（最大 60s）
+- 最大重试次数：`max_retries`（默认 3 次）
+
+**质量阈值**：
+- 整体评分阈值：`overall_score`（默认 8.0）
+- 单项评分阈值：`minimum_single_score`（默认 7.0）
+
 ### 🏗️ 企业级功能
 
 #### 智能缓存系统
 
 **数据存储结构**：
-- **SQLite 数据库**（`cache.db`）：
-  - `video_cache` 表：平台、URL、标题、作者、媒体 ID、说话人标识、文件位置
+
+**双层存储架构**：
+- **SQLite 数据库**（`data/cache/cache.db`）：
+  - `video_cache` 表：平台、URL、标题、作者、媒体 ID、说话人标识、文件位置、LLM 配置参数
+    - 联合主键：`platform`, `media_id`, `use_speaker_recognition`
+    - 索引：`idx_platform_media_id`（查询优化）、`idx_url`（URL 匹配）
   - `task_status` 表：任务 ID、查看令牌、状态、创建/完成时间
-- **文件系统**：存储实际内容（转录文本、LLM 校对、LLM 总结）
+    - 状态类型：`queued`, `processing`, `success`, `failed`
+    - LLM 配置追踪：`llm_config` 字段（JSON）存储处理时的模型参数
+- **文件系统**：存储实际内容（转录文本、LLM 校对、LLM 总结、结构化 JSON）
+
+**目录结构**（按时间分层）：
+```
+data/cache/
+└── {platform}/
+    └── {YYYY}/
+        └── {YYYYMM}/
+            └── {media_id}/
+                ├── transcript_funasr.json       # FunASR 转录（含时间戳、说话人）
+                ├── transcript_capswriter.txt    # CapsWriter 转录
+                ├── llm_calibrated.txt          # LLM 校对后的文本
+                ├── llm_summary.txt             # LLM 生成的总结
+                ├── llm_processed.json          # 结构化处理结果（V2 格式）
+                ├── key_info.json              # 关键信息缓存（新增）
+                └── speaker_mapping.json       # 说话人映射缓存（新增）
+```
 
 **查询逻辑**：
 ```python
@@ -174,10 +313,16 @@ cache_data = cache_manager.get_cache(
 )
 ```
 
-**智能缓存策略**：
-- 当 `use_speaker_recognition=true` 时，查询带说话人识别的缓存
-- 当 `use_speaker_recognition=false` 时，优先使用带说话人识别的缓存（信息更丰富）
-- 自动验证文件完整性，删除无效记录
+**智能缓存策略**（优先级逻辑）：
+- **请求 `use_speaker_recognition=True`**：仅匹配带说话人识别的缓存
+- **请求 `use_speaker_recognition=False`**：查询所有记录，但通过 `ORDER BY use_speaker_recognition DESC` 排序
+- **智能回退**：如果系统中同时存在同一个视频的"普通转录"和"带说话人识别转录"，系统会**优先返回信息更丰富的说话人转录结果**，即使用户并未明确要求
+- **完整性验证**：查询时若发现物理文件夹不存在，会立即 `DELETE` 数据库记录并返回 `None`
+
+**关键特性**：
+- **线程安全**：使用 `threading.local()` 为每个线程维护独立的 SQLite 连接
+- **增量保存**：`save_llm_result` 允许在任务完成后，增量地向同一个缓存目录追加校对文本、总结或结构化 JSON
+- **元数据追踪**：`llm_config` 字段记录生成结果时使用的模型参数，便于后续分析
 
 #### 多用户管理
 
