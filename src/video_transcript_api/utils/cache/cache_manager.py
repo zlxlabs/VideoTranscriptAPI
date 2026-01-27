@@ -5,7 +5,7 @@ import datetime
 import uuid
 import secrets
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 from contextlib import contextmanager
 import threading
 from ..logging import setup_logger
@@ -423,22 +423,24 @@ class CacheManager:
             logger.error(f"获取缓存失败: {e}")
             return None
             
-    def save_llm_result(self, 
+    def save_llm_result(self,
                         platform: str,
                         media_id: str,
                         use_speaker_recognition: bool,
                         llm_type: str,
-                        content: str) -> bool:
+                        content: Union[str, Dict]) -> bool:
         """
         保存 LLM 处理结果
-        
+
         Args:
             platform: 平台名称
             media_id: 媒体ID
             use_speaker_recognition: 是否使用了说话人识别
-            llm_type: LLM 类型 (calibrated/summary)
+            llm_type: LLM 类型 (calibrated/summary/structured)
             content: LLM 处理后的内容
-            
+                - calibrated/summary: 纯文本字符串
+                - structured: 结构化数据字典（自动添加 format_version）
+
         Returns:
             bool: 是否保存成功
         """
@@ -448,25 +450,46 @@ class CacheManager:
             if not cache_data:
                 logger.warning(f"未找到缓存记录: {platform}/{media_id}")
                 return False
-                
+
             # 获取文件路径
             file_path = Path(cache_data['file_path'])
-            
+
             # 保存 LLM 结果
             if llm_type == "calibrated":
                 llm_file = file_path / "llm_calibrated.txt"
+                with open(llm_file, 'w', encoding='utf-8') as f:
+                    f.write(content)
+
             elif llm_type == "summary":
                 llm_file = file_path / "llm_summary.txt"
+                with open(llm_file, 'w', encoding='utf-8') as f:
+                    f.write(content)
+
+            elif llm_type == "structured":
+                # 保存结构化数据到 JSON 文件
+                llm_file = file_path / "llm_processed.json"
+
+                # 确保是字典类型
+                if not isinstance(content, dict):
+                    logger.error(f"structured 类型要求 content 为字典，实际类型: {type(content)}")
+                    return False
+
+                # 添加格式版本标记（兼容旧渲染器）
+                structured_data = {
+                    "format_version": "v2",
+                    **content  # 合并传入的结构化数据
+                }
+
+                with open(llm_file, 'w', encoding='utf-8') as f:
+                    json.dump(structured_data, f, ensure_ascii=False, indent=2)
+
             else:
                 logger.error(f"未知的 LLM 类型: {llm_type}")
                 return False
-                
-            with open(llm_file, 'w', encoding='utf-8') as f:
-                f.write(content)
-                
+
             logger.info(f"LLM 结果保存成功: {platform}/{media_id}/{llm_type}")
             return True
-            
+
         except Exception as e:
             logger.error(f"保存 LLM 结果失败: {e}")
             return False

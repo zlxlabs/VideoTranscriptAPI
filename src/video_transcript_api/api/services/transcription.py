@@ -1447,6 +1447,21 @@ def _handle_llm_task(llm_task: dict):
                     else:
                         logger.warning(f"总结失败，跳过保存总结文件: {task_id}")
 
+                    # 保存结构化数据到缓存（仅在有说话人识别且校对成功时保存）
+                    if use_speaker_recognition and calibrate_success and "structured_data" in result_dict:
+                        structured_data = result_dict["structured_data"]
+                        save_structured_success = cache_manager.save_llm_result(
+                            platform=platform,
+                            media_id=media_id,
+                            use_speaker_recognition=use_speaker_recognition,
+                            llm_type="structured",
+                            content=structured_data,
+                        )
+                        if save_structured_success:
+                            logger.info(f"结构化数据已保存到缓存: {platform}/{media_id}/llm_processed.json")
+                        else:
+                            logger.warning(f"结构化数据保存失败: {task_id}")
+
                     if calibrate_success or summary_success:
                         logger.info(f"LLM结果已保存到缓存: {platform}/{media_id}")
                     else:
