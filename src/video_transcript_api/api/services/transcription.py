@@ -313,24 +313,50 @@ def process_transcription(
                 platform = 'bilibili'
                 video_id = match.group(0)
                 logger.info(f"快速提取: platform={platform}, video_id={video_id}")
+            else:
+                # 短链接或其他特殊格式，需要用下载器的方法提取
+                platform = 'bilibili'
+                logger.info(f"识别为 bilibili 短链接，需要解析: {check_url}")
         elif 'youtube.com' in check_url or 'youtu.be' in check_url:
             match = re.search(r'(?:v=|/)([a-zA-Z0-9_-]{11})', check_url)
             if match:
                 platform = 'youtube'
                 video_id = match.group(1)
                 logger.info(f"快速提取: platform={platform}, video_id={video_id}")
+            else:
+                platform = 'youtube'
+                logger.info(f"识别为 youtube 链接，需要解析: {check_url}")
         elif 'douyin.com' in check_url:
             match = re.search(r'/video/(\d+)', check_url)
             if match:
                 platform = 'douyin'
                 video_id = match.group(1)
                 logger.info(f"快速提取: platform={platform}, video_id={video_id}")
+            else:
+                platform = 'douyin'
+                logger.info(f"识别为 douyin 链接，需要解析: {check_url}")
 
-        # 如果无法快速提取，标记为 generic
+        # 如果识别出平台但未提取到 video_id，使用下载器的轻量级方法
+        if platform and platform != 'generic' and not video_id:
+            try:
+                temp_downloader = create_downloader(check_url)
+                # 只调用 _extract_video_id（轻量级，可能需要 HTTP HEAD 解析短链接）
+                # 不调用 get_video_info（避免触发 BBDown 下载）
+                if hasattr(temp_downloader, '_extract_video_id'):
+                    video_id = temp_downloader._extract_video_id(check_url)
+                    logger.info(f"使用下载器提取 video_id: {video_id}")
+                elif hasattr(temp_downloader, 'extract_video_id'):
+                    video_id = temp_downloader.extract_video_id(check_url)
+                    logger.info(f"使用下载器提取 video_id: {video_id}")
+            except Exception as e:
+                logger.warning(f"使用下载器提取 video_id 失败: {e}")
+                video_id = None
+
+        # 如果仍无法提取，标记为 generic
         if not platform or not video_id:
             platform = 'generic'
             video_id = generate_media_id_from_url(url)
-            logger.info(f"无法快速提取，使用通用标识: platform={platform}, video_id={video_id}")
+            logger.info(f"最终使用通用标识: platform={platform}, video_id={video_id}")
 
         # 步骤2：检查缓存（在调用 get_video_info 之前）
         cache_data = None
