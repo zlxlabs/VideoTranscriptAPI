@@ -162,11 +162,10 @@ def merge_metadata(parsed_metadata: Optional[dict], metadata_override: Optional[
         final_metadata['video_id'] = generate_media_id_from_url(url)
 
     logger.info(
-        "最终元数据: platform=%s, video_id=%s, title=%s, author=%s",
-        final_metadata['platform'],
-        final_metadata['video_id'],
-        final_metadata['title'][:50],
-        final_metadata['author']
+        f"最终元数据: platform={final_metadata['platform']}, "
+        f"video_id={final_metadata['video_id']}, "
+        f"title={final_metadata['title'][:50]}, "
+        f"author={final_metadata['author']}"
     )
 
     return final_metadata
@@ -1152,9 +1151,8 @@ def process_llm_queue():
             llm_task = llm_task_queue.get()
             try:
                 logger.info(
-                    "LLM任务出队: %s，提交到线程池（当前队列任务完成数: %s）",
-                    llm_task.get("task_id"),
-                    getattr(llm_task_queue, "completed", "未知"),
+                    f"LLM任务出队: {llm_task.get('task_id')}，"
+                    f"提交到线程池（当前队列任务完成数: {getattr(llm_task_queue, 'completed', '未知')}）"
                 )
                 llm_executor.submit(_handle_llm_task, llm_task)
             except Exception as exc:

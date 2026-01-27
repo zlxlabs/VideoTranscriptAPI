@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
@@ -25,6 +26,15 @@ task_results = get_task_results()
 router = APIRouter(prefix="/api", tags=["tasks"])
 
 
+def _normalize_empty_string(value: str | None) -> str | None:
+    """将空字符串规范化为 None"""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
+
+
 @router.post("/transcribe", response_model=TranscribeResponse)
 async def transcribe_video(
     request_body: TranscribeRequest,
@@ -37,13 +47,25 @@ async def transcribe_video(
         logger.warning("请求未提供视频URL")
         raise HTTPException(status_code=400, detail="视频URL不能为空")
 
+    # 规范化空字符串为 None
+    normalized_source_url = _normalize_empty_string(request_body.source_url)
+
+    # 规范化 metadata_override 中的空字符串
+    normalized_metadata_override = None
+    if request_body.metadata_override:
+        metadata_dict = request_body.metadata_override.model_dump()
+        # 过滤掉 None 和空字符串
+        filtered_metadata = {
+            k: v for k, v in metadata_dict.items()
+            if v is not None and (not isinstance(v, str) or v.strip())
+        }
+        # 只有在有有效字段时才设置 metadata_override
+        normalized_metadata_override = filtered_metadata if filtered_metadata else None
+
     logger.info(
-        "收到转录API请求 - URL: %s, 说话人识别: %s, 自定义企微webhook: %s, source_url: %s, 完整请求体: %s",
-        url,
-        request_body.use_speaker_recognition,
-        request_body.wechat_webhook is not None,
-        request_body.source_url,
-        request_body.model_dump(),
+        f"收到转录API请求 - URL: {url}, 说话人识别: {request_body.use_speaker_recognition}, "
+        f"自定义企微webhook: {request_body.wechat_webhook is not None}, "
+        f"source_url: {normalized_source_url}, metadata_override: {normalized_metadata_override}"
     )
 
     start_time = datetime.datetime.now()
@@ -63,7 +85,7 @@ async def transcribe_video(
         task_info = cache_manager.create_task(
             url=url,
             use_speaker_recognition=request_body.use_speaker_recognition,
-            source_url=request_body.source_url
+            source_url=normalized_source_url
         )
         task_id = task_info["task_id"]
         view_token = task_info["view_token"]
@@ -88,25 +110,25 @@ async def transcribe_video(
                 "use_speaker_recognition": request_body.use_speaker_recognition,
                 "wechat_webhook": effective_webhook,
                 "user_info": user_info,
-                "source_url": request_body.source_url,
-                "metadata_override": request_body.metadata_override.model_dump() if request_body.metadata_override else None,
+                "source_url": normalized_source_url,
+                "metadata_override": normalized_metadata_override,
             }
 
             try:
                 await task_queue.put(task)
-                logger.info("任务已加入队列: %s, URL: %s", task_id, url)
+                logger.info(f"任务已加入队列: {task_id}, URL: {url}")
             except asyncio.QueueFull:
                 logger.warning("任务队列已满，拒绝任务: %s", url)
                 raise HTTPException(status_code=503, detail="任务队列已满，请稍后重试")
 
             try:
                 # 优先使用 source_url 用于平台识别和通知显示
-                display_url = request_body.source_url or url
+                display_url = normalized_source_url or url
 
                 # 如果用户提供了 metadata_override.title，优先使用它
-                if request_body.metadata_override and request_body.metadata_override.title:
-                    title = request_body.metadata_override.title
-                    logger.info("使用用户提供的标题: %s", title)
+                if normalized_metadata_override and normalized_metadata_override.get("title"):
+                    title = normalized_metadata_override["title"]
+                    logger.info(f"使用用户提供的标题: {title}")
                 else:
                     # 根据平台生成默认标题
                     title = "转录任务已创建"
@@ -127,7 +149,7 @@ async def transcribe_video(
                     webhook=effective_webhook,
                     original_url=display_url,
                 )
-                logger.info("已发送任务创建通知: %s，使用URL: %s", task_id, display_url)
+                logger.info(f"已发送任务创建通知: {task_id}，使用URL: {display_url}")
             except Exception as exc:
                 logger.exception("发送任务创建通知失败: %s, 错误: %s", task_id, exc)
         except Exception as queue_exc:
