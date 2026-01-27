@@ -1258,19 +1258,19 @@ def _handle_llm_task(llm_task: dict):
 
                 # 适配返回格式为旧架构格式（保持后续代码兼容）
                 calibrated_text_new = coordinator_result.get("calibrated_text", "")
+                summary_text_new = coordinator_result.get("summary_text")  # 从新架构获取总结
 
-                # 判断是否需要总结（文本长度阈值）
-                min_summary_threshold = config.get("llm", {}).get("min_summary_threshold", 500)
-                should_skip_summary = len(calibrated_text_new) < min_summary_threshold
+                # 判断是否跳过总结（基于新架构返回的 summary_text）
+                should_skip_summary = summary_text_new is None
 
                 result_dict = {
                     "校对文本": calibrated_text_new,
-                    "内容总结": None,  # 新架构暂不包含总结
-                    "skip_summary": should_skip_summary,  # 短文本跳过总结
+                    "内容总结": summary_text_new,  # 使用新架构返回的总结
+                    "skip_summary": should_skip_summary,
                     "stats": coordinator_result.get("stats", {}),
                     "models_used": {},  # TODO: 从新架构获取使用的模型信息
                     "calibrate_success": True,
-                    "summary_success": True,
+                    "summary_success": summary_text_new is not None,  # 根据总结是否存在判断
                 }
 
                 # 如果是对话场景，保存结构化数据
@@ -1326,7 +1326,7 @@ def _handle_llm_task(llm_task: dict):
                                     content=summary_content,
                                 )
                         else:
-                            # 只有当 summary_text 不为 None 时才保存
+                            # 使用新架构生成的总结
                             if summary_text is not None:
                                 summary_content = summary_text
                                 logger.info(f"保存LLM总结到缓存: {task_id}")
@@ -1338,8 +1338,8 @@ def _handle_llm_task(llm_task: dict):
                                     content=summary_content,
                                 )
                             else:
-                                # 新架构暂不生成总结，跳过保存
-                                logger.info(f"总结未生成（新架构暂不支持），跳过保存总结: {task_id}")
+                                # 总结生成失败，跳过保存
+                                logger.warning(f"总结生成失败，跳过保存: {task_id}")
                     else:
                         logger.warning(f"总结失败，跳过保存总结文件: {task_id}")
 
