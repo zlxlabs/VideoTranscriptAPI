@@ -47,7 +47,6 @@ from .llm import (
     reset_llm_stats,
     log_llm_stats,
 )
-from .speaker_mapping import SpeakerMappingInference, infer_speaker_mapping_from_cache
 from .schemas import (
     CALIBRATION_RESULT_SCHEMA,
     VALIDATION_RESULT_SCHEMA,
@@ -102,9 +101,6 @@ __all__ = [
     "get_llm_stats",
     "reset_llm_stats",
     "log_llm_stats",
-    # Legacy helpers
-    "SpeakerMappingInference",
-    "infer_speaker_mapping_from_cache",
     # New Architecture
     "LLMCoordinator",
     "LLMConfig",
