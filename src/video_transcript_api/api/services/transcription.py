@@ -297,104 +297,54 @@ def process_transcription(
         )
         task_notifier.notify_task_status(display_url, f"开始处理 - {engine_info}")
 
-        # === 步骤1：轻量级提取 platform 和 video_id（用于缓存检查）===
-        import re
+        # ==================== 阶段1: URL 解析（提取 platform 和 video_id）====================
+        from ...utils.url_parser import URLParser
 
-        # 优先从 source_url 提取，否则从 url 提取
+        # 优先从 source_url 解析，否则从 url 解析
         check_url = source_url if source_url else url
+        logger.info(f"[URL解析] 开始解析 URL: {check_url[:100]}")
 
-        platform = None
-        video_id = None
+        try:
+            # 使用 URLParser 统一解析（支持短链接自动解析）
+            url_parser = URLParser()
+            parsed_url = url_parser.parse(check_url)
 
-        # 直接用正则表达式提取，不调用下载器（避免触发下载）
-        if 'bilibili.com' in check_url or 'b23.tv' in check_url:
-            match = re.search(r'BV[a-zA-Z0-9]+', check_url)
-            if match:
-                platform = 'bilibili'
-                video_id = match.group(0)
-                logger.info(f"快速提取: platform={platform}, video_id={video_id}")
-            else:
-                # 短链接或其他特殊格式，需要用下载器的方法提取
-                platform = 'bilibili'
-                logger.info(f"识别为 bilibili 短链接，需要解析: {check_url}")
-        elif 'youtube.com' in check_url or 'youtu.be' in check_url:
-            match = re.search(r'(?:v=|/)([a-zA-Z0-9_-]{11})', check_url)
-            if match:
-                platform = 'youtube'
-                video_id = match.group(1)
-                logger.info(f"快速提取: platform={platform}, video_id={video_id}")
-            else:
-                platform = 'youtube'
-                logger.info(f"识别为 youtube 链接，需要解析: {check_url}")
-        elif 'douyin.com' in check_url or 'v.douyin.com' in check_url:
-            # 抖音支持多种URL格式和短链
-            match = re.search(r'(?:video/|note/)(\d+)', check_url)
-            if match:
-                platform = 'douyin'
-                video_id = match.group(1)
-                logger.info(f"快速提取: platform={platform}, video_id={video_id}")
-            else:
-                platform = 'douyin'
-                logger.info(f"识别为 douyin 链接，需要解析: {check_url}")
-        elif 'xiaoyuzhoufm.com' in check_url:
-            # 小宇宙播客 URL格式: https://www.xiaoyuzhoufm.com/episode/68f7975f456ffec65ede5e47
-            match = re.search(r'/episode/([a-z0-9]+)', check_url)
-            if match:
-                platform = 'xiaoyuzhou'
-                video_id = match.group(1)
-                logger.info(f"快速提取: platform={platform}, video_id={video_id}")
-            else:
-                platform = 'xiaoyuzhou'
-                logger.info(f"识别为 xiaoyuzhou 链接，需要解析: {check_url}")
-        elif 'xiaohongshu.com' in check_url or 'xhslink.com' in check_url:
-            # 小红书支持主域名和短链，ID为24位
-            match = re.search(r'(?:explore/|discovery/item/|items/)(\w+)', check_url)
-            if not match:
-                # 尝试匹配24位ID
-                match = re.search(r'/(\w{24})', check_url)
-            if match:
-                platform = 'xiaohongshu'
-                video_id = match.group(1)
-                logger.info(f"快速提取: platform={platform}, video_id={video_id}")
-            else:
-                platform = 'xiaohongshu'
-                logger.info(f"识别为 xiaohongshu 链接，需要解析: {check_url}")
+            platform = parsed_url.platform
+            video_id = parsed_url.video_id
 
-        # 如果识别出平台但未提取到 video_id，使用下载器的轻量级方法
-        if platform and platform != 'generic' and not video_id:
-            try:
-                temp_downloader = create_downloader(check_url)
-                # 只调用 _extract_video_id（轻量级，可能需要 HTTP HEAD 解析短链接）
-                # 不调用 get_video_info（避免触发 BBDown 下载）
-                if hasattr(temp_downloader, '_extract_video_id'):
-                    video_id = temp_downloader._extract_video_id(check_url)
-                    logger.info(f"使用下载器提取 video_id: {video_id}")
-                elif hasattr(temp_downloader, 'extract_video_id'):
-                    video_id = temp_downloader.extract_video_id(check_url)
-                    logger.info(f"使用下载器提取 video_id: {video_id}")
-            except Exception as e:
-                logger.warning(f"使用下载器提取 video_id 失败: {e}")
-                video_id = None
+            logger.info(
+                f"[URL解析] 解析成功: platform={platform}, video_id={video_id}, "
+                f"is_short_url={parsed_url.is_short_url}"
+            )
 
-        # 如果仍无法提取，标记为 generic
-        if not platform or not video_id:
+        except Exception as e:
+            # URL 解析失败，回退到 generic 模式
+            logger.warning(f"[URL解析] 解析失败: {e}，使用 generic 模式")
             platform = 'generic'
             video_id = generate_media_id_from_url(url)
-            logger.info(f"最终使用通用标识: platform={platform}, video_id={video_id}")
+            logger.info(f"[URL解析] 回退到通用标识: platform={platform}, video_id={video_id}")
 
-        # 步骤2：检查缓存（在调用 get_video_info 之前）
+        # ==================== 阶段2: 缓存检测（在创建下载器之前）====================
         cache_data = None
         is_generic_downloader = platform == 'generic'
 
         if video_id and platform and not is_generic_downloader:
-            logger.info(f"检查缓存: platform={platform}, video_id={video_id}")
+            logger.info(
+                f"[缓存检测] 检查缓存: platform={platform}, video_id={video_id}, "
+                f"use_speaker_recognition={use_speaker_recognition}"
+            )
             cache_data = cache_manager.get_cache(
                 platform=platform,
                 media_id=video_id,
                 use_speaker_recognition=use_speaker_recognition,
             )
+        else:
+            logger.info(
+                f"[缓存检测] 跳过缓存检查 (platform={platform}, is_generic={is_generic_downloader})"
+            )
 
         if cache_data:
+            logger.info("[缓存检测] ✅ 缓存命中，直接返回")
             logger.info("找到已存在的缓存记录，跳过下载和转录步骤")
             video_title = cache_data.get("title", "已缓存视频")
             author = cache_data.get("author", "")
@@ -595,47 +545,94 @@ def process_transcription(
                 },
             }
         else:
-            logger.info("未找到缓存，准备下载和转录")
+            logger.info("[缓存检测] ❌ 缓存未命中，准备下载和转录")
 
-            # 步骤3：缓存未命中，获取完整元数据
+            # ==================== 阶段3: 元数据获取（创建下载器实例）====================
             parsed_metadata = None
             metadata_downloader = None
+            metadata_obj = None
+            download_info_obj = None
             parse_url = source_url if source_url else url
 
             try:
+                logger.info(f"[元数据获取] 创建下载器实例: {parse_url}")
                 metadata_downloader = create_downloader(parse_url)
-                logger.info(f"获取完整元数据: {parse_url}, 下载器类型: {metadata_downloader.__class__.__name__}")
-                parsed_metadata = metadata_downloader.get_video_info(parse_url)
                 logger.info(
-                    f"成功获取元数据: platform={parsed_metadata.get('platform')}, "
-                    f"media_id={parsed_metadata.get('video_id')}, title={parsed_metadata.get('video_title', '')[:50]}"
+                    f"[元数据获取] 下载器类型: {metadata_downloader.__class__.__name__}"
+                )
+
+                metadata_obj = metadata_downloader.get_metadata(parse_url)
+                parsed_metadata = {
+                    "video_id": metadata_obj.video_id,
+                    "video_title": metadata_obj.title,
+                    "title": metadata_obj.title,
+                    "author": metadata_obj.author,
+                    "description": metadata_obj.description,
+                    "platform": metadata_obj.platform,
+                }
+                logger.info(
+                    f"[元数据获取] 成功: platform={metadata_obj.platform}, "
+                    f"video_id={metadata_obj.video_id}, "
+                    f"title={metadata_obj.title[:50]}"
                 )
             except Exception as e:
-                logger.warning(f"获取元数据失败: {e}")
+                logger.warning(f"[元数据获取] 失败: {e}")
                 parsed_metadata = None
+                metadata_obj = None
 
-            # 合并元数据
+            # 合并元数据（metadata_override 作为补充或覆盖）
             if parsed_metadata:
                 final_metadata = merge_metadata(parsed_metadata, metadata_override, url)
                 video_title = final_metadata.get('title') or final_metadata.get('video_title', '')
                 author = final_metadata.get('author', '')
                 description = final_metadata.get('description', '')
-                # 更新 platform 和 video_id（用完整数据覆盖快速提取的值）
+                # 更新 platform 和 video_id（用完整数据覆盖 URLParser 提取的值）
                 platform = final_metadata.get('platform', platform)
                 video_id = final_metadata.get('video_id', video_id)
+                logger.info(f"[元数据合并] 元数据解析成功，metadata_override 作为补充")
             else:
-                # 元数据获取失败，使用默认值
-                video_title = extract_filename_from_url(url) or "Untitled"
-                author = "Unknown"
-                description = ""
+                # 元数据获取失败，使用 metadata_override 或默认值
+                final_metadata = metadata_override or {}
+                video_title = final_metadata.get('title') or extract_filename_from_url(url) or "Untitled"
+                author = final_metadata.get('author', 'Unknown')
+                description = final_metadata.get('description', '')
+                logger.info(f"[元数据合并] 元数据解析失败，使用 metadata_override 或默认值")
 
             media_id = video_id
             is_from_generic = (platform == 'generic')
-            logger.info(f"最终元数据: platform={platform}, video_id={video_id}, title={video_title[:50]}")
+            logger.info(
+                f"[元数据合并] 最终元数据: platform={platform}, video_id={video_id}, "
+                f"title={video_title[:50]}, author={author}"
+            )
 
-            # 创建下载器
+            # 判断是否同时提供了 url 和 source_url
+            # 如果同时提供且不同，说明 url 是直接下载地址，source_url 仅用于元数据解析
+            has_separate_download_url = (
+                source_url is not None and
+                source_url.strip() != "" and
+                source_url != url
+            )
+
+            # 下载器准备
             from ...downloaders.generic import GenericDownloader
-            downloader = GenericDownloader()
+            download_downloader = None
+            if has_separate_download_url:
+                download_downloader = GenericDownloader()
+            elif metadata_downloader:
+                download_downloader = metadata_downloader
+            else:
+                download_downloader = create_downloader(url)
+
+            # 获取下载信息（仅在需要使用解析URL下载时）
+            if not has_separate_download_url and download_downloader:
+                try:
+                    download_info_obj = download_downloader.get_download_info(parse_url)
+                    logger.info(
+                        f"[下载信息] 获取成功: platform={platform}, video_id={video_id}"
+                    )
+                except Exception as e:
+                    logger.warning(f"[下载信息] 获取失败: {e}")
+                    download_info_obj = None
 
             # ========== YouTube API Server 快速路径 ==========
             # 如果是 YouTube URL 且启用了 API Server，使用一次请求获取所有资源
@@ -886,34 +883,13 @@ def process_transcription(
                     return {"status": "failed", "message": error_msg}
 
             # ========== 原有逻辑（非 YouTube API Server 路径）==========
-            # 如果没有提供 source_url，则使用传统方式获取视频信息
+            # 已在前面完成元数据解析与下载器准备
+            original_downloader = None
             if not source_url:
-                logger.info("未提供 source_url，使用传统下载器获取视频信息")
-                original_downloader = create_downloader(url)
-                video_info = original_downloader.get_video_info(url)
-                if not video_info:
-                    raise ValueError("下载器未返回视频信息")
-
-                video_title = video_info.get("video_title", "")
-                author = video_info.get("author", "")
-                description = video_info.get("description", "")
-                is_from_generic = video_info.get("is_generic", False)
-                platform = video_info.get("platform")
-                video_id = video_info.get("video_id")
-                media_id = video_id  # 保持兼容性
+                original_downloader = metadata_downloader or create_downloader(url)
             else:
                 logger.info("已提供 source_url，使用解析的元数据，跳过传统下载器的 get_video_info")
-                # video_title, author, description, platform, video_id, media_id 已在前面设置
-                # 从 platform 推断 is_from_generic
                 is_from_generic = (platform == 'generic')
-
-            # 判断是否同时提供了 url 和 source_url
-            # 如果同时提供且不同，说明 url 是直接下载地址，source_url 仅用于元数据解析
-            has_separate_download_url = (
-                source_url is not None and
-                source_url.strip() != "" and
-                source_url != url
-            )
 
             # 根据 use_speaker_recognition 参数决定处理优先级
             subtitle = None
@@ -935,9 +911,7 @@ def process_transcription(
                 if metadata_downloader and metadata_downloader.__class__.__name__ == "YoutubeDownloader" and source_url:
                     logger.info(f"不需要说话人识别，尝试从 source_url 获取YouTube平台字幕: {source_url}")
                     subtitle = metadata_downloader.get_subtitle(source_url)
-                elif not source_url:
-                    # 如果没有 source_url，使用原有逻辑
-                    original_downloader = create_downloader(url)
+                elif not source_url and original_downloader:
                     if original_downloader.__class__.__name__ == "YoutubeDownloader":
                         logger.info(f"不需要说话人识别，尝试获取YouTube平台字幕: {url}")
                         subtitle = original_downloader.get_subtitle(url)
@@ -955,9 +929,9 @@ def process_transcription(
 
                 # 使用新的缓存系统保存平台字幕
                 cache_result = cache_manager.save_cache(
-                    platform=video_info.get("platform"),
+                    platform=platform,
                     url=url,
-                    media_id=video_info.get("video_id"),
+                    media_id=video_id,
                     use_speaker_recognition=False,  # 平台字幕没有说话人识别
                     transcript_data=subtitle,
                     transcript_type="capswriter",  # 平台字幕按文本格式保存
@@ -976,8 +950,8 @@ def process_transcription(
                             "task_id": task_id,
                             "url": url,
                             "display_url": display_url,
-                            "platform": video_info.get("platform"),
-                            "media_id": video_info.get("video_id"),
+                            "platform": platform,
+                            "media_id": video_id,
                             "video_title": video_title,
                             "author": author,
                             "description": description,
@@ -1023,10 +997,9 @@ def process_transcription(
                     author=author,
                 )
 
-                # 如果提供了 source_url，说明使用本地文件，直接下载
+                # 下载文件
                 local_file = None
-                if source_url:
-                    # 使用 GenericDownloader 下载文件
+                if has_separate_download_url:
                     logger.info(f"使用 GenericDownloader 下载文件: {url}")
                     # 从 URL 提取文件名
                     from urllib.parse import urlparse, unquote
@@ -1034,32 +1007,46 @@ def process_transcription(
                     path = unquote(parsed_url.path)
                     filename = os.path.basename(path)
                     if not filename:
-                        # 如果无法提取文件名，生成一个
                         filename = f"{platform}_{video_id}.mp4"
 
-                    local_file = downloader.download_file(url, filename)
-                else:
-                    # 传统逻辑：检查是否已通过BBDown下载
-                    if video_info.get("downloaded") and video_info.get("local_file"):
-                        # 使用BBDown已下载的文件
-                        local_file = video_info.get("local_file")
-                        logger.info(f"使用BBDown已下载的文件: {local_file}")
-                    else:
-                        # 常规下载流程
-                        download_url = video_info.get("download_url")
-                        filename = video_info.get("filename")
+                    if download_info_obj and download_info_obj.filename:
+                        filename = download_info_obj.filename
 
-                        # 如果是YouTube链接，使用优先级下载方式（yt-dlp优先，TikHub备用）
-                        original_downloader = create_downloader(url)
+                    local_file = download_downloader.download_file(url, filename)
+                else:
+                    # 确保下载信息已获取
+                    if download_info_obj is None and download_downloader:
+                        try:
+                            download_info_obj = download_downloader.get_download_info(parse_url)
+                        except Exception as e:
+                            logger.warning(f"[下载信息] 获取失败: {e}")
+
+                    # 检查是否已有本地文件
+                    if download_info_obj and download_info_obj.downloaded and download_info_obj.local_file:
+                        local_file = download_info_obj.local_file
+                        logger.info(f"使用已下载的本地文件: {local_file}")
+                    else:
+                        download_url = download_info_obj.download_url if download_info_obj else None
+                        filename = download_info_obj.filename if download_info_obj else None
+
+                        original_downloader = download_downloader or create_downloader(url)
                         if hasattr(original_downloader, "download_video_with_priority") and (
                             "youtube.com" in url or "youtu.be" in url
                         ):
                             logger.info(f"YouTube视频，使用优先级下载（yt-dlp优先）: {url}")
+                            legacy_video_info = {
+                                "video_id": video_id,
+                                "video_title": video_title,
+                                "author": author,
+                                "description": description,
+                                "platform": platform,
+                                "download_url": download_url,
+                                "filename": filename,
+                            }
                             local_file = original_downloader.download_video_with_priority(
-                                url, video_info
+                                url, legacy_video_info
                             )
                         elif download_url and filename:
-                            # 其他平台使用常规下载流程
                             local_file = original_downloader.download_file(download_url, filename)
                         else:
                             error_msg = f"无法获取下载信息: {url}"

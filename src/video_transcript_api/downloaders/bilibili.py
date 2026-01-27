@@ -7,6 +7,7 @@ import subprocess
 import platform
 import shutil
 from .base import BaseDownloader, get_temp_manager
+from .models import VideoMetadata, DownloadInfo
 from ..utils.logging import setup_logger
 from ..utils import create_debug_dir
 
@@ -18,6 +19,9 @@ class BilibiliDownloader(BaseDownloader):
     """
     Bilibili视频下载器
     """
+    def __init__(self):
+        super().__init__()
+        self._cached_video_info: dict[str, dict] = {}
 
     def can_handle(self, url):
         """
@@ -485,15 +489,27 @@ class BilibiliDownloader(BaseDownloader):
         返回:
             dict: 包含视频信息的字典
         """
+        try:
+            bv_id = self._extract_video_id(url)
+            if bv_id in self._cached_video_info:
+                logger.info(f"[实例缓存命中] 使用缓存的视频信息: {bv_id}")
+                return self._cached_video_info[bv_id]
+        except Exception:
+            bv_id = None
+
         # 判断是否使用BBDown下载
         use_bbdown = self.config.get("bbdown", {}).get("use_bbdown", False)
 
         if use_bbdown:
             logger.info("使用BBDown下载Bilibili视频")
-            return self._get_video_info_bbdown(url)
+            result = self._get_video_info_bbdown(url)
         else:
             logger.info("使用API获取Bilibili视频信息")
-            return self._get_video_info_api(url)
+            result = self._get_video_info_api(url)
+
+        if bv_id:
+            self._cached_video_info[bv_id] = result
+        return result
 
     def download_file(self, url, filename):
         """
@@ -526,3 +542,31 @@ class BilibiliDownloader(BaseDownloader):
         """
         # 直接返回None，跳过尝试获取字幕步骤
         return None
+
+    def _fetch_metadata(self, url: str, video_id: str) -> VideoMetadata:
+        info = self.get_video_info(url)
+        extra = {}
+        if "cid" in info:
+            extra["cid"] = info.get("cid")
+        return VideoMetadata(
+            video_id=info.get("video_id", video_id),
+            platform=info.get("platform", "bilibili"),
+            title=info.get("video_title", ""),
+            author=info.get("author", ""),
+            description=info.get("description", ""),
+            extra=extra,
+        )
+
+    def _fetch_download_info(self, url: str, video_id: str) -> DownloadInfo:
+        info = self.get_video_info(url)
+        filename = info.get("filename")
+        file_ext = None
+        if filename and "." in filename:
+            file_ext = filename.rsplit(".", 1)[-1]
+        return DownloadInfo(
+            download_url=info.get("download_url"),
+            file_ext=file_ext,
+            filename=filename,
+            local_file=info.get("local_file"),
+            downloaded=bool(info.get("downloaded")),
+        )

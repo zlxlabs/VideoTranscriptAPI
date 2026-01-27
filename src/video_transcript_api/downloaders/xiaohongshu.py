@@ -4,6 +4,7 @@ import json
 import time
 import datetime
 from .base import BaseDownloader
+from .models import VideoMetadata, DownloadInfo
 from ..utils.logging import setup_logger
 from ..utils import create_debug_dir
 
@@ -16,6 +17,10 @@ class XiaohongshuDownloader(BaseDownloader):
     """
     小红书视频下载器
     """
+    def __init__(self):
+        super().__init__()
+        self._cached_video_info: dict[str, dict] = {}
+
     def can_handle(self, url):
         """
         判断是否可以处理该URL
@@ -37,6 +42,12 @@ class XiaohongshuDownloader(BaseDownloader):
             
         返回:
             str: 笔记ID
+        """
+        return self._extract_note_id(url)
+
+    def extract_video_id(self, url: str) -> str:
+        """
+        提取笔记ID（兼容新接口）
         """
         return self._extract_note_id(url)
     
@@ -90,9 +101,17 @@ class XiaohongshuDownloader(BaseDownloader):
             dict: 包含视频信息的字典
         """
         try:
+            note_id = self._extract_note_id(url)
+            if note_id in self._cached_video_info:
+                logger.info(f"[实例缓存命中] 使用缓存的视频信息: {note_id}")
+                return self._cached_video_info[note_id]
+
             # 直接使用URL调用新的API接口，无需提取笔记ID
             logger.info(f"使用新版API获取小红书笔记信息: url={url}")
-            return self.get_video_info_v3(url)
+            result = self.get_video_info_v3(url)
+            if note_id:
+                self._cached_video_info[note_id] = result
+            return result
         except Exception as e:
             logger.exception(f"获取小红书视频信息异常: {str(e)}")
             raise
@@ -419,3 +438,25 @@ class XiaohongshuDownloader(BaseDownloader):
         """
         # 直接返回None，跳过尝试获取字幕步骤
         return None 
+
+    def _fetch_metadata(self, url: str, video_id: str) -> VideoMetadata:
+        info = self.get_video_info(url)
+        return VideoMetadata(
+            video_id=info.get("video_id", video_id),
+            platform=info.get("platform", "xiaohongshu"),
+            title=info.get("video_title", ""),
+            author=info.get("author", ""),
+            description=info.get("description", ""),
+        )
+
+    def _fetch_download_info(self, url: str, video_id: str) -> DownloadInfo:
+        info = self.get_video_info(url)
+        filename = info.get("filename")
+        file_ext = None
+        if filename and "." in filename:
+            file_ext = filename.rsplit(".", 1)[-1]
+        return DownloadInfo(
+            download_url=info.get("download_url"),
+            file_ext=file_ext,
+            filename=filename,
+        )

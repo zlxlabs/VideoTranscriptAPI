@@ -679,6 +679,9 @@ X-Content-Type-Options: nosniff
 - [LLM 工程指南](docs/development/llm/engineering_guide.md) - Prompt 优化、结构化输出
 - [LLM 重构方案](docs/development/llm/refactoring_plan.md) - 模块化架构设计方案
 - [LLM 重构完成报告](docs/development/llm/refactoring_completed.md) - 重构实施总结
+- [架构优化方案](docs/development/architecture_optimization_plan.md) - 业务流程重构与迁移规划
+- [架构优化完成报告（阶段一）](docs/development/architecture_optimization_completed_phase1.md) - 基础重构实施总结
+- [架构优化完成报告（阶段二）](docs/development/architecture_optimization_completed_phase2.md) - 接口标准化实施总结
 - [并发处理架构](docs/development/concurrency.md) - 双队列设计、性能优化
 - [风控模块开发](docs/development/risk_control.md) - 敏感词管理、审核策略
 - [日志系统指南](docs/development/logging.md) - Loguru 配置、日志分析

@@ -4,7 +4,9 @@ import json
 import requests
 import time
 from abc import ABC, abstractmethod
+from typing import Dict, Optional
 from urllib.parse import urlparse, parse_qs
+from .models import VideoMetadata, DownloadInfo
 from ..utils.logging import setup_logger, load_config, ensure_dir
 
 logger = setup_logger("downloaders")
@@ -33,6 +35,9 @@ class BaseDownloader(ABC):
         self.config = load_config()
         self.api_key = self.config.get("tikhub", {}).get("api_key")
         self.temp_manager = get_temp_manager()
+        # 实例级缓存（任务生命周期内有效）
+        self._metadata_cache: Dict[str, VideoMetadata] = {}
+        self._download_info_cache: Dict[str, DownloadInfo] = {}
 
     @abstractmethod
     def can_handle(self, url):
@@ -48,19 +53,64 @@ class BaseDownloader(ABC):
         pass
 
     @abstractmethod
-    def get_video_info(self, url):
+    def extract_video_id(self, url: str) -> str:
         """
-        获取视频信息
+        提取视频ID（轻量级操作）
 
         参数:
             url: 视频URL
 
         返回:
-            dict: 包含视频信息的字典，至少包含以下字段:
-                - video_title: 视频标题
-                - author: 视频作者
-                - download_url: 音视频下载地址（可能是mp3或mp4等）
+            str: 视频ID
         """
+        pass
+
+    def get_metadata(self, url: str) -> VideoMetadata:
+        """
+        获取视频元数据（可能触发API请求）
+
+        参数:
+            url: 视频URL
+
+        返回:
+            VideoMetadata: 标准化元数据
+        """
+        video_id = self.extract_video_id(url)
+        if video_id in self._metadata_cache:
+            logger.info(f"使用缓存元数据: {video_id}")
+            return self._metadata_cache[video_id]
+
+        metadata = self._fetch_metadata(url, video_id)
+        self._metadata_cache[video_id] = metadata
+        return metadata
+
+    @abstractmethod
+    def _fetch_metadata(self, url: str, video_id: str) -> VideoMetadata:
+        """子类实现：实际获取元数据的逻辑"""
+        pass
+
+    def get_download_info(self, url: str) -> DownloadInfo:
+        """
+        获取下载信息（可能触发API请求）
+
+        参数:
+            url: 视频URL
+
+        返回:
+            DownloadInfo: 标准化下载信息
+        """
+        video_id = self.extract_video_id(url)
+        if video_id in self._download_info_cache:
+            logger.info(f"使用缓存下载信息: {video_id}")
+            return self._download_info_cache[video_id]
+
+        download_info = self._fetch_download_info(url, video_id)
+        self._download_info_cache[video_id] = download_info
+        return download_info
+
+    @abstractmethod
+    def _fetch_download_info(self, url: str, video_id: str) -> DownloadInfo:
+        """子类实现：实际获取下载信息的逻辑"""
         pass
 
     @abstractmethod
@@ -75,6 +125,53 @@ class BaseDownloader(ABC):
             str: 字幕文本，如果没有则返回None
         """
         pass
+
+    def get_video_info(self, url: str) -> dict:
+        """
+        兼容旧接口的 video_info 结构
+
+        参数:
+            url: 视频URL
+
+        返回:
+            dict: 兼容旧结构的视频信息
+        """
+        metadata = self.get_metadata(url)
+        download_info = self.get_download_info(url)
+        return self._build_legacy_video_info(metadata, download_info)
+
+    def _build_legacy_video_info(
+        self, metadata: VideoMetadata, download_info: DownloadInfo
+    ) -> dict:
+        """将标准化结构转换为旧的 video_info 字典"""
+        legacy = {
+            "video_id": metadata.video_id,
+            "video_title": metadata.title,
+            "author": metadata.author,
+            "description": metadata.description,
+            "download_url": download_info.download_url,
+            "filename": download_info.filename,
+            "platform": metadata.platform,
+        }
+
+        if download_info.file_ext:
+            legacy["file_ext"] = download_info.file_ext
+        if download_info.subtitle_url:
+            legacy["subtitle_url"] = download_info.subtitle_url
+        if download_info.local_file:
+            legacy["local_file"] = download_info.local_file
+        if download_info.downloaded:
+            legacy["downloaded"] = True
+
+        # 合并额外字段（避免覆盖标准键）
+        for key, value in (metadata.extra or {}).items():
+            if key not in legacy:
+                legacy[key] = value
+        for key, value in (download_info.extra or {}).items():
+            if key not in legacy:
+                legacy[key] = value
+
+        return legacy
 
     def resolve_short_url(self, url):
         """
