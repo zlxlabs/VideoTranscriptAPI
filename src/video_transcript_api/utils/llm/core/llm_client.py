@@ -27,6 +27,7 @@ class LLMClient:
         base_url: str,
         max_retries: int = 3,
         retry_delay: int = 5,
+        config: Optional[Dict] = None,
     ):
         """初始化 LLM 客户端
 
@@ -35,11 +36,13 @@ class LLMClient:
             base_url: API Base URL
             max_retries: 最大重试次数
             retry_delay: 基础重试延迟（秒），实际延迟会指数增长
+            config: 完整配置字典（用于读取 JSON 输出模式等设置）
         """
         self.api_key = api_key
         self.base_url = base_url
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.config = config or {}
 
     def call(
         self,
@@ -159,6 +162,7 @@ class LLMClient:
                 retry_delay=0,
                 reasoning_effort=reasoning_effort,
                 task_type=task_type,
+                config=self.config,  # 传递配置，以便选择正确的 JSON 输出模式
             )
 
             # 判断返回类型

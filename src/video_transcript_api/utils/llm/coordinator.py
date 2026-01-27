@@ -29,6 +29,9 @@ class LLMCoordinator:
             config_dict: 完整的配置字典
             cache_dir: 缓存目录路径
         """
+        # 保存完整配置字典
+        self.config_dict = config_dict
+
         # 创建配置对象
         self.config = LLMConfig.from_dict(config_dict)
 
@@ -38,6 +41,7 @@ class LLMCoordinator:
             base_url=self.config.base_url,
             max_retries=self.config.max_retries,
             retry_delay=self.config.retry_delay,
+            config=config_dict,  # 传递完整配置，以便读取 JSON 输出模式等设置
         )
 
         self.cache_manager = CacheManager(cache_dir=cache_dir)
