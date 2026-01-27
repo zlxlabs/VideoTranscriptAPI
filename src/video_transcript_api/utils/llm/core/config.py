@@ -161,7 +161,7 @@ class LLMConfig:
                 "calibration_concurrent_limit", 3
             ),
             # enable_validation 现在控制分段质量验证（每个chunk独立打分）
-            enable_validation=calibration_config.get("enable_validation", False)
+            enable_validation=calibration_config.get("enable_validation", False),
 
             # 质量阈值
             overall_score_threshold=quality_config.get("overall_score", 8.0),
