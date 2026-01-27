@@ -14,6 +14,7 @@ from ..context import (
     get_config,
     get_enhanced_llm_processor,
     get_executor,
+    get_llm_coordinator,
     get_llm_executor,
     get_llm_queue,
     get_logger,
@@ -38,7 +39,9 @@ config = get_config()
 user_manager = get_user_manager()
 audit_logger = get_audit_logger()
 cache_manager = get_cache_manager()
-enhanced_llm_processor = get_enhanced_llm_processor()
+# 使用新架构（如需回滚，注释下行，取消注释下下行）
+llm_coordinator = get_llm_coordinator()
+# enhanced_llm_processor = get_enhanced_llm_processor()  # 旧架构回滚用
 task_results = get_task_results()
 task_queue = get_task_queue()
 llm_task_queue = get_llm_queue()
@@ -1232,9 +1235,47 @@ def _handle_llm_task(llm_task: dict):
 
                 llm_task["video_title"] = video_title
 
-                # 使用增强LLM处理器处理任务（自动判断是否需要分段）
-                logger.info(f"开始使用增强LLM处理器处理任务: {task_id}")
-                result_dict = enhanced_llm_processor.process_llm_task(llm_task)
+                # 使用新 LLM 协调器处理任务
+                logger.info(f"开始使用 LLM 协调器处理任务: {task_id}")
+
+                # 准备新架构的参数
+                content = (
+                    llm_task.get("transcription_data")
+                    if use_speaker_recognition and llm_task.get("transcription_data")
+                    else transcript
+                )
+
+                # 调用新架构
+                coordinator_result = llm_coordinator.process(
+                    content=content,
+                    title=video_title,
+                    author=llm_task.get("author", ""),
+                    description=llm_task.get("description", ""),
+                    platform=platform or "",
+                    media_id=media_id or "",
+                    has_risk=False,  # 新架构会自动检测风险
+                )
+
+                # 适配返回格式为旧架构格式（保持后续代码兼容）
+                calibrated_text_new = coordinator_result.get("calibrated_text", "")
+
+                # 判断是否需要总结（文本长度阈值）
+                min_summary_threshold = config.get("llm", {}).get("min_summary_threshold", 500)
+                should_skip_summary = len(calibrated_text_new) < min_summary_threshold
+
+                result_dict = {
+                    "校对文本": calibrated_text_new,
+                    "内容总结": None,  # 新架构暂不包含总结
+                    "skip_summary": should_skip_summary,  # 短文本跳过总结
+                    "stats": coordinator_result.get("stats", {}),
+                    "models_used": {},  # TODO: 从新架构获取使用的模型信息
+                    "calibrate_success": True,
+                    "summary_success": True,
+                }
+
+                # 如果是对话场景，保存结构化数据
+                if "structured_data" in coordinator_result:
+                    result_dict["structured_data"] = coordinator_result["structured_data"]
 
                 logger.info(f"LLM处理完成，开始保存结果和发送微信通知: {task_id}")
 
