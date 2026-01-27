@@ -1326,15 +1326,30 @@ def _handle_llm_task(llm_task: dict):
                                     content=summary_content,
                                 )
                         else:
-                            summary_content = summary_text
-                            logger.info(f"保存LLM总结到缓存: {task_id}")
-                            cache_manager.save_llm_result(
-                                platform=platform,
-                                media_id=media_id,
-                                use_speaker_recognition=use_speaker_recognition,
-                                llm_type="summary",
-                                content=summary_content,
-                            )
+                            # 只有当 summary_text 不为 None 时才保存
+                            if summary_text is not None:
+                                summary_content = summary_text
+                                logger.info(f"保存LLM总结到缓存: {task_id}")
+                                cache_manager.save_llm_result(
+                                    platform=platform,
+                                    media_id=media_id,
+                                    use_speaker_recognition=use_speaker_recognition,
+                                    llm_type="summary",
+                                    content=summary_content,
+                                )
+                            else:
+                                # 新架构暂不生成总结，使用校对文本
+                                if calibrate_success:
+                                    logger.info(f"总结未生成，使用校对文本作为总结: {task_id}")
+                                    cache_manager.save_llm_result(
+                                        platform=platform,
+                                        media_id=media_id,
+                                        use_speaker_recognition=use_speaker_recognition,
+                                        llm_type="summary",
+                                        content=calibrated_text,
+                                    )
+                                else:
+                                    logger.warning(f"总结和校对都未生成，跳过保存总结: {task_id}")
                     else:
                         logger.warning(f"总结失败，跳过保存总结文件: {task_id}")
 
