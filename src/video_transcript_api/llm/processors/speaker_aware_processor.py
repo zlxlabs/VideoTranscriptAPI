@@ -110,7 +110,7 @@ class SpeakerAwareProcessor:
 
         # 步骤2: 分段
         chunks = self.segmenter.segment(normalized_dialogs)
-        logger.info(f"Dialogs segmented: {len(chunks)} chunks")
+        logger.debug(f"Dialogs segmented: {len(chunks)} chunks")
 
         # 步骤3: 分段校对（每段独立验证）
         calibrated_chunks = self._calibrate_chunks(
@@ -348,7 +348,7 @@ class SpeakerAwareProcessor:
         def calibrate_single_chunk(index: int, chunk: List[Dict]):
             """校对单个 chunk（含质量验证）"""
             chunk_length = sum(len(d.get("text", "")) for d in chunk)
-            logger.info(
+            logger.debug(
                 f"Calibrating chunk {index + 1}/{len(chunks)}, dialog count: {len(chunk)}, length: {chunk_length}"
             )
 
@@ -398,7 +398,7 @@ class SpeakerAwareProcessor:
 
                     # 步骤4: 分段质量验证（可选）
                     if self.config.enable_validation:
-                        logger.info(f"Validating chunk {index + 1}/{len(chunks)}")
+                        logger.debug(f"Validating chunk {index + 1}/{len(chunks)}")
 
                         validation_result = self.quality_validator.validate_by_score(
                             original=chunk,
@@ -428,13 +428,13 @@ class SpeakerAwareProcessor:
                             calibrated_chunks[index] = chunk
                             return
 
-                        logger.info(
+                        logger.debug(
                             f"Chunk {index + 1} validation passed "
                             f"(score: {validation_result.get('overall_score', 'N/A')})"
                         )
 
                     calibrated_chunks[index] = merged_dialogs
-                    logger.info(f"Chunk {index + 1} calibration completed")
+                    logger.debug(f"Chunk {index + 1} calibration completed")
                     return
 
                 except Exception as e:

@@ -694,7 +694,7 @@ class CacheManager:
         existing_task = self.get_existing_task_by_url(url, use_speaker_recognition)
         if existing_task:
             view_token = existing_task['view_token']
-            logger.info(f"复用现有view_token: {view_token} (状态: {existing_task['status']}) for URL: {url}")
+            logger.debug(f"复用现有view_token: {view_token} (状态: {existing_task['status']}) for URL: {url}")
         else:
             view_token = self.generate_view_token()
             logger.info(f"生成新view_token: {view_token} for URL: {url}")
@@ -979,7 +979,7 @@ class CacheManager:
                         'cache_id': row[10],
                         'created_at': row[11]
                     }
-                    logger.info(f"找到现有任务: {task_info['task_id']}, 状态: {task_info['status']}, URL: {url}")
+                    logger.debug(f"找到现有任务: {task_info['task_id']}, 状态: {task_info['status']}, URL: {url}")
                     return task_info
                 else:
                     logger.debug(f"未找到现有任务: URL={url}, use_speaker_recognition={use_speaker_recognition}")

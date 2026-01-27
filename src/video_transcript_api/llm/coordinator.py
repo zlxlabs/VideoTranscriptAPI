@@ -196,7 +196,7 @@ class LLMCoordinator:
         """
         if isinstance(content, str):
             # 纯文本 - 使用 PlainTextProcessor
-            logger.info("Routing to PlainTextProcessor")
+            logger.debug("Routing to PlainTextProcessor")
             return self.plain_text_processor.process(
                 text=content,
                 title=title,
@@ -208,7 +208,7 @@ class LLMCoordinator:
             )
         elif isinstance(content, list):
             # 对话列表 - 使用 SpeakerAwareProcessor
-            logger.info(f"Routing to SpeakerAwareProcessor (dialog count: {len(content)})")
+            logger.debug(f"Routing to SpeakerAwareProcessor (dialog count: {len(content)})")
             return self.speaker_aware_processor.process(
                 dialogs=content,
                 title=title,

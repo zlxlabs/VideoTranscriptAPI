@@ -103,7 +103,7 @@ class XiaohongshuDownloader(BaseDownloader):
         try:
             note_id = self._extract_note_id(url)
             if note_id in self._cached_video_info:
-                logger.info(f"[实例缓存命中] 使用缓存的视频信息: {note_id}")
+                logger.debug(f"[实例缓存命中] 使用缓存的视频信息: {note_id}")
                 return self._cached_video_info[note_id]
 
             # 直接使用URL调用新的API接口，无需提取笔记ID

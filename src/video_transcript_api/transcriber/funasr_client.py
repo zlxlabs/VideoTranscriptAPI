@@ -291,7 +291,7 @@ class FunASRSpeakerClient:
                 progress = response["data"]["progress"]
                 status = response["data"]["status"]
                 message = response["data"].get("message", "")
-                logger.info(f"转录进度: {progress}% - {status} - {message}")
+                logger.debug(f"转录进度: {progress}% - {status} - {message}")
 
             elif response["type"] == "task_queued":
                 position = response["data"]["queue_position"]

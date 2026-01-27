@@ -260,7 +260,7 @@ class YoutubeDownloader(BaseDownloader):
 
             # 🆕 检查实例缓存（避免同一任务内的重复请求）
             if video_id in self._cached_video_info:
-                logger.info(f"[实例缓存命中] 使用缓存的视频信息: {video_id}")
+                logger.debug(f"[实例缓存命中] 使用缓存的视频信息: {video_id}")
                 return self._cached_video_info[video_id]
 
             # 实例缓存未命中，调用 TikHub API
@@ -616,7 +616,7 @@ class YoutubeDownloader(BaseDownloader):
 
             # 🆕 优先复用实例缓存（避免重复 API 请求）
             if video_id in self._cached_video_info:
-                logger.info(f"[实例缓存命中] 复用 video_info，避免重复 API 请求: {video_id}")
+                logger.debug(f"[实例缓存命中] 复用 video_info，避免重复 API 请求: {video_id}")
                 video_info = self._cached_video_info[video_id]
             else:
                 # 如果缓存不存在，首次调用 get_video_info（会自动缓存）

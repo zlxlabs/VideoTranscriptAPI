@@ -79,7 +79,7 @@ class XiaoyuzhouDownloader(BaseDownloader):
             episode_id = self._extract_episode_id(url)
 
             if episode_id in self._cached_video_info:
-                logger.info(f"[实例缓存命中] 使用缓存的视频信息: {episode_id}")
+                logger.debug(f"[实例缓存命中] 使用缓存的视频信息: {episode_id}")
                 return self._cached_video_info[episode_id]
             
             # 请求网页内容

@@ -492,7 +492,7 @@ class BilibiliDownloader(BaseDownloader):
         try:
             bv_id = self._extract_video_id(url)
             if bv_id in self._cached_video_info:
-                logger.info(f"[实例缓存命中] 使用缓存的视频信息: {bv_id}")
+                logger.debug(f"[实例缓存命中] 使用缓存的视频信息: {bv_id}")
                 return self._cached_video_info[bv_id]
         except Exception:
             bv_id = None

@@ -97,7 +97,7 @@ class GenericDownloader(BaseDownloader):
         try:
             cache_id = self.extract_video_id(url)
             if cache_id in self._cached_video_info:
-                logger.info(f"[实例缓存命中] 使用缓存的视频信息: {cache_id}")
+                logger.debug(f"[实例缓存命中] 使用缓存的视频信息: {cache_id}")
                 return self._cached_video_info[cache_id]
         except Exception:
             cache_id = None

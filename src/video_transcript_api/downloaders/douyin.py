@@ -94,7 +94,7 @@ class DouyinDownloader(BaseDownloader):
 
             # 实例缓存命中
             if aweme_id in self._cached_video_info:
-                logger.info(f"[实例缓存命中] 使用缓存的视频信息: {aweme_id}")
+                logger.debug(f"[实例缓存命中] 使用缓存的视频信息: {aweme_id}")
                 return self._cached_video_info[aweme_id]
             
             # 调用API获取视频信息

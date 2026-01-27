@@ -421,6 +421,8 @@ class CapsWriterClient:
         if Config.verbose:
             if level == "info":
                 logger.info(message)
+            elif level == "debug":
+                logger.debug(message)
             elif level == "warning":
                 logger.warning(message)
             elif level == "error":
@@ -548,12 +550,19 @@ class CapsWriterClient:
             # 发送消息
             await self.websocket.send(json.dumps(message))
 
-            # 更新进度
+            # 更新进度（仅在关键里程碑时输出，降低日志噪音）
             progress = min(chunk_end / 4 / 16000, audio_duration)
             progress_percent = progress / audio_duration * 100
-            self.log(
-                f"发送进度: {progress:.2f}秒 / {audio_duration:.2f}秒 ({progress_percent:.1f}%)"
-            )
+
+            # 只在 20%, 40%, 60%, 80%, 100% 时输出
+            milestones = [20, 40, 60, 80, 100]
+            for milestone in milestones:
+                if not hasattr(self, f'_milestone_{milestone}') and progress_percent >= milestone:
+                    setattr(self, f'_milestone_{milestone}', True)
+                    self.log(
+                        f"发送进度: {progress:.2f}秒 / {audio_duration:.2f}秒 ({progress_percent:.1f}%)"
+                    )
+                    break
 
             if is_final:
                 break
@@ -576,9 +585,9 @@ class CapsWriterClient:
                 try:
                     result = json.loads(message)
 
-                    # 显示进度
+                    # 显示进度（DEBUG 级别，避免日志噪音）
                     if "duration" in result:
-                        self.log(f"转录进度: {result['duration']:.2f}秒")
+                        self.log(f"转录进度: {result['duration']:.2f}秒", "debug")
 
                     # 检查是否为最终结果
                     if result.get("is_final", False):

@@ -83,10 +83,10 @@ class PlainTextProcessor:
 
         if need_segmentation:
             segments = self.segmenter.segment(text)
-            logger.info(f"Text segmented: {len(segments)} segments")
+            logger.debug(f"Text segmented: {len(segments)} segments")
         else:
             segments = [text]
-            logger.info("Text length below threshold, no segmentation")
+            logger.debug("Text length below threshold, no segmentation")
 
         # 步骤3: 分段校对
         calibrated_segments = self._calibrate_segments(
@@ -147,7 +147,7 @@ class PlainTextProcessor:
             """校对单个分段（含长度检查 + 二次校对）"""
             try:
                 original_length = len(segment)
-                logger.info(f"Calibrating segment {index + 1}/{len(segments)}, length: {original_length}")
+                logger.debug(f"Calibrating segment {index + 1}/{len(segments)}, length: {original_length}")
 
                 # 第一次校对
                 user_prompt = build_calibrate_user_prompt(
@@ -174,7 +174,7 @@ class PlainTextProcessor:
                 if calibrated_length >= min_length:
                     # 长度合格
                     calibrated_segments[index] = calibrated_text
-                    logger.info(
+                    logger.debug(
                         f"Segment {index + 1} calibration passed: "
                         f"{original_length} -> {calibrated_length} (>= {min_length})"
                     )
