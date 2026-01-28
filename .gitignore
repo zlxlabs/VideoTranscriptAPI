@@ -49,6 +49,7 @@ models/
 test_output/
 tests/sample_files/test_files/
 test_cache_dir/
+tests/llm/validation_scoring_results.json
 
 # 配置文件（敏感信息）
 config/config.jsonc
