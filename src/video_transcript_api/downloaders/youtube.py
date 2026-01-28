@@ -489,6 +489,42 @@ class YoutubeDownloader(BaseDownloader):
             return None
 
     def _fetch_metadata(self, url: str, video_id: str) -> VideoMetadata:
+        if self.use_api_server:
+            try:
+                result = self._youtube_api_client.fetch_video_info(video_id)
+                info = result.video_info
+                title = info.title or f"youtube_{video_id}"
+                author = info.author or ""
+                description = info.description or ""
+
+                extra = {
+                    "duration": info.duration,
+                    "channel_id": info.channel_id,
+                    "upload_date": info.upload_date,
+                    "view_count": info.view_count,
+                    "thumbnail": info.thumbnail,
+                    "cached": result.cached,
+                    "metadata_source": result.metadata_source,
+                    "fetched_at": result.fetched_at,
+                }
+
+                logger.info(
+                    f"[youtube-api] Metadata fetched: video_id={result.video_id}, "
+                    f"title={title[:50]}"
+                )
+                return VideoMetadata(
+                    video_id=result.video_id or video_id,
+                    platform="youtube",
+                    title=title,
+                    author=author,
+                    description=description,
+                    extra=extra,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[youtube-api] Metadata fetch failed, fallback to TikHub: {e}"
+                )
+
         info = self.get_video_info(url)
         extra = {}
         if "subtitle_info" in info:
