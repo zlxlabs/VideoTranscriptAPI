@@ -48,7 +48,7 @@ async def transcribe_video(
         raise HTTPException(status_code=400, detail="视频URL不能为空")
 
     # 规范化空字符串为 None
-    normalized_source_url = _normalize_empty_string(request_body.source_url)
+    normalized_download_url = _normalize_empty_string(request_body.download_url)
 
     # 规范化 metadata_override 中的空字符串
     normalized_metadata_override = None
@@ -65,7 +65,7 @@ async def transcribe_video(
     logger.info(
         f"收到转录API请求 - URL: {url}, 说话人识别: {request_body.use_speaker_recognition}, "
         f"自定义企微webhook: {request_body.wechat_webhook is not None}, "
-        f"source_url: {normalized_source_url}, metadata_override: {normalized_metadata_override}"
+        f"download_url: {normalized_download_url}, metadata_override: {normalized_metadata_override}"
     )
 
     start_time = datetime.datetime.now()
@@ -85,7 +85,7 @@ async def transcribe_video(
         task_info = cache_manager.create_task(
             url=url,
             use_speaker_recognition=request_body.use_speaker_recognition,
-            source_url=normalized_source_url
+            download_url=normalized_download_url
         )
         task_id = task_info["task_id"]
         view_token = task_info["view_token"]
@@ -110,7 +110,7 @@ async def transcribe_video(
                 "use_speaker_recognition": request_body.use_speaker_recognition,
                 "wechat_webhook": effective_webhook,
                 "user_info": user_info,
-                "source_url": normalized_source_url,
+                "download_url": normalized_download_url,
                 "metadata_override": normalized_metadata_override,
             }
 
@@ -122,8 +122,7 @@ async def transcribe_video(
                 raise HTTPException(status_code=503, detail="任务队列已满，请稍后重试")
 
             try:
-                # 优先使用 source_url 用于平台识别和通知显示
-                display_url = normalized_source_url or url
+                display_url = url
 
                 # 如果用户提供了 metadata_override.title，优先使用它
                 if normalized_metadata_override and normalized_metadata_override.get("title"):

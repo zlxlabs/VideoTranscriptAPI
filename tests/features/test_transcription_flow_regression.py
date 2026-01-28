@@ -101,6 +101,9 @@ class YoutubeDownloader:
     def download_file(self, url, filename):
         return "C:/tmp/test.mp3"
 
+    def fetch_for_transcription(self, *args, **kwargs):
+        raise AssertionError("fetch_for_transcription should not be called in this test")
+
 
 class GenericDownloader:
     def __init__(self):
@@ -149,7 +152,7 @@ def test_flow_cache_hit(monkeypatch, patch_runtime):
         url="https://www.youtube.com/watch?v=abc123",
         use_speaker_recognition=False,
         wechat_webhook=None,
-        source_url=None,
+        download_url=None,
         metadata_override=None,
     )
 
@@ -170,7 +173,7 @@ def test_flow_subtitle_preferred(monkeypatch, patch_runtime):
         url="https://www.youtube.com/watch?v=abc123",
         use_speaker_recognition=False,
         wechat_webhook=None,
-        source_url=None,
+        download_url=None,
         metadata_override=None,
     )
 
@@ -194,7 +197,7 @@ def test_flow_download_capswriter(monkeypatch, patch_runtime):
         url="https://www.youtube.com/watch?v=abc123",
         use_speaker_recognition=False,
         wechat_webhook=None,
-        source_url=None,
+        download_url=None,
         metadata_override=None,
     )
 
@@ -218,7 +221,7 @@ def test_flow_download_funasr(monkeypatch, patch_runtime):
         url="https://www.youtube.com/watch?v=abc123",
         use_speaker_recognition=True,
         wechat_webhook=None,
-        source_url=None,
+        download_url=None,
         metadata_override=None,
     )
 
@@ -243,10 +246,10 @@ def test_flow_separate_download_url(monkeypatch, patch_runtime):
 
     result = transcription.process_transcription(
         task_id="task_separate_url",
-        url="http://example.com/file.mp3",
+        url="https://www.youtube.com/watch?v=abc123",
         use_speaker_recognition=False,
         wechat_webhook=None,
-        source_url="https://www.youtube.com/watch?v=abc123",
+        download_url="http://example.com/file.mp3",
         metadata_override=None,
     )
 
@@ -254,3 +257,28 @@ def test_flow_separate_download_url(monkeypatch, patch_runtime):
     assert generic_downloader.calls
     assert generic_downloader.calls[0][0] == "http://example.com/file.mp3"
     assert generic_downloader.calls[0][1] == "file.mp3"
+
+
+def test_flow_download_url_skips_youtube_api(monkeypatch, patch_runtime):
+    cache_manager = DummyCacheManager(cache_data=None)
+    monkeypatch.setattr(transcription, "cache_manager", cache_manager)
+
+    downloader = YoutubeDownloader(subtitle=None)
+    downloader.use_api_server = True
+    monkeypatch.setattr(transcription, "create_downloader", lambda url: downloader)
+
+    generic_downloader = GenericDownloader()
+    import video_transcript_api.downloaders.generic as generic_module
+    monkeypatch.setattr(generic_module, "GenericDownloader", lambda: generic_downloader)
+
+    result = transcription.process_transcription(
+        task_id="task_download_url_skip_api",
+        url="https://www.youtube.com/watch?v=abc123",
+        use_speaker_recognition=False,
+        wechat_webhook=None,
+        download_url="http://example.com/file.mp3",
+        metadata_override=None,
+    )
+
+    assert result["status"] == "success"
+    assert generic_downloader.calls

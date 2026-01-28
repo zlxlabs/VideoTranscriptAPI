@@ -89,7 +89,7 @@ class CacheManager:
                     task_id TEXT PRIMARY KEY,
                     view_token TEXT NOT NULL,
                     url TEXT NOT NULL,
-                    source_url TEXT,
+                    download_url TEXT,
                     platform TEXT,
                     media_id TEXT,
                     use_speaker_recognition BOOLEAN DEFAULT 0,
@@ -142,14 +142,14 @@ class CacheManager:
                     cursor.execute("ALTER TABLE task_status ADD COLUMN llm_config TEXT")
                     logger.info("llm_config 字段添加成功")
 
-                # 迁移3: 添加 source_url 字段
+                # 迁移3: 添加 download_url 字段
                 cursor.execute("PRAGMA table_info(task_status)")
                 columns = [col[1] for col in cursor.fetchall()]
 
-                if 'source_url' not in columns:
-                    logger.info("添加 source_url 字段到 task_status 表...")
-                    cursor.execute("ALTER TABLE task_status ADD COLUMN source_url TEXT")
-                    logger.info("source_url 字段添加成功")
+                if 'download_url' not in columns:
+                    logger.info("添加 download_url 字段到 task_status 表...")
+                    cursor.execute("ALTER TABLE task_status ADD COLUMN download_url TEXT")
+                    logger.info("download_url 字段添加成功")
                 else:
                     logger.debug("数据库结构正常，无需迁移")
 
@@ -171,13 +171,13 @@ class CacheManager:
         # 删除旧表
         cursor.execute("DROP TABLE task_status")
 
-        # 重新创建表（包含 llm_config 和 source_url 字段）
+        # 重新创建表（包含 llm_config 和 download_url 字段）
         cursor.execute('''
             CREATE TABLE task_status (
                 task_id TEXT PRIMARY KEY,
                 view_token TEXT NOT NULL,
                 url TEXT NOT NULL,
-                source_url TEXT,
+                download_url TEXT,
                 platform TEXT,
                 media_id TEXT,
                 use_speaker_recognition BOOLEAN DEFAULT 0,
@@ -197,26 +197,31 @@ class CacheManager:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_task_status ON task_status(status)')
 
         # 恢复数据（处理列数差异）
+        old_column_names = [col[1] for col in old_columns]
         for row in existing_data:
             row_data = list(row)
+            row_map = {name: row_data[idx] for idx, name in enumerate(old_column_names)}
 
-            # 处理不同版本的表结构
-            if old_column_count == 12:
-                # 旧表格式: task_id, view_token, url, platform, media_id, use_speaker_recognition,
-                #           status, title, author, created_at, completed_at, cache_id
-                # 需要在 url 后插入 source_url(None)，最后添加 llm_config(None)
-                new_row_data = row_data[:3] + [None] + row_data[3:] + [None]
-            elif old_column_count == 13:
-                # 中间版本: 已有 llm_config 但没有 source_url
-                # 需要在 url 后插入 source_url(None)
-                new_row_data = row_data[:3] + [None] + row_data[3:]
-            else:
-                # 已经是最新版本
-                new_row_data = row_data
+            new_row_data = [
+                row_map.get("task_id"),
+                row_map.get("view_token"),
+                row_map.get("url"),
+                row_map.get("download_url"),
+                row_map.get("platform"),
+                row_map.get("media_id"),
+                row_map.get("use_speaker_recognition"),
+                row_map.get("status"),
+                row_map.get("title"),
+                row_map.get("author"),
+                row_map.get("created_at"),
+                row_map.get("completed_at"),
+                row_map.get("cache_id"),
+                row_map.get("llm_config"),
+            ]
 
             cursor.execute('''
                 INSERT INTO task_status
-                (task_id, view_token, url, source_url, platform, media_id, use_speaker_recognition,
+                (task_id, view_token, url, download_url, platform, media_id, use_speaker_recognition,
                  status, title, author, created_at, completed_at, cache_id, llm_config)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', new_row_data)
@@ -672,14 +677,14 @@ class CacheManager:
         """生成查看token"""
         return f"view_{secrets.token_urlsafe(32)}"
     
-    def create_task(self, url: str, use_speaker_recognition: bool = False, source_url: str = None) -> Dict[str, str]:
+    def create_task(self, url: str, use_speaker_recognition: bool = False, download_url: str = None) -> Dict[str, str]:
         """
         创建新任务，相同URL会复用view_token
 
         Args:
-            url: 视频URL（实际下载地址）
+            url: 视频URL（平台链接，用于 view_token 和缓存）
             use_speaker_recognition: 是否使用说话人识别
-            source_url: 原始平台URL（用于显示，可选）
+            download_url: 实际下载地址（可选，如果提供则优先使用）
 
         Returns:
             Dict: 包含task_id和view_token的字典
@@ -687,8 +692,8 @@ class CacheManager:
         task_id = self.generate_task_id()
 
         # 将空字符串转换为 None，避免存储无意义的空字符串
-        if source_url is not None and not source_url.strip():
-            source_url = None
+        if download_url is not None and not download_url.strip():
+            download_url = None
 
         # 检查是否已有相同URL的任务，如果有则复用其view_token（无论任务状态）
         existing_task = self.get_existing_task_by_url(url, use_speaker_recognition)
@@ -703,11 +708,11 @@ class CacheManager:
             with self._get_cursor() as cursor:
                 cursor.execute('''
                     INSERT INTO task_status
-                    (task_id, view_token, url, source_url, use_speaker_recognition, status)
+                    (task_id, view_token, url, download_url, use_speaker_recognition, status)
                     VALUES (?, ?, ?, ?, ?, 'queued')
-                ''', (task_id, view_token, url, source_url, use_speaker_recognition))
+                ''', (task_id, view_token, url, download_url, use_speaker_recognition))
 
-            logger.info(f"任务创建成功: {task_id}, view_token: {view_token}, source_url: {source_url}")
+            logger.info(f"任务创建成功: {task_id}, view_token: {view_token}, download_url: {download_url}")
             return {
                 "task_id": task_id,
                 "view_token": view_token
@@ -718,7 +723,7 @@ class CacheManager:
     
     def update_task_status(self, task_id: str, status: str, platform: str = None,
                           media_id: str = None, title: str = None, author: str = None,
-                          cache_id: int = None, source_url: str = None):
+                          cache_id: int = None, download_url: str = None):
         """
         更新任务状态
 
@@ -730,12 +735,12 @@ class CacheManager:
             title: 视频标题
             author: 作者
             cache_id: 关联的缓存ID
-            source_url: 原始平台URL
+            download_url: 实际下载地址
         """
         try:
             # 将空字符串转换为 None，避免存储无意义的空字符串
-            if source_url is not None and isinstance(source_url, str) and not source_url.strip():
-                source_url = None
+            if download_url is not None and isinstance(download_url, str) and not download_url.strip():
+                download_url = None
 
             with self._get_cursor() as cursor:
                 # 构建更新语句
@@ -757,9 +762,9 @@ class CacheManager:
                 if cache_id:
                     update_fields.append("cache_id = ?")
                     params.append(cache_id)
-                if source_url is not None:  # 只有非空的 source_url 才更新
-                    update_fields.append("source_url = ?")
-                    params.append(source_url)
+                if download_url is not None:  # 只有非空的 download_url 才更新
+                    update_fields.append("download_url = ?")
+                    params.append(download_url)
 
                 if status in ['success', 'failed']:
                     update_fields.append("completed_at = CURRENT_TIMESTAMP")
@@ -853,9 +858,7 @@ class CacheManager:
             if not task_info:
                 return None
 
-            # 优先使用 source_url（如果存在且非空），否则回退到 url
-            source_url_value = task_info.get('source_url')
-            display_url = source_url_value if (source_url_value and source_url_value.strip()) else task_info['url']
+            display_url = task_info.get('url') or task_info.get('download_url') or ""
 
             # 如果任务还在进行中
             if task_info['status'] in ['queued', 'processing']:
@@ -948,7 +951,7 @@ class CacheManager:
                 # 查找相同URL和说话人识别设置的任务
                 # 优先返回成功完成的任务，其次是处理中的任务
                 cursor.execute('''
-                    SELECT task_id, view_token, url, source_url, use_speaker_recognition, status,
+                    SELECT task_id, view_token, url, download_url, use_speaker_recognition, status,
                            title, author, platform, media_id, cache_id, created_at
                     FROM task_status
                     WHERE url = ? AND use_speaker_recognition = ?
@@ -969,7 +972,7 @@ class CacheManager:
                         'task_id': row[0],
                         'view_token': row[1],
                         'url': row[2],
-                        'source_url': row[3],
+                        'download_url': row[3],
                         'use_speaker_recognition': bool(row[4]),
                         'status': row[5],
                         'title': row[6],

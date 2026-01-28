@@ -786,10 +786,10 @@ uv run pytest tests/cache/
 **`POST /api/transcribe`**：
 ```json
 {
-  "url": "视频URL（必填，实际下载地址）",
+  "url": "视频URL（必填，平台链接）",
   "use_speaker_recognition": "是否使用说话人识别（默认 false）",
   "wechat_webhook": "企业微信 webhook 地址（可选）",
-  "source_url": "原始视频URL（可选，用于解析平台和元数据）",
+  "download_url": "实际下载地址（可选，如果提供则优先使用）",
   "metadata_override": {
     "title": "视频标题（可选）",
     "description": "视频描述（可选）",
@@ -802,25 +802,30 @@ uv run pytest tests/cache/
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `url` | string | 是 | 实际下载地址（可以是本地 HTTP 服务器地址） |
+| `url` | string | 是 | **平台链接**（用于 view_token 生成、缓存查询、元数据解析） |
 | `use_speaker_recognition` | boolean | 否 | 是否使用说话人识别功能（默认 false） |
 | `wechat_webhook` | string | 否 | 企业微信 webhook 地址，用于发送通知 |
-| `source_url` | string | 否 | 原始视频 URL，用于解析平台信息和元数据（适用于本地文件场景） |
+| `download_url` | string | 否 | **实际下载地址**（可选，如果提供则优先使用，用于本地文件场景） |
 | `metadata_override` | object | 否 | 元数据覆盖对象，用于补充或覆盖解析的元数据 |
 | `metadata_override.title` | string | 否 | 视频标题 |
 | `metadata_override.description` | string | 否 | 视频描述 |
 | `metadata_override.author` | string | 否 | 视频作者 |
 
+#### 注意事项
+
+- view_token 基于 `url`（平台链接）生成，`download_url` 仅影响实际下载地址。
+- 提供 `download_url` 时会跳过平台字幕/平台下载器/YouTube API Server，强制使用 `download_url` 下载。
+
 #### 使用场景示例
 
 **场景 1：本地文件 + 原始元数据保留**
 
-当你在本地下载了视频文件（如 YouTube 视频），并通过本地 HTTP 服务器暴露文件时，可以使用 `source_url` 保留原始平台信息：
+当你在本地下载了视频文件（如 YouTube 视频），并通过本地 HTTP 服务器暴露文件时，可以使用 `download_url` 指定实际下载地址：
 
 ```json
 {
-  "url": "http://localhost:8080/video.mp4",
-  "source_url": "https://www.youtube.com/watch?v=abc123",
+  "url": "https://www.youtube.com/watch?v=abc123",
+  "download_url": "http://localhost:8080/video.mp4",
   "use_speaker_recognition": true
 }
 ```
@@ -831,8 +836,8 @@ uv run pytest tests/cache/
 
 ```json
 {
-  "url": "http://localhost:8080/video.mp4",
-  "source_url": "https://www.youtube.com/watch?v=abc123",
+  "url": "https://www.youtube.com/watch?v=abc123",
+  "download_url": "http://localhost:8080/video.mp4",
   "metadata_override": {
     "title": "更准确的中文标题",
     "description": "补充的详细描述"
@@ -840,7 +845,7 @@ uv run pytest tests/cache/
 }
 ```
 
-**详细说明**：参见 [Source URL 和 Metadata Override 功能文档](docs/features/source_url_and_metadata_override.md)
+**详细说明**：参见 [Download URL 和 Metadata Override 功能文档](docs/features/source_url_and_metadata_override.md)
 
 ### 响应状态码
 

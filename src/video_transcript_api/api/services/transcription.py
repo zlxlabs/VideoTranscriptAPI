@@ -57,13 +57,13 @@ class MetadataOverride(BaseModel):
 class TranscribeRequest(BaseModel):
     """转录请求数据模型"""
 
-    url: str = Field(..., description="视频URL（实际下载地址）")
+    url: str = Field(..., description="视频URL（平台链接，用于 view_token 和缓存）")
     use_speaker_recognition: bool = Field(False, description="是否使用说话人识别功能")
     wechat_webhook: Optional[str] = Field(
         None, description="企业微信webhook地址，用于发送通知"
     )
-    source_url: Optional[str] = Field(
-        None, description="原始视频URL（用于解析平台和元数据）"
+    download_url: Optional[str] = Field(
+        None, description="实际下载地址（可选，如果提供则优先使用）"
     )
     metadata_override: Optional[MetadataOverride] = Field(
         None, description="元数据覆盖（用于补充或覆盖解析的元数据）"
@@ -120,9 +120,9 @@ def merge_metadata(parsed_metadata: Optional[dict], metadata_override: Optional[
     合并解析的元数据和用户提供的元数据覆盖
 
     参数:
-        parsed_metadata: 从source_url解析的元数据（可能为None）
+        parsed_metadata: 从url解析的元数据（可能为None）
         metadata_override: 用户提供的元数据覆盖（可能为None）
-        url: 实际下载URL（用于生成默认值）
+        url: 平台链接（用于生成默认值）
 
     返回:
         dict: 合并后的完整元数据
@@ -205,7 +205,7 @@ async def process_task_queue():
             url = task["url"]
             use_speaker_recognition = task.get("use_speaker_recognition", False)
             wechat_webhook = task.get("wechat_webhook")
-            source_url = task.get("source_url")
+            download_url = task.get("download_url")
             metadata_override = task.get("metadata_override")
 
             try:
@@ -213,7 +213,7 @@ async def process_task_queue():
                     "status": "processing",
                     "message": "正在处理转录任务",
                 }
-                cache_manager.update_task_status(task_id, "processing", source_url=source_url)
+                cache_manager.update_task_status(task_id, "processing", download_url=download_url)
 
                 future = executor.submit(
                     process_transcription,
@@ -221,7 +221,7 @@ async def process_task_queue():
                     url,
                     use_speaker_recognition,
                     wechat_webhook,
-                    source_url,
+                    download_url,
                     metadata_override,
                 )
 
@@ -239,8 +239,7 @@ async def process_task_queue():
                             "message": f"转录任务失败: {exc}",
                             "error": str(exc),
                         }
-                        # 优先使用 source_url 用于通知显示
-                        display_url = source_url or url
+                        display_url = url
                         WechatNotifier().notify_task_status(display_url, "转录失败", str(exc))
 
                 future.add_done_callback(task_completed)
@@ -263,28 +262,28 @@ async def process_task_queue():
 
 def process_transcription(
     task_id, url, use_speaker_recognition=False, wechat_webhook=None,
-    source_url=None, metadata_override=None
+    download_url=None, metadata_override=None
 ):
     """
     处理视频转录
 
     参数:
         task_id: 任务ID
-        url: 实际下载地址
+        url: 平台链接（用于元数据解析、view_token 生成、缓存查询）
         use_speaker_recognition: 是否使用说话人识别
         wechat_webhook: 企业微信webhook
-        source_url: 原始视频URL（用于解析平台和元数据）
+        download_url: 实际下载地址（可选，如果提供则优先使用）
         metadata_override: 元数据覆盖（dict）
     """
     try:
-        # 规范化 source_url：将空字符串转换为 None
-        if source_url is not None and isinstance(source_url, str) and not source_url.strip():
-            source_url = None
+        # 规范化 download_url：将空字符串转换为 None
+        if download_url is not None and isinstance(download_url, str) and not download_url.strip():
+            download_url = None
 
-        logger.info(f"开始处理转录任务: {task_id}, URL: {url}, source_url: {source_url}")
+        logger.info(f"开始处理转录任务: {task_id}, URL: {url}, download_url: {download_url}")
 
-        # 优先使用 source_url 用于通知显示（保持原始平台链接的可读性）
-        display_url = source_url or url
+        # url 本身就是平台链接，直接使用
+        display_url = url
         logger.info(f"企业微信通知将使用URL: {display_url}")
 
         task_notifier = (
@@ -298,8 +297,8 @@ def process_transcription(
         # ==================== 阶段1: URL 解析（提取 platform 和 video_id）====================
         from ...utils.url_parser import URLParser
 
-        # 优先从 source_url 解析，否则从 url 解析
-        check_url = source_url if source_url else url
+        # url 本身就是平台链接，直接解析
+        check_url = url
         logger.info(f"[URL解析] 开始解析 URL: {check_url[:100]}")
 
         try:
@@ -481,7 +480,7 @@ def process_transcription(
                     title=video_title,
                     author=author,
                     cache_id=cache_data.get("cache_id"),
-                    source_url=source_url,
+                    download_url=download_url,
                 )
 
                 return {
@@ -550,7 +549,7 @@ def process_transcription(
             metadata_downloader = None
             metadata_obj = None
             download_info_obj = None
-            parse_url = source_url if source_url else url
+            parse_url = url
 
             try:
                 logger.info(f"[元数据获取] 创建下载器实例: {parse_url}")
@@ -603,12 +602,11 @@ def process_transcription(
                 f"title={video_title[:50]}, author={author}"
             )
 
-            # 判断是否同时提供了 url 和 source_url
-            # 如果同时提供且不同，说明 url 是直接下载地址，source_url 仅用于元数据解析
+            # 判断是否提供了 download_url
+            # 如果提供，说明需要从 download_url 下载，而 url 仅用于元数据解析
             has_separate_download_url = (
-                source_url is not None and
-                source_url.strip() != "" and
-                source_url != url
+                download_url is not None and
+                download_url.strip() != ""
             )
 
             # 下载器准备
@@ -633,8 +631,11 @@ def process_transcription(
                     download_info_obj = None
 
             # ========== YouTube API Server 快速路径 ==========
+            # 如果提供了 download_url，则跳过 API Server，强制使用 download_url 下载
+            if has_separate_download_url:
+                logger.info("[youtube-api] download_url provided; skip API Server fast path")
             # 如果是 YouTube URL 且启用了 API Server，使用一次请求获取所有资源
-            if (
+            elif (
                 metadata_downloader
                 and metadata_downloader.__class__.__name__ == "YoutubeDownloader"
                 and hasattr(metadata_downloader, "use_api_server")
@@ -729,7 +730,7 @@ def process_transcription(
                             media_id=media_id,
                             title=video_title,
                             author=author,
-                            source_url=source_url,
+                            download_url=download_url,
                         )
                         return {
                             "status": "success",
@@ -853,7 +854,7 @@ def process_transcription(
                             media_id=media_id,
                             title=video_title,
                             author=author,
-                            source_url=source_url,
+                            download_url=download_url,
                         )
                         return {
                             "status": "success",
@@ -883,21 +884,21 @@ def process_transcription(
             # ========== 原有逻辑（非 YouTube API Server 路径）==========
             # 已在前面完成元数据解析与下载器准备
             original_downloader = None
-            if not source_url:
+            if not download_url:
                 original_downloader = metadata_downloader or create_downloader(url)
             else:
-                logger.info("已提供 source_url，使用解析的元数据，跳过传统下载器的 get_video_info")
+                logger.info("已提供 download_url，使用解析的元数据，跳过传统下载器的 get_video_info")
                 is_from_generic = (platform == 'generic')
 
             # 根据 use_speaker_recognition 参数决定处理优先级
             subtitle = None
 
             if has_separate_download_url:
-                # 同时提供了 url 和 source_url，说明用户已有下载地址
-                # 跳过字幕获取，直接使用 url 进行下载和转录
+                # 提供了 download_url，说明用户已有下载地址
+                # 跳过字幕获取，直接使用 download_url 进行下载和转录
                 logger.info(
-                    f"检测到提供了独立的下载地址，跳过字幕获取，直接使用 url 进行转录: "
-                    f"url={url}, source_url={source_url}"
+                    f"检测到提供了独立的下载地址，跳过字幕获取，直接使用 download_url 进行转录: "
+                    f"url={url}, download_url={download_url}"
                 )
                 subtitle = None
             elif use_speaker_recognition:
@@ -906,10 +907,10 @@ def process_transcription(
                 subtitle = None
             else:
                 # 只有在不需要说话人识别时，才尝试获取平台字幕
-                if metadata_downloader and metadata_downloader.__class__.__name__ == "YoutubeDownloader" and source_url:
-                    logger.info(f"不需要说话人识别，尝试从 source_url 获取YouTube平台字幕: {source_url}")
-                    subtitle = metadata_downloader.get_subtitle(source_url)
-                elif not source_url and original_downloader:
+                if metadata_downloader and metadata_downloader.__class__.__name__ == "YoutubeDownloader":
+                    logger.info(f"不需要说话人识别，尝试获取YouTube平台字幕: {url}")
+                    subtitle = metadata_downloader.get_subtitle(url)
+                elif not download_url and original_downloader:
                     if original_downloader.__class__.__name__ == "YoutubeDownloader":
                         logger.info(f"不需要说话人识别，尝试获取YouTube平台字幕: {url}")
                         subtitle = original_downloader.get_subtitle(url)
@@ -982,7 +983,7 @@ def process_transcription(
                     media_id=video_id,
                     title=video_title,
                     author=author,
-                    source_url=source_url,
+                    download_url=download_url,
                 )
                 return result
             else:
@@ -998,10 +999,11 @@ def process_transcription(
                 # 下载文件
                 local_file = None
                 if has_separate_download_url:
-                    logger.info(f"使用 GenericDownloader 下载文件: {url}")
+                    actual_download_url = download_url or url
+                    logger.info(f"使用 GenericDownloader 下载文件: {actual_download_url}")
                     # 从 URL 提取文件名
                     from urllib.parse import urlparse, unquote
-                    parsed_url = urlparse(url)
+                    parsed_url = urlparse(actual_download_url)
                     path = unquote(parsed_url.path)
                     filename = os.path.basename(path)
                     if not filename:
@@ -1010,7 +1012,7 @@ def process_transcription(
                     if download_info_obj and download_info_obj.filename:
                         filename = download_info_obj.filename
 
-                    local_file = download_downloader.download_file(url, filename)
+                    local_file = download_downloader.download_file(actual_download_url, filename)
                 else:
                     # 确保下载信息已获取
                     if download_info_obj is None and download_downloader:
@@ -1024,7 +1026,7 @@ def process_transcription(
                         local_file = download_info_obj.local_file
                         logger.info(f"使用已下载的本地文件: {local_file}")
                     else:
-                        download_url = download_info_obj.download_url if download_info_obj else None
+                        download_info_url = download_info_obj.download_url if download_info_obj else None
                         filename = download_info_obj.filename if download_info_obj else None
 
                         original_downloader = download_downloader or create_downloader(url)
@@ -1038,14 +1040,14 @@ def process_transcription(
                                 "author": author,
                                 "description": description,
                                 "platform": platform,
-                                "download_url": download_url,
+                                "download_url": download_info_url,
                                 "filename": filename,
                             }
                             local_file = original_downloader.download_video_with_priority(
                                 url, legacy_video_info
                             )
-                        elif download_url and filename:
-                            local_file = original_downloader.download_file(download_url, filename)
+                        elif download_info_url and filename:
+                            local_file = original_downloader.download_file(download_info_url, filename)
                         else:
                             error_msg = f"无法获取下载信息: {url}"
                             logger.error(error_msg)
@@ -1199,19 +1201,18 @@ def process_transcription(
                     media_id=video_id,
                     title=video_title,
                     author=author,
-                    source_url=source_url,
+                    download_url=download_url,
                 )
 
         return result
     except Exception as exc:
         logger.exception(f"转录处理异常: {exc}")
-        # 优先使用 source_url 用于通知显示
-        display_url = source_url or url
+        display_url = url
         task_notifier = (
             WechatNotifier(wechat_webhook) if wechat_webhook else WechatNotifier()
         )
         task_notifier.notify_task_status(display_url, "转录异常", str(exc))
-        cache_manager.update_task_status(task_id, "failed", source_url=source_url)
+        cache_manager.update_task_status(task_id, "failed", download_url=download_url)
         return {
             "status": "failed",
             "message": f"转录任务异常: {exc}",
