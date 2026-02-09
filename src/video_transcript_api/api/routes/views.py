@@ -29,6 +29,21 @@ static_dir = get_static_dir()
 
 router = APIRouter()
 
+# robots.txt：明确允许 AI 工具的 URL fetcher 访问 /view/ 和 /export/ 端点
+_ROBOTS_TXT = """\
+User-agent: *
+Allow: /view/
+Allow: /export/
+Disallow: /api/
+Disallow: /static/
+"""
+
+
+@router.get("/robots.txt", include_in_schema=False)
+async def robots_txt():
+    """返回 robots.txt，允许外部 AI 工具 (Gemini, Claude 等) 访问分享页面."""
+    return Response(content=_ROBOTS_TXT, media_type="text/plain")
+
 
 def sanitize_filename(filename: str) -> str:
     """
@@ -197,13 +212,21 @@ def handle_raw_export(view_data: Dict[str, Any], export_type: str) -> Response:
         )
 
     # 6. 返回纯文本响应（Raw 模式不需要文件名头）
-    logger.info(
-        "Raw 模式导出: %s, view_token: %s",
-        export_type,
-        view_data.get("view_token", "unknown")[:20],
-    )
+    vt = view_data.get("view_token", "unknown")[:20]
+    logger.info(f"Raw export: type={export_type}, view_token={vt}")
 
-    return Response(content=content, media_type="text/plain; charset=utf-8")
+    # 明确设置响应头，提高外部 AI 工具 (Gemini 等) URL fetcher 的兼容性
+    content_bytes = content.encode("utf-8")
+    return Response(
+        content=content_bytes,
+        media_type="text/plain",
+        headers={
+            "Content-Length": str(len(content_bytes)),
+            "Cache-Control": "public, max-age=3600",
+            "X-Content-Type-Options": "nosniff",
+            "X-Robots-Tag": "noindex",
+        },
+    )
 
 
 @router.get("/add_task_by_web", response_class=HTMLResponse)

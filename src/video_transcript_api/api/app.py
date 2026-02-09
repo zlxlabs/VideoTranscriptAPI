@@ -1,7 +1,7 @@
 import asyncio
 import threading
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -34,6 +34,30 @@ def create_app() -> FastAPI:
     static_dir = get_static_dir()
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+    # 调试中间件：记录 /view/ 请求的详细信息，用于排查外部 AI 工具的访问问题
+    @app.middleware("http")
+    async def log_external_access(request: Request, call_next):
+        path = request.url.path
+        if "/view/" in path or "/export/" in path:
+            query = str(request.url.query)
+            ua = request.headers.get("user-agent", "N/A")[:200]
+            cf_ip = request.headers.get("cf-connecting-ip", "N/A")
+            cf_ray = request.headers.get("cf-ray", "N/A")
+            accept = request.headers.get("accept", "N/A")[:100]
+            logger.info(
+                f"[ExternalAccess] {request.method} {path}?{query} | "
+                f"UA: {ua} | CF-IP: {cf_ip} | CF-Ray: {cf_ray} | Accept: {accept}"
+            )
+            response = await call_next(request)
+            ct = response.headers.get("content-type", "N/A")
+            cl = response.headers.get("content-length", "unknown")
+            logger.info(
+                f"[ExternalAccess] Response: {request.method} {path} | "
+                f"status={response.status_code} | content-type={ct} | content-length={cl}"
+            )
+            return response
+        return await call_next(request)
 
     app.include_router(tasks.router)
     app.include_router(audit.router)
