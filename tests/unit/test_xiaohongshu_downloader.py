@@ -741,3 +741,35 @@ class TestDownloadFileFallback:
             result = downloader.download_file("http://cdn1/a.mp4", "test.mp4")
         assert result == "/tmp/file.mp4"
         mock_dl.assert_called_once_with("http://cdn1/a.mp4", "test.mp4")
+
+    def test_cross_video_isolation(self, downloader):
+        """Candidate URLs from different videos must NOT be mixed."""
+        downloader._cached_video_info["video_A"] = {
+            "download_url": "http://cdn1/video_a.mp4",
+            "_candidate_urls": [
+                "http://cdn1/video_a.mp4",
+                "http://cdn2/video_a_backup.mp4",
+            ],
+        }
+        downloader._cached_video_info["video_B"] = {
+            "download_url": "http://cdn1/video_b.mp4",
+            "_candidate_urls": [
+                "http://cdn1/video_b.mp4",
+                "http://cdn2/video_b_backup.mp4",
+            ],
+        }
+
+        tried_urls = []
+
+        def mock_download(url, filename):
+            tried_urls.append(url)
+            return None  # all fail
+
+        with patch.object(BaseDownloader, "download_file", side_effect=mock_download):
+            downloader.download_file("http://cdn1/video_a.mp4", "test.mp4")
+
+        # Should only try video_a URLs, NOT video_b URLs
+        assert "http://cdn1/video_a.mp4" in tried_urls
+        assert "http://cdn2/video_a_backup.mp4" in tried_urls
+        assert "http://cdn1/video_b.mp4" not in tried_urls
+        assert "http://cdn2/video_b_backup.mp4" not in tried_urls

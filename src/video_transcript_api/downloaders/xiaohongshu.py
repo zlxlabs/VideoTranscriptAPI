@@ -617,12 +617,15 @@ class XiaohongshuDownloader(BaseDownloader):
         Returns:
             下载成功返回本地文件路径，失败返回 None。
         """
-        # 收集所有候选 URL（主 URL + 缓存中的备选）
+        # 收集当前视频的候选 URL（主 URL + 缓存中同视频的备选）
         candidate_urls = [url]
         for info in self._cached_video_info.values():
-            for u in info.get("_candidate_urls", []):
-                if u not in candidate_urls:
-                    candidate_urls.append(u)
+            # 仅当主 URL 在该缓存条目的候选列表中时，才采纳其他候选
+            candidates = info.get("_candidate_urls", [])
+            if url in candidates or info.get("download_url") == url:
+                for u in candidates:
+                    if u not in candidate_urls:
+                        candidate_urls.append(u)
 
         if len(candidate_urls) > 1:
             logger.info(
