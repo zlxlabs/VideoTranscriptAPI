@@ -513,6 +513,14 @@ class BaseDownloader(ABC):
                         last_error = ValueError(f"API授权失败: {error_message}")
                         break
 
+                    # 404 表示端点不存在，跳过重试
+                    if response.status_code == 404:
+                        logger.warning(
+                            f"API endpoint not found (404), skipping retry: {url}"
+                        )
+                        last_error = ValueError(error_message)
+                        break
+
                     # 如果是服务器错误，尝试重试
                     if response.status_code >= 500 and attempt < max_retries:
                         logger.warning(f"服务器错误，{retry_delay}秒后重试...")

@@ -97,3 +97,5 @@ tests/output
 
 # Claude Code 临时目录
 tmpclaude-*
+
+tests/unit/data
