@@ -12,6 +12,7 @@ Covers:
 import pytest
 from unittest.mock import patch, MagicMock
 
+from video_transcript_api.downloaders.base import BaseDownloader
 from video_transcript_api.downloaders.xiaohongshu import (
     XiaohongshuDownloader,
     _ENDPOINT_CONFIGS,
@@ -631,8 +632,11 @@ class TestRealWorldResponseFormats:
 
         assert result["video_title"] == "Vibe Coding"
         assert result["author"] == "TestUser"
-        # backup_urls[1] should be preferred (index 1 before index 0 in paths)
-        assert result["download_url"] == "http://sns-v10.good/video.mp4"
+        # backup_urls[0] is preferred (more stable CDN nodes)
+        assert result["download_url"] == "http://sns-v8.bad/video.mp4"
+        # All candidate URLs collected for download fallback
+        assert "http://sns-v10.good/video.mp4" in result["_candidate_urls"]
+        assert len(result["_candidate_urls"]) >= 2
 
     def test_app_note_widgets_context_fallback(self, downloader):
         """Simulate app_note: no video_info_v2, fallback to widgets_context audio."""
@@ -667,3 +671,73 @@ class TestRealWorldResponseFormats:
         assert result["video_title"] == "Audio Only Note"
         assert result["author"] == "NoteAuthor"
         assert result["download_url"] == "http://cdn/audio_track.m4a"
+
+
+class TestDownloadFileFallback:
+    """Test download_file multi-URL fallback logic."""
+
+    def test_first_url_succeeds(self, downloader):
+        """When the primary URL works, no fallback needed."""
+        downloader._cached_video_info["note1"] = {
+            "_candidate_urls": ["http://cdn1/a.mp4", "http://cdn2/b.mp4"],
+        }
+        with patch.object(
+            BaseDownloader, "download_file", return_value="/tmp/file.mp4"
+        ):
+            result = downloader.download_file("http://cdn1/a.mp4", "test.mp4")
+        assert result == "/tmp/file.mp4"
+
+    def test_fallback_to_second_url(self, downloader):
+        """When the first URL fails, fall back to the next candidate."""
+        downloader._cached_video_info["note1"] = {
+            "_candidate_urls": ["http://cdn1/a.mp4", "http://cdn2/b.mp4"],
+        }
+
+        call_count = 0
+
+        def mock_download(url, filename):
+            nonlocal call_count
+            call_count += 1
+            if "cdn1" in url:
+                return None  # first URL fails
+            return "/tmp/file.mp4"
+
+        with patch.object(BaseDownloader, "download_file", side_effect=mock_download):
+            result = downloader.download_file("http://cdn1/a.mp4", "test.mp4")
+
+        assert result == "/tmp/file.mp4"
+        assert call_count == 2
+
+    def test_fallback_on_exception(self, downloader):
+        """ConnectionResetError on first URL should trigger fallback."""
+        downloader._cached_video_info["note1"] = {
+            "_candidate_urls": ["http://cdn1/a.mp4", "http://cdn2/b.mp4"],
+        }
+
+        def mock_download(url, filename):
+            if "cdn1" in url:
+                raise ConnectionError("Connection reset")
+            return "/tmp/file.mp4"
+
+        with patch.object(BaseDownloader, "download_file", side_effect=mock_download):
+            result = downloader.download_file("http://cdn1/a.mp4", "test.mp4")
+
+        assert result == "/tmp/file.mp4"
+
+    def test_all_urls_fail(self, downloader):
+        """When all candidate URLs fail, return None."""
+        downloader._cached_video_info["note1"] = {
+            "_candidate_urls": ["http://cdn1/a.mp4", "http://cdn2/b.mp4"],
+        }
+        with patch.object(BaseDownloader, "download_file", return_value=None):
+            result = downloader.download_file("http://cdn1/a.mp4", "test.mp4")
+        assert result is None
+
+    def test_no_cached_candidates_uses_primary_only(self, downloader):
+        """With no cache, only the primary URL is tried."""
+        with patch.object(
+            BaseDownloader, "download_file", return_value="/tmp/file.mp4"
+        ) as mock_dl:
+            result = downloader.download_file("http://cdn1/a.mp4", "test.mp4")
+        assert result == "/tmp/file.mp4"
+        mock_dl.assert_called_once_with("http://cdn1/a.mp4", "test.mp4")

@@ -47,16 +47,16 @@ _ENDPOINT_CONFIGS: list[dict[str, Any]] = [
 PathKey = Union[str, int]
 
 # 视频 URL 候选提取路径（按优先级，作用于已 unwrap 的笔记数据）
-# 注意：某些 CDN 节点（如 sns-v8）可能不可用，因此同时尝试 backup_urls[0] 和 [1]
+# 多条路径返回不同 CDN 节点的 URL，下载时会逐个尝试以应对单节点故障
 _VIDEO_URL_PATHS: list[Tuple[PathKey, ...]] = [
     # app_video_note: video_info_v2.media.stream.h264
-    ("video_info_v2", "media", "stream", "h264", 0, "backup_urls", 1),
     ("video_info_v2", "media", "stream", "h264", 0, "backup_urls", 0),
     ("video_info_v2", "media", "stream", "h264", 0, "master_url"),
+    ("video_info_v2", "media", "stream", "h264", 0, "backup_urls", 1),
     # web V3/V4 flat: video.media.stream.h264
-    ("video", "media", "stream", "h264", 0, "backup_urls", 1),
     ("video", "media", "stream", "h264", 0, "backup_urls", 0),
     ("video", "media", "stream", "h264", 0, "master_url"),
+    ("video", "media", "stream", "h264", 0, "backup_urls", 1),
     # simple paths
     ("video", "url"),
     ("video_info", "url"),
@@ -436,15 +436,19 @@ class XiaohongshuDownloader(BaseDownloader):
             f"desc_len={len(description)}"
         )
 
-        # 视频 URL
-        video_url = self._extract_first_match(data, _VIDEO_URL_PATHS)
-        if not video_url:
+        # 视频 URL — 收集所有候选以便下载时逐个尝试
+        all_video_urls = self._extract_all_matches(data, _VIDEO_URL_PATHS)
+        if not all_video_urls:
             self._save_debug_response(data, f"no_video_url_{endpoint_name}", note_id)
             raise ValueError(
                 f"[{endpoint_name}] Cannot extract video URL from response"
             )
 
-        logger.info(f"Found video URL via '{endpoint_name}': {str(video_url)[:80]}...")
+        video_url = all_video_urls[0]
+        logger.info(
+            f"Found {len(all_video_urls)} video URL(s) via '{endpoint_name}': "
+            f"{str(video_url)[:80]}..."
+        )
 
         filename = f"xiaohongshu_{note_id}_{int(time.time())}.mp4"
 
@@ -454,6 +458,7 @@ class XiaohongshuDownloader(BaseDownloader):
             "author": author,
             "description": description,
             "download_url": video_url,
+            "_candidate_urls": all_video_urls,
             "filename": filename,
             "platform": "xiaohongshu",
         }
@@ -509,6 +514,28 @@ class XiaohongshuDownloader(BaseDownloader):
             if value is not None and value != "":
                 return value
         return None
+
+    @classmethod
+    def _extract_all_matches(
+        cls, data: Any, paths: list[Tuple[PathKey, ...]]
+    ) -> list[Any]:
+        """提取所有路径的非空值（去重，保持优先级顺序）。
+
+        Args:
+            data: 根数据对象
+            paths: 路径列表
+
+        Returns:
+            所有非 None、非空字符串的值列表（已去重）
+        """
+        seen: set = set()
+        results: list[Any] = []
+        for path in paths:
+            value = cls._extract_by_path(data, path)
+            if value is not None and value != "" and value not in seen:
+                seen.add(value)
+                results.append(value)
+        return results
 
     # ------------------------------------------------------------------
     # 调试文件保存
@@ -575,3 +602,56 @@ class XiaohongshuDownloader(BaseDownloader):
             file_ext=file_ext,
             filename=filename,
         )
+
+    def download_file(self, url: str, filename: str) -> Optional[str]:
+        """下载文件，支持多 CDN URL 回退。
+
+        小红书不同 CDN 节点稳定性差异大（sns-v8/sns-v10 等），单个节点可能
+        因网络环境不同而出现 ConnectionResetError。此处重写父类方法，从缓存
+        中获取所有候选 URL 并逐个尝试，直到成功或全部失败。
+
+        Args:
+            url: 主下载 URL（由 _fetch_download_info 提供）。
+            filename: 期望的本地文件名（含扩展名）。
+
+        Returns:
+            下载成功返回本地文件路径，失败返回 None。
+        """
+        # 收集所有候选 URL（主 URL + 缓存中的备选）
+        candidate_urls = [url]
+        for info in self._cached_video_info.values():
+            for u in info.get("_candidate_urls", []):
+                if u not in candidate_urls:
+                    candidate_urls.append(u)
+
+        if len(candidate_urls) > 1:
+            logger.info(
+                f"Xiaohongshu download: {len(candidate_urls)} candidate URLs available"
+            )
+
+        last_error: Optional[Exception] = None
+        for idx, candidate_url in enumerate(candidate_urls):
+            try:
+                logger.info(
+                    f"Trying URL [{idx + 1}/{len(candidate_urls)}]: "
+                    f"{candidate_url[:100]}..."
+                )
+                result = super().download_file(candidate_url, filename)
+                if result is not None:
+                    return result
+                # download_file 返回 None 表示文件无效，尝试下一个
+                logger.warning(
+                    f"URL [{idx + 1}] returned invalid file, trying next"
+                )
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    f"URL [{idx + 1}] failed: {type(e).__name__}: "
+                    f"{str(e)[:100]}"
+                )
+
+        logger.error(
+            f"All {len(candidate_urls)} candidate URLs failed for "
+            f"xiaohongshu download"
+        )
+        return None
