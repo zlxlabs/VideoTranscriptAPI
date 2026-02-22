@@ -13,9 +13,11 @@ from ..validators.unified_quality_validator import UnifiedQualityValidator
 from ..segmenters.dialog_segmenter import DialogSegmenter
 from ..prompts import (
     STRUCTURED_CALIBRATE_SYSTEM_PROMPT,
+    STRUCTURED_CALIBRATE_SYSTEM_PROMPT_EN,
     build_structured_calibrate_user_prompt,
 )
 from ..schemas import CALIBRATION_RESULT_SCHEMA
+from ..utils.language_detector import detect_language
 
 logger = setup_logger(__name__)
 
@@ -77,6 +79,11 @@ class SpeakerAwareProcessor:
             f"Start processing speaker-aware text: {title}, dialog count: {len(base_dialogs)}, total length: {total_length}"
         )
 
+        # 步骤0: 检测语言
+        dialog_text_sample = " ".join(d.get("text", "") for d in base_dialogs[:50])
+        detected_language = detect_language(dialog_text_sample)
+        logger.info(f"Detected language: {detected_language}")
+
         # 步骤1: 提取关键信息
         key_info = self.key_info_extractor.extract(
             title=title,
@@ -121,6 +128,7 @@ class SpeakerAwareProcessor:
             title=title,
             description=description,
             selected_models=selected_models,
+            language=detected_language,
         )
 
         # 合并校对结果（不再进行整体验证）
@@ -322,6 +330,7 @@ class SpeakerAwareProcessor:
         title: str,
         description: str,
         selected_models: Optional[Dict],
+        language: str = "zh",
     ) -> List[List[Dict]]:
         """校对分块对话（并发处理，每块独立验证）
 
@@ -333,6 +342,7 @@ class SpeakerAwareProcessor:
             title: 视频标题
             description: 描述
             selected_models: 选定的模型
+            language: 检测到的语言（"zh" 或 "en"）
 
         Returns:
             校对后的分块列表（包含成功+降级的混合结果）
@@ -342,6 +352,12 @@ class SpeakerAwareProcessor:
 
         # 格式化关键信息
         key_info_text = key_info.format_for_prompt()
+
+        # 根据语言选择 system prompt
+        structured_system_prompt = (
+            STRUCTURED_CALIBRATE_SYSTEM_PROMPT_EN if language == "en"
+            else STRUCTURED_CALIBRATE_SYSTEM_PROMPT
+        )
 
         calibrated_chunks = [None] * len(chunks)
 
@@ -369,12 +385,13 @@ class SpeakerAwareProcessor:
                         key_info=key_info_text,
                         dialog_count=len(chunk),
                         min_ratio=self.config.min_calibrate_ratio,
+                        language=language,
                     )
 
                     # 调用 LLM（结构化输出）
                     response = self.llm_client.call(
                         model=model,
-                        system_prompt=STRUCTURED_CALIBRATE_SYSTEM_PROMPT,
+                        system_prompt=structured_system_prompt,
                         user_prompt=user_prompt,
                         response_schema=CALIBRATION_RESULT_SCHEMA,
                         reasoning_effort=reasoning_effort,

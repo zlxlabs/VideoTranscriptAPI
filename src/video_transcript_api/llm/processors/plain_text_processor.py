@@ -13,8 +13,10 @@ from ..validators.unified_quality_validator import UnifiedQualityValidator
 from ..segmenters.text_segmenter import TextSegmenter
 from ..prompts import (
     CALIBRATE_SYSTEM_PROMPT,
+    CALIBRATE_SYSTEM_PROMPT_EN,
     build_calibrate_user_prompt,
 )
+from ..utils.language_detector import detect_language
 
 logger = setup_logger(__name__)
 
@@ -69,6 +71,10 @@ class PlainTextProcessor:
         """
         logger.info(f"Start processing plain text: {title}, length: {len(text)}")
 
+        # 步骤0: 检测语言
+        detected_language = detect_language(text)
+        logger.info(f"Detected language: {detected_language}")
+
         # 步骤1: 提取关键信息
         key_info = self.key_info_extractor.extract(
             title=title,
@@ -95,6 +101,7 @@ class PlainTextProcessor:
             title=title,
             description=description,
             selected_models=selected_models,
+            language=detected_language,
         )
 
         # 合并校对结果（分段级检查已完成，无需全局检查）
@@ -122,6 +129,7 @@ class PlainTextProcessor:
         title: str,
         description: str,
         selected_models: Optional[Dict],
+        language: str = "zh",
     ) -> List[str]:
         """校对分段文本（并发处理）
 
@@ -131,6 +139,7 @@ class PlainTextProcessor:
             title: 视频标题
             description: 描述
             selected_models: 选定的模型
+            language: 检测到的语言（"zh" 或 "en"）
 
         Returns:
             校对后的分段列表
@@ -140,6 +149,9 @@ class PlainTextProcessor:
 
         # 格式化关键信息
         key_info_text = key_info.format_for_prompt()
+
+        # 根据语言选择 system prompt
+        system_prompt = CALIBRATE_SYSTEM_PROMPT_EN if language == "en" else CALIBRATE_SYSTEM_PROMPT
 
         calibrated_segments = [None] * len(segments)
 
@@ -155,11 +167,12 @@ class PlainTextProcessor:
                     video_title=title,
                     description=description,
                     key_info=key_info_text,
+                    language=language,
                 )
 
                 response = self.llm_client.call(
                     model=model,
-                    system_prompt=CALIBRATE_SYSTEM_PROMPT,
+                    system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     reasoning_effort=reasoning_effort,
                     task_type="calibrate_segment",
@@ -189,11 +202,18 @@ class PlainTextProcessor:
                         f"Segment {index + 1} too short: ratio {ratio:.2f} < {force_retry_ratio}, retrying..."
                     )
 
-                    retry_hint = (
-                        f"上一次校对结果过短（{calibrated_length} 字符），"
-                        f"而原文有 {original_length} 字符。"
-                        f"请确保保留所有实质性内容，不要大段删减。"
-                    )
+                    if language == "en":
+                        retry_hint = (
+                            f"Previous proofread result was too short ({calibrated_length} chars), "
+                            f"while the original has {original_length} chars. "
+                            f"Please ensure all substantive content is preserved, do not condense."
+                        )
+                    else:
+                        retry_hint = (
+                            f"上一次校对结果过短（{calibrated_length} 字符），"
+                            f"而原文有 {original_length} 字符。"
+                            f"请确保保留所有实质性内容，不要大段删减。"
+                        )
 
                     user_prompt_retry = build_calibrate_user_prompt(
                         transcript=segment,
@@ -201,11 +221,12 @@ class PlainTextProcessor:
                         description=description,
                         key_info=key_info_text,
                         retry_hint=retry_hint,
+                        language=language,
                     )
 
                     response_retry = self.llm_client.call(
                         model=model,
-                        system_prompt=CALIBRATE_SYSTEM_PROMPT,
+                        system_prompt=system_prompt,
                         user_prompt=user_prompt_retry,
                         reasoning_effort=reasoning_effort,
                         task_type="calibrate_segment_retry",
