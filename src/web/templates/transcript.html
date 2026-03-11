@@ -54,10 +54,12 @@
         <button class="quick-copy-btn" data-path="/view/{{ view_token }}?raw=calibrated" title="复制 Raw 校对文本 URL">
             <span class="quick-copy-label">Raw 校对文本</span>
             <span class="quick-copy-action">复制 URL</span>
+            <span class="quick-copy-desc">纯文本，粘贴到 ChatGPT / Claude 直接读取</span>
         </button>
         <button class="quick-copy-btn" data-path="/view/{{ view_token }}?page=calibrated" title="复制 HTML 校对页面 URL">
             <span class="quick-copy-label">HTML 校对页面</span>
             <span class="quick-copy-action">复制 URL</span>
+            <span class="quick-copy-desc">带标题的 HTML，供 NotebookLM 等工具爬取</span>
         </button>
     </div>
     {% endif %}

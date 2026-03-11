@@ -712,10 +712,12 @@
         }
 
         .quick-copy-btn {
-            display: inline-flex;
+            display: inline-grid;
+            grid-template-columns: 1fr auto;
+            grid-template-rows: auto auto;
             align-items: center;
-            gap: 8px;
-            padding: 6px 14px;
+            gap: 2px 8px;
+            padding: 8px 14px;
             border: 1px solid var(--border-primary);
             border-radius: 6px;
             background: var(--bg-primary);
@@ -723,6 +725,7 @@
             font-size: 0.85rem;
             cursor: pointer;
             transition: all 0.15s ease;
+            text-align: left;
         }
 
         .quick-copy-btn:hover {
@@ -748,10 +751,21 @@
             color: #667eea;
             border-left: 1px solid var(--border-primary);
             padding-left: 8px;
+            grid-row: 1 / 3;
+            grid-column: 2;
+            align-self: center;
         }
 
         .quick-copy-btn.copied .quick-copy-action {
             color: #10b981;
+        }
+
+        .quick-copy-desc {
+            grid-column: 1;
+            font-size: 0.72rem;
+            color: var(--text-secondary);
+            opacity: 0.7;
+            font-weight: 400;
         }
 
         /* 深色主题适配 */
