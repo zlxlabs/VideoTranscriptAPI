@@ -906,7 +906,7 @@ async def view_transcript(
 
         return templates.TemplateResponse(
             "transcript.html",
-            {"request": request, **view_data, "stats": stats},
+            {"request": request, **view_data, "view_token": view_token, "stats": stats},
         )
 
     except Exception as exc:
