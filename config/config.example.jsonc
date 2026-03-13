@@ -141,6 +141,22 @@
         "min_calibrate_ratio": 0.8,      // 校对后文本长度/原文长度的最小比例，低于则视为异常
 
         // ------------------------------------------------------
+        // 统一质量验证配置（新增）
+        // ------------------------------------------------------
+        "quality_validation": {
+            "score_weights": {
+                "accuracy": 0.40,
+                "completeness": 0.30,
+                "fluency": 0.20,
+                "format": 0.10
+            },
+            "quality_threshold": {
+                "overall_score": 8.0,
+                "minimum_single_score": 7.0
+            }
+        },
+
+        // ------------------------------------------------------
         // 分段处理配置
         // 【触发条件】文本长度 >= enable_threshold 且 use_speaker_recognition=false
         // 【适用场景】
@@ -153,7 +169,12 @@
             "segment_size": 8000,        // 每段的目标大小
             "max_segment_size": 12000,   // 每段的最大大小（避免截断句子时超出）
             "concurrent_workers": 10,    // 并发处理的段落数
-            "min_segment_ratio": 0.8     // 分段处理后长度/原长度的最小比例
+            "quality_validation": {
+                "enabled": true,         // 默认开启
+                "pass_ratio": 0.7,       // 绿灯区阈值
+                "force_retry_ratio": 0.5,// 红灯区阈值
+                "fallback_strategy": "best_quality"
+            }
         },
 
         // ------------------------------------------------------
@@ -169,16 +190,10 @@
             "preferred_chunk_length": 2000,  // 首选块长度（尽量接近此值分块）
             "max_calibration_retries": 2,    // 单块校对失败的最大重试次数
             "calibration_concurrent_limit": 10,  // 并发校对的块数
-            "quality_threshold": {
-                "overall_score": 8.0,    // 校对质量整体分数阈值（0-10）
-                "minimum_single_score": 7.0  // 单项（流畅度/准确度等）最低分
-            },
-            "enable_validation": true,   // 是否对校对结果进行质量验证
-            "fallback_to_original": true,    // 校对失败时是否回退到原文
-            "validator_model": "deepseek-chat",   // 质量验证使用的模型
-            "validator_reasoning_effort": null,  // null=不支持, "none"=关闭, "low"/"medium"/"high"
-            "risk_validator_model": "gpt-4.1-mini",      // 风险内容校验使用的模型（可选，为空则不切换）
-            "risk_validator_reasoning_effort": null  // 风险校验模型的 reasoning_effort
+            "quality_validation": {
+                "enabled": false,        // 默认关闭
+                "fallback_strategy": "best_quality"
+            }
         },
 
         // ------------------------------------------------------

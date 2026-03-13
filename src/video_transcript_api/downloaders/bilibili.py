@@ -6,7 +6,9 @@ import datetime
 import subprocess
 import platform
 import shutil
+import requests
 from .base import BaseDownloader, get_temp_manager
+from .models import VideoMetadata, DownloadInfo
 from ..utils.logging import setup_logger
 from ..utils import create_debug_dir
 
@@ -18,6 +20,10 @@ class BilibiliDownloader(BaseDownloader):
     """
     Bilibili视频下载器
     """
+    def __init__(self):
+        super().__init__()
+        self._cached_video_info: dict[str, dict] = {}
+        self._cached_metadata: dict[str, dict] = {}  # 缓存官方API的元数据
 
     def can_handle(self, url):
         """
@@ -82,6 +88,100 @@ class BilibiliDownloader(BaseDownloader):
         """
         return self._extract_video_id(url)
 
+    def _fetch_bilibili_official_metadata(self, bvid: str) -> dict:
+        """
+        调用Bilibili官方API获取视频元数据
+
+        这个方法用于获取视频的完整元数据，包括标题、简介、作者等信息。
+        API 无需登录即可访问公开视频的信息。
+
+        参数:
+            bvid: 视频的BV号（如 BV1zW2vB2Ey2）
+
+        返回:
+            dict: 包含以下字段的字典：
+                - title (str): 视频标题
+                - description (str): 视频简介
+                - author (str): 作者昵称
+                - author_id (int): 作者mid
+                - duration (int): 视频时长（秒）
+                - pubdate (int): 发布时间戳
+            如果获取失败，返回空字典
+        """
+        # 检查实例级缓存
+        if bvid in self._cached_metadata:
+            logger.debug(f"[实例缓存命中] 使用缓存的B站官方元数据: {bvid}")
+            return self._cached_metadata[bvid]
+
+        api_url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
+
+        # 构造请求头，模拟浏览器访问
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Referer": f"https://www.bilibili.com/video/{bvid}",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+
+        try:
+            logger.info(f"调用B站官方API获取元数据: bvid={bvid}")
+            response = requests.get(api_url, headers=headers, timeout=5.0)
+            response.raise_for_status()
+
+            data = response.json()
+
+            # 检查API返回状态
+            if data.get("code") != 0:
+                logger.warning(
+                    f"B站官方API返回错误: code={data.get('code')}, "
+                    f"message={data.get('message', '未知错误')}"
+                )
+                return {}
+
+            # 提取视频数据
+            video_data = data.get("data", {})
+            if not video_data:
+                logger.warning(f"B站官方API返回数据为空: bvid={bvid}")
+                return {}
+
+            # 构造元数据字典
+            metadata = {
+                "title": video_data.get("title", ""),
+                "description": video_data.get("desc", ""),
+                "author": video_data.get("owner", {}).get("name", ""),
+                "author_id": video_data.get("owner", {}).get("mid", ""),
+                "duration": video_data.get("duration", 0),
+                "pubdate": video_data.get("pubdate", 0),
+            }
+
+            logger.info(
+                f"成功获取B站官方元数据: 标题='{metadata['title']}', "
+                f"作者='{metadata['author']}', "
+                f"简介长度={len(metadata['description'])} 字符"
+            )
+
+            # 缓存结果（实例级缓存）
+            self._cached_metadata[bvid] = metadata
+
+            return metadata
+
+        except requests.exceptions.Timeout:
+            logger.warning(f"调用B站官方API超时: bvid={bvid}")
+            return {}
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"调用B站官方API网络异常: {e}")
+            return {}
+        except json.JSONDecodeError as e:
+            logger.warning(f"解析B站官方API响应失败: {e}")
+            return {}
+        except Exception as e:
+            logger.error(f"获取B站官方元数据时发生未知错误: {e}")
+            return {}
+
     def _get_video_info_bbdown(self, url):
         """
         使用BBDown获取视频信息并下载
@@ -129,25 +229,25 @@ class BilibiliDownloader(BaseDownloader):
             # 提取分P号
             page_num = self._extract_page_number(url)
 
-            # 在Windows上，使用完整的命令字符串
+            # 统一使用列表形式执行命令（避免 shell=True 带来的命令注入风险）
             if system_platform == "windows":
-                cmd = f'"{bbdown_path}" "{url}" -p {page_num}'
+                download_args = [bbdown_path, url, "-p", str(page_num)]
                 if audio_only:
-                    cmd += " --audio-only"
-                logger.info(f"执行BBDown命令: {cmd}")
+                    download_args.append("--audio-only")
 
-                # 在Windows上使用shell=True执行命令
+                logger.info(f"执行BBDown命令: {' '.join(download_args)}")
                 timeout = bbdown_config.get("timeout", 300)
+
                 try:
                     process = subprocess.run(
-                        cmd,
+                        download_args,
                         cwd=temp_dir,
-                        shell=True,
+                        shell=False,
                         check=True,
                         capture_output=True,
                         text=True,
-                        encoding="utf-8",  # 显式指定UTF-8编码
-                        errors="replace",  # 替换无法解码的字符
+                        encoding="utf-8",
+                        errors="replace",
                         timeout=timeout,
                     )
 
@@ -485,15 +585,27 @@ class BilibiliDownloader(BaseDownloader):
         返回:
             dict: 包含视频信息的字典
         """
+        try:
+            bv_id = self._extract_video_id(url)
+            if bv_id in self._cached_video_info:
+                logger.debug(f"[实例缓存命中] 使用缓存的视频信息: {bv_id}")
+                return self._cached_video_info[bv_id]
+        except Exception:
+            bv_id = None
+
         # 判断是否使用BBDown下载
         use_bbdown = self.config.get("bbdown", {}).get("use_bbdown", False)
 
         if use_bbdown:
             logger.info("使用BBDown下载Bilibili视频")
-            return self._get_video_info_bbdown(url)
+            result = self._get_video_info_bbdown(url)
         else:
             logger.info("使用API获取Bilibili视频信息")
-            return self._get_video_info_api(url)
+            result = self._get_video_info_api(url)
+
+        if bv_id:
+            self._cached_video_info[bv_id] = result
+        return result
 
     def download_file(self, url, filename):
         """
@@ -526,3 +638,69 @@ class BilibiliDownloader(BaseDownloader):
         """
         # 直接返回None，跳过尝试获取字幕步骤
         return None
+
+    def _fetch_metadata(self, url: str, video_id: str) -> VideoMetadata:
+        """
+        获取视频元数据
+
+        优先使用B站官方API获取完整元数据（包括description），
+        然后用下载器API/BBDown的结果补充或覆盖某些字段。
+
+        参数:
+            url: 视频URL
+            video_id: 视频ID（BV号）
+
+        返回:
+            VideoMetadata: 标准化的视频元数据对象
+        """
+        # 1. 首先尝试从官方API获取完整元数据
+        official_metadata = self._fetch_bilibili_official_metadata(video_id)
+
+        # 2. 获取下载器信息（TikHub API 或 BBDown）
+        info = self.get_video_info(url)
+
+        # 3. 合并元数据，优先使用官方API的数据
+        # 如果官方API获取失败，则使用下载器提供的数据作为回退
+        title = official_metadata.get("title") or info.get("video_title", "")
+        author = official_metadata.get("author") or info.get("author", "")
+        description = official_metadata.get("description", "")  # description 只能从官方API获取
+        duration = official_metadata.get("duration")
+
+        # 构造 extra 字段
+        extra = {}
+        if "cid" in info:
+            extra["cid"] = info.get("cid")
+        if official_metadata.get("author_id"):
+            extra["author_id"] = official_metadata.get("author_id")
+        if official_metadata.get("pubdate"):
+            extra["pubdate"] = official_metadata.get("pubdate")
+
+        logger.info(
+            f"合并元数据完成: 标题='{title[:30]}...', "
+            f"作者='{author}', "
+            f"简介={'有' if description else '无'}"
+        )
+
+        return VideoMetadata(
+            video_id=info.get("video_id", video_id),
+            platform=info.get("platform", "bilibili"),
+            title=title,
+            author=author,
+            description=description,
+            duration=duration,
+            extra=extra,
+        )
+
+    def _fetch_download_info(self, url: str, video_id: str) -> DownloadInfo:
+        info = self.get_video_info(url)
+        filename = info.get("filename")
+        file_ext = None
+        if filename and "." in filename:
+            file_ext = filename.rsplit(".", 1)[-1]
+        return DownloadInfo(
+            download_url=info.get("download_url"),
+            file_ext=file_ext,
+            filename=filename,
+            local_file=info.get("local_file"),
+            downloaded=bool(info.get("downloaded")),
+        )

@@ -1,3 +1,4 @@
+import html
 import re
 import json
 import os
@@ -254,8 +255,12 @@ class DialogRenderer:
                 content = dialog.get("text", dialog.get("content", ""))
                 color = self.get_speaker_color(speaker, speakers)
 
-                # 智能分段处理
-                smart_content = self.smart_paragraph_split(content)
+                # 安全转义：防止 XSS
+                safe_speaker = html.escape(speaker)
+                safe_content = html.escape(content)
+
+                # 智能分段处理（在转义后的文本上操作）
+                smart_content = self.smart_paragraph_split(safe_content)
 
                 # 处理内容中的换行，为段落间增加特殊样式类
                 content_html = smart_content.replace(
@@ -267,7 +272,7 @@ class DialogRenderer:
                 html_parts.append(f"""
                 <div class="dialog-item">
                     <div class="speaker-tag" style="background-color: {color};">
-                        {speaker}
+                        {safe_speaker}
                     </div>
                     <div class="dialog-content">
                         {content_html}
@@ -316,8 +321,9 @@ class DialogRenderer:
         except Exception as e:
             logger.warning(f"Markdown渲染失败，降级到普通文本处理: {e}")
 
-        # 降级到简单的段落处理
-        paragraphs = text.split("\n\n")
+        # 降级到简单的段落处理（转义防 XSS）
+        safe_text = html.escape(text)
+        paragraphs = safe_text.split("\n\n")
         html_parts = []
 
         for paragraph in paragraphs:
@@ -330,7 +336,7 @@ class DialogRenderer:
         if html_parts:
             return "\n".join(html_parts)
         else:
-            return f"<p>{text.replace(chr(10), '<br>')}</p>"
+            return f"<p>{safe_text.replace(chr(10), '<br>')}</p>"
 
     def _get_optimal_rendering_strategy(self, cache_dir: str) -> str:
         """
@@ -390,14 +396,18 @@ class DialogRenderer:
                 content = dialog.get("text", dialog.get("content", ""))
                 color = self.get_speaker_color(speaker, speakers)
 
-                # 获取开始时间
-                start_time = dialog.get("start_time", "")
+                # 安全转义：防止 XSS
+                safe_speaker = html.escape(speaker)
+                safe_content = html.escape(content)
+
+                # 获取开始时间（转义）
+                start_time = html.escape(dialog.get("start_time", ""))
                 time_display = (
                     f'<span class="time-tag">{start_time}</span>' if start_time else ""
                 )
 
-                # 智能分段处理
-                smart_content = self.smart_paragraph_split(content)
+                # 智能分段处理（在转义后的文本上操作）
+                smart_content = self.smart_paragraph_split(safe_content)
 
                 # 处理内容中的换行，为段落间增加特殊样式类
                 content_html = smart_content.replace(
@@ -410,7 +420,7 @@ class DialogRenderer:
                 <div class="dialog-item">
                     <div class="speaker-header">
                         <div class="speaker-tag" style="background-color: {color};">
-                            {speaker}
+                            {safe_speaker}
                         </div>
                         {time_display}
                     </div>

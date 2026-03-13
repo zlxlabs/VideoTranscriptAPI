@@ -11,6 +11,7 @@ from pathlib import Path
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, VideoUnavailable, IpBlocked, NoTranscriptFound
 from .base import BaseDownloader
+from .models import VideoMetadata, DownloadInfo
 from ..utils.logging import setup_logger
 from ..utils import create_debug_dir
 from ..utils.ytdlp import YtdlpConfigBuilder
@@ -35,6 +36,11 @@ class YoutubeDownloader(BaseDownloader):
         # 延迟初始化 YouTube API Server 客户端
         self._youtube_api_client = None
         self._init_youtube_api_client()
+
+        # 🆕 实例级缓存（生命周期 = 任务生命周期）
+        # 用途：避免同一任务内的重复 TikHub API 请求
+        # 场景：get_video_info() 和 _get_subtitle_with_tikhub_api() 复用同一次 API 响应
+        self._cached_video_info: dict[str, dict] = {}
 
     @property
     def ytdlp_builder(self) -> YtdlpConfigBuilder:
@@ -240,6 +246,8 @@ class YoutubeDownloader(BaseDownloader):
         """
         获取视频信息，直接使用 TikHub API（避免 yt-dlp 触发机器人风控）
 
+        使用实例级缓存避免重复 API 请求（任务内有效）
+
         参数:
             url: 视频URL
 
@@ -250,8 +258,13 @@ class YoutubeDownloader(BaseDownloader):
             # 提取视频ID
             video_id = self._extract_video_id(url)
 
-            # 使用 TikHub API 获取视频信息
-            logger.info(f"使用 TikHub API 获取 YouTube 视频信息: {video_id}")
+            # 🆕 检查实例缓存（避免同一任务内的重复请求）
+            if video_id in self._cached_video_info:
+                logger.debug(f"[实例缓存命中] 使用缓存的视频信息: {video_id}")
+                return self._cached_video_info[video_id]
+
+            # 实例缓存未命中，调用 TikHub API
+            logger.info(f"[API请求] 调用 TikHub API 获取 YouTube 视频信息: {video_id}")
             endpoint = f"/api/v1/youtube/web/get_video_info"
             params = {"video_id": video_id}
             
@@ -372,7 +385,10 @@ class YoutubeDownloader(BaseDownloader):
                 "subtitle_info": subtitle_info,
                 "download_method": "tikhub"
             }
-            
+
+            # 🆕 缓存到实例变量（仅在当前任务内有效，任务结束自动释放）
+            self._cached_video_info[video_id] = result
+            logger.info(f"[缓存保存] 视频信息已缓存到实例: {video_id}")
             logger.info(f"成功获取YouTube视频信息: ID={video_id}, 文件类型={file_ext}")
             return result
                 
@@ -471,6 +487,73 @@ class YoutubeDownloader(BaseDownloader):
         except Exception as e:
             logger.exception(f"[字幕获取] 异常: {str(e)}")
             return None
+
+    def _fetch_metadata(self, url: str, video_id: str) -> VideoMetadata:
+        if self.use_api_server:
+            try:
+                result = self._youtube_api_client.fetch_video_info(video_id)
+                info = result.video_info
+                title = info.title or f"youtube_{video_id}"
+                author = info.author or ""
+                description = info.description or ""
+
+                extra = {
+                    "duration": info.duration,
+                    "channel_id": info.channel_id,
+                    "upload_date": info.upload_date,
+                    "view_count": info.view_count,
+                    "thumbnail": info.thumbnail,
+                    "cached": result.cached,
+                    "metadata_source": result.metadata_source,
+                    "fetched_at": result.fetched_at,
+                }
+
+                logger.info(
+                    f"[youtube-api] Metadata fetched: video_id={result.video_id}, "
+                    f"title={title[:50]}"
+                )
+                return VideoMetadata(
+                    video_id=result.video_id or video_id,
+                    platform="youtube",
+                    title=title,
+                    author=author,
+                    description=description,
+                    extra=extra,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[youtube-api] Metadata fetch failed, fallback to TikHub: {e}"
+                )
+
+        info = self.get_video_info(url)
+        extra = {}
+        if "subtitle_info" in info:
+            extra["subtitle_info"] = info.get("subtitle_info")
+        return VideoMetadata(
+            video_id=info.get("video_id", video_id),
+            platform=info.get("platform", "youtube"),
+            title=info.get("video_title", ""),
+            author=info.get("author", ""),
+            description=info.get("description", ""),
+            extra=extra,
+        )
+
+    def _fetch_download_info(self, url: str, video_id: str) -> DownloadInfo:
+        info = self.get_video_info(url)
+        filename = info.get("filename")
+        file_ext = None
+        if filename and "." in filename:
+            file_ext = filename.rsplit(".", 1)[-1]
+        extra = {}
+        if info.get("download_method"):
+            extra["download_method"] = info.get("download_method")
+        return DownloadInfo(
+            download_url=info.get("download_url"),
+            file_ext=file_ext,
+            filename=filename,
+            subtitle_url=None,
+            extra=extra,
+        )
     
     def _fetch_youtube_transcript(self, video_id):
         """
@@ -560,9 +643,22 @@ class YoutubeDownloader(BaseDownloader):
     def _get_subtitle_with_tikhub_api(self, url):
         """
         使用原有的 TikHub API 获取字幕作为备用方案
+
+        🆕 优化：复用实例缓存的 video_info，避免重复 TikHub API 请求
+        （在同一任务内，get_video_info 通常已被调用）
         """
         try:
-            video_info = self.get_video_info(url)
+            video_id = self._extract_video_id(url)
+
+            # 🆕 优先复用实例缓存（避免重复 API 请求）
+            if video_id in self._cached_video_info:
+                logger.debug(f"[实例缓存命中] 复用 video_info，避免重复 API 请求: {video_id}")
+                video_info = self._cached_video_info[video_id]
+            else:
+                # 如果缓存不存在，首次调用 get_video_info（会自动缓存）
+                logger.info(f"[实例缓存未命中] 调用 get_video_info: {video_id}")
+                video_info = self.get_video_info(url)
+
             subtitle_info = video_info.get("subtitle_info")
             
             if not subtitle_info or not subtitle_info.get("url"):

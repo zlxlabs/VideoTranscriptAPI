@@ -5,14 +5,10 @@
 """
 import os
 import sys
-import json
-
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(project_root, "src"))
 
 from video_transcript_api.utils.logging import load_config
-from video_transcript_api.utils.llm import EnhancedLLMProcessor
-
 def test_notification_logic():
     """测试通知逻辑"""
     print("开始测试企微通知优化功能")
@@ -24,8 +20,6 @@ def test_notification_logic():
         print("[错误] 无法加载配置文件")
         return
     
-    # 创建增强LLM处理器
-    enhanced_llm_processor = EnhancedLLMProcessor(config)
     segmentation_config = config.get('llm', {}).get('segmentation', {})
     if not segmentation_config or 'enable_threshold' not in segmentation_config:
         print("[错误] 配置文件中缺少 llm.segmentation.enable_threshold 配置项")

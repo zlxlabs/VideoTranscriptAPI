@@ -4,6 +4,7 @@ import json
 import time
 import datetime
 from .base import BaseDownloader
+from .models import VideoMetadata, DownloadInfo
 from ..utils.logging import setup_logger
 from ..utils import create_debug_dir
 
@@ -16,6 +17,10 @@ class DouyinDownloader(BaseDownloader):
     """
     抖音视频下载器
     """
+    def __init__(self):
+        super().__init__()
+        self._cached_video_info: dict[str, dict] = {}
+
     def can_handle(self, url):
         """
         判断是否可以处理该URL
@@ -86,6 +91,11 @@ class DouyinDownloader(BaseDownloader):
         try:
             # 提取视频ID
             aweme_id = self._extract_aweme_id(url)
+
+            # 实例缓存命中
+            if aweme_id in self._cached_video_info:
+                logger.debug(f"[实例缓存命中] 使用缓存的视频信息: {aweme_id}")
+                return self._cached_video_info[aweme_id]
             
             # 调用API获取视频信息
             endpoint = f"/api/v1/douyin/web/fetch_one_video"
@@ -242,7 +252,8 @@ class DouyinDownloader(BaseDownloader):
                 "filename": filename,
                 "platform": "douyin"
             }
-            
+
+            self._cached_video_info[aweme_id] = result
             logger.info(f"成功获取抖音视频信息: ID={aweme_id}, 文件类型={file_ext}")
             return result
                 
@@ -262,3 +273,25 @@ class DouyinDownloader(BaseDownloader):
         """
         # 直接返回None，跳过尝试获取字幕步骤
         return None 
+
+    def _fetch_metadata(self, url: str, video_id: str) -> VideoMetadata:
+        info = self.get_video_info(url)
+        return VideoMetadata(
+            video_id=info.get("video_id", video_id),
+            platform=info.get("platform", "douyin"),
+            title=info.get("video_title", ""),
+            author=info.get("author", ""),
+            description=info.get("description", ""),
+        )
+
+    def _fetch_download_info(self, url: str, video_id: str) -> DownloadInfo:
+        info = self.get_video_info(url)
+        filename = info.get("filename")
+        file_ext = None
+        if filename and "." in filename:
+            file_ext = filename.rsplit(".", 1)[-1]
+        return DownloadInfo(
+            download_url=info.get("download_url"),
+            file_ext=file_ext,
+            filename=filename,
+        )

@@ -14,7 +14,7 @@ import os
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, project_root)
 
-from src.video_transcript_api.utils.risk_control import TextSanitizer
+from src.video_transcript_api.risk_control import TextSanitizer
 
 
 def test_general_text_sanitization():

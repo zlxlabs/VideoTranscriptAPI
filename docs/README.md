@@ -14,11 +14,20 @@ docs/
 │   └── multi_user_setup.md    # 多用户系统配置
 ├── development/         # 开发文档（面向开发者）
 │   ├── llm/              # LLM 开发指南
-│   ├── platforms/        # 平台适配开发
+│   │   ├── engineering_guide.md           # LLM 工程指南（核心参考）
+│   │   ├── refactoring_plan.md           # 重构方案设计
+│   │   ├── refactoring_completed.md     # 重构完成报告
+│   │   ├── summary_feature_design.md     # 总结功能设计
+│   │   ├── structured_calibration_guide.md # 结构化校对指南
+│   │   ├── gemini_openai_compat.md       # Gemini OpenAI 兼容性
+│   │   ├── json_output.md                # JSON 输出说明
+│   │   └── manus_context_engineering.md  # Manus 上下文工程
 │   ├── concurrency.md    # 并发处理架构
 │   ├── logging.md        # 日志系统指南
 │   ├── risk_control.md   # 风控模块指南
-│   └── web_view.md       # Web 视图指南
+│   ├── web_view.md       # Web 视图指南
+│   └── archive/          # 文档归档（已完成的文档）
+│       └── README.md     # 归档说明
 ├── features/            # 功能特性文档
 │   └── raw_export.md     # 原始导出功能
 └── samples/             # 示例文件
@@ -63,54 +72,75 @@ docs/
 
 ### LLM 相关
 
-- [LLM 工程指南](development/llm/engineering_guide.md)
+- [LLM 工程指南](docs/development/llm/engineering_guide.md)
   - 基础架构设计
   - Prompt 工程与 Prefix Cache 优化
   - 结构化输出（JSON）
   - Reasoning Effort 配置
   - 错误处理与可观测性
 
-- [Manus 上下文工程](development/llm/manus_context_engineering.md)
+- [LLM 重构方案](docs/development/archive/refactoring_plan.md)
+  - 模块化架构设计方案
+  - 统一校对思路
+  - 核心组件设计
+
+- [LLM 重构完成报告](docs/development/archive/refactoring_completed.md)
+  - 重构实施总结
+  - 测试结果
+  - 使用示例
+
+- [LLM 总结功能设计](docs/development/archive/summary_feature_design.md)
+  - 总结功能恢复设计
+  - 架构对比
+  - 实施步骤
+
+- [结构化校对指南](docs/development/llm/structured_calibration_guide.md)
+  - 结构化校对流程
+  - 配置说明
+  - 使用示例
+
+- [Manus 上下文工程](docs/development/llm/manus_context_engineering.md)
   - KV 缓存优化
   - 状态机管理
   - 文件系统作为上下文
   - 注意力操控
 
-- [Gemini OpenAI 兼容](development/llm/gemini_openai_compat.md)
+- [Gemini OpenAI 兼容](docs/development/llm/gemini_openai_compat.md)
   - Gemini API 的 OpenAI 兼容模式
   - Thinking 配置
 
-- [JSON 输出模式](development/llm/json_output.md)
+- [JSON 输出模式](docs/development/llm/json_output.md)
   - JSON Schema 结构化输出
   - 模式选择与配置
   - Self-Correction 重试机制
-
-- [JSON Schema 升级计划](development/llm/json_schema_upgrade_plan.md)
-  - 现状分析
-  - 架构设计
-  - 实现步骤
 
 ### 并发处理
 
 - [并发处理架构](development/concurrency.md)
   - 双队列架构设计
   - LLM 并发调度
-  - 转录文本处理流水线
-  - 性能优化
-
-### 平台适配
-
-- [通用 URL 功能](development/platforms/generic_url.md)
-  - 通用下载器设计
-  - URL 去重处理
-
-- [URL 去重](development/platforms/url_deduplication.md)
-  - 去重策略
-  - 缓存管理
-
+   - 转录文本处理流水线
+   - 性能优化
+ 
 ### 其他开发
-
+ 
 - [日志系统](development/logging.md)
+  - Loguru 使用指南
+  - 日志配置
+  - FunASR 日志说明
+ 
+### 文档归档
+
+- [文档归档目录](development/archive/)
+  - 已完成的文档（LLM 重构、架构优化、模块迁移）
+  - 归档说明和维护原则
+
+  **重要归档文档**：
+  - [LLM 重构方案](development/archive/refactoring_plan.md)
+  - [LLM 重构完成报告](development/archive/refactoring_completed.md)
+  - [LLM 总结功能设计](development/archive/summary_feature_design.md)
+  - [架构优化方案](development/archive/architecture_optimization_plan.md)
+  - [模块迁移方案](development/archive/module_migration_plan.md)
   - Loguru 使用指南
   - 日志配置
   - FunASR 日志说明

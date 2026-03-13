@@ -8,7 +8,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from video_transcript_api.utils.cache import CacheManager
+from video_transcript_api.cache import CacheManager
 
 def test_view_token_query():
     """Test that view_token returns the correct task (success status)"""

@@ -5,6 +5,7 @@ import time
 import requests
 from bs4 import BeautifulSoup
 from .base import BaseDownloader
+from .models import VideoMetadata, DownloadInfo
 from ..utils.logging import setup_logger
 
 # 创建日志记录器
@@ -14,6 +15,10 @@ class XiaoyuzhouDownloader(BaseDownloader):
     """
     小宇宙播客下载器
     """
+    def __init__(self):
+        super().__init__()
+        self._cached_video_info: dict[str, dict] = {}
+
     def can_handle(self, url):
         """
         判断是否可以处理该URL
@@ -72,6 +77,10 @@ class XiaoyuzhouDownloader(BaseDownloader):
         try:
             # 提取剧集ID
             episode_id = self._extract_episode_id(url)
+
+            if episode_id in self._cached_video_info:
+                logger.debug(f"[实例缓存命中] 使用缓存的视频信息: {episode_id}")
+                return self._cached_video_info[episode_id]
             
             # 请求网页内容
             logger.info(f"访问小宇宙播客页面: {url}")
@@ -176,7 +185,8 @@ class XiaoyuzhouDownloader(BaseDownloader):
                 "filename": filename,
                 "platform": "xiaoyuzhou"
             }
-            
+
+            self._cached_video_info[episode_id] = result
             logger.info(f"成功获取小宇宙播客信息: ID={episode_id}")
             return result
             
@@ -196,3 +206,25 @@ class XiaoyuzhouDownloader(BaseDownloader):
         """
         # 播客通常没有字幕，直接返回None
         return None
+
+    def _fetch_metadata(self, url: str, video_id: str) -> VideoMetadata:
+        info = self.get_video_info(url)
+        return VideoMetadata(
+            video_id=info.get("video_id", video_id),
+            platform=info.get("platform", "xiaoyuzhou"),
+            title=info.get("video_title", ""),
+            author=info.get("author", ""),
+            description=info.get("description", ""),
+        )
+
+    def _fetch_download_info(self, url: str, video_id: str) -> DownloadInfo:
+        info = self.get_video_info(url)
+        filename = info.get("filename")
+        file_ext = None
+        if filename and "." in filename:
+            file_ext = filename.rsplit(".", 1)[-1]
+        return DownloadInfo(
+            download_url=info.get("download_url"),
+            file_ext=file_ext,
+            filename=filename,
+        )

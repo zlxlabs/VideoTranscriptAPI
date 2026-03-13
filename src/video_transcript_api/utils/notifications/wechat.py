@@ -55,8 +55,8 @@ def _get_global_notifier():
 def _get_risk_control():
     """获取风控模块（每次都重新导入以确保获取最新状态）"""
     try:
-        # 直接从 video_transcript_api.utils.risk_control 导入，确保是同一个模块实例
-        from video_transcript_api.utils.risk_control import is_enabled, sanitize_text
+        # 直接从 video_transcript_api.risk_control 导入，确保是同一个模块实例
+        from video_transcript_api.risk_control import is_enabled, sanitize_text
 
         class RiskControlWrapper:
             @staticmethod

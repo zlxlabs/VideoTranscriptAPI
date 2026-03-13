@@ -7,13 +7,17 @@ This test verifies that:
 """
 import os
 import sys
-import commentjson
+
+try:
+    import commentjson as json
+except ImportError:
+    import json
 
 # Add project root to path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.insert(0, project_root)
 
-from src.video_transcript_api.utils.llm import EnhancedLLMProcessor
+from src.video_transcript_api.llm import LLMCoordinator
 from src.video_transcript_api.utils.logging import setup_logger
 
 logger = setup_logger(__name__)
@@ -78,7 +82,7 @@ def load_config():
         sys.exit(1)
 
     with open(config_path, 'r', encoding='utf-8') as f:
-        return commentjson.load(f)
+        return json.load(f)
 
 
 def check_section_exists(summary: str, section_name: str) -> bool:
@@ -86,29 +90,26 @@ def check_section_exists(summary: str, section_name: str) -> bool:
     import re
     if not summary:
         return False
-    # Match markdown headers like "### 逻辑分析" or "## 框架与心智模型"
     pattern = rf'#{2,4}\s*\d*\.?\s*{section_name}'
     return bool(re.search(pattern, summary))
 
 
-def run_test(processor, test_text: str, meta: dict, test_name: str) -> dict:
+def run_test(coordinator, test_text: str, meta: dict, test_name: str) -> dict:
     """Run a single test case"""
     logger.info(f"\n{'='*60}")
     logger.info(f"Running test: {test_name}")
     logger.info(f"{'='*60}")
 
-    llm_task = {
-        'task_id': f'test_{test_name}',
-        'transcript': test_text,
-        'use_speaker_recognition': False,
-        'video_title': meta['video_title'],
-        'author': meta['author'],
-        'description': meta['description'],
-        'transcription_data': None
-    }
+    result = coordinator.process(
+        content=test_text,
+        title=meta['video_title'],
+        author=meta['author'],
+        description=meta['description'],
+        platform='test',
+        media_id=f"test_{test_name}",
+    )
 
-    result = processor.process_llm_task(llm_task)
-    summary = result.get('内容总结', '')
+    summary = result.get('summary_text', '')
 
     has_logic = check_section_exists(summary, '逻辑分析')
     has_framework = check_section_exists(summary, '框架')
@@ -126,11 +127,17 @@ def main():
     logger.info("Starting conditional sections test")
 
     config = load_config()
-    processor = EnhancedLLMProcessor(config)
+
+    output_dir = os.path.join(project_root, 'tests', 'llm', 'output')
+    os.makedirs(output_dir, exist_ok=True)
+    cache_dir = os.path.join(output_dir, 'cache')
+    os.makedirs(cache_dir, exist_ok=True)
+
+    coordinator = LLMCoordinator(config_dict=config, cache_dir=cache_dir)
 
     # Run test 1: Product review
     result1 = run_test(
-        processor,
+        coordinator,
         PRODUCT_REVIEW_TEXT,
         PRODUCT_REVIEW_META,
         'product_review'
@@ -138,16 +145,13 @@ def main():
 
     # Run test 2: Interview with methodology
     result2 = run_test(
-        processor,
+        coordinator,
         INTERVIEW_WITH_METHOD_TEXT,
         INTERVIEW_WITH_METHOD_META,
         'interview_methodology'
     )
 
     # Save results
-    output_dir = os.path.join(project_root, 'tests', 'llm', 'output')
-    os.makedirs(output_dir, exist_ok=True)
-
     with open(os.path.join(output_dir, 'summary_product_review.txt'), 'w', encoding='utf-8') as f:
         f.write(result1['summary'])
 

@@ -1,8 +1,10 @@
 import os
 import mimetypes
+import hashlib
 import requests
 from urllib.parse import urlparse, unquote
 from .base import BaseDownloader
+from .models import VideoMetadata, DownloadInfo
 from ..utils.logging import setup_logger
 import datetime
 
@@ -19,6 +21,7 @@ class GenericDownloader(BaseDownloader):
         初始化通用下载器
         """
         super().__init__()
+        self._cached_video_info: dict[str, dict] = {}
         # 支持的音视频扩展名
         self.supported_audio_extensions = {'.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.wma'}
         self.supported_video_extensions = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v'}
@@ -90,6 +93,14 @@ class GenericDownloader(BaseDownloader):
             dict: 包含视频信息的字典
         """
         logger.info(f"通用下载器处理URL: {url}")
+
+        try:
+            cache_id = self.extract_video_id(url)
+            if cache_id in self._cached_video_info:
+                logger.debug(f"[实例缓存命中] 使用缓存的视频信息: {cache_id}")
+                return self._cached_video_info[cache_id]
+        except Exception:
+            cache_id = None
         
         # 检查是否是直接的媒体文件链接
         if self._is_media_url(url):
@@ -123,16 +134,19 @@ class GenericDownloader(BaseDownloader):
                 filename = f"generic_{timestamp}{ext}"
             
             # 返回视频信息
-            return {
+            result = {
                 "video_title": "",  # 留空，后续由LLM生成
                 "author": "",
                 "description": "",
                 "download_url": url,
                 "filename": filename,
                 "platform": "generic",
-                "video_id": datetime.datetime.now().strftime("%Y%m%d%H%M%S"),
+                "video_id": self.extract_video_id(url),
                 "is_generic": True  # 标记为通用下载
             }
+            if cache_id:
+                self._cached_video_info[cache_id] = result
+            return result
         else:
             # 对于非直接媒体链接，尝试作为网页处理
             logger.warning(f"URL不是直接媒体文件链接，尝试作为网页处理: {url}")
@@ -157,7 +171,7 @@ class GenericDownloader(BaseDownloader):
     def extract_video_id(self, url):
         """
         提取视频ID
-        对于通用URL，使用时间戳作为ID
+        对于通用URL，使用URL哈希作为ID
         
         参数:
             url: 视频URL
@@ -165,7 +179,7 @@ class GenericDownloader(BaseDownloader):
         返回:
             str: 视频ID
         """
-        return datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        return hashlib.md5(url.encode()).hexdigest()[:16]
     
     def download_file(self, url, filename):
         """
@@ -322,3 +336,26 @@ class GenericDownloader(BaseDownloader):
                 pass
                 
         return None
+
+    def _fetch_metadata(self, url: str, video_id: str) -> VideoMetadata:
+        info = self.get_video_info(url)
+        return VideoMetadata(
+            video_id=info.get("video_id", video_id),
+            platform=info.get("platform", "generic"),
+            title=info.get("video_title", ""),
+            author=info.get("author", ""),
+            description=info.get("description", ""),
+            extra={"is_generic": True},
+        )
+
+    def _fetch_download_info(self, url: str, video_id: str) -> DownloadInfo:
+        info = self.get_video_info(url)
+        filename = info.get("filename")
+        file_ext = None
+        if filename and "." in filename:
+            file_ext = filename.rsplit(".", 1)[-1]
+        return DownloadInfo(
+            download_url=info.get("download_url"),
+            file_ext=file_ext,
+            filename=filename,
+        )

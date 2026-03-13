@@ -63,6 +63,16 @@ class TaskResult:
     error_message: Optional[str] = None
 
 
+@dataclass
+class VideoInfoResult:
+    """视频元数据结果"""
+    video_id: str
+    video_info: VideoInfo
+    cached: bool
+    metadata_source: Optional[str] = None
+    fetched_at: Optional[str] = None
+
+
 class YouTubeApiClient:
     """
     YouTube Download API Server 客户端
@@ -145,6 +155,65 @@ class YouTubeApiClient:
             f"length={len(plain_text)} chars, language={result.transcript.language}"
         )
         return plain_text
+
+    def fetch_video_info(self, video_id: str) -> VideoInfoResult:
+        """
+        获取视频元数据（不下载文件）
+
+        Args:
+            video_id: YouTube 视频 ID
+
+        Returns:
+            VideoInfoResult: 元数据结果
+
+        Raises:
+            YouTubeApiError: API 调用失败或响应格式异常
+            YouTubeApiNetworkError: 网络错误
+        """
+        logger.info(f"[youtube-api] Fetching video info: {video_id}")
+
+        try:
+            response = self.session.get(
+                f"{self.base_url}/api/v1/videos/{video_id}/info",
+                timeout=self.timeout,
+            )
+
+            if response.status_code == 401:
+                raise YouTubeApiError(ErrorCode.UNEXPECTED, "Invalid API key")
+
+            response.raise_for_status()
+            data = response.json()
+
+        except requests.exceptions.Timeout:
+            raise YouTubeApiNetworkError("Request timeout during video info fetch")
+        except requests.exceptions.RequestException as e:
+            raise YouTubeApiNetworkError(f"Network error: {e}", original_error=e)
+
+        if not isinstance(data, dict):
+            raise YouTubeApiError(ErrorCode.UNEXPECTED, "Invalid response format")
+
+        video_info = data.get("video_info") or {}
+        if not isinstance(video_info, dict) or not video_info:
+            raise YouTubeApiError(ErrorCode.UNEXPECTED, "Missing video_info in response")
+
+        parsed_info = VideoInfo(
+            title=video_info.get("title", ""),
+            author=video_info.get("author", ""),
+            description=video_info.get("description", ""),
+            duration=video_info.get("duration", 0),
+            channel_id=video_info.get("channel_id"),
+            upload_date=video_info.get("upload_date"),
+            view_count=video_info.get("view_count"),
+            thumbnail=video_info.get("thumbnail"),
+        )
+
+        return VideoInfoResult(
+            video_id=data.get("video_id", video_id),
+            video_info=parsed_info,
+            cached=bool(data.get("cached")),
+            metadata_source=data.get("metadata_source"),
+            fetched_at=data.get("fetched_at"),
+        )
 
     def create_and_wait(
         self,

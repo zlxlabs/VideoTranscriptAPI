@@ -1,5 +1,5 @@
 """
-测试 CapsWriter 格式文本分段和校对功能
+测试 CapsWriter 格式文本分段和校对功能（新架构）
 
 验证目标:
 1. 检测到 CapsWriter 格式（短句换行，无标点）
@@ -8,13 +8,23 @@
 """
 import os
 import sys
-import json
+
+try:
+    import commentjson as json
+except ImportError:
+    import json
 
 # Add project root to path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.insert(0, project_root)
 
-from src.video_transcript_api.utils.llm import TextSegmentationProcessor, SegmentedLLMProcessor
+from src.video_transcript_api.llm import (
+    LLMConfig,
+    TextSegmenter,
+    CALIBRATE_SYSTEM_PROMPT,
+    build_calibrate_user_prompt,
+    call_llm_api,
+)
 from src.video_transcript_api.utils.logging import setup_logger
 
 logger = setup_logger(__name__)
@@ -50,17 +60,17 @@ def load_capswriter_text():
 
 def main():
     """Main test function"""
-    logger.info("Starting CapsWriter segmentation and calibration test")
+    logger.info("Starting CapsWriter segmentation and calibration test (new arch)")
 
-    # Load configuration
     config = load_config()
+    llm_config = LLMConfig.from_dict(config)
 
     # Load test text
     original_text = load_capswriter_text()
     original_length = len(original_text)
     original_lines = len([line for line in original_text.split('\n') if line.strip()])
 
-    logger.info(f"Original text loaded:")
+    logger.info("Original text loaded:")
     logger.info(f"  - Length: {original_length} characters")
     logger.info(f"  - Lines: {original_lines} lines")
 
@@ -69,15 +79,14 @@ def main():
     logger.info("TEST 1: Format Detection and Segmentation")
     logger.info(f"{'='*60}")
 
-    segmentation_processor = TextSegmentationProcessor(config)
-    segments = segmentation_processor.segment_txt_content(original_text)
+    segmenter = TextSegmenter(llm_config)
+    segments = segmenter.segment(original_text)
 
-    logger.info(f"Segmentation results:")
+    logger.info("Segmentation results:")
     logger.info(f"  - Number of segments: {len(segments)}")
     for i, segment in enumerate(segments):
         logger.info(f"  - Segment {i+1} length: {len(segment)} characters")
 
-    # Check if segmentation is working correctly
     if len(segments) <= 1:
         logger.error("FAILED: Text was not properly segmented (only 1 segment created)")
     else:
@@ -88,42 +97,37 @@ def main():
     logger.info("TEST 2: Calibration Compression Check")
     logger.info(f"{'='*60}")
 
-    # Use first 10000 characters to speed up test
     sample_text = original_text[:10000]
     sample_length = len(sample_text)
     logger.info(f"Using sample text: {sample_length} characters")
 
-    # Initialize processor
-    llm_processor = SegmentedLLMProcessor(config)
-
-    # Perform segmentation on sample
-    sample_segments = segmentation_processor.segment_txt_content(sample_text)
+    sample_segments = segmenter.segment(sample_text)
     logger.info(f"Sample segmented into {len(sample_segments)} segments")
 
-    # Calibrate first segment only (to save API calls)
-    if len(sample_segments) > 0:
+    if sample_segments:
         first_segment = sample_segments[0]
         first_segment_length = len(first_segment)
         logger.info(f"Testing calibration on first segment ({first_segment_length} characters)")
 
-        # Generate calibration prompt
-        prompt = llm_processor._generate_calibrate_prompt(
-            first_segment,
-            use_speaker_recognition=False,
-            title="娃哈哈国有资产流失解密",
+        prompt = build_calibrate_user_prompt(
+            transcript=first_segment,
+            video_title="娃哈哈国有资产流失解密",
             author="",
-            description="解密娃哈哈国有资产流失过程和宗庆后家族内部冲突"
+            description="解密娃哈哈国有资产流失过程和宗庆后家族内部冲突",
+            key_info="",
         )
 
-        # Call LLM for calibration
-        from src.video_transcript_api.utils.llm import call_llm_api
         calibrated_segment = call_llm_api(
             model=config['llm']['calibrate_model'],
             prompt=prompt,
             api_key=config['llm']['api_key'],
             base_url=config['llm']['base_url'],
-            max_retries=config['llm']['max_retries'],
-            retry_delay=config['llm']['retry_delay']
+            max_retries=config['llm'].get('max_retries', 2),
+            retry_delay=config['llm'].get('retry_delay', 5),
+            reasoning_effort=llm_config.calibrate_reasoning_effort,
+            task_type="calibrate_segment",
+            system_prompt=CALIBRATE_SYSTEM_PROMPT,
+            config=config,
         )
 
         calibrated_length = len(calibrated_segment)
@@ -137,7 +141,6 @@ def main():
         logger.info(f"Compression ratio: {compression_ratio:.2%}")
         logger.info(f"Length change: {calibrated_length - first_segment_length:+d} characters")
 
-        # Save results for inspection
         output_dir = os.path.join(project_root, 'tests', 'llm', 'output')
         os.makedirs(output_dir, exist_ok=True)
 
@@ -153,17 +156,15 @@ def main():
         logger.info(f"\nOriginal segment saved to: {original_output}")
         logger.info(f"Calibrated segment saved to: {calibrated_output}")
 
-        # Check if calibration preserved content length
         if compression_ratio < 0.8:
-            logger.warning(f"WARNING: Calibration compressed content by more than 20%!")
+            logger.warning("WARNING: Calibration compressed content by more than 20%!")
             logger.warning(f"Expected ratio >= 0.80, got {compression_ratio:.2%}")
         else:
             logger.info(f"SUCCESS: Calibration preserved content length (ratio: {compression_ratio:.2%})")
 
-        # Show preview
-        logger.info(f"\nOriginal segment preview (first 300 chars):")
+        logger.info("\nOriginal segment preview (first 300 chars):")
         logger.info(f"{first_segment[:300]}...")
-        logger.info(f"\nCalibrated segment preview (first 300 chars):")
+        logger.info("\nCalibrated segment preview (first 300 chars):")
         logger.info(f"{calibrated_segment[:300]}...")
 
     logger.info(f"\n{'='*60}")

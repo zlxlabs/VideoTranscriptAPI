@@ -47,9 +47,8 @@ python tests/llm/test_summary_prompt_improvement.py
 - **仅使用中文书写，禁止添加任何英文翻译或解释**
 - 专有名词直接使用中文，不要在括号内添加英文原文或音译
 
-修改位置：
-- `src/video_transcript_api/utils/llm_enhanced.py:413-414` (多说话人场景)
-- `src/video_transcript_api/utils/llm_enhanced.py:479-480` (单说话人场景)
+修改位置（新架构）：
+- `src/video_transcript_api/utils/llm/prompts/__init__.py` 中的 Summary Prompt 模板
 
 ## 预期结果
 
@@ -60,6 +59,6 @@ python tests/llm/test_summary_prompt_improvement.py
 
 ## 注意事项
 
-1. 需要正确配置 `config/config.json` 中的 LLM API 密钥
+1. 需要正确配置 `config/config.jsonc` 中的 LLM API 密钥
 2. 测试会调用真实的 LLM API，会产生费用
 3. 由于使用前 3000 字符测试，总结质量可能受影响，但足以验证 prompt 改进效果

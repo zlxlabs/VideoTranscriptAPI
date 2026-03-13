@@ -5,13 +5,17 @@
 """
 import os
 import sys
-import json
+
+try:
+    import commentjson as json
+except ImportError:
+    import json
 
 # Add project root to path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.insert(0, project_root)
 
-from src.video_transcript_api.utils.llm import EnhancedLLMProcessor
+from src.video_transcript_api.llm import LLMCoordinator
 from src.video_transcript_api.utils.logging import setup_logger
 
 logger = setup_logger(__name__)
@@ -59,48 +63,45 @@ def main():
     test_text = load_test_text()
     logger.info(f"Loaded test text, length: {len(test_text)} characters")
 
-    # Initialize enhanced LLM processor
-    processor = EnhancedLLMProcessor(config)
-
-    # Prepare test task
-    llm_task = {
-        'task_id': 'test_summary_prompt',
-        'transcript': test_text,
-        'use_speaker_recognition': False,
-        'video_title': '娃哈哈国有资产流失解密',
-        'author': '王教授财经频道',
-        'description': '解密娃哈哈国有资产流失过程和宗庆后家族内部冲突',
-        'transcription_data': None
-    }
-
-    logger.info("Processing LLM task with improved prompt...")
-
-    # Process the task
-    result = processor._process_original_logic(llm_task)
-
-    # Save results to files for inspection
+    # Initialize coordinator
     output_dir = os.path.join(project_root, 'tests', 'llm', 'output')
     os.makedirs(output_dir, exist_ok=True)
+    cache_dir = os.path.join(output_dir, 'cache')
+    os.makedirs(cache_dir, exist_ok=True)
 
+    coordinator = LLMCoordinator(config_dict=config, cache_dir=cache_dir)
+
+    logger.info("Processing content with LLMCoordinator...")
+
+    result = coordinator.process(
+        content=test_text,
+        title='娃哈哈国有资产流失解密',
+        author='王教授财经频道',
+        description='解密娃哈哈国有资产流失过程和宗庆后家族内部冲突',
+        platform='test',
+        media_id='test_summary_prompt'
+    )
+
+    calibrated_text = result.get('calibrated_text', '')
+    summary_text = result.get('summary_text', '')
+
+    # Save results to files for inspection
     calibrated_output = os.path.join(output_dir, 'test_calibrated.txt')
     summary_output = os.path.join(output_dir, 'test_summary.txt')
 
     with open(calibrated_output, 'w', encoding='utf-8') as f:
-        f.write(result.get('校对文本', ''))
+        f.write(calibrated_text)
 
     with open(summary_output, 'w', encoding='utf-8') as f:
-        f.write(result.get('内容总结', ''))
+        f.write(summary_text)
 
     logger.info(f"Calibrated text saved to: {calibrated_output}")
     logger.info(f"Summary text saved to: {summary_output}")
 
     # Check for English annotations in summary
-    summary_text = result.get('内容总结', '')
-
-    # Count parentheses with English content
     import re
     english_pattern = r'\([A-Za-z\s,\.;:]+\)'
-    english_matches = re.findall(english_pattern, summary_text)
+    english_matches = re.findall(english_pattern, summary_text or '')
 
     logger.info(f"\n{'='*60}")
     logger.info("IMPROVEMENT CHECK RESULTS")
@@ -109,7 +110,7 @@ def main():
 
     if english_matches:
         logger.warning("Found English annotations in summary:")
-        for i, match in enumerate(english_matches[:10], 1):  # Show first 10
+        for i, match in enumerate(english_matches[:10], 1):
             logger.warning(f"  {i}. {match}")
         if len(english_matches) > 10:
             logger.warning(f"  ... and {len(english_matches) - 10} more")
@@ -118,7 +119,7 @@ def main():
 
     logger.info(f"{'='*60}")
     logger.info(f"Summary length: {len(summary_text)} characters")
-    logger.info(f"Calibrated text length: {len(result.get('校对文本', ''))} characters")
+    logger.info(f"Calibrated text length: {len(calibrated_text)} characters")
     logger.info(f"{'='*60}\n")
 
     # Display first 500 characters of summary as preview

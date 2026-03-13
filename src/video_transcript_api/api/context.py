@@ -10,8 +10,8 @@ from typing import Any, Dict
 from fastapi.templating import Jinja2Templates
 
 from ..utils.accounts import get_user_manager as _get_user_manager_impl
-from ..utils.cache import CacheManager
-from ..utils.llm import EnhancedLLMProcessor
+from ..cache import CacheManager
+from ..llm import LLMCoordinator
 from ..utils.logging import get_audit_logger as _get_audit_logger_impl
 from ..utils.logging import load_config as _load_config_impl
 from ..utils.logging import setup_logger
@@ -75,8 +75,11 @@ def get_workspace_dir() -> str:
 
 
 @lru_cache
-def get_enhanced_llm_processor():
-    return EnhancedLLMProcessor(get_config())
+def get_llm_coordinator():
+    """获取 LLM 协调器（新架构）"""
+    config = get_config()
+    cache_dir = config.get("storage", {}).get("cache_dir", "./data/cache")
+    return LLMCoordinator(config_dict=config, cache_dir=cache_dir)
 
 
 def get_task_results() -> Dict[str, Dict[str, Any]]:

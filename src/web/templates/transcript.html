@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 
 {% block title %}{{ title or "视频转录" }} - 视频转录查看器{% endblock %}
+{% block meta_description %}{{ title or "视频转录" }} - {{ platform or "" }} 视频转录校对结果{% endblock %}
+{% block og_title %}{{ title or "视频转录" }} - 视频转录查看器{% endblock %}
+{% block og_description %}{{ title or "视频转录" }} 的转录校对结果{% endblock %}
 
 {% block extra_css %}
 <link rel="stylesheet" href="/static/css/floating-toc.css">
@@ -41,6 +44,56 @@
                 <span class="config-value">{{ llm_config.summary_model }}{% if llm_config.summary_reasoning_effort %} <span class="reasoning-tag">reasoning: {{ llm_config.summary_reasoning_effort }}</span>{% endif %}</span>
             </div>
             {% endif %}
+        </div>
+    </details>
+    {% endif %}
+
+    <!-- 一键复制常用链接 -->
+    {% if view_token %}
+    <div class="quick-copy-bar">
+        <button class="quick-copy-btn" data-path="/view/{{ view_token }}?raw=calibrated" title="复制 Raw 校对文本 URL">
+            <span class="quick-copy-label">Raw 校对文本</span>
+            <span class="quick-copy-action">复制 URL</span>
+            <span class="quick-copy-desc">纯文本，粘贴到 ChatGPT / Claude 直接读取</span>
+        </button>
+        <button class="quick-copy-btn" data-path="/view/{{ view_token }}?page=calibrated" title="复制 HTML 校对页面 URL">
+            <span class="quick-copy-label">HTML 校对页面</span>
+            <span class="quick-copy-action">复制 URL</span>
+            <span class="quick-copy-desc">带标题的 HTML，供 NotebookLM 等工具爬取</span>
+        </button>
+    </div>
+    {% endif %}
+
+    <!-- 导出链接栏 -->
+    {% if view_token %}
+    <details class="export-links-details">
+        <summary class="export-links-summary">
+            <span class="export-icon">📤</span>
+            <span class="export-summary-label">更多导出选项</span>
+        </summary>
+        <div class="export-links-content">
+            <div class="export-group">
+                <span class="export-group-label">Raw 纯文本</span>
+                <span class="export-group-items">
+                    <a href="/view/{{ view_token }}?raw=calibrated" title="导出校对文本（纯文本）">校对文本</a>
+                    <span class="export-sep">·</span>
+                    <a href="/view/{{ view_token }}?raw=summary" title="导出内容总结（纯文本）">总结</a>
+                    <span class="export-sep">·</span>
+                    <a href="/view/{{ view_token }}?raw=transcript" title="导出原始转录（纯文本）">原始转录</a>
+                </span>
+                <span class="export-hint">下载 TXT / 粘贴 URL 到 ChatGPT、Claude 等 LLM 直接读取</span>
+            </div>
+            <div class="export-group">
+                <span class="export-group-label">HTML 页面</span>
+                <span class="export-group-items">
+                    <a href="/view/{{ view_token }}?page=calibrated" title="导出校对文本（HTML 页面）">校对文本</a>
+                    <span class="export-sep">·</span>
+                    <a href="/view/{{ view_token }}?page=summary" title="导出内容总结（HTML 页面）">总结</a>
+                    <span class="export-sep">·</span>
+                    <a href="/view/{{ view_token }}?page=transcript" title="导出原始转录（HTML 页面）">原始转录</a>
+                </span>
+                <span class="export-hint">带标题与 Meta 标签，适合 NotebookLM 等工具爬取</span>
+            </div>
         </div>
     </details>
     {% endif %}

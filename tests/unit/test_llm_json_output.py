@@ -10,7 +10,7 @@ Tests the new JSON Schema structured output feature including:
 import pytest
 from unittest.mock import patch, MagicMock
 
-from video_transcript_api.utils.llm.llm import (
+from video_transcript_api.llm.llm import (
     _get_json_mode_for_model,
     _validate_required_fields,
     _extract_json_from_response,

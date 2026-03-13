@@ -1,5 +1,7 @@
+import html as html_stdlib
 import re
 import markdown
+import nh3
 import pymdownx.emoji
 from ..logging import setup_logger
 
@@ -329,13 +331,41 @@ def render_markdown_to_html(markdown_text: str) -> str:
             'tables': {}  # 确保表格扩展正确配置
         })
         
-        html = md.convert(markdown_text)
-        return html
-        
+        raw_html = md.convert(markdown_text)
+
+        # HTML 净化：移除危险标签（script, iframe, object 等），保留安全的格式标签
+        clean_html = nh3.clean(
+            raw_html,
+            tags={
+                "p", "br", "hr",
+                "h1", "h2", "h3", "h4", "h5", "h6",
+                "ul", "ol", "li",
+                "table", "thead", "tbody", "tr", "th", "td",
+                "blockquote", "pre", "code",
+                "strong", "em", "b", "i", "u", "s", "del", "sub", "sup",
+                "a", "img", "span", "div",
+                "details", "summary",
+                "dl", "dt", "dd",
+                "svg", "path",  # emoji SVG
+            },
+            attributes={
+                "*": {"class", "id"},
+                "a": {"href", "title", "target"},
+                "img": {"src", "alt", "title", "width", "height"},
+                "td": {"colspan", "rowspan", "align"},
+                "th": {"colspan", "rowspan", "align"},
+                "svg": {"viewBox", "xmlns", "width", "height"},
+                "path": {"d", "fill"},
+            },
+            link_rel="noopener noreferrer",
+            url_schemes={"http", "https", "mailto"},
+        )
+        return clean_html
+
     except Exception as e:
         logger.error(f"Markdown渲染失败: {e}")
-        # 出错时返回原始文本，用<pre>标签包装
-        return f"<pre>{markdown_text}</pre>"
+        # 出错时返回转义后的原始文本，防止 XSS
+        return f"<pre>{html_stdlib.escape(markdown_text)}</pre>"
 
 def get_base_url() -> str:
     """获取外部访问基础URL"""
