@@ -7,6 +7,61 @@
 
 {% block extra_css %}
 <link rel="stylesheet" href="/static/css/floating-toc.css">
+<style>
+/* Recalibrate button */
+.recalibrate-bar { margin: 10px 0; }
+.recalibrate-btn {
+    background: var(--bg-secondary, #f5f5f5);
+    border: 1px solid var(--border-color, #ddd);
+    border-radius: 6px;
+    padding: 6px 14px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    color: var(--text-primary, #333);
+    transition: background 0.2s;
+}
+.recalibrate-btn:hover { background: var(--bg-tertiary, #e8e8e8); }
+
+/* Recalibrate dialog */
+.recalibrate-dialog {
+    border: none;
+    border-radius: 12px;
+    padding: 24px;
+    max-width: 420px;
+    width: 90%;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.15);
+    background: var(--bg-primary, #fff);
+    color: var(--text-primary, #333);
+}
+.recalibrate-dialog::backdrop { background: rgba(0,0,0,0.4); }
+.recalibrate-dialog h3 { margin: 0 0 8px; font-size: 1.1rem; }
+.recalibrate-dialog .dialog-desc { margin: 0 0 16px; font-size: 0.85rem; color: var(--text-secondary, #666); }
+.recalibrate-dialog label { display: block; margin-bottom: 4px; font-size: 0.85rem; font-weight: 500; }
+.recalibrate-dialog input {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border-color, #ddd);
+    border-radius: 6px;
+    font-size: 0.9rem;
+    box-sizing: border-box;
+    background: var(--bg-secondary, #f9f9f9);
+    color: var(--text-primary, #333);
+}
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.dialog-btn {
+    padding: 7px 18px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color, #ddd);
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+.dialog-btn-cancel { background: var(--bg-secondary, #f5f5f5); color: var(--text-primary, #333); }
+.dialog-btn-confirm { background: var(--accent-color, #4a90d9); color: #fff; border-color: transparent; }
+.dialog-btn-confirm:disabled { opacity: 0.6; cursor: not-allowed; }
+.dialog-status { margin-top: 12px; font-size: 0.82rem; color: var(--text-secondary, #666); }
+.dialog-status-error { color: #d9534f; }
+.dialog-status-ok { color: #5cb85c; }
+</style>
 {% endblock %}
 
 {% block content %}
@@ -62,6 +117,29 @@
             <span class="quick-copy-desc">带标题的 HTML，供 NotebookLM 等工具爬取</span>
         </button>
     </div>
+    {% endif %}
+
+    <!-- 重新校对按钮 -->
+    {% if view_token %}
+    <div class="recalibrate-bar">
+        <button class="recalibrate-btn" onclick="document.getElementById('recalibrateDialog').showModal()">
+            🔄 重新校对
+        </button>
+    </div>
+
+    <dialog id="recalibrateDialog" class="recalibrate-dialog">
+        <form method="dialog">
+            <h3>重新校对</h3>
+            <p class="dialog-desc">将重新执行 LLM 校对（跳过下载、转录和总结），校对完成后刷新页面即可查看新结果。</p>
+            <label for="recalibrateApiKey">API Key</label>
+            <input type="password" id="recalibrateApiKey" placeholder="Bearer token" autocomplete="off">
+            <div class="dialog-actions">
+                <button type="button" class="dialog-btn dialog-btn-cancel" onclick="document.getElementById('recalibrateDialog').close()">取消</button>
+                <button type="button" class="dialog-btn dialog-btn-confirm" id="recalibrateConfirmBtn" onclick="submitRecalibrate()">确认</button>
+            </div>
+            <p id="recalibrateStatus" class="dialog-status" style="display:none;"></p>
+        </form>
+    </dialog>
     {% endif %}
 
     <!-- 导出链接栏 -->
@@ -127,4 +205,104 @@
 
 {% block extra_js %}
 <script src="/static/js/floating-toc.js"></script>
+{% if view_token %}
+<script>
+(function() {
+    // Auto-fill API key from localStorage (shared with /add_task_by_web)
+    var stored = localStorage.getItem('api_key') || '';
+    var input = document.getElementById('recalibrateApiKey');
+    if (input && stored) input.value = stored;
+})();
+
+function submitRecalibrate() {
+    var btn = document.getElementById('recalibrateConfirmBtn');
+    var status = document.getElementById('recalibrateStatus');
+    var apiKey = document.getElementById('recalibrateApiKey').value.trim();
+
+    if (!apiKey) {
+        status.textContent = 'Please enter API Key';
+        status.className = 'dialog-status dialog-status-error';
+        status.style.display = 'block';
+        return;
+    }
+
+    // Save to localStorage for future use
+    localStorage.setItem('api_key', apiKey);
+
+    btn.disabled = true;
+    btn.textContent = 'Processing...';
+    status.textContent = 'Submitting recalibration request...';
+    status.className = 'dialog-status';
+    status.style.display = 'block';
+
+    fetch('/api/recalibrate', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + apiKey
+        },
+        body: JSON.stringify({ view_token: '{{ view_token }}' })
+    })
+    .then(function(resp) {
+        if (resp.status === 401) throw new Error('API Key invalid');
+        if (resp.status === 403) throw new Error('No recalibrate permission');
+        if (resp.status === 404) throw new Error('Transcript data not found');
+        if (!resp.ok) return resp.json().then(function(d) { throw new Error(d.detail || 'Request failed'); });
+        return resp.json();
+    })
+    .then(function(data) {
+        var taskId = data.data && data.data.task_id;
+        if (!taskId) throw new Error('No task_id returned');
+        status.textContent = 'Recalibrating... (0s)';
+        status.className = 'dialog-status dialog-status-ok';
+        pollTask(taskId, apiKey, status, btn);
+    })
+    .catch(function(err) {
+        status.textContent = err.message;
+        status.className = 'dialog-status dialog-status-error';
+        btn.disabled = false;
+        btn.textContent = 'Confirm';
+    });
+}
+
+function pollTask(taskId, apiKey, statusEl, btn) {
+    var elapsed = 0;
+    var interval = setInterval(function() {
+        elapsed += 3;
+        statusEl.textContent = 'Recalibrating... (' + elapsed + 's)';
+
+        fetch('/api/task/' + taskId, {
+            headers: { 'Authorization': 'Bearer ' + apiKey }
+        })
+        .then(function(resp) { return resp.json(); })
+        .then(function(data) {
+            var taskStatus = data.data && data.data.status;
+            if (data.code === 200 || taskStatus === 'success') {
+                clearInterval(interval);
+                statusEl.textContent = 'Done! Refreshing page...';
+                setTimeout(function() { location.reload(); }, 500);
+            } else if (taskStatus === 'failed') {
+                clearInterval(interval);
+                statusEl.textContent = 'Recalibration failed';
+                statusEl.className = 'dialog-status dialog-status-error';
+                btn.disabled = false;
+                btn.textContent = 'Confirm';
+            }
+            // processing/queued: keep polling
+        })
+        .catch(function() {
+            // Network error, keep polling
+        });
+
+        if (elapsed > 600) {
+            clearInterval(interval);
+            statusEl.textContent = 'Timeout (>10min). Please refresh manually.';
+            statusEl.className = 'dialog-status dialog-status-error';
+            btn.disabled = false;
+            btn.textContent = 'Confirm';
+        }
+    }, 3000);
+}
+</script>
+{% endif %}
 {% endblock %}

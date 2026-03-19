@@ -203,6 +203,24 @@ class UserManager:
         
         return f"{api_key[:4]}{'*' * (len(api_key) - 8)}{api_key[-4:]}"
     
+    def check_permission(self, user_info: dict, permission: str) -> bool:
+        """检查用户是否有指定权限
+
+        legacy 单 token 用户默认拥有所有权限；
+        多用户模式下检查 permissions 数组。
+
+        Args:
+            user_info: validate_token 返回的用户信息字典
+            permission: 需要检查的权限名称（如 "recalibrate"）
+
+        Returns:
+            bool: 用户是否拥有该权限
+        """
+        if user_info.get("is_legacy"):
+            return True
+        permissions = user_info.get("permissions", [])
+        return permission in permissions
+
     def is_multi_user_mode(self) -> bool:
         """
         检查是否处于多用户模式

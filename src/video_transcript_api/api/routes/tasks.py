@@ -11,11 +11,13 @@ from ..context import (
     get_task_results,
 )
 from ..services.transcription import (
+    RecalibrateRequest,
     TranscribeRequest,
     TranscribeResponse,
     verify_token,
 )
 from ...utils.notifications import send_view_link_wechat
+from ...utils.accounts.user_manager import get_user_manager
 
 logger = get_logger()
 config = get_config()
@@ -296,4 +298,147 @@ async def get_webhook_status_info(
             "message": "Webhook status is now managed by wecom-notifier package",
             "suggestion": "All webhooks are automatically rate-limited by wecom-notifier",
         },
+    )
+
+
+@router.post("/recalibrate", response_model=TranscribeResponse)
+async def recalibrate(
+    request_body: RecalibrateRequest,
+    request: Request,
+    user_info: dict = Depends(verify_token),
+):
+    """重新校对接口
+
+    仅重新执行校对步骤（跳过下载、转录、总结），需要 recalibrate 权限。
+    """
+    view_token = request_body.view_token
+    user_id = user_info.get("user_id")
+    api_key = user_info.get("api_key")
+
+    start_time = datetime.datetime.now()
+
+    audit_logger.log_api_call(
+        api_key=api_key,
+        user_id=user_id,
+        endpoint="/api/recalibrate",
+        user_agent=request.headers.get("User-Agent"),
+        remote_ip=request.client.host if request.client else None,
+    )
+
+    # 权限检查
+    um = get_user_manager()
+    if not um.check_permission(user_info, "recalibrate"):
+        logger.warning(f"用户 {user_id} 无 recalibrate 权限")
+        raise HTTPException(status_code=403, detail="无重新校对权限")
+
+    # 通过 view_token 获取缓存数据
+    cache_data = cache_manager.get_cache_by_view_token(view_token)
+    if not cache_data:
+        logger.warning(f"view_token 对应的缓存不存在: {view_token}")
+        raise HTTPException(status_code=404, detail="未找到对应的转录数据")
+
+    # 验证有转录数据
+    transcript_data = cache_data.get("transcript_data")
+    if not transcript_data:
+        logger.warning(f"缓存中无转录数据: {view_token}")
+        raise HTTPException(status_code=400, detail="缓存中没有转录数据，无法重新校对")
+
+    task_info = cache_data.get("task_info", {})
+    platform = cache_data.get("platform")
+    media_id = cache_data.get("media_id")
+    use_speaker_recognition = cache_data.get("use_speaker_recognition", False)
+    video_title = cache_data.get("title", "")
+    author = cache_data.get("author", "")
+    description = cache_data.get("description", "")
+    cache_file_path = cache_data.get("file_path")
+
+    # 创建新任务（复用原 view_token）
+    task_id = cache_manager.generate_task_id()
+    try:
+        with cache_manager._get_cursor() as cursor:
+            cursor.execute('''
+                INSERT INTO task_status
+                (task_id, view_token, url, platform, media_id,
+                 use_speaker_recognition, status, title, author)
+                VALUES (?, ?, ?, ?, ?, ?, 'processing', ?, ?)
+            ''', (
+                task_id, view_token, task_info.get("url", ""),
+                platform, media_id, use_speaker_recognition,
+                video_title, author,
+            ))
+        logger.info(f"重新校对任务创建成功: {task_id}, view_token: {view_token}")
+    except Exception as e:
+        logger.error(f"创建重新校对任务失败: {e}")
+        raise HTTPException(status_code=500, detail=f"创建重新校对任务失败: {e}")
+
+    task_results[task_id] = {
+        "status": "processing",
+        "message": "正在重新校对",
+        "view_token": view_token,
+    }
+
+    # 准备转录内容（与 _handle_llm_task 的输入格式一致）
+    transcript_text = ""
+    transcription_data_for_llm = None
+    if cache_data.get("transcript_type") == "funasr":
+        transcription_data_for_llm = transcript_data
+        from ...transcriber import FunASRSpeakerClient
+        funasr_client = FunASRSpeakerClient()
+        transcript_text = funasr_client.format_transcript_with_speakers(transcript_data)
+    else:
+        transcript_text = transcript_data
+
+    # 确定 webhook
+    effective_webhook = (
+        request_body.wechat_webhook
+        or user_info.get("wechat_webhook")
+        or config.get("wechat", {}).get("webhook")
+    )
+
+    # 放入 LLM 队列
+    from ..context import get_llm_queue
+    llm_queue = get_llm_queue()
+
+    llm_task = {
+        "task_id": task_id,
+        "url": task_info.get("url", ""),
+        "display_url": task_info.get("url", ""),
+        "platform": platform,
+        "media_id": media_id,
+        "video_title": video_title,
+        "author": author,
+        "description": description,
+        "transcript": transcript_text,
+        "use_speaker_recognition": use_speaker_recognition,
+        "transcription_data": transcription_data_for_llm if use_speaker_recognition else None,
+        "is_generic": False,
+        "wechat_webhook": effective_webhook,
+        "calibrate_only": True,  # 标记仅校对模式
+    }
+
+    try:
+        llm_queue.put(llm_task)
+        logger.info(f"重新校对任务已加入 LLM 队列: {task_id}")
+    except Exception as e:
+        logger.error(f"重新校对任务加入队列失败: {e}")
+        raise HTTPException(status_code=500, detail=f"任务加入队列失败: {e}")
+
+    processing_time_ms = int(
+        (datetime.datetime.now() - start_time).total_seconds() * 1000
+    )
+    audit_logger.log_api_call(
+        api_key=api_key,
+        user_id=user_id,
+        endpoint="/api/recalibrate",
+        processing_time_ms=processing_time_ms,
+        status_code=202,
+        task_id=task_id,
+        user_agent=request.headers.get("User-Agent"),
+        remote_ip=request.client.host if request.client else None,
+    )
+
+    return TranscribeResponse(
+        code=202,
+        message="重新校对任务已提交",
+        data={"task_id": task_id, "view_token": view_token},
     )

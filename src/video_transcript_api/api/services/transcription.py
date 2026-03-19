@@ -70,6 +70,15 @@ class TranscribeRequest(BaseModel):
     )
 
 
+class RecalibrateRequest(BaseModel):
+    """重新校对请求数据模型"""
+
+    view_token: str = Field(..., description="查看页面的 view_token")
+    wechat_webhook: Optional[str] = Field(
+        None, description="企业微信webhook地址，用于发送通知"
+    )
+
+
 class TranscribeResponse(BaseModel):
     """转录响应数据模型"""
 
@@ -1371,6 +1380,9 @@ def _handle_llm_task(llm_task: dict):
                 except Exception as e:
                     logger.error(f"风险检测失败，使用默认模型: {e}")
 
+                # 是否为仅校对模式（重新校对场景）
+                calibrate_only = llm_task.get("calibrate_only", False)
+
                 # 调用新架构
                 coordinator_result = llm_coordinator.process(
                     content=content,
@@ -1380,6 +1392,7 @@ def _handle_llm_task(llm_task: dict):
                     platform=platform or "",
                     media_id=media_id or "",
                     has_risk=has_risk,  # 传递风险检测结果
+                    skip_summary=calibrate_only,  # 仅校对时跳过总结
                 )
 
                 # 适配返回格式为旧架构格式（保持后续代码兼容）
@@ -1387,6 +1400,7 @@ def _handle_llm_task(llm_task: dict):
                 summary_text_new = coordinator_result.get("summary_text")  # 从新架构获取总结
 
                 # 判断是否跳过总结（基于新架构返回的 summary_text）
+                # calibrate_only 模式下保留原有总结，不覆盖
                 should_skip_summary = summary_text_new is None
 
                 result_dict = {
@@ -1438,7 +1452,10 @@ def _handle_llm_task(llm_task: dict):
                         logger.warning(f"校对失败，跳过保存校对文件: {task_id}")
 
                     # 保存总结文本到缓存（仅在成功时保存）
-                    if summary_success:
+                    # calibrate_only 模式下保留原有总结文件，不覆盖
+                    if calibrate_only:
+                        logger.info(f"仅校对模式，保留原有总结文件: {task_id}")
+                    elif summary_success:
                         if skip_summary:
                             # 跳过总结时，只有校对成功才保存
                             if calibrate_success:
@@ -1575,8 +1592,38 @@ def _handle_llm_task(llm_task: dict):
                     logger.info(f"任务完成通知已加入限流队列: {task_id}")
 
                 logger.info(f"LLM任务处理完成: {task_id}, 标题: {video_title}")
+
+                # calibrate_only 模式：LLM 处理完成后需要更新任务状态为 success
+                # （正常流程中 task_status 在 process_transcription 中已更新）
+                if calibrate_only and platform and media_id:
+                    cache_manager.update_task_status(
+                        task_id,
+                        "success",
+                        platform=platform,
+                        media_id=media_id,
+                        title=video_title,
+                        author=llm_task.get("author", ""),
+                    )
+                    # 同步更新内存中的任务状态（供 GET /api/task/{task_id} 轮询）
+                    task_results[task_id] = {
+                        "status": "success",
+                        "message": "重新校对完成",
+                    }
+                    logger.info(f"重新校对任务状态已更新为 success: {task_id}")
             except Exception as exc:
                 logger.exception(f"LLM任务处理异常: {task_id}, 错误: {exc}")
                 task_notifier.send_text(f"【LLM API调用异常】{exc}")
+
+                # calibrate_only 模式：异常时也要更新任务状态
+                if llm_task.get("calibrate_only"):
+                    try:
+                        cache_manager.update_task_status(task_id, "failed")
+                        task_results[task_id] = {
+                            "status": "failed",
+                            "message": f"重新校对失败: {exc}",
+                        }
+                        logger.info(f"重新校对任务状态已更新为 failed: {task_id}")
+                    except Exception:
+                        pass
     finally:
         llm_task_queue.task_done()

@@ -102,6 +102,7 @@ class LLMCoordinator:
         platform: str = "",
         media_id: str = "",
         has_risk: bool = False,
+        skip_summary: bool = False,
     ) -> Dict:
         """处理文本（统一入口）
 
@@ -113,6 +114,7 @@ class LLMCoordinator:
             platform: 平台标识
             media_id: 媒体 ID
             has_risk: 是否有风险内容
+            skip_summary: 是否跳过总结生成（重新校对场景使用）
 
         Returns:
             处理结果字典:
@@ -124,7 +126,7 @@ class LLMCoordinator:
                 "structured_data": dict,       # 结构化数据（仅有说话人）
             }
         """
-        logger.info(f"Processing content for: {title}")
+        logger.info(f"Processing content for: {title} (skip_summary={skip_summary})")
 
         # 步骤 1: 选择模型
         selected_models = self.config.select_models_for_task(has_risk)
@@ -146,18 +148,21 @@ class LLMCoordinator:
         calibrated_text = calibration_result.get("calibrated_text", "")
         speaker_count = self._extract_speaker_count(content, calibration_result)
 
-        # 步骤 3: 总结生成（基于校对文本）
-        logger.info("Step 2/2: Summary generation")
-
-        summary_text = self._generate_summary_if_needed(
-            text=calibrated_text,
-            title=title,
-            author=author,
-            description=description,
-            speaker_count=speaker_count,
-            transcription_data=self._extract_transcription_data(content),
-            selected_models=selected_models,
-        )
+        # 步骤 3: 总结生成（基于校对文本，可跳过）
+        summary_text = None
+        if skip_summary:
+            logger.info("Step 2/2: Summary generation SKIPPED (skip_summary=True)")
+        else:
+            logger.info("Step 2/2: Summary generation")
+            summary_text = self._generate_summary_if_needed(
+                text=calibrated_text,
+                title=title,
+                author=author,
+                description=description,
+                speaker_count=speaker_count,
+                transcription_data=self._extract_transcription_data(content),
+                selected_models=selected_models,
+            )
 
         # 步骤 4: 合并结果
         return {

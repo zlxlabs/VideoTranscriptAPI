@@ -935,6 +935,57 @@ class CacheManager:
             logger.error(f"获取查看页面数据失败: {e}")
             return None
     
+    def get_cache_by_view_token(self, view_token: str) -> Optional[Dict[str, Any]]:
+        """根据 view_token 获取完整缓存数据（含转录文件路径和元数据）
+
+        从 task_status 表找到 url、platform、media_id、use_speaker_recognition，
+        再从 video_cache 表获取完整缓存数据。
+
+        Args:
+            view_token: 查看 token
+
+        Returns:
+            Dict: 完整缓存数据（与 get_cache 返回格式一致），包含额外的 task_info 字段；
+                  如果未找到则返回 None
+        """
+        try:
+            # 获取任务信息
+            task_info = self.get_task_by_view_token(view_token)
+            if not task_info:
+                logger.warning(f"未找到 view_token 对应的任务: {view_token}")
+                return None
+
+            platform = task_info.get("platform")
+            media_id = task_info.get("media_id")
+            use_speaker_recognition = task_info.get("use_speaker_recognition", False)
+
+            if not platform or not media_id:
+                logger.warning(
+                    f"任务信息不完整，缺少 platform 或 media_id: "
+                    f"view_token={view_token}, platform={platform}, media_id={media_id}"
+                )
+                return None
+
+            # 获取缓存数据
+            cache_data = self.get_cache(
+                platform=platform,
+                media_id=media_id,
+                use_speaker_recognition=use_speaker_recognition,
+            )
+
+            if cache_data:
+                # 附加任务信息，方便调用方使用
+                cache_data["task_info"] = task_info
+                logger.info(
+                    f"通过 view_token 获取缓存成功: platform={platform}, media_id={media_id}"
+                )
+
+            return cache_data
+
+        except Exception as e:
+            logger.error(f"通过 view_token 获取缓存失败: {e}")
+            return None
+
     def get_existing_task_by_url(self, url: str, use_speaker_recognition: bool = False) -> Optional[Dict[str, Any]]:
         """
         根据URL和说话人识别参数查找现有任务
