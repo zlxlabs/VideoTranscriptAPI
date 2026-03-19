@@ -64,6 +64,11 @@
 .dialog-status { margin-top: 12px; font-size: 0.82rem; color: var(--text-secondary, #666); }
 .dialog-status-error { color: #d9534f; }
 .dialog-status-ok { color: #5cb85c; }
+
+/* Inline recalibrate status (replaces button during processing) */
+.recalibrate-status { font-size: 0.85rem; color: var(--text-secondary, #888); white-space: nowrap; }
+.recalibrate-done { color: #5cb85c; }
+.recalibrate-error { color: #d9534f; }
 </style>
 {% endblock %}
 
@@ -172,7 +177,9 @@
         <div class="section-header">
             <h2>✨ 校对文本</h2>
             {% if view_token %}
-            <button class="recalibrate-btn" onclick="document.getElementById('recalibrateDialog').showModal()">🔄 重新校对</button>
+            <span id="recalibrateArea">
+                <button class="recalibrate-btn" id="recalibrateBtn" onclick="document.getElementById('recalibrateDialog').showModal()">🔄 重新校对</button>
+            </span>
             {% endif %}
         </div>
         {% if use_speaker_recognition %}
@@ -218,6 +225,8 @@
 function submitRecalibrate() {
     var btn = document.getElementById('recalibrateConfirmBtn');
     var status = document.getElementById('recalibrateStatus');
+    var dialog = document.getElementById('recalibrateDialog');
+    var area = document.getElementById('recalibrateArea');
     var apiKey = document.getElementById('recalibrateApiKey').value.trim();
 
     if (!apiKey) {
@@ -231,10 +240,8 @@ function submitRecalibrate() {
     localStorage.setItem('api_key', apiKey);
 
     btn.disabled = true;
-    btn.textContent = 'Processing...';
-    status.textContent = 'Submitting recalibration request...';
-    status.className = 'dialog-status';
-    status.style.display = 'block';
+    btn.textContent = 'Submitting...';
+    status.style.display = 'none';
 
     fetch('/api/recalibrate', {
         method: 'POST',
@@ -254,23 +261,25 @@ function submitRecalibrate() {
     .then(function(data) {
         var taskId = data.data && data.data.task_id;
         if (!taskId) throw new Error('No task_id returned');
-        status.textContent = 'Recalibrating... (0s)';
-        status.className = 'dialog-status dialog-status-ok';
-        pollTask(taskId, apiKey, status, btn);
+        // Close dialog, show inline status on the button area
+        dialog.close();
+        area.innerHTML = '<span class="recalibrate-status">校对中... (0s)</span>';
+        pollTask(taskId, apiKey, area);
     })
     .catch(function(err) {
         status.textContent = err.message;
         status.className = 'dialog-status dialog-status-error';
+        status.style.display = 'block';
         btn.disabled = false;
         btn.textContent = 'Confirm';
     });
 }
 
-function pollTask(taskId, apiKey, statusEl, btn) {
+function pollTask(taskId, apiKey, area) {
     var elapsed = 0;
     var interval = setInterval(function() {
         elapsed += 3;
-        statusEl.textContent = 'Recalibrating... (' + elapsed + 's)';
+        area.innerHTML = '<span class="recalibrate-status">校对中... (' + elapsed + 's)</span>';
 
         fetch('/api/task/' + taskId, {
             headers: { 'Authorization': 'Bearer ' + apiKey }
@@ -280,16 +289,12 @@ function pollTask(taskId, apiKey, statusEl, btn) {
             var taskStatus = data.data && data.data.status;
             if (data.code === 200 || taskStatus === 'success') {
                 clearInterval(interval);
-                statusEl.textContent = 'Done! Refreshing page...';
+                area.innerHTML = '<span class="recalibrate-status recalibrate-done">校对完成，刷新中...</span>';
                 setTimeout(function() { location.reload(); }, 500);
             } else if (taskStatus === 'failed') {
                 clearInterval(interval);
-                statusEl.textContent = 'Recalibration failed';
-                statusEl.className = 'dialog-status dialog-status-error';
-                btn.disabled = false;
-                btn.textContent = 'Confirm';
+                area.innerHTML = '<span class="recalibrate-status recalibrate-error">校对失败</span>';
             }
-            // processing/queued: keep polling
         })
         .catch(function() {
             // Network error, keep polling
@@ -297,10 +302,7 @@ function pollTask(taskId, apiKey, statusEl, btn) {
 
         if (elapsed > 600) {
             clearInterval(interval);
-            statusEl.textContent = 'Timeout (>10min). Please refresh manually.';
-            statusEl.className = 'dialog-status dialog-status-error';
-            btn.disabled = false;
-            btn.textContent = 'Confirm';
+            area.innerHTML = '<span class="recalibrate-status recalibrate-error">超时，请手动刷新页面</span>';
         }
     }, 3000);
 }
