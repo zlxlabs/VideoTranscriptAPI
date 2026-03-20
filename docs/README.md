@@ -188,6 +188,7 @@ docs/
 
 ### 安装与配置
 - [项目 README](../README.md) - 项目介绍和快速开始
+- [系统架构](architecture.md) - 架构设计、模块详解、处理流程
 - [配置示例](../config/config.example.jsonc) - 配置文件模板
 
 ### 测试

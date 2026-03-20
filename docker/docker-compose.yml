@@ -2,7 +2,7 @@
 # @skill-version 1
 services:
   video-transcript-api:
-    image: video-transcript-api:latest
+    image: ghcr.io/zj1123581321/video-transcript-api:latest
     build:
       context: ..
       dockerfile: docker/Dockerfile
