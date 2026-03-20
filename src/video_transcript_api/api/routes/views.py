@@ -952,6 +952,19 @@ async def view_transcript(
                     except Exception as exc:
                         logger.error(f"计算总结文本字数失败: {exc}")
 
+            # 4. 读取校准质量统计
+            processed_file = cache_dir_path / "llm_processed.json" if cache_dir else None
+            if processed_file and processed_file.exists():
+                try:
+                    import json
+                    with open(processed_file, "r", encoding="utf-8") as f:
+                        processed_data = json.load(f)
+                    cal_stats = processed_data.get("calibration_stats")
+                    if cal_stats:
+                        stats["calibration_stats"] = cal_stats
+                except Exception as exc:
+                    logger.error(f"读取校准统计失败: {exc}")
+
             fallback_text = view_data.get("transcript", "")
             transcript_path = Path(cache_dir) / "llm_calibrated.txt"
             if transcript_path.exists():

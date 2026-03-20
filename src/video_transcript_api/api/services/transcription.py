@@ -1489,6 +1489,10 @@ def _handle_llm_task(llm_task: dict):
                     # 保存结构化数据到缓存（仅在有说话人识别且校对成功时保存）
                     if use_speaker_recognition and calibrate_success and "structured_data" in result_dict:
                         structured_data = result_dict["structured_data"]
+                        # 将校准统计写入结构化数据，供前端页面读取
+                        cal_stats_for_save = stats.get("calibration_stats")
+                        if cal_stats_for_save:
+                            structured_data["calibration_stats"] = cal_stats_for_save
                         save_structured_success = cache_manager.save_llm_result(
                             platform=platform,
                             media_id=media_id,
@@ -1522,6 +1526,27 @@ def _handle_llm_task(llm_task: dict):
                     calibrated_length = stats.get("calibrated_length", 0)
                     summary_length = stats.get("summary_length", 0)
 
+                    # 校准质量警告
+                    calibration_warning = ""
+                    cal_stats = stats.get("calibration_stats")
+                    if cal_stats:
+                        failed = cal_stats.get("failed_count", 0)
+                        fallback = cal_stats.get("fallback_count", 0)
+                        total = cal_stats.get("total_chunks", 0)
+                        success = cal_stats.get("success_count", 0)
+                        if failed == total and total > 0:
+                            calibration_warning = (
+                                "\n⚠️ **校准完全失败**：LLM API 超时，"
+                                "当前显示为未校准的原始语音识别文本，质量较低。"
+                                "建议稍后重新提交。"
+                            )
+                        elif failed > 0 or fallback > 0:
+                            calibration_warning = (
+                                f"\n⚠️ **校准部分异常**：{success}/{total} 段校准成功，"
+                                f"{fallback} 段降级，{failed} 段失败。"
+                                "部分内容为未校准文本。"
+                            )
+
                     # 构建完整的消息格式
                     speaker_info = "（含说话人识别）" if use_speaker_recognition else ""
 
@@ -1534,7 +1559,7 @@ def _handle_llm_task(llm_task: dict):
 📄 直接获取：{view_url}?raw=calibrated
 
 ## 转录统计
-原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 未生成
+原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 未生成{calibration_warning}
 
 {model_config_text}
 
@@ -1547,7 +1572,7 @@ def _handle_llm_task(llm_task: dict):
 📄 直接获取：{view_url}?raw=calibrated
 
 ## 转录统计
-原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_length:,} 字
+原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_length:,} 字{calibration_warning}
 
 {model_config_text}
 

@@ -120,7 +120,7 @@ class SpeakerAwareProcessor:
         logger.debug(f"Dialogs segmented: {len(chunks)} chunks")
 
         # 步骤3: 分段校对（每段独立验证）
-        calibrated_chunks = self._calibrate_chunks(
+        calibrated_chunks, calibration_stats = self._calibrate_chunks(
             chunks=chunks,
             original_chunks=chunks,  # 传入原始chunk用于验证
             key_info=key_info,
@@ -157,6 +157,7 @@ class SpeakerAwareProcessor:
                 "calibrated_length": len(calibrated_text),
                 "dialog_count": len(normalized_dialogs),
                 "chunk_count": len(chunks),
+                "calibration_stats": calibration_stats,
             }
         }
 
@@ -345,7 +346,9 @@ class SpeakerAwareProcessor:
             language: 检测到的语言（"zh" 或 "en"）
 
         Returns:
-            校对后的分块列表（包含成功+降级的混合结果）
+            (calibrated_chunks, calibration_stats) 元组:
+            - calibrated_chunks: 校对后的分块列表（包含成功+降级的混合结果）
+            - calibration_stats: 校准统计 {total_chunks, success_count, fallback_count, failed_count}
         """
         model = selected_models["calibrate_model"] if selected_models else self.config.calibrate_model
         reasoning_effort = selected_models.get("calibrate_reasoning_effort") if selected_models else self.config.calibrate_reasoning_effort
@@ -360,6 +363,8 @@ class SpeakerAwareProcessor:
         )
 
         calibrated_chunks = [None] * len(chunks)
+        # 跟踪每个 chunk 的校准状态: "success" | "fallback" | "failed"
+        chunk_statuses = ["failed"] * len(chunks)
 
         def calibrate_single_chunk(index: int, chunk: List[Dict]):
             """校对单个 chunk（含质量验证）"""
@@ -415,6 +420,7 @@ class SpeakerAwareProcessor:
                             f"falling back to original"
                         )
                         calibrated_chunks[index] = chunk
+                        chunk_statuses[index] = "fallback"
                         return
 
                     # 步骤4: 分段质量验证（可选）
@@ -458,6 +464,7 @@ class SpeakerAwareProcessor:
                                 last_candidate=merged_dialogs,
                                 fallback_strategy=fallback_strategy,
                             )
+                            chunk_statuses[index] = "fallback"
                             return
 
                         logger.debug(
@@ -466,6 +473,7 @@ class SpeakerAwareProcessor:
                         )
 
                     calibrated_chunks[index] = merged_dialogs
+                    chunk_statuses[index] = "success"
                     logger.debug(f"Chunk {index + 1} calibration completed")
                     return
 
@@ -484,6 +492,7 @@ class SpeakerAwareProcessor:
                         last_candidate=merged_dialogs if 'merged_dialogs' in locals() else None,
                         fallback_strategy=fallback_strategy,
                     )
+                    chunk_statuses[index] = "failed"
                     return
 
         # 并发处理
@@ -497,7 +506,33 @@ class SpeakerAwareProcessor:
             for future in concurrent.futures.as_completed(futures):
                 future.result()  # 等待完成
 
-        return calibrated_chunks
+        # 统计校准质量
+        success_count = chunk_statuses.count("success")
+        fallback_count = chunk_statuses.count("fallback")
+        failed_count = chunk_statuses.count("failed")
+        total = len(chunks)
+
+        if failed_count == total:
+            logger.warning(
+                f"All {total} chunks calibration failed, "
+                f"output is raw ASR text without calibration"
+            )
+        elif failed_count > 0 or fallback_count > 0:
+            logger.warning(
+                f"Calibration partial: {success_count}/{total} succeeded, "
+                f"{fallback_count} fallback, {failed_count} failed"
+            )
+        else:
+            logger.info(f"All {total} chunks calibrated successfully")
+
+        calibration_stats = {
+            "total_chunks": total,
+            "success_count": success_count,
+            "fallback_count": fallback_count,
+            "failed_count": failed_count,
+        }
+
+        return calibrated_chunks, calibration_stats
 
     def _format_chunk_for_prompt(self, chunk: List[Dict], speaker_mapping: Dict[str, str]) -> str:
         """格式化对话块为 prompt 文本
