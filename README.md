@@ -20,10 +20,10 @@
 
 ## 外部依赖
 
-- [Tikhub API](https://user.tikhub.io/register?referral_code=YArXsaWi) — 音视频解析下载
-- [funasr_spk_server](https://github.com/zj1123581321/funasr_spk_server) — FunASR 转录服务（含说话人识别）
-- [CapsWriter-Offline](https://github.com/HaujetZhao/CapsWriter-Offline) — 离线语音转录
-- OpenAI 兼容 API（如 Deepseek）— LLM 文本处理
+- [Tikhub API key，用于音视频解析下载。有 aff](https://user.tikhub.io/register?referral_code=YArXsaWi)
+- [funasr_spk_server：funasr server 对应暴露 api，支持音视频转写，分角色，自动合并相同人物的话。](https://github.com/zj1123581321/funasr_spk_server)
+- [CapsWriter-Offline：CapsWriter 的离线版，一个好用的 PC 端的语音输入工具，支持热词、LLM处理。](https://github.com/HaujetZhao/CapsWriter-Offline)
+- OpenAI 兼容的 API，比如 Deepseek，量大管饱。
 
 ---
 
