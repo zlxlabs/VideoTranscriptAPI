@@ -799,6 +799,29 @@
             }
         }
 
+        /* ========== 开源脚注样式 ========== */
+        .powered-footer {
+            padding: 12px 30px;
+            text-align: center;
+            font-size: 0.78rem;
+            color: var(--text-secondary);
+            opacity: 0.5;
+            transition: opacity 0.2s ease;
+        }
+
+        .powered-footer:hover {
+            opacity: 0.8;
+        }
+
+        .powered-footer a {
+            color: var(--text-secondary);
+            text-decoration: none;
+        }
+
+        .powered-footer a:hover {
+            text-decoration: underline;
+        }
+
         /* ========== 导出链接折叠栏样式 ========== */
         .export-links-details {
             padding: 0;
@@ -951,6 +974,10 @@
         </div>
         
         {% block content %}{% endblock %}
+
+        <div class="powered-footer">
+            Powered by <a href="https://github.com/zj1123581321/VideoTranscriptAPI" target="_blank" rel="noopener">VideoTranscriptAPI</a> · Open Source · <a href="https://github.com/zj1123581321/VideoTranscriptAPI" target="_blank" rel="noopener">☆ Star on GitHub</a>
+        </div>
     </div>
     
     {% block extra_js %}{% endblock %}

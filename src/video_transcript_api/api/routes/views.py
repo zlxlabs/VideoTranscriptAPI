@@ -73,43 +73,99 @@ _HOME_HTML = """\
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Video Transcript API - 视频转录服务</title>
-    <meta name="description" content="Video Transcript API 是一个多平台视频转录服务，支持 YouTube、Bilibili、抖音等平台的视频语音转文字，并提供 AI 校对与总结功能。">
+    <title>VideoTranscriptAPI</title>
+    <meta name="description" content="Multi-platform video transcription with AI-powered proofreading and summarization. Supports YouTube, Bilibili, Douyin, Xiaohongshu and more.">
     <meta name="theme-color" content="#667eea">
     <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
             line-height: 1.6;
             color: #333;
-            max-width: 700px;
-            margin: 60px auto;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             padding: 20px;
-            background: #f8f9fa;
         }
         .card {
             background: #fff;
-            border-radius: 12px;
-            box-shadow: 0 2px 12px rgba(0,0,0,0.08);
-            padding: 40px;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+            padding: 48px;
+            max-width: 560px;
+            width: 100%;
+            text-align: center;
         }
-        h1 { font-size: 1.6rem; margin: 0 0 8px 0; }
-        .subtitle { color: #6b7280; margin: 0 0 24px 0; font-size: 0.95rem; }
-        ul { padding-left: 20px; }
-        li { margin-bottom: 6px; }
-        .footer { margin-top: 24px; font-size: 0.85rem; color: #9ca3af; }
+        .logo { font-size: 3rem; margin-bottom: 16px; }
+        h1 { font-size: 1.8rem; margin-bottom: 8px; font-weight: 700; }
+        .subtitle { color: #6b7280; margin-bottom: 32px; font-size: 0.95rem; }
+        .features {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 32px;
+            text-align: left;
+        }
+        .feature {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 14px 16px;
+            font-size: 0.88rem;
+            color: #374151;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .feature-icon { font-size: 1.2rem; flex-shrink: 0; }
+        .cta {
+            display: inline-block;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #fff;
+            text-decoration: none;
+            padding: 12px 32px;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            font-weight: 500;
+            transition: opacity 0.2s, transform 0.2s;
+        }
+        .cta:hover { opacity: 0.9; transform: translateY(-1px); }
+        .footer {
+            margin-top: 24px;
+            font-size: 0.78rem;
+            color: #9ca3af;
+            opacity: 0.8;
+        }
+        .footer a { color: #9ca3af; text-decoration: none; }
+        .footer a:hover { text-decoration: underline; }
+        @media (max-width: 480px) {
+            .card { padding: 32px 24px; }
+            .features { grid-template-columns: 1fr; }
+            h1 { font-size: 1.5rem; }
+        }
     </style>
 </head>
 <body>
     <div class="card">
-        <h1>Video Transcript API</h1>
-        <p class="subtitle">多平台视频转录与 AI 校对服务</p>
-        <ul>
-            <li>支持 YouTube、Bilibili、抖音、小红书、小宇宙等平台</li>
-            <li>语音转文字 + LLM 智能校对</li>
-            <li>自动生成内容总结</li>
-            <li>提供分享链接与多格式导出</li>
-        </ul>
-        <p class="footer">Powered by Video Transcript API</p>
+        <div class="logo">🎬</div>
+        <h1>VideoTranscriptAPI</h1>
+        <p class="subtitle">多平台视频转录与 AI 智能校对服务</p>
+        <div class="features">
+            <div class="feature"><span class="feature-icon">🌐</span>支持 YouTube、Bilibili、抖音、小红书、小宇宙播客及音视频直链</div>
+            <div class="feature"><span class="feature-icon">🎙️</span>本地语音转文字 + LLM 智能校对</div>
+            <div class="feature"><span class="feature-icon">📝</span>自动生成内容总结</div>
+            <div class="feature"><span class="feature-icon">👀</span>网页版查看 + 企业微信推送</div>
+        </div>
+        <a class="cta" href="/add_task_by_web">开始使用</a>
+        <p style="margin-top: 16px; font-size: 0.85rem;">
+            <a href="https://mp.weixin.qq.com/s/w8VnWJcUp5VkD5J-fYCUrg" target="_blank" rel="noopener" style="color: #667eea; text-decoration: none;">📖 开发契机和玩法分享</a>
+        </p>
+        <p class="footer">
+            Powered by <a href="https://github.com/zj1123581321/VideoTranscriptAPI" target="_blank" rel="noopener">VideoTranscriptAPI</a>
+            · Open Source ·
+            <a href="https://github.com/zj1123581321/VideoTranscriptAPI" target="_blank" rel="noopener">☆ Star on GitHub</a>
+        </p>
     </div>
 </body>
 </html>

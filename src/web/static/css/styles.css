@@ -583,10 +583,25 @@ body {
 /* 页脚样式 */
 .footer {
     text-align: center;
-    color: rgba(255, 255, 255, 0.8);
-    font-size: 0.9rem;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
     margin-top: auto;
-    padding-top: 1rem;
+    padding: 12px 20px;
+    opacity: 0.5;
+    transition: opacity 0.2s ease;
+}
+
+.footer:hover {
+    opacity: 0.8;
+}
+
+.footer a {
+    color: var(--text-secondary);
+    text-decoration: none;
+}
+
+.footer a:hover {
+    text-decoration: underline;
 }
 
 /* 加载动画 */
