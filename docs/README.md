@@ -40,6 +40,10 @@ docs/
 
 ### API 指南
 
+- [API Quick Start](guides/api/quickstart.md)
+  - 下游客户端接入指南：认证、提交任务、轮询状态、获取结果
+  - 包含 curl 和 Python 完整示例
+
 - [FunASR 客户端 API](guides/api/funasr_spk_server_client_api.md)
   - WebSocket API 接口说明
   - 输出格式（JSON/SRT）
