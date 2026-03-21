@@ -1,195 +1,154 @@
-"""Integration test for plain text formatting when calibration fails"""
+"""Integration test for plain text fallback formatting.
+
+Tests PlainTextProcessor fallback behavior under different failure modes:
+1. best_quality strategy: picks longest LLM attempt even if short
+2. formatted_original strategy: formats original text into paragraphs
+3. Exception path: formats original text via _format_plain_text
+4. _format_plain_text logic: splits text walls into 2-3 sentence paragraphs
+"""
 
 import pytest
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock
 from src.video_transcript_api.llm.processors.plain_text_processor import PlainTextProcessor
 from src.video_transcript_api.llm.core.config import LLMConfig
 from src.video_transcript_api.llm.core.key_info_extractor import KeyInfo
 
 
 class TestPlainTextFallbackFormatting:
-    """Test formatting when calibration falls back to original text"""
+    """Test formatting behavior under calibration failure scenarios"""
 
     @pytest.fixture
     def mock_config(self):
-        """Create mock LLM config"""
+        """Create mock LLM config with all required attributes"""
         config = Mock(spec=LLMConfig)
-        config.enable_threshold = 5000  # High threshold, no segmentation for small text
-        config.min_calibrate_ratio = 0.8  # Require 80% of original length
+        config.enable_threshold = 5000
+        config.min_calibrate_ratio = 0.8
         config.concurrent_workers = 10
         config.segment_size = 2000
         config.max_segment_size = 3000
         config.calibrate_model = "mock-model"
         config.calibrate_reasoning_effort = "medium"
+        config.segmentation_pass_ratio = 0.7
+        config.segmentation_force_retry_ratio = 0.5
+        config.segmentation_fallback_strategy = "best_quality"
+        config.segmentation_validation_enabled = False
         return config
 
     @pytest.fixture
     def processor(self, mock_config):
         """Create PlainTextProcessor with mocked dependencies"""
-        mock_llm_client = Mock()
-        mock_key_info_extractor = Mock()
-        mock_quality_validator = Mock()
-
         return PlainTextProcessor(
             config=mock_config,
-            llm_client=mock_llm_client,
-            key_info_extractor=mock_key_info_extractor,
-            quality_validator=mock_quality_validator,
+            llm_client=Mock(),
+            key_info_extractor=Mock(),
+            quality_validator=Mock(),
         )
 
-    def test_calibration_failure_formats_original_text(self, processor, mock_config):
-        """Test that when calibration fails, original text is formatted"""
-        # Setup: Create long text without line breaks
-        original_text = (
-            "这是第一句话，内容很长，足够满足长度要求。"
-            "这是第二句话，也很长，包含很多信息。"
-            "这是第三句话！内容丰富，详细描述了很多内容。"
-            "这是第四句话？问题很多，需要详细解答。"
-        )
-
-        # Mock key info extractor to return empty key info
+    def _setup_mocks(self, processor, llm_text="short", llm_error=None):
+        """Helper: configure key_info + llm_client mocks"""
         mock_key_info = Mock(spec=KeyInfo)
         mock_key_info.to_dict.return_value = {}
         mock_key_info.format_for_prompt.return_value = ""
         processor.key_info_extractor.extract.return_value = mock_key_info
 
-        # Mock LLM client to return text that's too short (< 80% of original)
-        # This simulates calibration failure
-        mock_response = Mock()
-        mock_response.text = "短文本"  # Much shorter than required
-        processor.llm_client.call.return_value = mock_response
+        if llm_error:
+            processor.llm_client.call.side_effect = llm_error
+        else:
+            mock_response = Mock()
+            mock_response.text = llm_text
+            processor.llm_client.call.return_value = mock_response
 
-        # Execute: Process the text
+    def test_best_quality_picks_longest_attempt(self, processor, mock_config):
+        """best_quality fallback picks the longest LLM candidate"""
+        original_text = (
+            "First sentence about technology."
+            "Second sentence about science."
+            "Third sentence about research!"
+            "Fourth sentence about discovery?"
+        )
+        self._setup_mocks(processor, llm_text="short text")
+
         result = processor.process(
             text=original_text,
-            title="Test Video",
-            author="Test Author",
-            description="Test Description",
+            title="Test",
+            author="Author",
             platform="test",
-            media_id="test123",
+            media_id="t1",
         )
 
-        # Verify: The result should be formatted with line breaks
         calibrated = result["calibrated_text"]
+        # best_quality: returns max(candidates, key=len) = "short text" (10 chars)
+        # Both attempts return same "short text", so result is "short text"
+        assert calibrated == "short text"
 
-        # Should have line breaks after each sentence
-        assert '\n' in calibrated
-        lines = calibrated.split('\n')
-
-        # Should have at least 4 lines (one per sentence)
-        assert len(lines) >= 4
-
-        # Each line should end with punctuation
-        for line in lines:
-            if line.strip():  # Skip empty lines
-                assert line.strip()[-1] in '。！？；.!?;'
-
-    def test_exception_during_calibration_formats_text(self, processor, mock_config):
-        """Test that when exception occurs, text is formatted before fallback"""
-        # Original text without line breaks
-        original_text = "第一句。第二句！第三句？第四句；第五句。"
-
-        # Mock key info extractor
-        mock_key_info = Mock(spec=KeyInfo)
-        mock_key_info.to_dict.return_value = {}
-        mock_key_info.format_for_prompt.return_value = ""
-        processor.key_info_extractor.extract.return_value = mock_key_info
-
-        # Mock LLM client to raise exception
-        processor.llm_client.call.side_effect = Exception("API Error")
-
-        # Execute: Process the text (should handle exception gracefully)
-        result = processor.process(
-            text=original_text,
-            title="Test Video",
-            author="Test Author",
-        )
-
-        # Verify: Text should still be formatted despite exception
-        calibrated = result["calibrated_text"]
-        lines = calibrated.split('\n')
-
-        # Should have 5 lines (one per sentence)
-        assert len(lines) == 5
-        assert lines[0] == "第一句。"
-        assert lines[1] == "第二句！"
-        assert lines[2] == "第三句？"
-
-    def test_retry_failure_formats_text(self, processor, mock_config):
-        """Test that after retry failure, text is properly formatted"""
-        # Long text requiring formatting
+    def test_formatted_original_strategy_formats_text(self, processor, mock_config):
+        """formatted_original strategy calls _format_plain_text on original"""
+        mock_config.segmentation_fallback_strategy = "formatted_original"
         original_text = (
-            "这是一个很长的句子，包含了很多信息和内容。"
-            "这是另一个很长的句子，描述了更多细节。"
-            "第三句话也很长，提供了额外的上下文信息。"
+            "First sentence about technology and its deep impact on society."
+            "Second sentence about science and the way it shapes our world."
+            "Third sentence about cutting-edge research breakthroughs!"
+            "Fourth sentence about important scientific discovery?"
+            "Fifth sentence with additional context and information."
+            "Sixth sentence concluding the discussion."
         )
+        self._setup_mocks(processor, llm_text="x")
 
-        # Mock key info
-        mock_key_info = Mock(spec=KeyInfo)
-        mock_key_info.to_dict.return_value = {}
-        mock_key_info.format_for_prompt.return_value = ""
-        processor.key_info_extractor.extract.return_value = mock_key_info
-
-        # Mock LLM to return short text both times (initial + retry)
-        mock_response = Mock()
-        mock_response.text = "太短"  # Way too short
-        processor.llm_client.call.return_value = mock_response
-
-        # Execute
         result = processor.process(
             text=original_text,
-            title="Test Video",
+            title="Test",
+            author="Author",
+            platform="test",
+            media_id="t2",
         )
 
-        # Verify: Should be formatted
         calibrated = result["calibrated_text"]
-        lines = calibrated.split('\n')
+        # formatted_original -> _format_plain_text -> _split_into_paragraphs
+        # Should produce paragraph structure with \n\n
+        assert '\n\n' in calibrated
+        paragraphs = [p for p in calibrated.split('\n\n') if p.strip()]
+        assert len(paragraphs) >= 2
 
-        # Should have at least 3 lines
-        assert len(lines) >= 3
+    def test_exception_falls_back_to_formatted_original(self, processor, mock_config):
+        """When LLM raises exception, falls back to _format_plain_text(segment)"""
+        original_text = (
+            "First sentence about technology and innovation in modern world."
+            "Second sentence about science and discovery across disciplines."
+            "Third sentence about research and academic achievements!"
+            "Fourth sentence about engineering and system design?"
+            "Fifth sentence with more context and background information."
+        )
+        self._setup_mocks(processor, llm_error=Exception("API Error"))
 
-        # Each non-empty line should end with punctuation
-        for line in lines:
-            if line.strip():
-                assert line.strip()[-1] in '。！？；.!?;'
+        result = processor.process(
+            text=original_text,
+            title="Test",
+            author="Author",
+        )
 
-    def test_long_unformatted_text_gets_formatted(self, processor, mock_config):
-        """Test formatting of very long text without any line breaks"""
-        # Create a long text (500+ chars) without line breaks
+        calibrated = result["calibrated_text"]
+        # Exception path line 325: formatted_segment = self._format_plain_text(segment)
+        assert calibrated is not None
+        assert len(calibrated) > 0
+        # For text wall (1 line, long), should be split into paragraphs
+        assert '\n\n' in calibrated
+
+    def test_format_plain_text_splits_text_wall(self, processor):
+        """_format_plain_text splits text wall into 2-3 sentence paragraphs"""
         sentences = [
-            "这是关于人工智能的详细讨论。",
-            "机器学习是人工智能的一个重要分支！",
-            "深度学习在近年来取得了巨大进展？",
-            "自然语言处理也是研究热点之一；",
-            "计算机视觉应用广泛。",
+            "Artificial intelligence is transforming every industry.",
+            "Machine learning enables automated decision making!",
+            "Deep learning has achieved remarkable breakthroughs?",
+            "NLP bridges human language and computer understanding.",
+            "Computer vision has widespread applications.",
         ]
-        # Repeat to make it long enough
-        original_text = "".join(sentences * 5)  # ~250 chars * 5 = ~1250 chars
+        # 5 repetitions = 25 sentences, single wall of text
+        text_wall = "".join(sentences * 5)
 
-        # Mock components
-        mock_key_info = Mock(spec=KeyInfo)
-        mock_key_info.to_dict.return_value = {}
-        mock_key_info.format_for_prompt.return_value = ""
-        processor.key_info_extractor.extract.return_value = mock_key_info
+        result = processor._format_plain_text(text_wall)
 
-        # Mock calibration to fail
-        mock_response = Mock()
-        mock_response.text = "失败"
-        processor.llm_client.call.return_value = mock_response
-
-        # Execute
-        result = processor.process(
-            text=original_text,
-            title="AI Discussion",
-        )
-
-        # Verify formatting
-        calibrated = result["calibrated_text"]
-
-        # Should have many line breaks (5 sentences * 5 repetitions = 25 lines)
-        lines = [l for l in calibrated.split('\n') if l.strip()]
-        assert len(lines) == 25
-
-        # Each line should end with a sentence-ending punctuation
-        for line in lines:
-            assert line.strip()[-1] in '。！？；'
+        # Should be split with \n\n
+        assert '\n\n' in result
+        paragraphs = [p for p in result.split('\n\n') if p.strip()]
+        # 25 sentences / 2-3 per paragraph = ~8-12 paragraphs
+        assert 5 <= len(paragraphs) <= 15
