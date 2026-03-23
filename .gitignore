@@ -29,6 +29,8 @@ data/logs/
 data/cache/
 data/temp/
 data/*.db
+data/*.db-shm
+data/*.db-wal
 data/output
 data/risk_control/
 tests/llm/output
