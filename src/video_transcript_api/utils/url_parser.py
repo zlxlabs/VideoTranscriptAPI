@@ -176,6 +176,14 @@ class URLParser:
             response = requests.head(url, allow_redirects=True, timeout=timeout)
             resolved_url = response.url
 
+            # 某些短链接服务（如 xhslink.com）不支持 HEAD，返回 404
+            # 回退到 GET + stream 模式，只读取 headers 不下载 body
+            if response.status_code == 404 or (resolved_url == url and response.status_code != 200):
+                logger.debug(f"HEAD 请求未跳转 (status={response.status_code})，回退到 GET: {url}")
+                response = requests.get(url, allow_redirects=True, timeout=timeout, stream=True)
+                resolved_url = response.url
+                response.close()
+
             if resolved_url and resolved_url != url:
                 # SSRF 防护：验证解析后的 URL 安全性
                 try:

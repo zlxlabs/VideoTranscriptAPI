@@ -191,7 +191,17 @@ class BaseDownloader(ABC):
         """
         try:
             response = requests.head(url, allow_redirects=True, timeout=10)
-            return response.url
+            resolved_url = response.url
+
+            # 某些短链接服务（如 xhslink.com）不支持 HEAD，返回 404
+            # 回退到 GET + stream 模式，只读取 headers 不下载 body
+            if response.status_code == 404 or (resolved_url == url and response.status_code != 200):
+                logger.debug(f"HEAD failed (status={response.status_code}), falling back to GET: {url}")
+                response = requests.get(url, allow_redirects=True, timeout=10, stream=True)
+                resolved_url = response.url
+                response.close()
+
+            return resolved_url
         except Exception as e:
             logger.error(f"解析短链接失败: {url}, 错误: {str(e)}")
             return url
