@@ -8,7 +8,7 @@ API调用审计日志模块
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from .logger import setup_logger
@@ -229,7 +229,7 @@ class AuditLogger:
         """
         try:
             # 使用 Python 计算截止日期，避免 SQL 格式化注入
-            cutoff_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+            cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
 
             with self._get_cursor() as cursor:
                 # 查询指定天数内的统计数据
@@ -300,7 +300,7 @@ class AuditLogger:
         """
         try:
             # 使用 Python 计算截止日期，避免 SQL 格式化注入
-            cutoff_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+            cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
 
             with self._get_cursor() as cursor:
                 cursor.execute('''
@@ -393,7 +393,7 @@ class AuditLogger:
         """
         try:
             # 使用 Python 计算截止日期，避免 SQL 格式化注入
-            cutoff_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+            cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
 
             with self._get_cursor() as cursor:
                 cursor.execute('''

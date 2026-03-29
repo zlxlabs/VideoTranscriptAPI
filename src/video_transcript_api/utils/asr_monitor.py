@@ -150,6 +150,20 @@ class ASRMonitor:
                 self._maybe_send_alert(name, url, count)
                 self._was_down[name] = True
 
+    def _get_local_time_str(self) -> str:
+        """获取配置时区的当前时间字符串
+
+        Returns:
+            格式化的本地时间字符串 (YYYY-MM-DD HH:MM:SS)
+        """
+        try:
+            from .timeutil.timezone_helper import get_configured_timezone
+            import datetime
+            tz = get_configured_timezone()
+            return datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            return time.strftime('%Y-%m-%d %H:%M:%S')
+
     def _maybe_send_alert(self, name: str, url: str, failure_count: int):
         """发送告警（带防抖）
 
@@ -172,7 +186,7 @@ class ASRMonitor:
             f"- 服务: {name}\n"
             f"- 地址: {url}\n"
             f"- 连续失败: {failure_count} 次\n"
-            f"- 时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"- 时间: {self._get_local_time_str()}\n\n"
             f"请检查服务状态。"
         )
 
@@ -190,7 +204,7 @@ class ASRMonitor:
             f"**ASR 服务恢复通知**\n\n"
             f"- 服务: {name}\n"
             f"- 地址: {url}\n"
-            f"- 时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"- 时间: {self._get_local_time_str()}\n\n"
             f"服务已恢复正常。"
         )
 

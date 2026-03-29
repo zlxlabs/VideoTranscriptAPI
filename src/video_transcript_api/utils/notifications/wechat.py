@@ -351,8 +351,10 @@ class WechatNotifier:
         返回:
             bool: 发送是否成功
         """
-        # 添加时间戳前缀
-        timestamp = datetime.datetime.now().strftime("%y%m%d-%H%M%S")
+        # 添加时间戳前缀（使用配置时区）
+        from ..timeutil.timezone_helper import get_configured_timezone
+        tz = get_configured_timezone()
+        timestamp = datetime.datetime.now(tz).strftime("%y%m%d-%H%M%S")
 
         # 清洗URL
         clean_url = self._clean_url(url)

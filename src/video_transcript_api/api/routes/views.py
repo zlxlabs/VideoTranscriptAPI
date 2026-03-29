@@ -198,7 +198,8 @@ def _build_text_metadata_header(view_data: Dict[str, Any], export_type: str) -> 
     platform = view_data.get("platform", "unknown")
     source_url = view_data.get("url", "")
     content_type_cn = type_map.get(export_type, export_type)
-    export_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    from ...utils.timeutil.timezone_helper import get_configured_timezone
+    export_date = datetime.now(get_configured_timezone()).strftime("%Y-%m-%d")
 
     lines = [
         "---",
