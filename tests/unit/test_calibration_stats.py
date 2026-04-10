@@ -28,6 +28,7 @@ def _make_processor():
     config.structured_validation_enabled = False
     config.calibration_concurrent_limit = 2
     config.min_calibrate_ratio = 0.8
+    config.chunk_time_budget = 300
 
     llm_client = MagicMock()
     key_info_extractor = MagicMock()

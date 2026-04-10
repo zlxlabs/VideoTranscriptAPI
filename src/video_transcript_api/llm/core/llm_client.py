@@ -6,7 +6,13 @@ from dataclasses import dataclass
 
 from ...utils.logging import setup_logger
 from ..llm import call_llm_api, LLMCallError, StructuredResult
-from .errors import classify_error, RetryableError, FatalError
+from .errors import (
+    classify_error,
+    RetryableError,
+    FatalError,
+    TimeoutError as LLMTimeoutError,
+    TruncationError,
+)
 
 logger = setup_logger(__name__)
 
@@ -103,7 +109,16 @@ class LLMClient:
                     logger.error(f"LLM API call failed (fatal): {e}")
                     raise FatalError(f"Non-retryable error: {e}") from e
 
-                # 可重试错误
+                # 超时/截断：重试无意义，直接上抛
+                if error_type == LLMTimeoutError:
+                    logger.error(f"LLM API call timed out, not retrying: {e}")
+                    raise LLMTimeoutError(str(e)) from e
+
+                if error_type == TruncationError:
+                    logger.error(f"LLM API output truncated, not retrying: {e}")
+                    raise TruncationError(str(e)) from e
+
+                # 其他可重试错误
                 if attempt < self.max_retries:
                     # 计算延迟时间（指数退避）
                     delay = self._calculate_delay(attempt)

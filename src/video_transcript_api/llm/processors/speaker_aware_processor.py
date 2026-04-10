@@ -1,5 +1,6 @@
 """有说话人文本处理器"""
 
+import time
 from typing import Dict, List, Optional, Any
 from concurrent.futures import ThreadPoolExecutor
 import concurrent.futures
@@ -384,7 +385,7 @@ class SpeakerAwareProcessor:
         chunk_statuses = ["failed"] * len(chunks)
 
         def calibrate_single_chunk(index: int, chunk: List[Dict]):
-            """校对单个 chunk（含质量验证）"""
+            """校对单个 chunk（含质量验证和时间预算）"""
             chunk_length = sum(len(d.get("text", "")) for d in chunk)
             logger.debug(
                 f"Calibrating chunk {index + 1}/{len(chunks)}, dialog count: {len(chunk)}, length: {chunk_length}"
@@ -392,10 +393,27 @@ class SpeakerAwareProcessor:
 
             max_attempts = self.config.max_calibration_retries + 1
             fallback_strategy = self.config.structured_fallback_strategy
+            chunk_budget = self.config.chunk_time_budget
+            start_time = time.monotonic()
 
             best_quality_score = None
             best_quality_candidate = None
             for attempt in range(max_attempts):
+                # 时间预算检查
+                elapsed = time.monotonic() - start_time
+                if elapsed > chunk_budget:
+                    logger.warning(
+                        f"Chunk {index + 1} time budget exhausted "
+                        f"({elapsed:.0f}s > {chunk_budget}s), falling back"
+                    )
+                    calibrated_chunks[index] = self._apply_structured_fallback(
+                        original_chunk=chunk,
+                        best_candidate=best_quality_candidate,
+                        last_candidate=None,
+                        fallback_strategy=fallback_strategy,
+                    )
+                    chunk_statuses[index] = "failed"
+                    return
                 try:
                     # 构建 prompt（包含对话结构）
                     chunk_text = self._format_chunk_for_prompt(chunk, speaker_mapping)

@@ -86,22 +86,21 @@ class TestLLMClientRetry:
 
     @patch("video_transcript_api.llm.core.llm_client.time.sleep")
     @patch.object(LLMClient, "_actual_call")
-    def test_retry_on_timeout(self, mock_call, mock_sleep, client):
-        """Should retry on timeout errors."""
-        mock_call.side_effect = [
-            LLMCallError("Request timed out"),
-            LLMResponse(text="success after retry"),
-        ]
+    def test_no_retry_on_timeout(self, mock_call, mock_sleep, client):
+        """Should NOT retry on timeout errors (timeout retries are ineffective)."""
+        from video_transcript_api.llm.core.errors import TimeoutError as LLMTimeoutError
 
-        result = client.call(
-            model="test-model",
-            system_prompt="system",
-            user_prompt="user",
-        )
+        mock_call.side_effect = LLMCallError("Request timed out")
 
-        assert result.text == "success after retry"
-        assert mock_call.call_count == 2
-        assert mock_sleep.call_count == 1
+        with pytest.raises(LLMTimeoutError):
+            client.call(
+                model="test-model",
+                system_prompt="system",
+                user_prompt="user",
+            )
+
+        assert mock_call.call_count == 1
+        mock_sleep.assert_not_called()
 
     @patch("video_transcript_api.llm.core.llm_client.time.sleep")
     @patch.object(LLMClient, "_actual_call")
@@ -246,11 +245,12 @@ class TestLLMClientBackoff:
 class TestErrorClassification:
     """Verify error classification from llm/core/errors.py."""
 
-    def test_classify_timeout_as_retryable(self):
-        """Timeout errors should be classified as retryable."""
-        from video_transcript_api.llm.core.errors import classify_error
+    def test_classify_timeout_as_timeout_error(self):
+        """Timeout errors should be classified as TimeoutError (subclass of RetryableError)."""
+        from video_transcript_api.llm.core.errors import classify_error, TimeoutError as LLMTimeoutError
         result = classify_error(Exception("Request timed out"))
-        assert result == RetryableError
+        assert result == LLMTimeoutError
+        assert issubclass(result, RetryableError)
 
     def test_classify_401_as_fatal(self):
         """401 errors should be classified as fatal."""

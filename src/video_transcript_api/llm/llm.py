@@ -8,6 +8,7 @@ import json
 import fnmatch
 import re
 import requests
+import requests.exceptions
 import time
 from typing import Any, Dict, Optional, Union, overload
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from loguru import logger
 _default_config: Optional[Dict[str, Any]] = None
 
 # 默认 API 请求超时（秒）
-DEFAULT_LLM_TIMEOUT = 360
+DEFAULT_LLM_TIMEOUT = 180
 
 
 def _get_llm_timeout() -> int:
@@ -148,6 +149,20 @@ def reset_llm_stats() -> None:
 # ============================================================
 # 内部工具函数
 # ============================================================
+
+
+def _is_truncation_error(error_msg: str) -> bool:
+    """判断是否为输出截断错误（模型 token 耗尽导致 JSON 不完整）
+
+    Args:
+        error_msg: 错误消息（小写）
+
+    Returns:
+        True 表示是截断错误
+    """
+    truncation_patterns = ['unterminated string', 'unexpected end']
+    return any(p in error_msg for p in truncation_patterns)
+
 
 def _get_json_mode_for_model(model_name: str, config: Dict[str, Any]) -> str:
     """
@@ -438,7 +453,7 @@ def _call_with_json_object_mode(
     base_url: str,
     config: Dict[str, Any],
     system_prompt: str,
-    max_retries: int,
+    max_retries: Optional[int],
     retry_delay: int,
     reasoning_effort: Optional[str],
     task_type: str
@@ -466,7 +481,9 @@ def _call_with_json_object_mode(
     _stats.json_object_calls += 1
 
     json_output_config = config.get('llm', {}).get('json_output', {})
-    json_object_retries = json_output_config.get('max_retries', 2)
+    # 参数优先，配置兜底（_actual_call 传 max_retries=0 以禁用底层重试）
+    config_retries = json_output_config.get('max_retries', 2)
+    json_object_retries = max_retries if max_retries is not None else config_retries
 
     headers = {
         "Content-Type": "application/json",
@@ -518,6 +535,13 @@ def _call_with_json_object_mode(
             try:
                 parsed = json.loads(json_str)
             except json.JSONDecodeError as e:
+                error_msg = str(e).lower()
+                # 截断错误（token 耗尽）：Self-Correction 无效，直接上抛
+                if _is_truncation_error(error_msg):
+                    raise LLMCallError(
+                        f"Output truncated: JSON parse failed: {e}", e
+                    )
+                # 普通格式错误：允许 Self-Correction
                 last_error = f"JSON parse failed: {str(e)}"
                 _stats.json_object_parse_failures += 1
                 continue
@@ -538,7 +562,20 @@ def _call_with_json_object_mode(
 
             return StructuredResult(success=True, data=parsed)
 
+        except requests.exceptions.Timeout as e:
+            # 超时：没有响应可 Self-Correct，直接上抛
+            raise LLMCallError(f"API timeout: {e}", e)
+
+        except requests.exceptions.ConnectionError as e:
+            # 连接失败：直接上抛
+            raise LLMCallError(f"Connection error: {e}", e)
+
+        except LLMCallError:
+            # 已包装的错误（如截断），直接上抛
+            raise
+
         except Exception as e:
+            # 其他错误：允许 Self-Correction 继续
             last_error = f"API call error: {str(e)}"
             logger.warning(f"[{task_type.upper()}] json_object error: {e}")
 

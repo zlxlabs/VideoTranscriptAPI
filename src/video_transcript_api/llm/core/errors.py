@@ -17,6 +17,22 @@ class RetryableError(LLMError):
     pass
 
 
+class TimeoutError(RetryableError):
+    """超时错误
+
+    网络连接超时或读取超时，重试可能无效（同样的请求大概率同样超时）
+    """
+    pass
+
+
+class TruncationError(RetryableError):
+    """输出截断错误
+
+    模型输出 token 耗尽导致 JSON 被截断，重试无意义（同样的输入产生同样的截断）
+    """
+    pass
+
+
 class FatalError(LLMError):
     """不可重试错误
 
@@ -26,13 +42,15 @@ class FatalError(LLMError):
 
 
 def classify_error(error: Exception) -> type:
-    """将异常分类为可重试或不可重试错误
+    """将异常分类为具体的错误类型
+
+    分类优先级：Fatal > Timeout > Truncation > Retryable
 
     Args:
         error: 原始异常对象
 
     Returns:
-        RetryableError 或 FatalError 类型
+        FatalError / TimeoutError / TruncationError / RetryableError 类型
     """
     error_msg = str(error).lower()
 
@@ -49,10 +67,21 @@ def classify_error(error: Exception) -> type:
         'bad request', '400',
     ]
 
-    # 检查是否匹配不可重试模式
     for pattern in fatal_patterns:
         if pattern in error_msg:
             return FatalError
+
+    # 超时错误
+    timeout_patterns = ['timed out', 'timeout', 'read timeout']
+    for pattern in timeout_patterns:
+        if pattern in error_msg:
+            return TimeoutError
+
+    # 输出截断错误（token 耗尽导致 JSON 不完整）
+    truncation_patterns = ['unterminated string', 'unexpected end']
+    for pattern in truncation_patterns:
+        if pattern in error_msg:
+            return TruncationError
 
     # 默认为可重试错误
     return RetryableError
