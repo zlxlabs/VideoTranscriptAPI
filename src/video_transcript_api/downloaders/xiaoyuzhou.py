@@ -172,9 +172,17 @@ class XiaoyuzhouDownloader(BaseDownloader):
                 logger.error(f"无法从页面中提取音频下载地址: {url}")
                 raise ValueError(f"无法从页面中提取音频下载地址")
             
-            # 清理文件名中的非法字符
+            # 从音频URL提取实际扩展名（小宇宙音频可能是.mp3或.m4a等）
+            audio_ext = ".m4a"  # 默认扩展名
+            audio_path = audio_url.split("?")[0]  # 去掉查询参数
+            if "." in audio_path.split("/")[-1]:
+                detected_ext = os.path.splitext(audio_path.split("/")[-1])[1].lower()
+                if detected_ext in (".mp3", ".m4a", ".wav", ".ogg", ".aac"):
+                    audio_ext = detected_ext
+                    logger.info(f"从音频URL检测到扩展名: {audio_ext}")
+
             safe_title = re.sub(r'[\\/*?:"<>|]', "_", video_title)
-            filename = f"xiaoyuzhou_{episode_id}_{int(time.time())}.m4a"
+            filename = f"xiaoyuzhou_{episode_id}_{int(time.time())}{audio_ext}"
             
             result = {
                 "video_id": episode_id,
