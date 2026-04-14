@@ -401,7 +401,7 @@
         </div>
         <div class="filter-group">
             <label>已读</label>
-            <select id="filterRead">
+            <select id="filterRead" onchange="serializeFiltersToURL(); applyReadFilter()">
                 <option value="all">全部</option>
                 <option value="unread">未读</option>
                 <option value="read">已读</option>
@@ -457,10 +457,8 @@
 
 <script>
 // ===================== 状态 =====================
-const STORAGE_KEY_READ    = () => `vta_read_${getMasked()}`;
-const STORAGE_KEY_ALIAS   = () => `vta_webhook_alias_${getMasked()}`;
-const STORAGE_KEY_WEBHOOK = () => `vta_pref_webhook_${getMasked()}`;
-const STORAGE_KEY_RDFILTER= () => `vta_pref_read_${getMasked()}`;
+const STORAGE_KEY_READ  = () => `vta_read_${getMasked()}`;
+const STORAGE_KEY_ALIAS = () => `vta_webhook_alias_${getMasked()}`;
 const PAGE_SIZE = 20;
 
 let currentPage = 0;
@@ -566,7 +564,7 @@ function markSelectedRead() {
     applyReadFilter();
 }
 
-// ===================== 已读过滤（客户端）=====================
+// ===================== 已读过滤（客户端，变更时实时写 URL）=====================
 function applyReadFilter() {
     const filter = document.getElementById('filterRead')?.value || 'all';
     const readSet = getReadSet();
@@ -581,23 +579,51 @@ function applyReadFilter() {
 }
 
 // ===================== 过滤偏好持久化 =====================
-function saveFilterPrefs() {
-    const webhook = document.getElementById('filterWebhook')?.value || '';
-    const readFilter = document.getElementById('filterRead')?.value || 'all';
-    if (webhook) localStorage.setItem(STORAGE_KEY_WEBHOOK(), webhook);
-    else localStorage.removeItem(STORAGE_KEY_WEBHOOK());
-    localStorage.setItem(STORAGE_KEY_RDFILTER(), readFilter);
+// ===================== URL 参数过滤状态 =====================
+// 所有过滤条件存在 URL 里，刷新/分享均保留；API Key 不入 URL（安全）
+
+function serializeFiltersToURL() {
+    const params = new URLSearchParams();
+    const get = id => document.getElementById(id)?.value.trim() || '';
+
+    const q         = get('filterQ');
+    const startDate = get('filterStartDate');
+    const endDate   = get('filterEndDate');
+    const webhook   = get('filterWebhook');
+    const platform  = get('filterPlatform');
+    const author    = get('filterAuthor');
+    const status    = get('filterStatus');
+    const read      = get('filterRead');
+
+    if (q)         params.set('q', q);
+    if (startDate) params.set('start_date', startDate);
+    if (endDate)   params.set('end_date', endDate);
+    if (webhook)   params.set('webhook', webhook);
+    if (platform)  params.set('platform', platform);
+    if (author)    params.set('author', author);
+    // 默认值不写入 URL，保持简洁
+    if (status && status !== 'success') params.set('status', status);
+    if (read   && read   !== 'all')     params.set('read', read);
+
+    const qs = params.toString();
+    history.replaceState(null, '', qs ? `?${qs}` : window.location.pathname);
 }
 
-function loadFilterPrefs() {
-    const savedWebhook = localStorage.getItem(STORAGE_KEY_WEBHOOK());
-    const savedRead    = localStorage.getItem(STORAGE_KEY_RDFILTER()) || 'all';
-    if (savedWebhook) {
-        const sel = document.getElementById('filterWebhook');
-        if (sel) sel.value = savedWebhook;
-    }
-    const readSel = document.getElementById('filterRead');
-    if (readSel) readSel.value = savedRead;
+function loadFiltersFromURL() {
+    // 必须在 populateFilterDropdowns() 之后调用，webhook 选项才存在
+    const params = new URLSearchParams(window.location.search);
+    const set = (id, key) => {
+        const val = params.get(key);
+        if (val !== null) { const el = document.getElementById(id); if (el) el.value = val; }
+    };
+    set('filterQ',          'q');
+    set('filterStartDate',  'start_date');
+    set('filterEndDate',    'end_date');
+    set('filterWebhook',    'webhook');
+    set('filterPlatform',   'platform');
+    set('filterAuthor',     'author');
+    set('filterStatus',     'status');
+    set('filterRead',       'read');
 }
 
 function getAliasMap() {
@@ -668,7 +694,7 @@ async function loadFilterOptions() {
             filterOptions = res.data;
             currentMasked = res.data.api_key_masked || '';
             populateFilterDropdowns();
-            loadFilterPrefs();   // 恢复 webhook + 已读过滤偏好
+            loadFiltersFromURL();   // 恢复 URL 里的过滤条件（必须在下拉填充后）
             document.getElementById('filterBar').style.display = 'flex';
             document.getElementById('statsBar').style.display = 'flex';
             // 只在有 webhook 记录时才显示别名设置入口
@@ -711,7 +737,7 @@ function populateFilterDropdowns() {
 }
 
 // ===================== 过滤 =====================
-function applyFilter() { saveFilterPrefs(); loadHistory(0); }
+function applyFilter() { serializeFiltersToURL(); loadHistory(0); }
 function resetFilter() {
     document.getElementById('filterStartDate').value = '';
     document.getElementById('filterEndDate').value = '';
@@ -721,8 +747,7 @@ function resetFilter() {
     document.getElementById('filterStatus').value = 'success';
     document.getElementById('filterRead').value = 'all';
     const qEl = document.getElementById('filterQ'); if (qEl) qEl.value = '';
-    localStorage.removeItem(STORAGE_KEY_WEBHOOK());
-    localStorage.removeItem(STORAGE_KEY_RDFILTER());
+    history.replaceState(null, '', window.location.pathname);  // 清空 URL 参数
     loadHistory(0);
 }
 function changePage(delta) {
@@ -1024,7 +1049,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     qInput.addEventListener('input', () => {
         clearTimeout(searchDebounce);
-        searchDebounce = setTimeout(() => loadHistory(0), 500);
+        searchDebounce = setTimeout(() => { serializeFiltersToURL(); loadHistory(0); }, 500);
     });
 });
 
