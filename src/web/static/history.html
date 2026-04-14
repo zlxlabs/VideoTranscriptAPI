@@ -564,18 +564,10 @@ function markSelectedRead() {
     applyReadFilter();
 }
 
-// ===================== 已读过滤（客户端，变更时实时写 URL）=====================
+// ===================== 已读过滤（触发重新拉取+客户端过滤） =====================
 function applyReadFilter() {
-    const filter = document.getElementById('filterRead')?.value || 'all';
-    const readSet = getReadSet();
-    const rows = document.querySelectorAll('.task-row[data-vt]');
-    rows.forEach(row => {
-        const vt = row.dataset.vt;
-        const isRead = readSet.has(vt);
-        if (filter === 'unread' && isRead) row.style.display = 'none';
-        else if (filter === 'read' && !isRead) row.style.display = 'none';
-        else row.style.display = '';
-    });
+    currentPage = 0;
+    fetchHistory();
 }
 
 // ===================== 过滤偏好持久化 =====================
@@ -753,7 +745,18 @@ function resetFilter() {
 function changePage(delta) {
     const maxPage = Math.ceil(totalItems / PAGE_SIZE) - 1;
     currentPage = Math.max(0, Math.min(maxPage, currentPage + delta));
-    fetchHistory();
+    if (_filteredItems) {
+        // 客户端已缓存全量过滤结果，直接切片渲染，无需再请求
+        const pageItems = _filteredItems.slice(
+            currentPage * PAGE_SIZE,
+            (currentPage + 1) * PAGE_SIZE
+        );
+        selectedSet.clear(); updateSelectionUI();
+        renderList(pageItems);
+        renderPagination();
+    } else {
+        fetchHistory();
+    }
 }
 
 // ===================== API 请求 =====================
@@ -768,8 +771,22 @@ async function apiFetch(url, params = {}) {
     return json;
 }
 
+// 缓存客户端过滤后的全量数据（仅已读/未读过滤激活时使用）
+let _filteredItems = null;
+
 async function fetchHistory() {
-    const params = { limit: PAGE_SIZE, offset: currentPage * PAGE_SIZE };
+    const readFilter = document.getElementById('filterRead')?.value || 'all';
+    const isReadFiltered = readFilter !== 'all';
+
+    const params = {};
+    if (isReadFiltered) {
+        // 已读/未读过滤是客户端行为，需拉全量数据再分页
+        params.limit = 10000;
+        params.offset = 0;
+    } else {
+        params.limit = PAGE_SIZE;
+        params.offset = currentPage * PAGE_SIZE;
+    }
 
     const startDate = document.getElementById('filterStartDate').value;
     const endDate   = document.getElementById('filterEndDate').value;
@@ -777,7 +794,6 @@ async function fetchHistory() {
     const platform  = document.getElementById('filterPlatform').value;
     const author    = document.getElementById('filterAuthor').value;
     const status    = document.getElementById('filterStatus').value;
-
     const q = document.getElementById('filterQ')?.value.trim() || '';
 
     if (startDate) params.start_date = startDate;
@@ -793,12 +809,29 @@ async function fetchHistory() {
         if (res.code !== 200) { showError(res.message || '查询失败'); return; }
 
         currentMasked = res.data.api_key_masked || currentMasked;
-        totalItems = res.data.total;
         showStatus('ok', '认证成功');
         selectedSet.clear();
         updateSelectionUI();
-        renderList(res.data.items);
-        applyReadFilter();
+
+        if (isReadFiltered) {
+            // 客户端过滤 + 客户端分页
+            const readSet = getReadSet();
+            _filteredItems = res.data.items.filter(item => {
+                const isRead = item.view_token && readSet.has(item.view_token);
+                return readFilter === 'unread' ? !isRead : isRead;
+            });
+            totalItems = _filteredItems.length;
+            const pageItems = _filteredItems.slice(
+                currentPage * PAGE_SIZE,
+                (currentPage + 1) * PAGE_SIZE
+            );
+            renderList(pageItems);
+        } else {
+            _filteredItems = null;
+            totalItems = res.data.total;
+            renderList(res.data.items);
+        }
+
         renderPagination();
         updateUnreadBadge(res.data.items);
     } catch(e) {
