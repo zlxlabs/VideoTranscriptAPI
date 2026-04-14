@@ -17,7 +17,7 @@
 - **多平台支持**：YouTube、Bilibili、抖音、小红书、小宇宙播客，工厂模式自动匹配下载器
 - **双引擎转录**：CapsWriter-Offline（通用转录）+ FunASR（说话人识别）
 - **智能文本处理**：LLM 自动校对 ASR 错误、专有名词纠错、说话人推断、内容总结
-- **企业级功能**：SQLite + 文件系统双层缓存、多用户管理、审计日志、企业微信通知
+- **企业级功能**：SQLite + 文件系统双层缓存、多用户管理、审计日志、企业微信通知、任务历史浏览器
 - **风控系统**：敏感词检测、多策略文本脱敏、风险模型自动切换
 
 ## 外部依赖
@@ -101,6 +101,7 @@ curl -X GET "http://localhost:8000/api/task/{task_id}" \
 
 - **提交任务**：`GET /add_task_by_web`
 - **查看结果**：`GET /view/{view_token}`
+- **任务历史**：`GET /static/history.html` — 支持按日期、平台、频道、关键词搜索，已读追踪，摘要预览
 - **导出文件**：`GET /export/{view_token}/{type}`（支持 `calibrated`、`summary`、`transcript`）
 
 ### API 端点一览
@@ -111,6 +112,9 @@ curl -X GET "http://localhost:8000/api/task/{task_id}" \
 | `/api/task/{task_id}` | GET | 查询任务状态 |
 | `/api/audit/stats` | GET | 调用统计 |
 | `/api/audit/calls` | GET | 调用记录 |
+| `/api/audit/history` | GET | 任务历史查询（支持多条件过滤、分页、关键词搜索） |
+| `/api/audit/filter-options` | GET | 获取过滤选项（webhook/平台/频道列表） |
+| `/api/audit/summary` | GET | 任务摘要预览（前 300 字） |
 | `/api/users/profile` | GET | 当前用户信息 |
 | `/view/{view_token}` | GET | 结果查看页 |
 | `/view/{view_token}?raw=calibrated` | GET | 纯文本导出 |

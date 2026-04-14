@@ -156,8 +156,12 @@ _HOME_HTML = """\
             <div class="feature"><span class="feature-icon">🎙️</span>本地语音转文字 + LLM 智能校对</div>
             <div class="feature"><span class="feature-icon">📝</span>自动生成内容总结</div>
             <div class="feature"><span class="feature-icon">👀</span>网页版查看 + 企业微信推送</div>
+            <div class="feature"><span class="feature-icon">📋</span>任务历史：搜索、过滤、已读追踪、摘要预览</div>
         </div>
-        <a class="cta" href="/add_task_by_web">开始使用</a>
+        <div style="display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;">
+            <a class="cta" href="/add_task_by_web">提交任务</a>
+            <a class="cta" href="/static/history.html" style="background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);">任务历史</a>
+        </div>
         <p style="margin-top: 16px; font-size: 0.85rem;">
             <a href="https://mp.weixin.qq.com/s/w8VnWJcUp5VkD5J-fYCUrg" target="_blank" rel="noopener" style="color: #667eea; text-decoration: none;">📖 开发契机和玩法分享</a>
         </p>
