@@ -187,7 +187,7 @@
             border-radius: 10px;
             padding: 12px 16px;
             display: grid;
-            grid-template-columns: 140px 1fr 90px 130px 80px;
+            grid-template-columns: 130px 1fr 100px;
             gap: 12px;
             align-items: center;
             cursor: pointer;
@@ -199,6 +199,10 @@
         .task-row.unclickable:hover { border-color: var(--border-primary); background: var(--bg-primary); }
 
         .task-time { font-size: 0.75rem; color: var(--text-tertiary); white-space: nowrap; }
+
+        /* 标题列容器：min-width:0 是让 grid 1fr 内 ellipsis 生效的关键 */
+        .task-title-cell { min-width: 0; overflow: hidden; }
+
         .task-title {
             font-size: 0.875rem;
             font-weight: 500;
@@ -206,7 +210,13 @@
             text-overflow: ellipsis;
             white-space: nowrap;
         }
-        .task-author { font-size: 0.75rem; color: var(--text-tertiary); }
+        .task-author {
+            font-size: 0.75rem;
+            color: var(--text-tertiary);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
         .task-platform {
             font-size: 0.75rem;
             padding: 2px 8px;
@@ -672,10 +682,8 @@ function buildRow(item, readSet) {
         <div class="${classes.join(' ')}" ${vtAttr} ${clickHandler}>
             ${!isRead && canClick ? '<div class="read-dot"></div>' : ''}
             <div class="task-time">${time}</div>
-            <div>${titleHtml}</div>
+            <div class="task-title-cell">${titleHtml}</div>
             <div class="task-platform">${platformLabel}</div>
-            <div class="task-webhook" title="${esc(item.wechat_webhook || '')}">${webhookLabel}</div>
-            <div></div>
         </div>`;
 }
 
@@ -694,7 +702,7 @@ function renderReadState() {
 
 function updateUnreadBadge(items) {
     const readSet = getReadSet();
-    const unread = items.filter(i => i.view_token && !readSet.has(i.view_token) && i.status === 'completed').length;
+    const unread = items.filter(i => i.view_token && !readSet.has(i.view_token) && i.status === 'success').length;
     const badge = document.getElementById('unreadBadge');
     const total = document.getElementById('totalCount');
     total.textContent = `共 ${totalItems} 条`;
@@ -738,9 +746,10 @@ function openTask(viewToken, rowEl) {
 
 // ===================== 摘要预览 =====================
 function onRowHover(e) {
-    const vt = e.currentTarget.dataset.vt;
+    const rowEl = e.currentTarget;   // 必须在 handler 内先存引用，setTimeout 后 currentTarget 会被置 null
+    const vt = rowEl.dataset.vt;
     if (!vt) return;
-    summaryDebounce = setTimeout(() => fetchSummary(vt, e.currentTarget), 300);
+    summaryDebounce = setTimeout(() => fetchSummary(vt, rowEl), 300);
 }
 function onRowMove(e) {
     const tooltip = document.getElementById('summaryTooltip');
@@ -757,26 +766,31 @@ function onRowLeave() {
 async function fetchSummary(viewToken, rowEl) {
     try {
         const res = await apiFetch('/api/audit/summary', { view_token: viewToken });
-        if (res.code === 200 && res.data.summary) {
+        if (res.code === 200) {
             const title = rowEl.querySelector('.task-title')?.textContent || '';
             document.getElementById('tooltipTitle').textContent = title;
-            document.getElementById('tooltipContent').textContent = res.data.summary;
+            document.getElementById('tooltipContent').textContent = res.data.summary || '（暂无摘要）';
             const tooltip = document.getElementById('summaryTooltip');
             tooltip.classList.add('visible');
             summaryVisible = true;
 
-            // 定位到鼠标附近
+            // position:fixed 相对视口，不加 scrollY
             const rect = rowEl.getBoundingClientRect();
-            tooltip.style.top = (rect.bottom + 8 + window.scrollY) + 'px';
-            tooltip.style.left = Math.min(rect.left, window.innerWidth - 360) + 'px';
+            const top = rect.bottom + 8;
+            const left = Math.min(rect.left, window.innerWidth - 360);
+            // 若下方空间不足，改为显示在行上方
+            const fitsBelow = top + 200 < window.innerHeight;
+            tooltip.style.top = fitsBelow ? top + 'px' : (rect.top - 8 - 200) + 'px';
+            tooltip.style.left = Math.max(0, left) + 'px';
         }
     } catch(e) { /* 静默失败 */ }
 }
 
 function positionTooltip(e) {
     const tooltip = document.getElementById('summaryTooltip');
-    tooltip.style.top = (e.pageY + 12) + 'px';
-    tooltip.style.left = Math.min(e.pageX + 8, window.innerWidth - 360) + 'px';
+    // clientY/clientX 对应 position:fixed 的视口坐标
+    tooltip.style.top = Math.min(e.clientY + 12, window.innerHeight - 220) + 'px';
+    tooltip.style.left = Math.min(e.clientX + 8, window.innerWidth - 360) + 'px';
 }
 
 // ===================== Webhook 别名 =====================
@@ -859,6 +873,10 @@ loadSavedKey();
 if (!document.getElementById('apiKeyInput').value) {
     const mainKey = tryLoadMainPageToken();
     if (mainKey) document.getElementById('apiKeyInput').value = mainKey;
+}
+// 有 key 就自动查询，无需手动点击
+if (document.getElementById('apiKeyInput').value) {
+    loadHistory();
 }
 </script>
 </body>
