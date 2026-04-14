@@ -66,7 +66,7 @@ async def get_history(
     end_date: Optional[str] = Query(None, description="结束日期，ISO格式 YYYY-MM-DD"),
     webhook: Optional[str] = Query(None, description="webhook地址精确过滤"),
     platform: Optional[str] = Query(None, description="平台过滤: youtube/bilibili/xiaoyuzhou/xiaohongshu/douyin"),
-    author: Optional[str] = Query(None, description="频道/作者精确过滤"),
+    author: Optional[str] = Query(None, description="频道/作者过滤，支持逗号分隔多选"),
     q: Optional[str] = Query(None, description="关键词搜索：匹配标题、频道名、视频URL"),
     status: Optional[str] = Query(None, description="任务状态过滤，默认只显示 success（已完成）"),
     limit: int = Query(20, ge=1, le=10000, description="每页条数，客户端已读过滤时传大值"),
@@ -106,8 +106,14 @@ async def get_history(
         params.append(platform)
 
     if author:
-        cache_conditions.append("t.author = ?")
-        params.append(author)
+        author_list = [a.strip() for a in author.split(",") if a.strip()]
+        if len(author_list) == 1:
+            cache_conditions.append("t.author = ?")
+            params.append(author_list[0])
+        elif author_list:
+            placeholders = ",".join("?" * len(author_list))
+            cache_conditions.append(f"t.author IN ({placeholders})")
+            params.extend(author_list)
 
     # status 默认 'success'（cache.db 中完成任务的实际值）；传 'all' 则不过滤
     effective_status = status or "success"

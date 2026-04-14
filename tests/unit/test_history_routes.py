@@ -239,6 +239,39 @@ class TestHistoryEndpoint:
         assert len(items) == 1
         assert items[0]["author"] == "Channel A"
 
+    def test_filter_by_multiple_authors(self, history_client):
+        """author=A,B (comma-separated) returns tasks from both channels."""
+        client, setup = history_client
+        al = setup["audit_logger"]
+        insert = setup["insert_task"]
+
+        _log(al, "t1"); _log(al, "t2"); _log(al, "t3")
+        insert("t1", "vt1", author="Channel A")
+        insert("t2", "vt2", author="Channel B")
+        insert("t3", "vt3", author="Channel C")
+
+        resp = client.get("/api/audit/history?author=Channel+A,Channel+B")
+        assert resp.status_code == 200
+        items = resp.json()["data"]["items"]
+        authors = {i["author"] for i in items}
+        assert authors == {"Channel A", "Channel B"}
+        assert resp.json()["data"]["total"] == 2
+
+    def test_filter_by_single_author_still_works(self, history_client):
+        """Single author (no comma) still works as exact match."""
+        client, setup = history_client
+        al = setup["audit_logger"]
+        insert = setup["insert_task"]
+
+        _log(al, "t1"); _log(al, "t2")
+        insert("t1", "vt1", author="Only This")
+        insert("t2", "vt2", author="Not This")
+
+        resp = client.get("/api/audit/history?author=Only+This")
+        assert resp.status_code == 200
+        assert resp.json()["data"]["total"] == 1
+        assert resp.json()["data"]["items"][0]["author"] == "Only This"
+
     def test_filter_by_date_range(self, history_client):
         """start_date and end_date filter by request_time."""
         client, setup = history_client

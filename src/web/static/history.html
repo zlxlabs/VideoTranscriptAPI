@@ -160,6 +160,49 @@
         .filter-group select option { background: var(--bg-secondary); }
         .filter-actions { display: flex; gap: 8px; align-items: flex-end; margin-left: auto; }
 
+        /* 频道多选下拉 */
+        .multi-select {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-primary);
+            border-radius: 8px;
+            padding: 7px 10px;
+            color: var(--text-primary);
+            font-size: 0.8rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            min-width: 120px;
+            white-space: nowrap;
+            overflow: hidden;
+        }
+        .multi-select:hover { border-color: var(--accent-primary); }
+        .multi-dropdown {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            z-index: 100;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-primary);
+            border-radius: 8px;
+            max-height: 240px;
+            overflow-y: auto;
+            min-width: 180px;
+            box-shadow: 0 8px 24px var(--shadow-medium);
+            margin-top: 4px;
+        }
+        .multi-opt {
+            padding: 6px 12px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--text-primary);
+        }
+        .multi-opt:hover { background: var(--bg-secondary); }
+        .multi-opt input { accent-color: var(--accent-primary); cursor: pointer; }
+
         /* 统计条 */
         .stats-bar {
             display: flex;
@@ -384,11 +427,19 @@
                 <option value="">全部</option>
             </select>
         </div>
-        <div class="filter-group">
+        <div class="filter-group" style="position:relative">
             <label>频道</label>
-            <select id="filterAuthor">
-                <option value="">全部</option>
-            </select>
+            <div id="authorMultiSelect" class="multi-select" onclick="toggleAuthorDropdown(event)">
+                <span id="authorDisplay">全部</span>
+                <span style="font-size:0.6rem; margin-left:auto">&#9662;</span>
+            </div>
+            <div id="authorDropdown" class="multi-dropdown" style="display:none">
+                <div class="multi-opt" onclick="toggleAllAuthors(event)">
+                    <input type="checkbox" id="authorSelectAll" checked> <span>全部</span>
+                </div>
+                <div id="authorOptions"></div>
+            </div>
+            <input type="hidden" id="filterAuthor" value="">
         </div>
         <div class="filter-group">
             <label>状态</label>
@@ -613,7 +664,16 @@ function loadFiltersFromURL() {
     set('filterEndDate',    'end_date');
     // webhook 不从 URL 读取
     set('filterPlatform',   'platform');
-    set('filterAuthor',     'author');
+    // 频道多选：从 URL 恢复选中状态
+    const authorParam = params.get('author');
+    if (authorParam) {
+        const selected = new Set(authorParam.split(',').map(s => s.trim()));
+        document.querySelectorAll('#authorOptions input[type=checkbox]').forEach(chk => {
+            chk.checked = selected.has(chk.value);
+        });
+        document.getElementById('filterAuthor').value = authorParam;
+        updateAuthorDisplay();
+    }
     set('filterStatus',     'status');
     set('filterRead',       'read');
 }
@@ -719,14 +779,83 @@ function populateFilterDropdowns() {
         platformSel.appendChild(opt);
     });
 
-    const authorSel = document.getElementById('filterAuthor');
-    authorSel.innerHTML = '<option value="">全部</option>';
+    // 频道：填充多选 checkbox 列表
+    const authorContainer = document.getElementById('authorOptions');
+    authorContainer.innerHTML = '';
     filterOptions.authors.forEach(a => {
-        const opt = document.createElement('option');
-        opt.value = a; opt.textContent = a;
-        authorSel.appendChild(opt);
+        const div = document.createElement('div');
+        div.className = 'multi-opt';
+        div.innerHTML = `<input type="checkbox" value="${esc(a)}" checked onchange="updateAuthorFilter(event)"> <span>${esc(a)}</span>`;
+        div.addEventListener('click', e => {
+            if (e.target.tagName !== 'INPUT') {
+                const chk = div.querySelector('input'); chk.checked = !chk.checked;
+                updateAuthorFilter();
+            }
+        });
+        authorContainer.appendChild(div);
     });
+    updateAuthorDisplay();
 }
+
+// ===================== 频道多选交互 =====================
+let _authorDropOpen = false;
+
+function toggleAuthorDropdown(e) {
+    e.stopPropagation();
+    const dd = document.getElementById('authorDropdown');
+    _authorDropOpen = !_authorDropOpen;
+    dd.style.display = _authorDropOpen ? 'block' : 'none';
+}
+
+function updateAuthorFilter(e) {
+    if (e) e.stopPropagation();
+    const checks = document.querySelectorAll('#authorOptions input[type=checkbox]');
+    const selected = [...checks].filter(c => c.checked).map(c => c.value);
+    const allChk = document.getElementById('authorSelectAll');
+
+    if (selected.length === checks.length || selected.length === 0) {
+        allChk.checked = true; allChk.indeterminate = false;
+        document.getElementById('filterAuthor').value = '';
+    } else {
+        allChk.checked = false; allChk.indeterminate = true;
+        document.getElementById('filterAuthor').value = selected.join(',');
+    }
+    updateAuthorDisplay();
+    serializeFiltersToURL();
+}
+
+function toggleAllAuthors(e) {
+    e.stopPropagation();
+    const allChk = document.getElementById('authorSelectAll');
+    if (e.target.tagName !== 'INPUT') allChk.checked = !allChk.checked;
+    const checks = document.querySelectorAll('#authorOptions input[type=checkbox]');
+    checks.forEach(c => c.checked = allChk.checked);
+    allChk.indeterminate = false;
+    document.getElementById('filterAuthor').value = '';
+    updateAuthorDisplay();
+    serializeFiltersToURL();
+}
+
+function updateAuthorDisplay() {
+    const checks = document.querySelectorAll('#authorOptions input[type=checkbox]');
+    const selected = [...checks].filter(c => c.checked).map(c => c.value);
+    const display = document.getElementById('authorDisplay');
+    if (selected.length === 0 || selected.length === checks.length) {
+        display.textContent = '全部';
+    } else if (selected.length <= 2) {
+        display.textContent = selected.join(', ');
+    } else {
+        display.textContent = `${selected[0]} +${selected.length - 1}`;
+    }
+}
+
+// 点击外部关闭下拉
+document.addEventListener('click', () => {
+    if (_authorDropOpen) {
+        document.getElementById('authorDropdown').style.display = 'none';
+        _authorDropOpen = false;
+    }
+});
 
 // ===================== 过滤 =====================
 function applyFilter() { serializeFiltersToURL(); loadHistory(0); }
