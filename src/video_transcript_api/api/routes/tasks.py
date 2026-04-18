@@ -83,11 +83,25 @@ async def transcribe_video(
         remote_ip=request.client.host if request.client else None,
     )
 
+    # 提前解析 URL，提取 platform+media_id 用于同源视频去重
+    parsed_platform = None
+    parsed_media_id = None
+    try:
+        from ...utils.url_parser import URLParser
+        parsed_url = URLParser().parse(url)
+        parsed_platform = parsed_url.platform
+        parsed_media_id = parsed_url.video_id
+        logger.info(f"URL预解析成功: platform={parsed_platform}, media_id={parsed_media_id}")
+    except Exception as e:
+        logger.warning(f"URL预解析失败，降级到精确URL匹配: {e}")
+
     try:
         task_info = cache_manager.create_task(
             url=url,
             use_speaker_recognition=request_body.use_speaker_recognition,
-            download_url=normalized_download_url
+            download_url=normalized_download_url,
+            platform=parsed_platform,
+            media_id=parsed_media_id,
         )
         task_id = task_info["task_id"]
         view_token = task_info["view_token"]

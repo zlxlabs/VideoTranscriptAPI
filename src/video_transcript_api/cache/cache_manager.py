@@ -114,6 +114,7 @@ class CacheManager:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_url ON video_cache(url)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_view_token ON task_status(view_token)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_task_status ON task_status(status)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_task_platform_media ON task_status(platform, media_id)')
             
         # 执行数据库迁移
         self._migrate_database()
@@ -682,14 +683,22 @@ class CacheManager:
         """生成查看token"""
         return f"view_{secrets.token_urlsafe(32)}"
     
-    def create_task(self, url: str, use_speaker_recognition: bool = False, download_url: str = None) -> Dict[str, str]:
+    def create_task(self, url: str, use_speaker_recognition: bool = False,
+                    download_url: str = None, platform: str = None,
+                    media_id: str = None) -> Dict[str, str]:
         """
-        创建新任务，相同URL会复用view_token
+        创建新任务，相同URL或相同(platform, media_id)会复用view_token
+
+        查重策略（按优先级）：
+        1. 精确 URL 匹配（现有行为）
+        2. (platform, media_id) 语义匹配（新增，解决同一视频不同 URL 格式的问题）
 
         Args:
             url: 视频URL（平台链接，用于 view_token 和缓存）
             use_speaker_recognition: 是否使用说话人识别
             download_url: 实际下载地址（可选，如果提供则优先使用）
+            platform: 平台名称（可选，由 URLParser 提取）
+            media_id: 媒体ID（可选，由 URLParser 提取）
 
         Returns:
             Dict: 包含task_id和view_token的字典
@@ -700,22 +709,33 @@ class CacheManager:
         if download_url is not None and not download_url.strip():
             download_url = None
 
-        # 检查是否已有相同URL的任务，如果有则复用其view_token（无论任务状态）
+        # 策略1: 精确 URL 匹配（现有行为）
         existing_task = self.get_existing_task_by_url(url, use_speaker_recognition)
         if existing_task:
             view_token = existing_task['view_token']
-            logger.debug(f"复用现有view_token: {view_token} (状态: {existing_task['status']}) for URL: {url}")
+            logger.debug(f"通过URL精确匹配复用view_token: {view_token} (状态: {existing_task['status']}) for URL: {url}")
         else:
-            view_token = self.generate_view_token()
-            logger.info(f"生成新view_token: {view_token} for URL: {url}")
+            # 策略2: (platform, media_id) 语义匹配（解决同源视频不同URL格式的问题）
+            media_task = self.get_existing_task_by_media(platform, media_id, use_speaker_recognition)
+            if media_task:
+                view_token = media_task['view_token']
+                logger.info(
+                    f"通过平台+媒体ID语义匹配复用view_token: {view_token} "
+                    f"(platform={platform}, media_id={media_id})"
+                )
+            else:
+                view_token = self.generate_view_token()
+                logger.info(f"生成新view_token: {view_token} for URL: {url}")
 
         try:
             with self._get_cursor() as cursor:
                 cursor.execute('''
                     INSERT INTO task_status
-                    (task_id, view_token, url, download_url, use_speaker_recognition, status)
-                    VALUES (?, ?, ?, ?, ?, 'queued')
-                ''', (task_id, view_token, url, download_url, use_speaker_recognition))
+                    (task_id, view_token, url, download_url, use_speaker_recognition,
+                     status, platform, media_id)
+                    VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)
+                ''', (task_id, view_token, url, download_url, use_speaker_recognition,
+                      platform, media_id))
 
             logger.info(f"任务创建成功: {task_id}, view_token: {view_token}, download_url: {download_url}")
             return {
@@ -1046,6 +1066,72 @@ class CacheManager:
 
         except Exception as e:
             logger.error(f"查找现有任务失败: {e}")
+            return None
+
+    def get_existing_task_by_media(self, platform: str, media_id: str,
+                                   use_speaker_recognition: bool = False) -> Optional[Dict[str, Any]]:
+        """
+        根据(platform, media_id)查找现有任务，用于同源视频不同URL格式的去重
+
+        Args:
+            platform: 平台名称
+            media_id: 媒体ID
+            use_speaker_recognition: 是否使用说话人识别
+
+        Returns:
+            Optional[Dict]: 现有任务信息，如果没有找到则返回None
+        """
+        # 参数校验：platform 或 media_id 为 None 时跳过查询
+        if not platform or not media_id:
+            return None
+
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute('''
+                    SELECT task_id, view_token, url, download_url, use_speaker_recognition, status,
+                           title, author, platform, media_id, cache_id, created_at
+                    FROM task_status
+                    WHERE platform = ? AND media_id = ? AND use_speaker_recognition = ?
+                    ORDER BY
+                        CASE status
+                            WHEN 'success' THEN 1
+                            WHEN 'processing' THEN 2
+                            WHEN 'queued' THEN 3
+                            ELSE 4
+                        END,
+                        created_at DESC
+                    LIMIT 1
+                ''', (platform, media_id, use_speaker_recognition))
+
+                row = cursor.fetchone()
+                if row:
+                    task_info = {
+                        'task_id': row[0],
+                        'view_token': row[1],
+                        'url': row[2],
+                        'download_url': row[3],
+                        'use_speaker_recognition': bool(row[4]),
+                        'status': row[5],
+                        'title': row[6],
+                        'author': row[7],
+                        'platform': row[8],
+                        'media_id': row[9],
+                        'cache_id': row[10],
+                        'created_at': row[11]
+                    }
+                    logger.debug(
+                        f"通过平台+媒体ID找到现有任务: {task_info['task_id']}, "
+                        f"状态: {task_info['status']}, platform={platform}, media_id={media_id}"
+                    )
+                    return task_info
+                else:
+                    logger.debug(
+                        f"未通过平台+媒体ID找到现有任务: platform={platform}, media_id={media_id}"
+                    )
+                    return None
+
+        except Exception as e:
+            logger.error(f"通过平台+媒体ID查找现有任务失败: {e}")
             return None
 
     def update_task_llm_config(self, task_id: str, llm_config: Dict[str, Any]) -> bool:
