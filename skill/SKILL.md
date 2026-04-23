@@ -8,19 +8,25 @@ metadata:
         - python3
     env:
       - name: VIDEO_TRANSCRIPT_API_BASE_URL
-        description: VideoTranscriptAPI 服务地址，如 http://localhost:8000 或自部署公网地址
+        description: API 请求地址。通常填内网/tailnet/局域网地址，图的是低延迟。例：http://localhost:8000
         required: true
       - name: VIDEO_TRANSCRIPT_API_TOKEN
         description: Bearer token，对应 config.jsonc 的 api.auth_token 或 users.json 中的 api_key
         required: true
+      - name: VIDEO_TRANSCRIPT_API_PUBLIC_URL
+        description: 给用户点的公网地址（可选）。不设时用 BASE_URL。例：https://vt.example.com
+        required: false
   hermes:
     env:
       - name: VIDEO_TRANSCRIPT_API_BASE_URL
-        description: VideoTranscriptAPI 服务地址，如 http://localhost:8000
+        description: API 请求地址（内网优先，低延迟），如 http://localhost:8000
         required: true
       - name: VIDEO_TRANSCRIPT_API_TOKEN
         description: Bearer token
         required: true
+      - name: VIDEO_TRANSCRIPT_API_PUBLIC_URL
+        description: 给用户点的公网地址（可选），不设时用 BASE_URL
+        required: false
 ---
 
 # VideoTranscriptAPI Skill
@@ -59,17 +65,20 @@ metadata:
 
 skill 在调用时从环境读取，**不要**在对话里要求用户粘贴 token。
 
-| 变量 | 含义 | 示例 |
-|------|------|------|
-| `VIDEO_TRANSCRIPT_API_BASE_URL` | 服务地址（不带尾斜杠） | `http://localhost:8000` 或 `https://vt.example.com` |
-| `VIDEO_TRANSCRIPT_API_TOKEN` | Bearer token | `config.jsonc` 里 `api.auth_token` 或 `users.json` 的某个 key |
+| 变量 | 必填 | 用途 | 示例 |
+|------|-----|------|------|
+| `VIDEO_TRANSCRIPT_API_BASE_URL` | ✅ | 脚本发 API 请求用的地址 | `http://localhost:8000` / `http://100.68.21.80:8200`（tailnet）|
+| `VIDEO_TRANSCRIPT_API_TOKEN` | ✅ | Bearer token | `config.jsonc` 里 `api.auth_token` 或 `users.json` 的某个 key |
+| `VIDEO_TRANSCRIPT_API_PUBLIC_URL` | —  | 给用户点的**公网**地址，不设时用 BASE_URL | `https://vt.example.com` |
+
+**为啥分两个地址**：服务端常跑在内网/tailnet（BASE_URL 用这个，请求最快），但用户拿 `/view/<token>` 链接可能从公网打开。配 PUBLIC_URL 后，skill 返回给用户的查看页面 URL 用公网域名拼，无论用户在哪张网都点得开。没配 PUBLIC_URL 的场景（纯本机 / 都在一张网内）行为不变。
 
 各平台配置方式：
 - **Claude Code**：`export VIDEO_TRANSCRIPT_API_BASE_URL=...` 写到 shell profile 或 `.env`
 - **Hermes**：`hermes setup` 时按提示填入
-- **OpenClaw**：编辑 `~/.openclaw/openclaw.json`，在 `skills.entries.videotranscript-api.env` 下加这两个
+- **OpenClaw**：编辑 `~/.openclaw/openclaw.json`，在 `skills.entries.videotranscript-api.env` 下加这两三个
 
-缺失时脚本会用 exit 3 和明确的 stderr 消息报错。
+缺失必填变量时脚本会用 exit 3 和明确的 stderr 消息报错。
 
 ## 命令总览
 

@@ -66,7 +66,20 @@ def _require_env(name: str) -> str:
 
 
 def _base_url() -> str:
+    """API 调用用的地址。通常是内网/局域网/tailnet，优先保证低延迟。"""
     return _require_env("VIDEO_TRANSCRIPT_API_BASE_URL").rstrip("/")
+
+
+def _public_url() -> str:
+    """给用户看的地址。若设置了 PUBLIC_URL 就用它（公网可访问），否则 fallback 到 BASE_URL。
+
+    场景：服务端实际跑在内网（如 tailnet / 局域网），但用户可能从公网打开 `/view/<token>` 页面。
+    这时需要两个地址分离：API 请求走内网（快），给用户的链接用公网域名。
+    """
+    pub = os.environ.get("VIDEO_TRANSCRIPT_API_PUBLIC_URL")
+    if pub:
+        return pub.rstrip("/")
+    return _base_url()
 
 
 def _auth_headers() -> dict[str, str]:
@@ -198,9 +211,16 @@ def cmd_submit(args: argparse.Namespace) -> int:
         raise TransportError(f"响应缺少 task_id: {resp}")
 
     if args.format == "json":
-        _emit_json({"task_id": task_id, "view_token": view_token, "raw": resp})
+        _emit_json(
+            {
+                "task_id": task_id,
+                "view_token": view_token,
+                "view_url": f"{_public_url()}/view/{view_token}" if view_token else None,
+                "raw": resp,
+            }
+        )
     else:
-        base = _base_url()
+        base = _public_url()
         print(
             textwrap.dedent(
                 f"""            # 任务已提交
@@ -308,12 +328,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         if view_token:
             print(
                 f"\n结果已就绪 —— `result {view_token} --type summary` "
-                f"或访问 {_base_url()}/view/{view_token}"
+                f"或访问 {_public_url()}/view/{view_token}"
             )
         else:
             print(
                 "\n结果已就绪，但没能反查到 view_token（可能任务过旧，已不在最近 1000 条历史里）。"
-                f" 请使用 submit 时保存的 view_token 调 `result`，或直接访问 {_base_url()}/view/<view_token>。"
+                f" 请使用 submit 时保存的 view_token 调 `result`，或直接访问 {_public_url()}/view/<view_token>。"
             )
     return 1 if task_status == "failed" else 0
 
@@ -410,7 +430,7 @@ def cmd_history(args: argparse.Namespace) -> int:
         if when:
             print(f"- 时间: {when}")
         if vt:
-            print(f"- view_token: `{vt}`  ({_base_url()}/view/{vt})")
+            print(f"- view_token: `{vt}`  ({_public_url()}/view/{vt})")
         if tid:
             print(f"- task_id: `{tid}`")
     return 0
