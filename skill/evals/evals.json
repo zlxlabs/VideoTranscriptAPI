@@ -1,0 +1,40 @@
+{
+  "skill_name": "videotranscript-api",
+  "evals": [
+    {
+      "id": 0,
+      "name": "bilibili-single-speaker-summary",
+      "prompt": "https://b23.tv/DBUt7OW 这个视频讲了啥",
+      "expected_output": "提交 URL（不加 --speaker，因为是单人 UP 主），给用户返回 task_id + view_token + 查看页面 URL，告知预计时间，让用户稍后再查。不原地 while 循环等待。",
+      "files": []
+    },
+    {
+      "id": 1,
+      "name": "xiaoyuzhou-multiperson-speaker",
+      "prompt": "https://www.xiaoyuzhoufm.com/episode/69e875e81d989496e73b7892 这期播客有几个人对谈，帮我整理成各个人的观点",
+      "expected_output": "识别出这是多人对谈场景（标题/用户意图），调 submit 时加 --speaker。提交后返回 task_id + view_token + 查看页面 URL + 让用户稍后再查。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "history-keyword-search",
+      "prompt": "我最近有没有转过关于『智能眼镜』的播客？",
+      "expected_output": "调 history --q 智能眼镜（或相关关键词），不调 submit。把检索结果列给用户，附 view_token / 页面链接。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "local-file-refuse",
+      "prompt": "我这有个 meeting_20260401.mp3 本地录音文件，帮我转成文字",
+      "expected_output": "不调 submit。告诉用户服务不支持本地文件上传，需要先把文件放到可公网访问的 URL（OSS/S3/Dropbox 直链等）然后用那个 URL 再提交。",
+      "files": []
+    },
+    {
+      "id": 4,
+      "name": "status-query-by-taskid",
+      "prompt": "task_4542ccd58cf145329025818268625718 这个任务好了没",
+      "expected_output": "调 status task_4542ccd58cf145329025818268625718。看到 success 后告诉用户任务已完成，并给出下一步：用对应 view_token 拉结果。",
+      "files": []
+    }
+  ]
+}

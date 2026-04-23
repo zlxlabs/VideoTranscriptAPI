@@ -1,0 +1,179 @@
+---
+name: videotranscript-api
+description: 通过自部署的 VideoTranscriptAPI 服务，把 YouTube、Bilibili、抖音、小红书、小宇宙播客等平台链接（或直接可访问的音视频直链 URL）转成 AI 校对过的文字稿与总结。当用户分享视频/播客链接并希望拿到文字版、总结、要点、逐字稿时必须使用，即使只是说"这个视频讲了啥"、"帮我听一下这期播客"、"给我这个节目的文字版"、"总结一下这个 B 站视频"、"小宇宙这期在聊什么"也要触发。同样用于查询过去提交过的转录任务历史（按平台、作者、关键词、日期过滤）。注意：服务只接受 URL（平台链接或直链），不支持上传本地文件；若用户想转本地录音，需先把文件放到可访问的 URL 后再提交。
+metadata:
+  openclaw:
+    requires:
+      bins:
+        - python3
+    env:
+      - name: VIDEO_TRANSCRIPT_API_BASE_URL
+        description: VideoTranscriptAPI 服务地址，如 http://localhost:8000 或自部署公网地址
+        required: true
+      - name: VIDEO_TRANSCRIPT_API_TOKEN
+        description: Bearer token，对应 config.jsonc 的 api.auth_token 或 users.json 中的 api_key
+        required: true
+  hermes:
+    env:
+      - name: VIDEO_TRANSCRIPT_API_BASE_URL
+        description: VideoTranscriptAPI 服务地址，如 http://localhost:8000
+        required: true
+      - name: VIDEO_TRANSCRIPT_API_TOKEN
+        description: Bearer token
+        required: true
+---
+
+# VideoTranscriptAPI Skill
+
+把视频/播客链接丢给自部署的 VideoTranscriptAPI 服务，拿回 AI 校对过的文字稿和 LLM 总结。
+
+## 什么时候用这个 skill
+
+**触发场景**：用户给了一个视频/播客链接（或音视频直链 URL），想要文字化内容或总结。
+
+- 「帮我转录这个视频」「这期播客讲了什么」「给我这个 B 站视频的文字版」
+- 「总结一下这个小宇宙节目」「提取这个 YouTube 的要点」
+- 「我上次那个转录好了没」（查询历史任务）
+- 「我最近转过哪些 YouTube 视频」（按平台过滤历史）
+
+**输入形态**：
+- 平台链接 —— YouTube、Bilibili（含 b23.tv 短链）、抖音、小红书、小宇宙播客，自动识别
+- 音视频直链 —— `.mp3` / `.mp4` / `.m4a` / `.wav` 等公网可直接 GET 的 URL，走 `submit` 默认参数或 `--download-url`
+
+**不支持的场景**：
+- **上传本地文件** —— 服务端没有 multipart 上传端点。若用户拿着一个本地会议录音要转写，需先把文件放到可公网访问的 URL（OSS/S3/Dropbox 直链等）再调 `submit`。
+- **视频画面理解** —— 本 skill 只做音轨转录+总结，不分析画面内容。
+
+## 关键约束
+
+**任务是异步的，不要原地等待。** 短视频要 5–6 分钟，长的要十几分钟，服务端还有并发队列。正确姿势：
+
+1. 调 `submit` 拿到 `task_id` 和 `view_token`
+2. 把这两个值告诉用户，附上 `view_token` 对应的查看页面 URL
+3. 让用户过一会儿再来问；用户再问时，调 `status <task_id>` 看进度
+4. 状态变 `success` 后，调 `result <view_token> --type summary` 拉总结
+
+**不要写 while 循环等任务完成**。下游 agent 自己掌握节奏，用户也可以去看 web 页面。
+
+## 环境变量
+
+skill 在调用时从环境读取，**不要**在对话里要求用户粘贴 token。
+
+| 变量 | 含义 | 示例 |
+|------|------|------|
+| `VIDEO_TRANSCRIPT_API_BASE_URL` | 服务地址（不带尾斜杠） | `http://localhost:8000` 或 `https://vt.example.com` |
+| `VIDEO_TRANSCRIPT_API_TOKEN` | Bearer token | `config.jsonc` 里 `api.auth_token` 或 `users.json` 的某个 key |
+
+各平台配置方式：
+- **Claude Code**：`export VIDEO_TRANSCRIPT_API_BASE_URL=...` 写到 shell profile 或 `.env`
+- **Hermes**：`hermes setup` 时按提示填入
+- **OpenClaw**：编辑 `~/.openclaw/openclaw.json`，在 `skills.entries.videotranscript-api.env` 下加这两个
+
+缺失时脚本会用 exit 3 和明确的 stderr 消息报错。
+
+## 命令总览
+
+所有命令通过 `python3 <skill>/scripts/videotranscript.py <sub> ...` 调用，输出默认是 markdown，加 `--format json` 拿结构化结果。
+
+### submit — 提交转录任务
+
+```bash
+python3 scripts/videotranscript.py submit <url> [options]
+```
+
+常用 options：
+- `--speaker`：启用说话人识别（FunASR 引擎，结果会按说话人分段，但更慢）
+- `--webhook URL`：完成后推送企业微信（覆盖服务端默认 webhook）
+- `--title "..."`, `--author "..."`, `--description "..."`：覆盖自动解析的元数据
+- `--download-url URL`：绕过平台解析，用直链下载音视频
+
+返回 `task_id` 和 `view_token`。**务必把这两个都记下来告诉用户**。
+
+#### 什么时候该加 `--speaker`
+
+默认**不加**，走 CapsWriter 通用转录，更快。只有"谁说了什么"这件事对用户重要时才加。
+
+| 内容类型 | 是否加 `--speaker` | 理由 |
+|---------|------------------|------|
+| 多人访谈/对谈播客（如多人小宇宙节目、圆桌讨论） | ✅ 加 | 分段后才看得出谁的观点 |
+| 会议录音、座谈、辩论 | ✅ 加 | 同上 |
+| 用户明确说"分段"、"谁说的"、"区分讲话人"、"问答格式" | ✅ 加 | 用户意图明确 |
+| 单人讲解、教程、vlog、单人脱口秀 | ❌ 不加 | 只有一个人，分段没意义 |
+| 单 UP 主口播视频、课程录播、单人解读 | ❌ 不加 | 同上 |
+| 用户只要"总结"或"要点" | ❌ 不加 | `summary` 不需要分段，省时间 |
+| 拿不准（比如不知道是单人还是多人） | ❌ 不加 | 更快；如果结果发现是多人再让用户重新提交 |
+
+判断时可以参考视频标题、平台、作者名。比如小宇宙"XX 对话 YY"、YouTube 的 `interview with`、标题含"对谈/圆桌/访谈"等就倾向加；一人名+"讲"、"教程"、"实录"、"vlog"倾向不加。
+
+### status — 查进度
+
+```bash
+python3 scripts/videotranscript.py status <task_id>
+```
+
+返回 `queued` / `processing` / `success` / `failed` 之一。exit 1 表示任务 failed（用于程序化判断）。
+
+**成功时会自动附带 `view_token`** —— 服务端 `/api/task` 响应有时不带 view_token（尤其命中缓存），CLI 内部会反查最近 1000 条历史帮你补齐。拿到后直接 `result <view_token> --type summary` 即可闭环，不用再向用户追问。极端情况（任务过旧、不在最近历史里）反查失败，此时才需要用户提供或让他访问 web 页面。
+
+### result — 拉结果
+
+```bash
+python3 scripts/videotranscript.py result <view_token> --type <summary|calibrated|transcript>
+```
+
+- `summary`（默认）：LLM 生成的要点总结 —— **绝大多数场景就用这个**
+- `calibrated`：LLM 校对过的完整文字稿（去除 ASR 错别字、加标点、分段）
+- `transcript`：原始 ASR 输出（FunASR JSON 或 CapsWriter 纯文本，一般不用）
+
+任务还没完成时会返回 exit 0 + 一行提示"仍在处理中"；拿不到结果时返回 exit 1。
+
+### history — 查历史任务
+
+```bash
+python3 scripts/videotranscript.py history [options]
+```
+
+Options：`--platform youtube`、`--author 作者名`、`--q 关键词`、`--start 2026-01-01 --end 2026-01-31`、`--status success`、`--limit 20 --offset 0`。
+
+### 辅助命令
+
+- `filter-options`：列出服务端已有的平台/作者/webhook 列表（做下拉时用）
+- `profile`：查当前 token 对应的用户信息
+- `health`：无鉴权探活，用来排查连不上的问题
+
+## 典型对话流
+
+**场景 A：用户想要一个 B 站视频的总结**
+
+1. 用户：「帮我看看这个视频 https://www.bilibili.com/video/BVxxx 讲了什么」
+2. 调 `submit https://www.bilibili.com/video/BVxxx`，拿到 `task_id=task_abc`、`view_token=vt_xyz`
+3. 回复用户：「已提交，预计 5–15 分钟。任务 ID `task_abc`，完成后可直接访问 {base_url}/view/vt_xyz 查看。过几分钟回来问我"那个 B 站视频好了吗"我再查。」
+4. 用户回来问：调 `status task_abc`
+5. 状态是 success：调 `result vt_xyz --type summary`，把总结贴给用户
+
+**场景 B：查找最近转过的小宇宙节目**
+
+1. 用户：「我上周转过的那个小宇宙播客在哪」
+2. 调 `history --platform xiaoyuzhou --start 2026-04-16 --end 2026-04-23`
+3. 把结果列表贴给用户，附上 `view_token` 和查看页面链接
+
+**场景 C：想要带说话人分段的多人对话**
+
+1. 用户：「这个访谈有三个人，能帮我做成问答格式吗」
+2. 调 `submit <url> --speaker`
+3. 其他流程同场景 A；`calibrated` 结果里会带说话人标记
+
+## 退出码语义（程序化调用时看这个）
+
+| Exit | 含义 |
+|------|------|
+| 0 | 成功 |
+| 1 | 业务失败（任务 failed、view_token 无效、结果为空） |
+| 2 | 传输/基础设施问题（网络、5xx、401/403 鉴权失败） |
+| 3 | 配置问题（缺 env、参数非法） |
+
+遇到 exit 2 时别无脑重试 —— 先看 stderr，通常是 token 错或服务没起。遇到 503（队列满）可以隔 1–2 分钟退避重试。
+
+## 更深入的 API 细节
+
+完整端点/字段/错误码对照参见 `references/api.md`。只有需要非标准字段、调试异常响应或自定义调用时才去读它。

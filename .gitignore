@@ -113,3 +113,6 @@ docker/pull_and_deploy.sh
 # Tools
 .cx-index.db
 graphify-out/
+
+# Skill 测试工作区
+skill-workspace/
