@@ -324,7 +324,9 @@ async def recalibrate(
 ):
     """重新校对接口
 
-    仅重新执行校对步骤（跳过下载、转录、总结），需要 recalibrate 权限。
+    重新执行校对步骤（跳过下载、转录），需要 recalibrate 权限。
+    若原任务缓存里 llm_summary.txt 缺失或为空，会自动补跑总结，
+    避免老任务停留在"总结处理中..."状态；其他情况仍保留原总结文件。
     """
     view_token = request_body.view_token
     user_id = user_info.get("user_id")

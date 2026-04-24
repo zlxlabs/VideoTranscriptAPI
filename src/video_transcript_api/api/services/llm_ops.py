@@ -10,6 +10,7 @@
 """
 
 import time
+from pathlib import Path
 from ..context import (
     get_cache_manager,
     get_config,
@@ -103,6 +104,24 @@ def _handle_llm_task(llm_task: dict):
                 # 是否为仅校对模式（重新校对场景）
                 calibrate_only = llm_task.get("calibrate_only", False)
 
+                # 仅校对模式下，若缓存里 llm_summary.txt 缺失/为空，顺手补跑一次 summary
+                # 避免老任务卡在 view 页的 "总结处理中..." 状态
+                summary_backfill = False
+                if calibrate_only and platform and media_id:
+                    cache_snapshot = cache_manager.get_cache(
+                        platform, media_id,
+                        use_speaker_recognition=use_speaker_recognition,
+                    )
+                    if _should_backfill_summary(cache_snapshot or {}, calibrate_only=True):
+                        summary_backfill = True
+                        logger.info(
+                            f"recalibrate: llm_summary missing for {task_id}, "
+                            f"auto-backfill enabled"
+                        )
+
+                # 协调器需要知道是否跳过 summary：backfill 时强制跑 summary
+                skip_summary_for_coordinator = calibrate_only and not summary_backfill
+
                 # 调用新架构（包含校对和总结）
                 with tracker.track("llm_processing"):
                     coordinator_result = llm_coordinator.process(
@@ -113,7 +132,7 @@ def _handle_llm_task(llm_task: dict):
                         platform=platform or "",
                         media_id=media_id or "",
                         has_risk=has_risk,
-                        skip_summary=calibrate_only,
+                        skip_summary=skip_summary_for_coordinator,
                     )
 
                 # 适配返回格式
@@ -129,6 +148,7 @@ def _handle_llm_task(llm_task: dict):
                     use_speaker_recognition=use_speaker_recognition,
                     result_dict=result_dict,
                     calibrate_only=calibrate_only,
+                    summary_backfill=summary_backfill,
                 )
 
                 # 发送企微通知
@@ -329,6 +349,36 @@ def _build_result_dict(coordinator_result: dict) -> dict:
     return result_dict
 
 
+def _should_backfill_summary(cache_data: dict, calibrate_only: bool) -> bool:
+    """判断是否需要在 recalibrate 流程里顺手补跑一次 summary。
+
+    触发条件：仅校对模式，且缓存目录里的 llm_summary.txt 缺失或为空字节。
+    空文件视为历史遗留占位，同样需要补跑。
+
+    Args:
+        cache_data: cache_manager.get_cache(...) 返回的数据字典
+        calibrate_only: 是否仅校对（recalibrate）流程
+
+    Returns:
+        True 表示应当补跑 summary，False 表示保留现状
+    """
+    if not calibrate_only:
+        return False
+
+    file_path = cache_data.get("file_path") if cache_data else None
+    if not file_path:
+        return False
+
+    summary_file = Path(file_path) / "llm_summary.txt"
+    if not summary_file.exists():
+        return True
+
+    try:
+        return summary_file.stat().st_size == 0
+    except OSError:
+        return True
+
+
 def _save_llm_results(
     task_id: str,
     platform: str,
@@ -336,6 +386,7 @@ def _save_llm_results(
     use_speaker_recognition: bool,
     result_dict: dict,
     calibrate_only: bool,
+    summary_backfill: bool = False,
 ):
     """保存 LLM 处理结果到缓存
 
@@ -346,6 +397,8 @@ def _save_llm_results(
         use_speaker_recognition: 是否使用说话人识别
         result_dict: LLM 处理结果字典
         calibrate_only: 是否仅校对模式
+        summary_backfill: 仅校对模式下是否需要补写 summary 文件
+            （原任务缺失 llm_summary.txt 时由 _handle_llm_task 置为 True）
     """
     calibrated_text = result_dict.get("校对文本", "")
     summary_text = result_dict.get("内容总结")
@@ -379,7 +432,7 @@ def _save_llm_results(
         logger.warning(f"校对失败，跳过保存校对文件: {task_id}")
 
     # 保存总结文本
-    if calibrate_only:
+    if calibrate_only and not summary_backfill:
         logger.info(f"仅校对模式，保留原有总结文件: {task_id}")
     elif summary_success:
         if skip_summary:

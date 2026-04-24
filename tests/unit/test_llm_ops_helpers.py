@@ -16,6 +16,7 @@ from video_transcript_api.api.services.llm_ops import (
     _prepare_llm_content,
     _build_result_dict,
     _build_calibration_warning,
+    _should_backfill_summary,
 )
 
 
@@ -155,3 +156,40 @@ class TestBuildCalibrationWarning:
         warning = _build_calibration_warning(stats)
         assert "3/5" in warning
         assert "1" in warning  # fallback count
+
+
+class TestShouldBackfillSummary:
+    """Test _should_backfill_summary helper.
+
+    Decides whether /api/recalibrate should also re-run summary generation
+    when the cache is missing a usable llm_summary.txt.
+    """
+
+    def test_not_calibrate_only_returns_false(self, tmp_path):
+        """Non calibrate-only path should never trigger backfill."""
+        summary_file = tmp_path / "llm_summary.txt"
+        summary_file.write_text("stale", encoding="utf-8")
+        cache_data = {"file_path": str(tmp_path)}
+        assert _should_backfill_summary(cache_data, calibrate_only=False) is False
+
+    def test_summary_exists_non_empty_returns_false(self, tmp_path):
+        """Existing non-empty summary should not trigger backfill."""
+        (tmp_path / "llm_summary.txt").write_text("real summary", encoding="utf-8")
+        cache_data = {"file_path": str(tmp_path)}
+        assert _should_backfill_summary(cache_data, calibrate_only=True) is False
+
+    def test_summary_missing_returns_true(self, tmp_path):
+        """Missing summary file should trigger backfill."""
+        cache_data = {"file_path": str(tmp_path)}
+        assert _should_backfill_summary(cache_data, calibrate_only=True) is True
+
+    def test_summary_empty_file_returns_true(self, tmp_path):
+        """Zero-byte summary placeholder should trigger backfill."""
+        (tmp_path / "llm_summary.txt").write_text("", encoding="utf-8")
+        cache_data = {"file_path": str(tmp_path)}
+        assert _should_backfill_summary(cache_data, calibrate_only=True) is True
+
+    def test_no_file_path_returns_false(self):
+        """Cache data without file_path cannot be inspected; be conservative."""
+        assert _should_backfill_summary({}, calibrate_only=True) is False
+        assert _should_backfill_summary({"file_path": None}, calibrate_only=True) is False
