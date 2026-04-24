@@ -64,6 +64,31 @@ class TestDetectProvider:
         assert providers.detect_provider("weirdbrand-v1", custom) == "deepseek"
         assert providers.detect_provider("weirdbrand-v1") == "openai"
 
+    def test_module_level_custom_patterns(self):
+        """config.jsonc llm.provider_patterns 注入后生效；清空后恢复默认。"""
+        providers.set_custom_patterns({"dsproxy-*": "deepseek"})
+        try:
+            assert providers.detect_provider("dsproxy-alpha") == "deepseek"
+            # 默认规则仍生效
+            assert providers.detect_provider("gpt-4o") == "openai_gpt4"
+        finally:
+            providers.set_custom_patterns(None)
+        # 清空后 dsproxy 回到 openai fallback
+        assert providers.detect_provider("dsproxy-alpha") == "openai"
+
+    def test_custom_patterns_accept_list_format(self):
+        providers.set_custom_patterns([["myai-*", "deepseek"]])
+        try:
+            assert providers.detect_provider("myai-v1") == "deepseek"
+        finally:
+            providers.set_custom_patterns(None)
+
+    def test_invalid_custom_patterns_fallback_to_defaults(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING):
+            providers.set_custom_patterns("not a list")
+        assert providers.detect_provider("gpt-4o") == "openai_gpt4"
+
 
 class TestBuildRequestPayloadDeepSeek:
     """DeepSeek V4: disabled -> extra_body.thinking.type, effort -> reasoning_effort."""

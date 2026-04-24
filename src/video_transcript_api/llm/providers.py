@@ -131,6 +131,57 @@ _FAMILY_CAPABILITIES: Dict[str, Dict[str, Any]] = {
 }
 
 
+# 启动时由 config.jsonc llm.provider_patterns 覆盖（通过 set_custom_patterns 注入）。
+# 未设置时用 _DEFAULT_PROVIDER_PATTERNS。
+_CUSTOM_PATTERNS: Optional[Tuple[Tuple[str, str], ...]] = None
+
+
+def set_custom_patterns(patterns: Optional[Any]) -> None:
+    """
+    由启动代码调用，注入用户在 config.jsonc 里定义的 provider_patterns。
+
+    格式：list of [pattern, family] 或 dict of pattern -> family。
+    传入 None 或空值会清空自定义，回到默认表。
+    """
+    global _CUSTOM_PATTERNS
+    if not patterns:
+        _CUSTOM_PATTERNS = None
+        return
+    normalized: list = []
+    if isinstance(patterns, dict):
+        pairs = list(patterns.items())
+    elif isinstance(patterns, (list, tuple)):
+        pairs = []
+        for entry in patterns:
+            if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                pairs.append((entry[0], entry[1]))
+    else:
+        logger.warning(
+            "Invalid provider_patterns type %s, ignoring", type(patterns).__name__
+        )
+        _CUSTOM_PATTERNS = None
+        return
+    for pattern, family in pairs:
+        if isinstance(pattern, str) and isinstance(family, str):
+            normalized.append((pattern, family))
+        else:
+            logger.warning(
+                "Skipping invalid provider_patterns entry %r -> %r", pattern, family
+            )
+    _CUSTOM_PATTERNS = tuple(normalized) if normalized else None
+
+
+def _effective_patterns(
+    custom_patterns: Optional[Tuple[Tuple[str, str], ...]] = None,
+) -> Tuple[Tuple[str, str], ...]:
+    """合并优先级：函数入参 custom > 模块级 _CUSTOM_PATTERNS > _DEFAULT_PROVIDER_PATTERNS。"""
+    if custom_patterns:
+        return tuple(custom_patterns) + _DEFAULT_PROVIDER_PATTERNS
+    if _CUSTOM_PATTERNS:
+        return _CUSTOM_PATTERNS + _DEFAULT_PROVIDER_PATTERNS
+    return _DEFAULT_PROVIDER_PATTERNS
+
+
 def detect_provider(
     model: Optional[str],
     custom_patterns: Optional[Tuple[Tuple[str, str], ...]] = None,
@@ -139,7 +190,7 @@ def detect_provider(
     if not model or not isinstance(model, str):
         logger.warning("detect_provider: invalid model name %r, defaulting to 'openai'", model)
         return "openai"
-    patterns = custom_patterns if custom_patterns else _DEFAULT_PROVIDER_PATTERNS
+    patterns = _effective_patterns(custom_patterns)
     model_lower = model.lower()
     for pattern, family in patterns:
         if fnmatch.fnmatch(model_lower, pattern.lower()):
@@ -258,6 +309,85 @@ def build_request_payload(
     family = detect_provider(model, custom_patterns)
     translation = _translate(family, reasoning_effort)
     return _deep_merge(base_payload, translation)
+
+
+def log_llm_config_summary(
+    config: Dict[str, Any],
+    custom_patterns: Optional[Tuple[Tuple[str, str], ...]] = None,
+) -> None:
+    """
+    启动时打印每个 LLM 任务的 provider+model+thinking 摘要。
+
+    格式：`[LLM] <task>: <model> (<provider>) | thinking=<mode>(<source>)`
+
+    只输出任务名、模型、provider、thinking 模式。绝不输出 api_key / base_url /
+    provider_patterns 等 secret-adjacent 或拓扑信息。
+
+    Args:
+        config: 完整 config dict（含 llm.* 字段）
+        custom_patterns: 可选自定义 provider 匹配表
+    """
+    llm = config.get("llm") if isinstance(config, dict) else None
+    if not isinstance(llm, dict):
+        logger.info("[LLM] No llm config present")
+        return
+
+    # 扫描所有 *_model 字段（对应 *_reasoning_effort）
+    task_pairs: Dict[str, Tuple[str, Optional[str]]] = {}
+    for key, value in llm.items():
+        if not isinstance(key, str) or not key.endswith("_model"):
+            continue
+        task = key[: -len("_model")]
+        if not isinstance(value, str) or not value:
+            continue
+        effort_key = f"{task}_reasoning_effort"
+        effort = llm.get(effort_key)
+        if isinstance(effort, str) and not effort:
+            effort = None
+        task_pairs[task] = (value, effort)
+
+    # structured_calibration.validator_model 等嵌套字段也扫一遍
+    for section_key in ("structured_calibration", "segmentation"):
+        section = llm.get(section_key)
+        if not isinstance(section, dict):
+            continue
+        for key, value in section.items():
+            if not isinstance(key, str) or not key.endswith("_model"):
+                continue
+            task = f"{section_key}.{key[: -len('_model')]}"
+            if not isinstance(value, str) or not value:
+                continue
+            effort_key = f"{key[: -len('_model')]}_reasoning_effort"
+            effort = section.get(effort_key)
+            if isinstance(effort, str) and not effort:
+                effort = None
+            task_pairs[task] = (value, effort)
+
+    if not task_pairs:
+        logger.info("[LLM] No LLM tasks configured")
+        return
+
+    for task in sorted(task_pairs):
+        model, effort = task_pairs[task]
+        try:
+            synthetic_payload: Dict[str, Any] = {"model": model}
+            # 模拟最终 payload 的 thinking 字段（复用 build_request_payload 的翻译）
+            if effort is not None:
+                translated = _translate(
+                    detect_provider(model, custom_patterns), effort
+                )
+                synthetic_payload = _deep_merge(synthetic_payload, translated)
+            desc = describe_from_payload(synthetic_payload, custom_patterns)
+            logger.info(
+                "[LLM] %s: %s (%s) | thinking=%s(%s)",
+                task,
+                desc["model"],
+                desc["provider"],
+                desc["thinking_mode"],
+                desc["thinking_source"],
+            )
+        except Exception as exc:  # 启动日志不应阻断服务
+            logger.warning("[LLM] Failed to describe task %r: %s", task, exc)
 
 
 def describe_from_payload(

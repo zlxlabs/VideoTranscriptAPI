@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from ..utils.notifications import init_global_notifier, shutdown_global_notifier
 from ..utils.ytdlp import YtdlpConfigBuilder
 from ..llm import set_default_config, log_llm_stats
+from ..llm import providers as _llm_providers
 from .context import get_config, get_logger, get_static_dir, get_temp_manager
 from .routes import audit, health, tasks, users, views
 from .services.transcription import process_llm_queue, process_task_queue
@@ -77,6 +78,10 @@ def create_app() -> FastAPI:
         # 设置 LLM 模块默认配置（用于 JSON 结构化输出）
         set_default_config(config)
         logger.info("LLM default config set")
+
+        # 注入用户自定义 provider 匹配表（可选）+ 打印每任务摘要
+        _llm_providers.set_custom_patterns(config.get("llm", {}).get("provider_patterns"))
+        _llm_providers.log_llm_config_summary(config)
 
         # 初始化 yt-dlp 配置并验证 YouTube cookie
         logger.info("Initializing yt-dlp configuration...")
