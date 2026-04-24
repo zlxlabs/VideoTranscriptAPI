@@ -14,6 +14,8 @@ from typing import Any, Dict, Optional, Union, overload
 from dataclasses import dataclass
 from loguru import logger
 
+from . import providers
+
 
 # ============================================================
 # 全局默认配置（解决 config 参数强依赖问题）
@@ -311,7 +313,7 @@ def _call_with_text_output(
         "Authorization": f"Bearer {api_key}"
     }
 
-    data = {
+    base_payload = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -320,17 +322,18 @@ def _call_with_text_output(
         "stream": False
     }
 
-    if reasoning_effort is not None:
-        data["reasoning_effort"] = reasoning_effort
+    # 由 providers 层按模型族翻译 thinking/reasoning 参数 + 深合并
+    data = providers.build_request_payload(model, reasoning_effort, base_payload)
 
     last_error = None
     start_time = time.time()
 
     for attempt in range(max_retries + 1):
         try:
-            reasoning_status = 'disabled' if reasoning_effort is None else reasoning_effort
+            desc = providers.describe_from_payload(data)
             logger.info(
-                f"[{task_type.upper()}] Model: {model} | Reasoning: {reasoning_status} | "
+                f"[{task_type.upper()}] Model: {desc['model']} ({desc['provider']}) | "
+                f"Thinking: {desc['thinking_mode']} | "
                 f"Attempt {attempt + 1}/{max_retries + 1}"
             )
 
@@ -399,7 +402,7 @@ def _call_with_json_schema_mode(
         "Authorization": f"Bearer {api_key}"
     }
 
-    data = {
+    base_payload = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -416,13 +419,16 @@ def _call_with_json_schema_mode(
         }
     }
 
-    if reasoning_effort is not None:
-        data["reasoning_effort"] = reasoning_effort
+    data = providers.build_request_payload(model, reasoning_effort, base_payload)
 
     last_error = None
     for attempt in range(max_retries + 1):
         try:
-            logger.info(f"[{task_type.upper()}] json_schema mode | Attempt {attempt + 1}/{max_retries + 1}")
+            desc = providers.describe_from_payload(data)
+            logger.info(
+                f"[{task_type.upper()}] json_schema mode ({desc['provider']}, "
+                f"thinking={desc['thinking_mode']}) | Attempt {attempt + 1}/{max_retries + 1}"
+            )
 
             resp = requests.post(base_url, json=data, headers=headers, timeout=_get_llm_timeout())
             resp.raise_for_status()
@@ -509,17 +515,20 @@ def _call_with_json_object_mode(
             else:
                 messages.append({"role": "user", "content": enhanced_prompt})
 
-            data = {
+            base_payload = {
                 "model": model,
                 "messages": messages,
                 "stream": False,
                 "response_format": {"type": "json_object"}
             }
 
-            if reasoning_effort is not None:
-                data["reasoning_effort"] = reasoning_effort
+            data = providers.build_request_payload(model, reasoning_effort, base_payload)
 
-            logger.info(f"[{task_type.upper()}] json_object mode | Attempt {attempt + 1}/{json_object_retries + 1}")
+            desc = providers.describe_from_payload(data)
+            logger.info(
+                f"[{task_type.upper()}] json_object mode ({desc['provider']}, "
+                f"thinking={desc['thinking_mode']}) | Attempt {attempt + 1}/{json_object_retries + 1}"
+            )
 
             resp = requests.post(base_url, json=data, headers=headers, timeout=_get_llm_timeout())
             resp.raise_for_status()
