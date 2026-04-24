@@ -3,37 +3,66 @@ LLM 处理工具模块
 
 包含 LLM API 调用、结构化校对、分段处理、说话人映射等功能。
 """
+import logging
 from typing import Optional
+
+_logger = logging.getLogger(__name__)
+
+# 2026 reasoning_effort 合法值白名单
+# - "disabled": 显式关闭思考（dispatcher 按 provider 翻译）
+# - "minimal": GPT-5 / Gemini 3 的最低挡；DeepSeek 无此值
+# - "low"/"medium"/"high": 三家通用
+# - "max"/"xhigh": DeepSeek V4 特有
+_VALID_EFFORTS = frozenset(
+    {"disabled", "minimal", "low", "medium", "high", "max", "xhigh"}
+)
 
 
 def normalize_reasoning_effort(value: Optional[str]) -> Optional[str]:
     """
-    规范化 reasoning_effort 配置值
+    规范化 reasoning_effort 配置值到 2026 白名单。
 
-    处理配置文件中可能出现的各种异常写法：
-    - "null" 字符串 -> None
-    - "none" 字符串 -> None（视为禁用）
-    - "" 空字符串 -> None
-    - 其他有效值保持不变（"low", "medium", "high"）
+    返回语义三种可能：
+    - None: 未设置，沿用 provider 默认（如 DeepSeek V4 默认 enabled@high）
+    - "disabled": 显式关闭思考（dispatcher 按 provider 翻译为 thinking.type=disabled 或等价）
+    - "minimal"/"low"/"medium"/"high"/"max"/"xhigh": 思考强度
 
-    Args:
-        value: 原始配置值
-
-    Returns:
-        规范化后的值，无效值返回 None
+    兼容迁移：
+    - "null"/""/"   " → None（默认）
+    - "none" → "disabled"（legacy 语义保持，warn deprecated）
+    - 大小写不敏感，归一到小写
+    - 非白名单值 → None + warn
     """
     if value is None:
         return None
 
-    # 处理字符串形式的 null/none/空值
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in ("null", "none", ""):
-            return None
-        # 返回原始值（保持大小写）
-        return value
+    if not isinstance(value, str):
+        return None
 
-    return None
+    normalized = value.strip().lower()
+
+    if normalized in ("", "null"):
+        return None
+
+    # Legacy: 旧 "none" 的用户意图是"关闭思考"，不是"不设置"
+    # 不映射到 "disabled" 会让 Gemini 2.5 用户从"关闭"静默变为"默认开启"
+    if normalized == "none":
+        _logger.warning(
+            "reasoning_effort='none' is deprecated (legacy from 2024 Gemini 2.5); "
+            "migrating to 'disabled'. Update your config to use 'disabled' explicitly."
+        )
+        return "disabled"
+
+    if normalized not in _VALID_EFFORTS:
+        _logger.warning(
+            "Unknown reasoning_effort %r, treating as None (provider default). "
+            "Valid values: %s",
+            value,
+            sorted(_VALID_EFFORTS),
+        )
+        return None
+
+    return normalized
 
 
 from .llm import (
