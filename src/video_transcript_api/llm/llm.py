@@ -15,6 +15,12 @@ from dataclasses import dataclass
 from loguru import logger
 
 from llm_compat import SyncLLMClient, set_custom_patterns
+from llm_compat import normalize_reasoning_effort as _lc_normalize
+from llm_compat.providers import (
+    build_request_payload,
+    describe_from_payload,
+    detect_provider,
+)
 
 
 # ============================================================
@@ -578,3 +584,74 @@ def call_llm_api(
             reasoning_effort=reasoning_effort,
             task_type=task_type,
         )
+
+
+# ============================================================
+# 启动日志
+# ============================================================
+
+
+def log_llm_config_summary(config: Dict[str, Any]) -> None:
+    """启动时打印每个 LLM 任务的 provider+model+thinking 摘要。
+
+    只输出任务名、模型、provider、thinking 模式。
+    绝不输出 api_key / base_url 等敏感信息。
+
+    Uses stdlib logging so pytest caplog can capture output.
+    """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
+    llm = config.get("llm") if isinstance(config, dict) else None
+    if not isinstance(llm, dict):
+        _log.info("[LLM] No llm config present")
+        return
+
+    task_pairs: Dict[str, tuple] = {}
+    for key, value in llm.items():
+        if not isinstance(key, str) or not key.endswith("_model"):
+            continue
+        task = key[: -len("_model")]
+        if not isinstance(value, str) or not value:
+            continue
+        effort_key = f"{task}_reasoning_effort"
+        effort = llm.get(effort_key)
+        if isinstance(effort, str) and not effort:
+            effort = None
+        task_pairs[task] = (value, effort)
+
+    for section_key in ("structured_calibration", "segmentation"):
+        section = llm.get(section_key)
+        if not isinstance(section, dict):
+            continue
+        for key, value in section.items():
+            if not isinstance(key, str) or not key.endswith("_model"):
+                continue
+            task = f"{section_key}.{key[: -len('_model')]}"
+            if not isinstance(value, str) or not value:
+                continue
+            effort_key = f"{key[: -len('_model')]}_reasoning_effort"
+            effort = section.get(effort_key)
+            if isinstance(effort, str) and not effort:
+                effort = None
+            task_pairs[task] = (value, effort)
+
+    if not task_pairs:
+        _log.info("[LLM] No LLM tasks configured")
+        return
+
+    for task in sorted(task_pairs):
+        model, effort = task_pairs[task]
+        try:
+            normalized = _lc_normalize(effort)
+            synthetic: Dict[str, Any] = {"model": model}
+            if normalized is not None:
+                synthetic = build_request_payload(model, normalized, synthetic)
+            desc = describe_from_payload(synthetic)
+            _log.info(
+                "[LLM] %s: %s (%s) | thinking=%s(%s)",
+                task, desc["model"], desc["provider"],
+                desc["thinking_mode"], desc["thinking_source"],
+            )
+        except Exception as exc:
+            _log.warning("[LLM] Failed to describe task %r: %s", task, exc)

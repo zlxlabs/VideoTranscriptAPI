@@ -10,7 +10,7 @@ import logging
 
 import pytest
 
-from video_transcript_api.llm.providers import log_llm_config_summary
+from video_transcript_api.llm.llm import log_llm_config_summary
 
 
 class TestLogLLMConfigSummary:
