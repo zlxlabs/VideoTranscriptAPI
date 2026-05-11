@@ -83,6 +83,12 @@ skill/
 注意：Windows 上 python3 命令是微软商店占位程序，会直接失败。请用 python 代替。
 ```
 
+**更新 prompt**（skill 已安装，只需拉最新代码）：
+
+```
+更新 videotranscript-api skill：从 https://github.com/zj1123581321/VideoTranscriptAPI.git 拉取最新的 skill/ 目录，覆盖到 ~/.claude/skills/videotranscript-api/。环境变量不用动。更新后跑 health 验证。
+```
+
 ### Hermes
 
 1. 把 `skill/` 同步到 Hermes skill 目录（`~/.hermes/skills/videotranscript-api/`）。
@@ -100,6 +106,12 @@ skill/
    VIDEO_TRANSCRIPT_API_PUBLIC_URL=<公网地址，可选，不设时用 BASE_URL>
    VIDEO_TRANSCRIPT_API_WECHAT_WEBHOOK=<企微 webhook，可选>
 3. 验证连通性：先试 python3 跑 health 命令，python3 不可用则用 python，都不行就用 curl <API 服务地址>/health
+```
+
+**更新 prompt**（skill 已安装，只需拉最新代码）：
+
+```
+更新 videotranscript-api skill：从 https://github.com/zj1123581321/VideoTranscriptAPI.git 拉取最新的 skill/ 目录，覆盖到 Hermes 的 skill 目录下的 videotranscript-api/。环境变量不用动。更新后跑 health 验证。
 ```
 
 ### OpenClaw
