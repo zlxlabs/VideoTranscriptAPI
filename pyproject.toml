@@ -32,7 +32,7 @@ dependencies = [
     "watchdog>=6.0.0",
     "websocket-client==1.5.1",
     "websockets>=13.0",
-    "wecom-notifier>=0.2.3",
+    "wecom-notifier>=0.3.1",
     "youtube-transcript-api>=1.2.3",
     "yt-dlp[default]>=2025.12.8",
 ]
