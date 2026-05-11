@@ -61,10 +61,10 @@ metadata:
 
 **任务是异步的，不要原地等待。** 短视频要 5–6 分钟，长的要十几分钟，服务端还有并发队列。正确姿势：
 
-1. 调 `submit` 拿到 `task_id` 和 `view_token`
-2. 把这两个值告诉用户，附上 `view_token` 对应的查看页面 URL
-3. 让用户过一会儿再来问；用户再问时，调 `status <task_id>` 看进度
-4. 状态变 `success` 后，调 `result <view_token> --type summary` 拉总结
+1. 调 `submit` 拿到 `view_token`
+2. 把查看页面 URL（`{public_url}/view/{view_token}`）发给用户
+3. 让用户过一会儿再来问；用户再问时，直接调 `result <view_token> --type summary`
+4. 返回 202 = 还在处理，让用户再等等；返回 200 = 完成，把结果贴给用户
 
 **不要写 while 循环等任务完成**。下游 agent 自己掌握节奏，用户也可以去看 web 页面。
 
@@ -108,7 +108,7 @@ python3 scripts/videotranscript.py submit <url> [options]
 - `--title "..."`, `--author "..."`, `--description "..."`：覆盖自动解析的元数据
 - `--download-url URL`：绕过平台解析，用直链下载音视频
 
-返回 `task_id` 和 `view_token`。**务必把这两个都记下来告诉用户**。
+返回 `view_token`（和 task_id，可忽略）。**只需要记住 `view_token`**，后续查进度和拉结果都用它。
 
 #### 什么时候该加 `--speaker`
 
@@ -126,17 +126,7 @@ python3 scripts/videotranscript.py submit <url> [options]
 
 判断时可以参考视频标题、平台、作者名。比如小宇宙"XX 对话 YY"、YouTube 的 `interview with`、标题含"对谈/圆桌/访谈"等就倾向加；一人名+"讲"、"教程"、"实录"、"vlog"倾向不加。
 
-### status — 查进度
-
-```bash
-python3 scripts/videotranscript.py status <task_id>
-```
-
-返回 `queued` / `processing` / `success` / `failed` 之一。exit 1 表示任务 failed（用于程序化判断）。
-
-**成功时会自动附带 `view_token`** —— 服务端 `/api/task` 响应有时不带 view_token（尤其命中缓存），CLI 内部会反查最近 1000 条历史帮你补齐。拿到后直接 `result <view_token> --type summary` 即可闭环，不用再向用户追问。极端情况（任务过旧、不在最近历史里）反查失败，此时才需要用户提供或让他访问 web 页面。
-
-### result — 拉结果
+### result — 查进度 & 拉结果
 
 ```bash
 python3 scripts/videotranscript.py result <view_token> --type <summary|calibrated|transcript>
@@ -158,6 +148,7 @@ Options：`--platform youtube`、`--author 作者名`、`--q 关键词`、`--sta
 
 ### 辅助命令
 
+- `status <task_id>`：用 task_id 查详细进度（一般不需要，`result` 已经能判断是否完成）
 - `filter-options`：列出服务端已有的平台/作者/webhook 列表（做下拉时用）
 - `profile`：查当前 token 对应的用户信息
 - `health`：无鉴权探活，用来排查连不上的问题
@@ -167,11 +158,11 @@ Options：`--platform youtube`、`--author 作者名`、`--q 关键词`、`--sta
 **场景 A：用户想要一个 B 站视频的总结**
 
 1. 用户：「帮我看看这个视频 https://www.bilibili.com/video/BVxxx 讲了什么」
-2. 调 `submit https://www.bilibili.com/video/BVxxx`，拿到 `task_id=task_abc`、`view_token=vt_xyz`
+2. 调 `submit https://www.bilibili.com/video/BVxxx`，拿到 `view_token=vt_xyz`
 3. **先单独发一条消息**，只包含查看链接：`{public_url}/view/vt_xyz`（可附一句「点击查看处理进度」）
-4. 再回复任务详情：「已提交，预计 5–15 分钟。任务 ID `task_abc`。过几分钟回来问我"那个 B 站视频好了吗"我再查。」
-5. 用户回来问：调 `status task_abc`
-6. 状态是 success：调 `result vt_xyz --type summary`，把总结贴给用户
+4. 再回复：「已提交，预计 5–15 分钟。过几分钟回来问我"那个 B 站视频好了吗"我再查。」
+5. 用户回来问：调 `result vt_xyz --type summary`
+6. 返回 202 → 告诉用户还在处理；返回 200 → 把总结贴给用户
 
 **场景 B：查找最近转过的小宇宙节目**
 

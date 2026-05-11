@@ -135,8 +135,8 @@ python3 skill/scripts/videotranscript.py submit https://b23.tv/DBUt7OW
 
 | 子命令 | 作用 |
 |--------|------|
-| `submit <url>` | 提交转录任务，异步返回 `task_id` + `view_token` |
-| `status <task_id>` | 查任务状态，success 时自动附带 `view_token` |
+| `submit <url>` | 提交转录任务，返回查看链接（agent 内部记录 task_id 用于后续查询） |
+| `status <task_id>` | 查任务状态（agent 内部使用），success 时自动附带 view_token |
 | `result <view_token>` | 拉结果文本（`--type summary`/`calibrated`/`transcript`） |
 | `history` | 按平台/作者/关键词/日期/状态查历史任务 |
 | `filter-options` | 列出可选的平台/作者/webhook |
@@ -162,8 +162,9 @@ python3 skill/scripts/videotranscript.py health && echo OK
 
 - **stdlib-only**：脚本零依赖，`python3` 有就能跑
 - **env 驱动**：不在 skill 里硬编码地址或 token，每个下游平台按自己的规范注入
-- **异步不阻塞**：`submit` 立返 `task_id`，不在 agent 会话里 poll 十几分钟
-- **闭环优先**：`status` 自动反查 view_token，agent 拿 task_id 就能走到 result，不用反问用户
+- **异步不阻塞**：`submit` 立返查看链接，不在 agent 会话里 poll 十几分钟
+- **闭环优先**：`status` 自动反查 view_token，agent 内部用 task_id 闭环到 result，不用反问用户
+- **用户友好**：用户只看到查看链接，task_id 等内部标识不暴露
 - **清晰的退出码**：让调用方能程序化区分网络问题、业务失败、配置错误
 
 更多设计背景见 [SKILL.md](./SKILL.md)；完整 API schema 见 [references/api.md](./references/api.md)。

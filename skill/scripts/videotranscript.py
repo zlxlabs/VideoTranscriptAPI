@@ -228,15 +228,14 @@ def cmd_submit(args: argparse.Namespace) -> int:
                 f"""\
             # 任务已提交
 
-            - **task_id**: `{task_id}`
-            - **view_token**: `{view_token}`
             - **预计耗时**: 5–15 分钟（取决于视频时长与队列）
+            - **view_token**: `{view_token}`
 
             **查看链接（请单独发送给用户）**:
             {view_url}
 
-            下一步：过一段时间后调用 `status {task_id}` 查询进度，
-            完成后调用 `result {view_token} --type summary` 拉取总结。"""
+            后续调用 `result {view_token} --type summary` 查进度和拉总结。
+            返回 202 = 还在处理，返回 200 = 完成。"""
             ).strip()
         )
     return 0
@@ -423,7 +422,6 @@ def cmd_history(args: argparse.Namespace) -> int:
         when = it.get("request_time") or ""
         status_val = it.get("status") or ""
         vt = it.get("view_token") or ""
-        tid = it.get("task_id") or ""
         print(f"\n## {title}")
         bits = [f"平台: {platform}"]
         if author:
@@ -434,9 +432,7 @@ def cmd_history(args: argparse.Namespace) -> int:
         if when:
             print(f"- 时间: {when}")
         if vt:
-            print(f"- view_token: `{vt}`  ({_public_url()}/view/{vt})")
-        if tid:
-            print(f"- task_id: `{tid}`")
+            print(f"- 查看: {_public_url()}/view/{vt}")
     return 0
 
 
