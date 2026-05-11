@@ -290,7 +290,7 @@ def cmd_submit(args: argparse.Namespace) -> int:
             - **view_token**: `{view_token}`
 
             **查看链接（请单独发送给用户）**:
-            {view_url}
+            [{view_url}]({view_url})
 
             后续调用 `result {view_token} --type summary` 查进度和拉总结。
             返回 202 = 还在处理，返回 200 = 完成。"""
@@ -387,9 +387,10 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     if task_status == "success":
         if view_token:
+            vurl = f"{_public_url()}/view/{view_token}"
             print(
                 f"\n结果已就绪 —— `result {view_token} --type summary` "
-                f"或访问 {_public_url()}/view/{view_token}"
+                f"或访问 [{vurl}]({vurl})"
             )
         else:
             print(
@@ -490,7 +491,8 @@ def cmd_history(args: argparse.Namespace) -> int:
         if when:
             print(f"- 时间: {when}")
         if vt:
-            print(f"- 查看: {_public_url()}/view/{vt}")
+            url = f"{_public_url()}/view/{vt}"
+            print(f"- 查看: [{url}]({url})")
     return 0
 
 
