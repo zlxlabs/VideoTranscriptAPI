@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from ..utils.notifications import init_global_notifier, shutdown_global_notifier
+from ..utils.notifications import init_all_notifiers, shutdown_all_notifiers
 from ..utils.ytdlp import YtdlpConfigBuilder
 from ..llm import set_default_config, log_llm_stats
 from ..llm.llm import log_llm_config_summary
@@ -73,7 +73,7 @@ def create_app() -> FastAPI:
         if old_files_count > 0:
             logger.info(f"启动时清理了 {old_files_count} 个旧临时文件")
 
-        init_global_notifier()
+        init_all_notifiers()
 
         # 设置 LLM 模块默认配置（用于 JSON 结构化输出）
         set_default_config(config)
@@ -131,7 +131,7 @@ def create_app() -> FastAPI:
         if hasattr(app.state, "asr_monitor") and app.state.asr_monitor:
             app.state.asr_monitor.stop()
 
-        shutdown_global_notifier()
+        shutdown_all_notifiers()
         logger.info("API服务已关闭")
 
     return app
