@@ -48,14 +48,45 @@ skill/
    ```bash
    export VIDEO_TRANSCRIPT_API_BASE_URL=http://your-server:8000
    export VIDEO_TRANSCRIPT_API_TOKEN=sk-xxx...
+   # 可选：给用户点的公网地址（不设时用 BASE_URL）
+   export VIDEO_TRANSCRIPT_API_PUBLIC_URL=https://vt.example.com
    # 可选：企业微信 webhook（设置后 submit 自动推送通知）
    export VIDEO_TRANSCRIPT_API_WECHAT_WEBHOOK=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
    ```
+
+**首次安装 prompt**（复制后把 `<...>` 占位符换成实际值）：
+
+```
+帮我安装 videotranscript-api skill。
+
+1. 把 https://github.com/zj1123581321/VideoTranscriptAPI.git 仓库里的 skill/ 目录复制到 ~/.claude/skills/videotranscript-api/
+2. 在我的 shell profile 里配置以下环境变量（写入 ~/.zshrc 或 ~/.bashrc，取决于我用的 shell）：
+   - VIDEO_TRANSCRIPT_API_BASE_URL=<API 服务地址，内网优先>
+   - VIDEO_TRANSCRIPT_API_TOKEN=<Bearer token>
+   - VIDEO_TRANSCRIPT_API_PUBLIC_URL=<公网地址，可选，不设时用 BASE_URL>
+   - VIDEO_TRANSCRIPT_API_WECHAT_WEBHOOK=<企微 webhook，可选>
+3. source 一下 profile 让变量生效
+4. 跑 health 命令验证连通性
+```
 
 ### Hermes
 
 1. 把 `skill/` 同步到 Hermes skill 目录。
 2. 运行 `hermes setup` —— 会根据 SKILL.md frontmatter 里的 `metadata.hermes.env` 声明提示你填值。
+
+**首次安装 prompt**（复制后把 `<...>` 占位符换成实际值）：
+
+```
+帮我安装 videotranscript-api skill。
+
+1. 把 https://github.com/zj1123581321/VideoTranscriptAPI.git 仓库里的 skill/ 目录复制到 Hermes 的 skill 目录下，命名为 videotranscript-api/
+2. 运行 hermes setup，按提示填入以下环境变量：
+   - VIDEO_TRANSCRIPT_API_BASE_URL=<API 服务地址，内网优先>
+   - VIDEO_TRANSCRIPT_API_TOKEN=<Bearer token>
+   - VIDEO_TRANSCRIPT_API_PUBLIC_URL=<公网地址，可选，不设时用 BASE_URL>
+   - VIDEO_TRANSCRIPT_API_WECHAT_WEBHOOK=<企微 webhook，可选>
+3. 跑 health 命令验证连通性
+```
 
 ### OpenClaw
 
