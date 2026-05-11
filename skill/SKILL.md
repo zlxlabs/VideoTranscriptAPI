@@ -16,6 +16,9 @@ metadata:
       - name: VIDEO_TRANSCRIPT_API_PUBLIC_URL
         description: 给用户点的公网地址（可选）。不设时用 BASE_URL。例：https://vt.example.com
         required: false
+      - name: VIDEO_TRANSCRIPT_API_WECHAT_WEBHOOK
+        description: 企业微信 webhook 默认值（可选）。--webhook 传参时覆盖
+        required: false
   hermes:
     env:
       - name: VIDEO_TRANSCRIPT_API_BASE_URL
@@ -26,6 +29,9 @@ metadata:
         required: true
       - name: VIDEO_TRANSCRIPT_API_PUBLIC_URL
         description: 给用户点的公网地址（可选），不设时用 BASE_URL
+        required: false
+      - name: VIDEO_TRANSCRIPT_API_WECHAT_WEBHOOK
+        description: 企业微信 webhook 默认值（可选），--webhook 传参时覆盖
         required: false
 ---
 
@@ -72,6 +78,7 @@ skill 在调用时从环境读取，**不要**在对话里要求用户粘贴 tok
 | `VIDEO_TRANSCRIPT_API_BASE_URL` | ✅ | 脚本发 API 请求用的地址 | `http://localhost:8000` / `http://100.68.21.80:8200`（tailnet）|
 | `VIDEO_TRANSCRIPT_API_TOKEN` | ✅ | Bearer token | `config.jsonc` 里 `api.auth_token` 或 `users.json` 的某个 key |
 | `VIDEO_TRANSCRIPT_API_PUBLIC_URL` | —  | 给用户点的**公网**地址，不设时用 BASE_URL | `https://vt.example.com` |
+| `VIDEO_TRANSCRIPT_API_WECHAT_WEBHOOK` | —  | 企业微信 webhook 默认值，`--webhook` 传参时覆盖 | `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx` |
 
 **为啥分两个地址**：服务端常跑在内网/tailnet（BASE_URL 用这个，请求最快），但用户拿 `/view/<token>` 链接可能从公网打开。配 PUBLIC_URL 后，skill 返回给用户的查看页面 URL 用公网域名拼，无论用户在哪张网都点得开。没配 PUBLIC_URL 的场景（纯本机 / 都在一张网内）行为不变。
 

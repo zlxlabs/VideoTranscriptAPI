@@ -179,8 +179,9 @@ def cmd_submit(args: argparse.Namespace) -> int:
     body: dict[str, Any] = {"url": args.url}
     if args.speaker:
         body["use_speaker_recognition"] = True
-    if args.webhook:
-        body["wechat_webhook"] = args.webhook
+    webhook = args.webhook or os.environ.get("VIDEO_TRANSCRIPT_API_WECHAT_WEBHOOK")
+    if webhook:
+        body["wechat_webhook"] = webhook
     if args.download_url:
         body["download_url"] = args.download_url
     meta = {}
