@@ -221,18 +221,21 @@ def cmd_submit(args: argparse.Namespace) -> int:
         )
     else:
         base = _public_url()
+        view_url = f"{base}/view/{view_token}" if view_token else "(view_token 缺失)"
         print(
             textwrap.dedent(
-                f"""            # 任务已提交
+                f"""\
+            # 任务已提交
 
             - **task_id**: `{task_id}`
             - **view_token**: `{view_token}`
-            - **查看页面**: {base}/view/{view_token}
             - **预计耗时**: 5–15 分钟（取决于视频时长与队列）
 
+            **查看链接（请单独发送给用户）**:
+            {view_url}
+
             下一步：过一段时间后调用 `status {task_id}` 查询进度，
-            完成后调用 `result {view_token} --type summary` 拉取总结。
-            """
+            完成后调用 `result {view_token} --type summary` 拉取总结。"""
             ).strip()
         )
     return 0

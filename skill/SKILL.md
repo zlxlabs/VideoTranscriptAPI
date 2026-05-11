@@ -61,6 +61,8 @@ metadata:
 
 **不要写 while 循环等任务完成**。下游 agent 自己掌握节奏，用户也可以去看 web 页面。
 
+**提交后必须单独发一条可点击的查看链接。** submit 成功后，除了正常的任务信息回复外，务必用**单独的一条消息**把查看页面 URL 发给用户，格式：`{public_url}/view/{view_token}`。这条消息只包含 URL 本身（可以加一句简短提示），不要和其他内容混在一起。目的是让用户（以及群聊中的其他读者）可以直接点击链接查看任务处理状态和结果，无需等 agent 后续操作。
+
 ## 环境变量
 
 skill 在调用时从环境读取，**不要**在对话里要求用户粘贴 token。
@@ -156,9 +158,10 @@ Options：`--platform youtube`、`--author 作者名`、`--q 关键词`、`--sta
 
 1. 用户：「帮我看看这个视频 https://www.bilibili.com/video/BVxxx 讲了什么」
 2. 调 `submit https://www.bilibili.com/video/BVxxx`，拿到 `task_id=task_abc`、`view_token=vt_xyz`
-3. 回复用户：「已提交，预计 5–15 分钟。任务 ID `task_abc`，完成后可直接访问 {base_url}/view/vt_xyz 查看。过几分钟回来问我"那个 B 站视频好了吗"我再查。」
-4. 用户回来问：调 `status task_abc`
-5. 状态是 success：调 `result vt_xyz --type summary`，把总结贴给用户
+3. **先单独发一条消息**，只包含查看链接：`{public_url}/view/vt_xyz`（可附一句「点击查看处理进度」）
+4. 再回复任务详情：「已提交，预计 5–15 分钟。任务 ID `task_abc`。过几分钟回来问我"那个 B 站视频好了吗"我再查。」
+5. 用户回来问：调 `status task_abc`
+6. 状态是 success：调 `result vt_xyz --type summary`，把总结贴给用户
 
 **场景 B：查找最近转过的小宇宙节目**
 
