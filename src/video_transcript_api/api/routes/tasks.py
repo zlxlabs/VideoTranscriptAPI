@@ -113,19 +113,15 @@ async def transcribe_video(
         }
 
         try:
-            # Build per-channel webhooks dict
-            # Base: user-level > global config
+            # Build per-channel webhooks dict from user-level config only.
+            # Global config webhooks are already embedded in user_info for
+            # legacy single-token mode (see user_manager.validate_token),
+            # so no additional fallback is needed here.
             notification_webhooks = {}
-            wechat_wh = (
-                user_info.get("wechat_webhook")
-                or config.get("wechat", {}).get("webhook")
-            )
+            wechat_wh = user_info.get("wechat_webhook")
             if wechat_wh:
                 notification_webhooks["wechat"] = wechat_wh
-            feishu_wh = (
-                user_info.get("feishu_webhook")
-                or config.get("feishu", {}).get("webhook")
-            )
+            feishu_wh = user_info.get("feishu_webhook")
             if feishu_wh:
                 notification_webhooks["feishu"] = feishu_wh
 
