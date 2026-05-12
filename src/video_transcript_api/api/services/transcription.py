@@ -805,6 +805,8 @@ def process_transcription(
                                     "use_speaker_recognition": False,
                                     "is_generic": False,
                                     "wechat_webhook": wechat_webhook,
+                                    "notification_channel": notification_channel,
+                                    "notification_webhooks": notification_webhooks,
                                     "perf_tracker": tracker,
                                 }
                             )
@@ -931,6 +933,8 @@ def process_transcription(
                                     else None,
                                     "is_generic": False,
                                     "wechat_webhook": wechat_webhook,
+                                    "notification_channel": notification_channel,
+                                    "notification_webhooks": notification_webhooks,
                                     "perf_tracker": tracker,
                                 }
                             )
@@ -1052,6 +1056,8 @@ def process_transcription(
                             "use_speaker_recognition": False,  # 平台字幕没有说话人信息
                             "is_generic": is_generic_downloader or is_from_generic,
                             "wechat_webhook": wechat_webhook,
+                            "notification_channel": notification_channel,
+                            "notification_webhooks": notification_webhooks,
                             "perf_tracker": tracker,
                         }
                     )
@@ -1269,6 +1275,8 @@ def process_transcription(
                                 else None,
                                 "is_generic": is_generic_downloader or is_from_generic,
                                 "wechat_webhook": wechat_webhook,
+                                "notification_channel": notification_channel,
+                                "notification_webhooks": notification_webhooks,
                                 "perf_tracker": tracker,
                             }
                         )
