@@ -148,7 +148,7 @@
         // 通用配置
         // ------------------------------------------------------
         "max_retries": 2,                // LLM 调用失败时的最大重试次数（由 llm-compat 内部处理）
-        "total_timeout": 180,            // 单次 LLM 请求总超时（秒），含 fallback 链共享
+        "total_timeout": 300,            // 单次 LLM 请求总超时（秒），含 fallback 链共享（需留足 fallback 时间）
         "min_summary_threshold": 500,    // 文本长度低于此值时跳过总结
         "min_calibrate_ratio": 0.8,      // 校对后文本长度/原文长度的最小比例，低于则视为异常
 
@@ -157,8 +157,8 @@
         // 当主模型因内容审查拒绝时，自动切换到 fallback 模型
         // ------------------------------------------------------
         "content_fallbacks": {
-            // "deepseek-v4-pro": ["gemini-3-flash-preview", "gemini-2.5-flash"],
-            // "deepseek-v4-flash": ["gemini-3.1-flash-lite-preview"]
+            "deepseek-v4-pro": ["deepseek-v4-flash"],
+            "deepseek-v4-flash": ["gpt-4.1-mini", "gemini-2.5-flash"]
         },
 
         // ------------------------------------------------------
