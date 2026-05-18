@@ -22,19 +22,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
 
 # ============================================================
-# 3. BBDown: download Linux build from GitHub Release
-#    File name includes version (e.g. BBDown_1.6.3_20240814_linux-x64.zip),
-#    so we use GitHub API to find the correct download URL.
+# 3. BBDown: copy from previous image (avoids GitHub API network issues)
+#    To update BBDown version, rebuild from source:
+#    docker build --build-arg BBDOWN_FROM_SOURCE=1 ...
 # ============================================================
-RUN BBDOWN_URL=$(curl -s https://api.github.com/repos/nilaoda/BBDown/releases/latest \
-    | grep -o '"browser_download_url": *"[^"]*linux-x64\.zip"' \
-    | head -1 | cut -d'"' -f4) \
-    && echo "Downloading BBDown from: ${BBDOWN_URL}" \
-    && curl -L -o /tmp/BBDown.zip "${BBDOWN_URL}" \
-    && mkdir -p /app/BBDown \
-    && unzip /tmp/BBDown.zip -d /app/BBDown/ \
-    && chmod +x /app/BBDown/BBDown \
-    && rm /tmp/BBDown.zip
+COPY --from=ghcr.io/zj1123581321/video-transcript-api:latest /app/BBDown /app/BBDown
 
 # ============================================================
 # 4. Python package manager: uv
