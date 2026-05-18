@@ -5,11 +5,12 @@
 """
 
 import asyncio
-import socket
 import time
 import threading
 from typing import Dict, Optional
-from urllib.parse import urlparse
+
+import websockets
+
 from .logging import setup_logger
 
 logger = setup_logger("asr_monitor")
@@ -81,29 +82,57 @@ class ASRMonitor:
         self._running = False
         logger.info("ASR monitor stopped")
 
-    def check_service(self, name: str, url: str) -> bool:
-        """检查单个服务的连通性
+    def check_service(self, name: str, url: str, timeout: float = 5.0) -> bool:
+        """检查单个服务的连通性（WebSocket 协议层握手）。
+
+        建立一次真实的 WebSocket 握手，成功即视为健康，然后立即正常关闭。
+        相比裸 TCP connect/close，本方法：
+        - 把验活强度提升到协议层：覆盖 server 死锁、handler 注册失败、
+          TLS 证书坏等场景（这些情况下 TCP 仍能 accept，裸 TCP 会假阳性）。
+        - 不污染对端日志：对端 ``websockets`` server 见到的是一次正常握手 +
+          关闭，不会抛 ``InvalidMessage: did not receive a valid HTTP request``。
 
         Args:
-            name: 服务名称
-            url: WebSocket URL
+            name: 服务名称（用于日志）
+            url: WebSocket URL（``ws://`` / ``wss://``）
+            timeout: 握手超时（秒）
 
         Returns:
             bool: 服务是否可用
         """
         try:
-            parsed = urlparse(url)
-            host = parsed.hostname or "localhost"
-            port = parsed.port or 80
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            result = sock.connect_ex((host, port))
-            sock.close()
-
-            return result == 0
+            # ASR monitor 在独立线程（``_monitor_loop``）中运行，每次调用都创建
+            # 独立的事件循环，不会与其他 loop 冲突。
+            return asyncio.run(self._ws_probe(name, url, timeout))
         except Exception as e:
-            logger.debug(f"service check failed for {name}: {e}")
+            # asyncio.run 自身极少抛错；这里是兜底，确保监控线程不会因为
+            # 单次探测异常而中断。
+            logger.info(f"service check failed for {name}: {e}")
+            return False
+
+    async def _ws_probe(self, name: str, url: str, timeout: float) -> bool:
+        """执行单次 WebSocket 握手探测。
+
+        握手成功立即返回 True 并触发正常关闭；任何异常都视为不健康并返回
+        False。失败原因走 ``logger.info``（不是 debug），方便排障时直接
+        看到端口为何被判定 down。
+        """
+        try:
+            async def _go() -> bool:
+                async with websockets.connect(
+                    url,
+                    open_timeout=timeout,
+                    close_timeout=1,
+                    ping_interval=None,  # 探活不需要心跳
+                    max_size=None,
+                ):
+                    return True
+
+            # 兜一层 wait_for，覆盖 DNS / 内核 connect 卡死等 open_timeout
+            # 不一定能拦住的边角情况。
+            return await asyncio.wait_for(_go(), timeout=timeout + 2)
+        except Exception as e:
+            logger.info(f"service check failed for {name}: {e}")
             return False
 
     def _monitor_loop(self):

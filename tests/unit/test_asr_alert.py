@@ -134,25 +134,17 @@ class TestRecoveryNotification:
 
 
 class TestServiceCheck:
-    """Verify service connectivity check."""
+    """Verify service connectivity check.
 
-    @patch("video_transcript_api.utils.asr_monitor.socket.socket")
-    def test_service_reachable(self, mock_socket_cls, monitor):
-        """Reachable service should return True."""
-        mock_sock = MagicMock()
-        mock_sock.connect_ex.return_value = 0
-        mock_socket_cls.return_value = mock_sock
+    Note: the connectivity-level cases (real WS handshake, TCP-only false
+    positive, unreachable port) live in ``test_asr_monitor_ws_probe.py``.
+    Here we only cover the trivially-mockable unreachable-host case.
+    """
 
-        assert monitor.check_service("TestASR", "ws://localhost:6016") is True
-
-    @patch("video_transcript_api.utils.asr_monitor.socket.socket")
-    def test_service_unreachable(self, mock_socket_cls, monitor):
-        """Unreachable service should return False."""
-        mock_sock = MagicMock()
-        mock_sock.connect_ex.return_value = 111
-        mock_socket_cls.return_value = mock_sock
-
-        assert monitor.check_service("TestASR", "ws://localhost:9999") is False
+    def test_service_unreachable_no_raise(self, monitor):
+        """Probing a closed port must return False, not raise."""
+        # 127.0.0.1:1 is reserved/closed; the probe should fail fast.
+        assert monitor.check_service("TestASR", "ws://127.0.0.1:1") is False
 
     def test_start_and_stop(self, monitor):
         """Monitor should start and stop cleanly."""
