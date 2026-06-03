@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any, List, Union
 from contextlib import contextmanager
 import threading
 from ..utils.logging import setup_logger
+from ..utils.task_status import TaskStatus
 
 logger = setup_logger("cache_manager")
 
@@ -748,19 +749,25 @@ class CacheManager:
     
     def update_task_status(self, task_id: str, status: str, platform: str = None,
                           media_id: str = None, title: str = None, author: str = None,
-                          cache_id: int = None, download_url: str = None):
+                          cache_id: int = None, download_url: str = None,
+                          force: bool = False):
         """
         更新任务状态
 
+        终态黏性:默认情况下,已处于终态(success/failed)的任务不会被覆写,
+        防止慢半拍的旧 worker、重复任务或异常重试把已完成的任务覆回处理中。
+        recalibrate 等需要显式重置的场景传 force=True 绕过该保护。
+
         Args:
             task_id: 任务ID
-            status: 状态 (queued/processing/success/failed)
+            status: 状态 (queued/processing/calibrating/success/failed)
             platform: 平台名称
             media_id: 媒体ID
             title: 视频标题
             author: 作者
             cache_id: 关联的缓存ID
             download_url: 实际下载地址
+            force: 是否绕过终态黏性保护(recalibrate 显式重置时为 True)
         """
         try:
             # 将空字符串转换为 None，避免存储无意义的空字符串
@@ -796,15 +803,63 @@ class CacheManager:
 
                 params.append(task_id)
 
-                query = f"UPDATE task_status SET {', '.join(update_fields)} WHERE task_id = ?"
+                # 终态黏性:非 force 时,已是 success/failed 的行不被覆写
+                where = "task_id = ?"
+                if not force:
+                    where += " AND status NOT IN (?, ?)"
+                    params.extend([TaskStatus.SUCCESS, TaskStatus.FAILED])
+
+                query = f"UPDATE task_status SET {', '.join(update_fields)} WHERE {where}"
                 cursor.execute(query, params)
 
-                logger.info(f"任务状态更新: {task_id} -> {status}")
+                if cursor.rowcount == 0 and not force:
+                    logger.info(
+                        f"任务状态更新被终态黏性拦截(已是终态,跳过): {task_id} -> {status}"
+                    )
+                else:
+                    logger.info(f"任务状态更新: {task_id} -> {status}")
 
         except Exception as e:
             logger.error(f"更新任务状态失败: {e}")
             raise
-    
+
+    def recover_orphaned_tasks(self) -> int:
+        """启动恢复:将中断的非终态任务标记为 failed.
+
+        任务队列存在内存中,进程崩溃/重启时正在处理的任务会随队列丢失,
+        DB 里会永远停在 queued/processing/calibrating。启动时调用一次,
+        把这些僵尸任务统一标为 failed,避免客户端白白轮询到超时。
+
+        命中 idx_task_status 索引。标 failed 而非重新入队,避免重复下载/扣费。
+
+        Returns:
+            int: 被恢复(标记为 failed)的任务数
+        """
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute(
+                    "UPDATE task_status SET status = ?, completed_at = CURRENT_TIMESTAMP "
+                    "WHERE status IN (?, ?, ?)",
+                    (
+                        TaskStatus.FAILED,
+                        TaskStatus.QUEUED,
+                        TaskStatus.PROCESSING,
+                        TaskStatus.CALIBRATING,
+                    ),
+                )
+                count = cursor.rowcount
+            if count:
+                logger.warning(
+                    f"启动恢复:将 {count} 个中断任务"
+                    f"(queued/processing/calibrating)标记为 failed"
+                )
+            else:
+                logger.info("启动恢复:无中断任务需要处理")
+            return count
+        except Exception as e:
+            logger.error(f"启动恢复扫描失败: {e}")
+            return 0
+
     def get_task_by_id(self, task_id: str) -> Optional[Dict[str, Any]]:
         """
         根据任务ID获取任务信息
