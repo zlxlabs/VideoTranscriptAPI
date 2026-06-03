@@ -18,7 +18,6 @@ from ..context import (
     get_llm_executor,
     get_llm_queue,
     get_logger,
-    get_task_results,
     task_lock,
 )
 from ...llm import call_llm_api
@@ -37,7 +36,6 @@ logger = get_logger()
 config = get_config()
 cache_manager = get_cache_manager()
 llm_coordinator = get_llm_coordinator()
-task_results = get_task_results()
 llm_task_queue = get_llm_queue()
 llm_executor = get_llm_executor()
 
@@ -187,8 +185,7 @@ def _handle_llm_task(llm_task: dict):
                     title=video_title,
                     author=llm_task.get("author", ""),
                 )
-                task_results[task_id] = {"status": "success", "message": done_message}
-                logger.info(f"任务状态已更新为 success: {task_id}")
+                logger.info(f"任务状态已更新为 success: {task_id} ({done_message})")
 
             except Exception as exc:
                 logger.exception(f"LLM任务处理异常: {task_id}, 错误: {exc}")
@@ -205,8 +202,7 @@ def _handle_llm_task(llm_task: dict):
                     cache_manager.update_task_status(
                         task_id, TaskStatus.FAILED, error_message=fail_message,
                     )
-                    task_results[task_id] = {"status": "failed", "message": fail_message}
-                    logger.info(f"任务状态已更新为 failed: {task_id}")
+                    logger.info(f"任务状态已更新为 failed: {task_id} ({fail_message})")
                 except Exception:
                     pass
     finally:

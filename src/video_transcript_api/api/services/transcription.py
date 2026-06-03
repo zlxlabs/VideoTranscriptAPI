@@ -16,7 +16,6 @@ from ..context import (
     get_llm_queue,
     get_logger,
     get_task_queue,
-    get_task_results,
     get_temp_manager,
     get_user_manager,
 )
@@ -37,7 +36,6 @@ config = get_config()
 user_manager = get_user_manager()
 audit_logger = get_audit_logger()
 cache_manager = get_cache_manager()
-task_results = get_task_results()
 task_queue = get_task_queue()
 llm_task_queue = get_llm_queue()
 executor = get_executor()
@@ -266,11 +264,7 @@ async def process_task_queue():
             metadata_override = task.get("metadata_override")
 
             try:
-                task_results[task_id] = {
-                    "status": "processing",
-                    "message": "正在处理转录任务",
-                }
-                cache_manager.update_task_status(task_id, "processing", download_url=download_url)
+                cache_manager.update_task_status(task_id, TaskStatus.PROCESSING, download_url=download_url)
 
                 future = executor.submit(
                     process_transcription,
@@ -285,19 +279,19 @@ async def process_task_queue():
                 )
 
                 def task_completed(future_result):
+                    # 状态由 process_transcription / LLM 阶段写入 DB；
+                    # 此回调仅兜底 future 意外抛出（未被内部捕获）的情况。
                     try:
-                        result = future_result.result()
-                        task_results[task_id] = result
+                        future_result.result()
                         logger.info(f"任务完成: {task_id}")
                     except Exception as exc:
                         logger.exception(
                             f"任务处理失败: {task_id}, URL: {url}, 错误: {exc}"
                         )
-                        task_results[task_id] = {
-                            "status": "failed",
-                            "message": f"转录任务失败: {exc}",
-                            "error": str(exc),
-                        }
+                        cache_manager.update_task_status(
+                            task_id, TaskStatus.FAILED,
+                            error_message=f"转录任务失败: {exc}",
+                        )
                         display_url = url
                         get_notification_router().notify_task_status(
                             url=display_url, status="转录失败", error=str(exc),
@@ -310,11 +304,10 @@ async def process_task_queue():
                 logger.exception(
                     f"提交任务到线程池失败: {task_id}, URL: {url}, 错误: {exc}"
                 )
-                task_results[task_id] = {
-                    "status": "failed",
-                    "message": f"提交任务失败: {exc}",
-                    "error": str(exc),
-                }
+                cache_manager.update_task_status(
+                    task_id, TaskStatus.FAILED,
+                    error_message=f"提交任务失败: {exc}",
+                )
             finally:
                 task_queue.task_done()
         except Exception as exc:

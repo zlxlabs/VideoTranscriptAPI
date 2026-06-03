@@ -8,7 +8,6 @@ from ..context import (
     get_config,
     get_logger,
     get_task_queue,
-    get_task_results,
 )
 from ..services.transcription import (
     RecalibrateRequest,
@@ -24,7 +23,6 @@ logger = get_logger()
 config = get_config()
 audit_logger = get_audit_logger()
 cache_manager = get_cache_manager()
-task_results = get_task_results()
 
 router = APIRouter(prefix="/api", tags=["tasks"])
 
@@ -106,12 +104,7 @@ async def transcribe_video(
         )
         task_id = task_info["task_id"]
         view_token = task_info["view_token"]
-
-        task_results[task_id] = {
-            "status": "queued",
-            "message": "任务已加入队列",
-            "view_token": view_token,
-        }
+        # 状态以 DB 为唯一真相源；create_task 已写入 status='queued'
 
         try:
             # Build per-channel webhooks dict from user-level config only.
@@ -427,11 +420,7 @@ async def recalibrate(
         logger.error(f"创建重新校对任务失败: {e}")
         raise HTTPException(status_code=500, detail=f"创建重新校对任务失败: {e}")
 
-    task_results[task_id] = {
-        "status": "processing",
-        "message": "正在重新校对",
-        "view_token": view_token,
-    }
+    # 状态以 DB 为唯一真相源；上方 INSERT 已写入 status='processing'
 
     # 准备转录内容（与 _handle_llm_task 的输入格式一致）
     transcript_text = ""

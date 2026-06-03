@@ -5,7 +5,7 @@ import threading
 from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict
+from typing import Dict
 
 from fastapi.templating import Jinja2Templates
 
@@ -16,9 +16,6 @@ from ..utils.logging import get_audit_logger as _get_audit_logger_impl
 from ..utils.logging import load_config as _load_config_impl
 from ..utils.logging import setup_logger
 from ..utils.tempfile_manager import TempFileManager
-
-# In-memory task result store shared across routes/workers
-_task_results: Dict[str, Dict[str, Any]] = {}
 
 # Lazy initialized runtime resources
 _task_queue: asyncio.Queue | None = None
@@ -80,11 +77,6 @@ def get_llm_coordinator():
     config = get_config()
     cache_dir = config.get("storage", {}).get("cache_dir", "./data/cache")
     return LLMCoordinator(config_dict=config, cache_dir=cache_dir)
-
-
-def get_task_results() -> Dict[str, Dict[str, Any]]:
-    """Global task state store."""
-    return _task_results
 
 
 def get_task_queue() -> asyncio.Queue:

@@ -112,16 +112,6 @@ def mock_cache_manager():
 
 
 @pytest.fixture()
-def mock_task_results():
-    """Patch the task_results dict in the tasks module."""
-    results = {}
-    with patch(
-        "video_transcript_api.api.routes.tasks.task_results", results
-    ):
-        yield results
-
-
-@pytest.fixture()
 def mock_task_queue():
     """Patch get_task_queue to return an asyncio.Queue."""
     q = asyncio.Queue(maxsize=10)
@@ -155,7 +145,6 @@ def client(
     mock_audit_logger,
     mock_user_manager,
     mock_cache_manager,
-    mock_task_results,
     mock_task_queue,
     mock_send_notification,
     mock_base_url,
