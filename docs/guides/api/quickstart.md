@@ -20,13 +20,13 @@ API Key 由服务管理员分配，格式为 `sk-<user>-xxxxxxxxxx`（在 `confi
 
 ## 统一响应格式
 
-所有 JSON 接口返回统一信封，**没有** `data.status` 字段，任务状态完全由 HTTP 状态码 / `code` 字段表达：
+所有 JSON 接口返回统一信封。查询任务状态时，`data.status` 给出**显式状态字符串**，`code` / HTTP 状态码与之一致（两者皆可用于判断）：
 
 ```json
 {
   "code": 202,
-  "message": "任务已提交",
-  "data": { ... }    // 可能为 null
+  "message": "任务处理中",
+  "data": { "status": "processing", ... }
 }
 ```
 
@@ -42,8 +42,17 @@ API Key 由服务管理员分配，格式为 `sk-<user>-xxxxxxxxxx`（在 `confi
 /api/transcribe  /api/task/{id}  /view/{token}?raw=calibrated
 ```
 
-> ⚠️ **重要**：任务状态变为「完成」(HTTP 200) 表示 **转录** 已结束，但 **LLM 校对 / 总结是异步后置的**，可能还在跑。
-> 因此最可靠的「结果就绪」信号不是 `/api/task`，而是直接轮询内容接口 `?raw=calibrated` 直到返回 **HTTP 200**（详见步骤 3）。
+任务状态机:
+
+```
+queued ──► processing ──► calibrating ──► success
+  (排队)      (下载+转录)    (LLM校对/总结)   (全部完成)
+                                          └──► failed (任一阶段失败)
+```
+
+> ✅ **状态语义**：`/api/task` 返回 `success`(HTTP 200) 表示**全流程已完成**（含 LLM 校对/总结，产物已落盘），此时 `?raw=calibrated` 可直接取到内容。
+> `calibrating` 表示转录已完成、校对/总结仍在进行（仍返回 202，继续轮询）。
+> 状态以服务端数据库为准，**服务重启不丢**；崩溃中断的任务会在重启时被标记为 `failed`。
 > 如果只想被动接收结果，配置 webhook 即可——任务全部完成后会推送「任务完成」消息和查看链接。
 
 ### 1. 提交转录任务
@@ -109,16 +118,37 @@ curl https://your-domain.com/api/task/task_abc123... \
   -H "Authorization: Bearer sk-xxx-xxxxxxxx"
 ```
 
-状态**仅通过 HTTP 状态码 / `code` 字段判断**（响应体没有 status 字符串）：
+**响应示例**（处理中）：
 
-| HTTP Code | 含义 | 客户端动作 |
-|-----------|------|------------|
-| 202 | 排队中 / 处理中 | 继续轮询 |
-| 200 | 转录完成 | 转去拉取结果（校对可能仍在生成，见步骤 3） |
-| 404 | 任务不存在（task_id 无效或服务重启后丢失） | 停止 |
-| 500 | 失败 | 读取 `message` 错误信息 |
+```json
+{
+  "code": 202,
+  "message": "转录完成，校对/总结生成中",
+  "data": {
+    "status": "calibrating",
+    "view_token": "view_xyz789...",
+    "title": "示例标题",
+    "author": "示例作者",
+    "platform": "youtube",
+    "completed_at": null
+  }
+}
+```
 
-**推荐轮询策略**：每 5–10 秒一次，设置最大超时（建议 30 分钟，长音频耗时较久）。
+状态由 `data.status` 显式给出，`code` / HTTP 状态码与之对应：
+
+| `data.status` | HTTP Code | 含义 | 客户端动作 |
+|---------------|-----------|------|------------|
+| `queued` | 202 | 排队中 | 继续轮询 |
+| `processing` | 202 | 下载 + 转录中 | 继续轮询 |
+| `calibrating` | 202 | 转录完成，LLM 校对/总结中 | 继续轮询 |
+| `success` | 200 | **全流程完成**，内容已就绪 | 拉取结果（步骤 3） |
+| `failed` | 500 | 失败 | 读取 `data.error` 错误详情 |
+| （不存在） | 404 | task_id 无效 | 停止 |
+
+`status=failed` 时 `data.error` 给出失败原因（如 `"LLM处理失败: ..."`）。
+
+**推荐轮询策略**：每 5–10 秒一次，设置最大超时（建议 30 分钟，长音频耗时较久）。状态以服务端数据库为准，服务重启不丢；崩溃中断的任务重启后会被置为 `failed`。
 
 ### 3. 获取结果
 
@@ -140,13 +170,13 @@ https://your-domain.com/view/{view_token}?page=calibrated
 https://your-domain.com/export/{view_token}/{type}   # type: calibrated/summary/transcript
 ```
 
-`?raw=` 接口的 HTTP 状态码即就绪信号，**下游应轮询它直到 200**：
+当 `/api/task` 已返回 `success` 后，`?raw=calibrated` 直接返回 **200** 和正文。各状态码：
 
 | HTTP Code | 含义 | 客户端动作 |
 |-----------|------|------------|
-| 200 | 内容就绪，响应体即正文（顶部含 YAML front matter 元数据） |  取用结果 |
-| 202 | 校对/总结仍在生成 | 继续轮询 |
-| 404 | 转录已完成但该文件尚未写入（LLM 处理中），或未启用该功能 | 短暂重试 / 放弃 |
+| 200 | 内容就绪，响应体即正文（顶部含 YAML front matter 元数据） | 取用结果 |
+| 202 | 任务仍在处理（未到 success 就提前访问时） | 等 `/api/task` 到 success |
+| 404 | 该类型文件不存在（如未启用总结 / 说话人识别） | 放弃该类型 |
 | 410 | 文件已被清理 | 需重新提交任务 |
 
 > 纯文本响应顶部带 `---` 包裹的元数据头（Title / Platform / Type / Source / Export-Date），并通过 `X-Document-Title`、`X-Platform` 等响应头透出（非 ASCII 用 RFC 5987 编码）。
@@ -177,27 +207,23 @@ task_id = data["task_id"]
 view_token = data["view_token"]
 print(f"Task submitted: {task_id}")
 
-# 2. 轮询任务状态：靠 HTTP 状态码判断（202=处理中, 200=转录完成, 500=失败）
+# 2. 轮询 data.status 直到 success（success 即表示全流程完成，含 LLM 校对/总结）
 deadline = time.time() + 30 * 60
 while time.time() < deadline:
-    r = requests.get(f"{BASE_URL}/api/task/{task_id}", headers=HEADERS)
-    if r.status_code == 200:
-        print("Transcription done.")
+    data = requests.get(f"{BASE_URL}/api/task/{task_id}", headers=HEADERS).json()["data"]
+    status = data["status"]
+    print(f"status: {status}")
+    if status == "success":
         break
-    if r.status_code == 500:
-        raise RuntimeError(r.json().get("message"))
-    time.sleep(10)
+    if status == "failed":
+        raise RuntimeError(data.get("error"))
+    time.sleep(10)   # queued / processing / calibrating → 继续轮询
+else:
+    raise TimeoutError("task did not finish in time")
 
-# 3. 拉取校对文本：LLM 校对是后置异步的，轮询 ?raw=calibrated 直到 200
-while time.time() < deadline:
-    r = requests.get(f"{BASE_URL}/view/{view_token}?raw=calibrated")
-    if r.status_code == 200:
-        print(f"Calibrated ({len(r.text)} chars):\n{r.text[:500]}")
-        break
-    if r.status_code in (404, 202):   # 仍在生成 / 文件未就绪
-        time.sleep(10)
-        continue
-    raise RuntimeError(f"Unexpected status: {r.status_code}")
+# 3. 拉取校对文本：此时内容已就绪，直接 200
+text = requests.get(f"{BASE_URL}/view/{view_token}?raw=calibrated").text
+print(f"Calibrated ({len(text)} chars):\n{text[:500]}")
 ```
 
 ---
