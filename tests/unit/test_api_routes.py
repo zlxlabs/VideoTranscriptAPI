@@ -295,50 +295,76 @@ class TestTranscribeEndpoint:
 
 
 class TestGetTaskStatus:
-    """Tests for GET /api/task/{task_id}."""
+    """Tests for GET /api/task/{task_id}.
 
-    def test_task_not_found(self, client, mock_task_results):
+    Status now comes from the persistent task_status table (single source of
+    truth), read via cache_manager.get_task_by_id. The response data carries an
+    explicit `status` field plus metadata; content is fetched via view_token.
+    """
+
+    def _row(self, **overrides):
+        row = {
+            "task_id": "task-1",
+            "view_token": "vt-1",
+            "status": "queued",
+            "title": "Demo",
+            "author": "Alice",
+            "platform": "youtube",
+            "completed_at": None,
+            "error_message": None,
+        }
+        row.update(overrides)
+        return row
+
+    def test_task_not_found(self, client, mock_cache_manager):
+        mock_cache_manager.get_task_by_id.return_value = None
         resp = client.get("/api/task/nonexistent-task")
         assert resp.status_code == 404
 
-    def test_task_queued_returns_202(self, client, mock_task_results):
-        mock_task_results["task-1"] = {
-            "status": "queued",
-            "message": "Queued",
-        }
-        resp = client.get("/api/task/task-1")
-        assert resp.status_code == 200
-        body = resp.json()
+    def test_task_queued_returns_202(self, client, mock_cache_manager):
+        mock_cache_manager.get_task_by_id.return_value = self._row(status="queued")
+        body = client.get("/api/task/task-1").json()
         assert body["code"] == 202
+        assert body["data"]["status"] == "queued"
 
-    def test_task_processing_returns_202(self, client, mock_task_results):
-        mock_task_results["task-1"] = {
-            "status": "processing",
-            "message": "Processing",
-        }
-        resp = client.get("/api/task/task-1")
-        body = resp.json()
+    def test_task_processing_returns_202(self, client, mock_cache_manager):
+        mock_cache_manager.get_task_by_id.return_value = self._row(status="processing")
+        body = client.get("/api/task/task-1").json()
         assert body["code"] == 202
+        assert body["data"]["status"] == "processing"
 
-    def test_task_completed_returns_200(self, client, mock_task_results):
-        mock_task_results["task-1"] = {
-            "status": "completed",
-            "message": "Done",
-            "data": {"transcript": "hello world"},
-        }
-        resp = client.get("/api/task/task-1")
-        body = resp.json()
+    def test_task_calibrating_returns_202(self, client, mock_cache_manager):
+        # NEW state: transcript done, LLM calibration still running.
+        mock_cache_manager.get_task_by_id.return_value = self._row(status="calibrating")
+        body = client.get("/api/task/task-1").json()
+        assert body["code"] == 202
+        assert body["data"]["status"] == "calibrating"
+
+    def test_task_success_returns_200_with_metadata(self, client, mock_cache_manager):
+        mock_cache_manager.get_task_by_id.return_value = self._row(
+            status="success", completed_at="2026-06-03T10:00:00"
+        )
+        body = client.get("/api/task/task-1").json()
         assert body["code"] == 200
-        assert body["data"]["transcript"] == "hello world"
+        data = body["data"]
+        assert data["status"] == "success"
+        assert data["view_token"] == "vt-1"
+        assert data["title"] == "Demo"
+        assert data["author"] == "Alice"
+        assert data["platform"] == "youtube"
+        assert data["completed_at"] == "2026-06-03T10:00:00"
+        # Inline transcript is intentionally dropped (fetch via view_token).
+        assert "transcript" not in data
 
-    def test_task_failed_returns_500_code(self, client, mock_task_results):
-        mock_task_results["task-1"] = {
-            "status": "failed",
-            "message": "ASR error",
-        }
+    def test_task_failed_returns_500_with_error(self, client, mock_cache_manager):
+        mock_cache_manager.get_task_by_id.return_value = self._row(
+            status="failed", error_message="ASR timeout"
+        )
         resp = client.get("/api/task/task-1")
         body = resp.json()
         assert body["code"] == 500
+        assert body["data"]["status"] == "failed"
+        assert body["data"]["error"] == "ASR timeout"
 
 
 class TestWebhookStatsEndpoint:

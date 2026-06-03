@@ -18,6 +18,7 @@ from ..services.transcription import (
 )
 from ...utils.notifications import send_view_link_wechat, get_notification_router
 from ...utils.accounts.user_manager import get_user_manager
+from ...utils.task_status import TaskStatus, http_code_for_status
 
 logger = get_logger()
 config = get_config()
@@ -246,7 +247,9 @@ async def get_task_status(
     api_key = user_info.get("api_key")
 
     try:
-        if task_id not in task_results:
+        # 状态以持久化的 task_status 表为唯一真相源（重启不丢、覆盖全流程）
+        task_info = cache_manager.get_task_by_id(task_id)
+        if not task_info:
             processing_time_ms = int(
                 (datetime.datetime.now() - start_time).total_seconds() * 1000
             )
@@ -263,12 +266,29 @@ async def get_task_status(
             logger.warning("任务不存在: %s", task_id)
             raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
 
-        task_result = task_results[task_id]
-        code = 200
-        if task_result.get("status") in {"queued", "processing"}:
-            code = 202
-        elif task_result.get("status") == "failed":
-            code = 500
+        status = task_info.get("status") or TaskStatus.QUEUED
+        code = http_code_for_status(status)
+
+        # 干净的元信息形状 + 显式 status；正文走 view_token 获取
+        data = {
+            "status": status,
+            "view_token": task_info.get("view_token"),
+            "title": task_info.get("title"),
+            "author": task_info.get("author"),
+            "platform": task_info.get("platform"),
+            "completed_at": task_info.get("completed_at"),
+        }
+        if status == TaskStatus.FAILED:
+            data["error"] = task_info.get("error_message") or "任务处理失败"
+
+        message_map = {
+            TaskStatus.QUEUED: "任务排队中",
+            TaskStatus.PROCESSING: "任务处理中",
+            TaskStatus.CALIBRATING: "转录完成，校对/总结生成中",
+            TaskStatus.SUCCESS: "任务已完成",
+            TaskStatus.FAILED: "任务处理失败",
+        }
+        message = message_map.get(status, "获取任务状态成功")
 
         processing_time_ms = int(
             (datetime.datetime.now() - start_time).total_seconds() * 1000
@@ -284,11 +304,7 @@ async def get_task_status(
             remote_ip=request.client.host if request.client else None,
         )
 
-        return TranscribeResponse(
-            code=code,
-            message=task_result.get("message", "获取任务状态成功"),
-            data=task_result.get("data"),
-        )
+        return TranscribeResponse(code=code, message=message, data=data)
     except HTTPException:
         raise
     except Exception as exc:
