@@ -106,10 +106,11 @@ class CacheManager:
                     completed_at TIMESTAMP,
                     cache_id INTEGER,
                     llm_config TEXT,
+                    error_message TEXT,
                     FOREIGN KEY (cache_id) REFERENCES video_cache(id)
                 )
             ''')
-            
+
             # 创建索引以提高查询性能
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_platform_media_id ON video_cache(platform, media_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_url ON video_cache(url)')
@@ -157,6 +158,15 @@ class CacheManager:
                     logger.info("添加 download_url 字段到 task_status 表...")
                     cursor.execute("ALTER TABLE task_status ADD COLUMN download_url TEXT")
                     logger.info("download_url 字段添加成功")
+
+                # 迁移4: 添加 error_message 字段（失败原因持久化）
+                cursor.execute("PRAGMA table_info(task_status)")
+                columns = [col[1] for col in cursor.fetchall()]
+
+                if 'error_message' not in columns:
+                    logger.info("添加 error_message 字段到 task_status 表...")
+                    cursor.execute("ALTER TABLE task_status ADD COLUMN error_message TEXT")
+                    logger.info("error_message 字段添加成功")
                 else:
                     logger.debug("数据库结构正常，无需迁移")
 
@@ -750,7 +760,7 @@ class CacheManager:
     def update_task_status(self, task_id: str, status: str, platform: str = None,
                           media_id: str = None, title: str = None, author: str = None,
                           cache_id: int = None, download_url: str = None,
-                          force: bool = False):
+                          force: bool = False, error_message: str = None):
         """
         更新任务状态
 
@@ -797,6 +807,9 @@ class CacheManager:
                 if download_url is not None:  # 只有非空的 download_url 才更新
                     update_fields.append("download_url = ?")
                     params.append(download_url)
+                if error_message is not None:
+                    update_fields.append("error_message = ?")
+                    params.append(error_message)
 
                 if status in ['success', 'failed']:
                     update_fields.append("completed_at = CURRENT_TIMESTAMP")
@@ -940,8 +953,8 @@ class CacheManager:
 
             display_url = task_info.get('url') or task_info.get('download_url') or ""
 
-            # 如果任务还在进行中
-            if task_info['status'] in ['queued', 'processing']:
+            # 如果任务还在进行中（calibrating 表示转录已完成、LLM 校对/总结进行中）
+            if task_info['status'] in ['queued', 'processing', 'calibrating']:
                 return {
                     'status': 'processing',
                     'title': task_info.get('title', '转录处理中...'),
@@ -955,7 +968,7 @@ class CacheManager:
                     'status': 'failed',
                     'title': task_info.get('title', '转录失败'),
                     'url': display_url,
-                    'message': '转录任务失败，请重新提交'
+                    'message': task_info.get('error_message') or '转录任务失败，请重新提交'
                 }
             
             # 任务成功，获取缓存数据

@@ -33,6 +33,13 @@ class TestCalibratingStatus:
         assert cm.get_task_by_id(task_id)["status"] == "calibrating"
 
 
+class TestErrorMessage:
+    def test_error_message_persists_on_failed(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.FAILED, error_message="ASR timeout")
+        assert cm.get_task_by_id(task_id)["error_message"] == "ASR timeout"
+
+
 class TestTerminalStickiness:
     """success / failed are terminal and must not be overwritten by late writes."""
 
