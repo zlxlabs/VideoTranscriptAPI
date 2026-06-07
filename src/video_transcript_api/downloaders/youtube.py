@@ -926,8 +926,8 @@ class YoutubeDownloader(BaseDownloader):
         """
         temp_dir = None
         try:
-            # 创建临时目录
-            temp_dir = tempfile.mkdtemp()
+            # 创建临时目录（落在当前任务目录下，随任务结束一并清理，不再泄漏到系统 /tmp）
+            temp_dir = tempfile.mkdtemp(dir=str(self.temp_manager.get_current_task_dir()))
             output_template = str(Path(temp_dir) / f"{video_id}.%(ext)s")
             output_path = str(Path(temp_dir) / f"{video_id}.mp3")
 

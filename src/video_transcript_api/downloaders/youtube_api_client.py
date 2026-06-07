@@ -525,7 +525,11 @@ class YouTubeApiClient:
         if target_dir:
             local_path = Path(target_dir) / filename
         else:
-            temp_dir = tempfile.mkdtemp()
+            # 默认落在当前任务目录下，随任务结束一并清理，不再泄漏到系统 /tmp
+            from ..utils.tempfile_manager import get_shared_temp_manager
+
+            task_dir = get_shared_temp_manager().get_current_task_dir()
+            temp_dir = tempfile.mkdtemp(dir=str(task_dir))
             local_path = Path(temp_dir) / filename
 
         logger.info(f"[youtube-api] Downloading file: {file_url} -> {local_path}")

@@ -192,8 +192,12 @@ class GenericDownloader(BaseDownloader):
         返回:
             str: 本地文件路径，如果下载失败则返回None
         """
-        local_path = os.path.join(self.temp_dir, filename)
-        
+        # 落到当前任务的专属目录（data/temp/task_<id>/），实现：
+        # 1) 任务结束时由 clean_up_task 一并 rmtree，不残留；
+        # 2) 不同任务即使同名文件也写在各自目录，避免同名碰撞互相覆盖/误删。
+        task_dir = self.temp_manager.get_current_task_dir()
+        local_path = os.path.join(str(task_dir), filename)
+
         # 创建目录（如果不存在）
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
         

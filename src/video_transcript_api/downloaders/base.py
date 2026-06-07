@@ -237,7 +237,7 @@ class BaseDownloader(ABC):
                 logger.info(f"actual file size: {actual_size / 1024 / 1024:.2f} MB")
 
                 if actual_size == 0:
-                    self.temp_manager.clean_up()
+                    self._discard_temp(local_path)
                     raise DownloadFailedError(f"downloaded file is 0 bytes: {local_path}")
 
                 if expected_size and abs(actual_size - expected_size) > 1024:
@@ -246,7 +246,7 @@ class BaseDownloader(ABC):
                     )
 
                 if not self._validate_media_file(local_path):
-                    self.temp_manager.clean_up()
+                    self._discard_temp(local_path)
                     raise InvalidMediaError(f"downloaded file is not valid media: {local_path}")
 
                 logger.info(f"file downloaded and validated: {local_path}")
@@ -276,10 +276,10 @@ class BaseDownloader(ABC):
             except Exception as e:
                 last_error = DownloadFailedError(f"unexpected error: {e}")
 
-            # Clean up on retry
+            # Clean up on retry — only this download's file, never other tasks'
             try:
                 if "local_path" in locals() and os.path.exists(local_path):
-                    self.temp_manager.clean_up()
+                    self._discard_temp(local_path)
             except Exception:
                 pass
 
@@ -292,6 +292,22 @@ class BaseDownloader(ABC):
 
         logger.error(f"download failed after {max_retries} attempts: {url}, error: {last_error}")
         return None
+
+    def _discard_temp(self, path) -> None:
+        """删除单个下载失败的临时文件并取消跟踪。
+
+        只针对本次下载的文件，绝不调用全局 clean_up()，避免误删其他并发任务
+        正在使用的在途文件（修复历史并发误删 bug）。
+        """
+        try:
+            from pathlib import Path
+
+            p = Path(path)
+            if p.exists():
+                p.unlink()
+            self.temp_manager.untrack_file(p)
+        except Exception as e:
+            logger.warning(f"discard temp file failed: {path}, error: {e}")
 
     def _validate_media_file(self, file_path):
         """
