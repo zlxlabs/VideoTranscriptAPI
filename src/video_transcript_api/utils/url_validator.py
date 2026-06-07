@@ -7,10 +7,11 @@ URL 安全验证模块
 
 import ipaddress
 import socket
+from functools import lru_cache
 from urllib.parse import urlparse
 from typing import Optional
 
-from .logging import setup_logger
+from .logging import setup_logger, load_config
 
 logger = setup_logger("url_validator")
 
@@ -18,6 +19,45 @@ logger = setup_logger("url_validator")
 class URLValidationError(ValueError):
     """URL 验证失败的异常"""
     pass
+
+
+@lru_cache(maxsize=1)
+def _load_allowlist() -> tuple:
+    """
+    加载内网下载源白名单（IP 或 CIDR 网段）。
+
+    来源：config.jsonc 的 security.download_url_allowlist 字段，
+    用于放行明确可信的内网地址（如局域网录制服务器），同时保持对其他
+    私有/保留地址的 SSRF 防护。
+
+    Returns:
+        tuple: 解析后的 ip_network 对象元组；配置缺失或非法时返回空元组
+    """
+    try:
+        config = load_config()
+        entries = (config.get("security", {}) or {}).get("download_url_allowlist", []) or []
+    except Exception as e:
+        logger.warning(f"Failed to load download_url_allowlist: {e}")
+        return tuple()
+
+    networks = []
+    for entry in entries:
+        try:
+            # strict=False 允许传入单个 IP（自动按 /32、/128 处理）
+            networks.append(ipaddress.ip_network(str(entry), strict=False))
+        except ValueError as e:
+            logger.warning(f"Invalid download_url_allowlist entry ignored: {entry} ({e})")
+    if networks:
+        logger.info(f"Loaded {len(networks)} download_url_allowlist entries")
+    return tuple(networks)
+
+
+def _is_allowlisted(ip: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> bool:
+    """检查 IP 是否在内网下载源白名单内（已显式信任，可放行）。"""
+    for network in _load_allowlist():
+        if ip.version == network.version and ip in network:
+            return True
+    return False
 
 
 def validate_url_safe(url: str) -> str:
@@ -102,7 +142,7 @@ def _check_dangerous_hostname(hostname: str) -> None:
         # 不是 IP 地址格式（是域名），后续通过 DNS 检查
         return
 
-    if _is_private_ip(ip):
+    if _is_private_ip(ip) and not _is_allowlisted(ip):
         raise URLValidationError(
             f"Access to private/reserved IP is blocked: {hostname}"
         )
@@ -130,7 +170,7 @@ def _check_resolved_ip(hostname: str) -> None:
             ip_str = addr_info[4][0]
             try:
                 ip = ipaddress.ip_address(ip_str)
-                if _is_private_ip(ip):
+                if _is_private_ip(ip) and not _is_allowlisted(ip):
                     raise URLValidationError(
                         f"DNS resolved to private/reserved IP: {hostname} -> {ip_str}"
                     )
