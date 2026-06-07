@@ -338,6 +338,19 @@ def process_transcription(
     # 性能追踪器：记录各阶段耗时
     tracker = PerfTracker(task_id=task_id)
 
+    # ---- 临时文件生命周期（见评审决议 D10/D11/codex#1,#9）----
+    # 进入处理：标记活跃（受在途保护）、绑定当前线程任务、建任务专属目录、
+    # 顺手做一次节流的惰性清扫兜底孤儿。所有下载产物会落到 data/temp/task_<id>/，
+    # 在最外层 finally 里被 clean_up_task 一并删除——覆盖所有 early return 与异常。
+    temp_manager = get_temp_manager()
+    temp_manager.mark_active(task_id)
+    temp_manager.set_current_task(task_id)
+    temp_manager.create_task_dir(task_id)
+    try:
+        temp_manager.maybe_sweep()
+    except Exception as sweep_exc:
+        logger.warning(f"惰性清扫失败（不影响主流程）: {sweep_exc}")
+
     try:
         # 规范化 download_url：将空字符串转换为 None
         if download_url is not None and isinstance(download_url, str) and not download_url.strip():
@@ -1363,6 +1376,19 @@ def process_transcription(
             "message": f"转录任务异常: {exc}",
             "error": str(exc),
         }
+    finally:
+        # 终态清理：删除本任务在 temp 下的全部文件（源视频 + 提取音频 + 中间件）。
+        # 临时文件只是转录的输入，转录段结束即可清，不依赖 LLM 阶段终态（codex#9）。
+        # 失败打 WARNING 不中断主流程；务必 clear_current_task 避免线程复用串号（codex#1）。
+        try:
+            temp_manager.clean_up_task(task_id)
+        except Exception as cleanup_exc:
+            logger.warning(
+                f"清理任务临时文件失败（不影响主流程）: {task_id}, 错误: {cleanup_exc}"
+            )
+        finally:
+            temp_manager.clear_current_task()
+            temp_manager.mark_done(task_id)
 
 
 def process_llm_queue():
