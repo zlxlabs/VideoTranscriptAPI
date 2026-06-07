@@ -68,8 +68,10 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def startup_event():
+        # 启动时按配置的 temp_retention_hours 清理孤儿临时文件（崩溃/强杀残留）。
+        # 此时无活跃任务，超龄的孤儿目录/文件会被清掉。
         temp_manager = get_temp_manager()
-        old_files_count = temp_manager.clean_up_old_files(hours=24)
+        old_files_count = temp_manager.clean_up_old_files()
         if old_files_count > 0:
             logger.info(f"启动时清理了 {old_files_count} 个旧临时文件")
 
@@ -131,8 +133,10 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def shutdown_event():
+        # 优雅关闭只清理非活跃任务目录（hours=0 → 删所有非活跃项），
+        # 避免删掉关闭瞬间仍在跑的任务正在使用的文件（D11）。
         temp_manager = get_temp_manager()
-        temp_manager.clean_up()
+        temp_manager.clean_up_old_files(hours=0)
 
         log_llm_stats()
 

@@ -149,3 +149,69 @@ def test_exception_still_cleans_task_temp(wired):
     assert not downloader.written_path.exists()
     assert tm.get_task_dir("t-fail") is None
     assert not tm.is_active("t-fail")
+
+
+# ---------------------------------------------------------------------------
+# Regression: base.py download error path must not delete OTHER tasks' files
+# (previously called the global clean_up() which wiped every tracked file).
+# ---------------------------------------------------------------------------
+
+def test_discard_temp_does_not_touch_other_tasks(tmp_path, monkeypatch):
+    from src.video_transcript_api.utils import tempfile_manager as tfm
+
+    mgr = TempFileManager(str(tmp_path / "temp"))
+    monkeypatch.setattr(tfm, "_shared_manager", mgr)
+
+    from src.video_transcript_api.downloaders.generic import GenericDownloader
+
+    dl = GenericDownloader()
+    assert dl.temp_manager is mgr
+
+    # task A: another concurrent task's in-flight file
+    da = mgr.create_task_dir("A")
+    fa = da / "a.mp4"
+    fa.write_bytes(b"x" * 100)
+    # task B: the file whose download just failed
+    db = mgr.create_task_dir("B")
+    fb = db / "b.mp4"
+    fb.write_bytes(b"y" * 100)
+
+    dl._discard_temp(fb)
+
+    assert not fb.exists()        # its own failed file removed
+    assert fa.exists()            # other task's in-flight file untouched (regression)
+
+
+# ---------------------------------------------------------------------------
+# Regression: YouTube-API download without target_dir must land under the
+# current task dir (data/temp/task_<id>/...), not system /tmp.
+# ---------------------------------------------------------------------------
+
+class _FakeResp:
+    def raise_for_status(self):
+        return None
+
+    def iter_content(self, chunk_size=8192):
+        yield b"audio-bytes"
+
+
+def test_youtube_api_download_lands_in_task_dir(tmp_path, monkeypatch):
+    from src.video_transcript_api.utils import tempfile_manager as tfm
+    import src.video_transcript_api.downloaders.youtube_api_client as yac
+
+    mgr = TempFileManager(str(tmp_path / "temp"))
+    monkeypatch.setattr(tfm, "_shared_manager", mgr)
+    monkeypatch.setattr(yac.requests, "get", lambda *a, **k: _FakeResp())
+
+    mgr.create_task_dir("YT")
+    mgr.set_current_task("YT")
+
+    client = yac.YouTubeApiClient({"base_url": "http://example.com", "api_key": "k"})
+    path = client.download_to_local("/api/v1/files/audio.m4a")
+
+    task_dir = mgr.get_task_dir("YT")
+    assert task_dir is not None
+    assert Path(path).resolve().is_relative_to(task_dir.resolve())
+    # and cleaning the task removes the downloaded file
+    mgr.clean_up_task("YT")
+    assert not Path(path).exists()
