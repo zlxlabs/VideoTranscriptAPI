@@ -93,7 +93,11 @@
         "executable_linux": "BBDown/BBDown",     // Linux 可执行文件路径
         "executable_mac": "BBDown/BBDown_Mac",   // macOS 可执行文件路径
         "audio_only": true,              // 是否只下载音频
-        "timeout": 300                   // 下载超时时间（秒）
+        "timeout": 300,                  // 下载超时时间（秒）
+        // 可选：B 站官方元数据 API 的 Cookie 字符串。留空时自动使用随机 buvid3
+        // 指纹躲避 IP 级风控（零维护，推荐）。仅当频繁遇到 -412/-799 风控时，
+        // 才考虑填入真实账号 Cookie（注意会过期，需自行维护）。
+        "bilibili_cookie": ""
     },
 
     // ============================================================

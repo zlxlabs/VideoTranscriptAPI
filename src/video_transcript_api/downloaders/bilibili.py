@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import uuid
 import datetime
 import subprocess
 import platform
@@ -15,6 +16,22 @@ from ..utils import create_debug_dir
 logger = setup_logger("bilibili_downloader")
 DEBUG_DIR = create_debug_dir()
 
+# 官方 view API 的风控/瞬时错误码，遇到这些值时重试而非直接放弃
+#   -412 请求被拦截（风控）  -799 请求过于频繁  -509 请求过于频繁(过载)
+_RETRYABLE_CODES = {-412, -799, -509}
+_OFFICIAL_API_MAX_RETRIES = 3      # 官方 API 最大尝试次数
+_OFFICIAL_API_BACKOFF_BASE = 0.5   # 指数退避基数（秒）
+
+
+def _generate_buvid3() -> str:
+    """生成随机 buvid3 指纹 cookie。
+
+    B 站对「完全无 cookie」的服务器 IP 风控最严，附带一个随机指纹即可显著降低
+    被 -412/-799 拦截的概率，且无需真实账号、零维护（区别于 BBDown 登录态 cookie）。
+    格式近似官方：<大写 UUID>infoc
+    """
+    return f"{str(uuid.uuid4()).upper()}infoc"
+
 
 class BilibiliDownloader(BaseDownloader):
     """
@@ -24,6 +41,8 @@ class BilibiliDownloader(BaseDownloader):
         super().__init__()
         self._cached_video_info: dict[str, dict] = {}
         self._cached_metadata: dict[str, dict] = {}  # 缓存官方API的元数据
+        # 实例级 buvid3 指纹，整个任务生命周期复用一个，避免每次请求都换指纹
+        self._buvid3 = _generate_buvid3()
 
     def can_handle(self, url):
         """
@@ -127,60 +146,101 @@ class BilibiliDownloader(BaseDownloader):
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         }
 
-        try:
-            logger.info(f"调用B站官方API获取元数据: bvid={bvid}")
-            response = requests.get(api_url, headers=headers, timeout=5.0)
-            response.raise_for_status()
+        # Cookie 策略：优先使用配置的完整 cookie（高级用户/真实账号），
+        # 否则附带一个随机 buvid3 指纹以躲避 IP 级风控（零维护）。
+        configured_cookie = (
+            self.config.get("bbdown", {}).get("bilibili_cookie", "") or ""
+        ).strip()
+        if configured_cookie:
+            headers["Cookie"] = configured_cookie
+            cookies = None
+        else:
+            cookies = {"buvid3": self._buvid3}
 
-            data = response.json()
+        # 重试循环：对超时/网络异常以及风控 code(-412/-799/-509) 做指数退避重试。
+        # 注意 B 站风控是 HTTP 200 + body code 异常，状态码级重试无效，必须判 code。
+        last_err = None
+        for attempt in range(1, _OFFICIAL_API_MAX_RETRIES + 1):
+            try:
+                logger.info(
+                    f"调用B站官方API获取元数据: bvid={bvid} "
+                    f"(尝试 {attempt}/{_OFFICIAL_API_MAX_RETRIES})"
+                )
+                response = requests.get(
+                    api_url, headers=headers, cookies=cookies, timeout=5.0
+                )
+                response.raise_for_status()
 
-            # 检查API返回状态
-            if data.get("code") != 0:
+                data = response.json()
+                code = data.get("code")
+
+                # 检查API返回状态
+                if code != 0:
+                    msg = data.get("message", "未知错误")
+                    if code in _RETRYABLE_CODES and attempt < _OFFICIAL_API_MAX_RETRIES:
+                        backoff = _OFFICIAL_API_BACKOFF_BASE * (2 ** (attempt - 1))
+                        logger.warning(
+                            f"B站官方API风控(code={code}, message={msg})，"
+                            f"{backoff:.1f}s 后重试"
+                        )
+                        time.sleep(backoff)
+                        continue
+                    logger.warning(
+                        f"B站官方API返回错误: code={code}, message={msg}"
+                    )
+                    return {}
+
+                # 提取视频数据
+                video_data = data.get("data", {})
+                if not video_data:
+                    logger.warning(f"B站官方API返回数据为空: bvid={bvid}")
+                    return {}
+
+                # 构造元数据字典
+                metadata = {
+                    "title": video_data.get("title", ""),
+                    "description": video_data.get("desc", ""),
+                    "author": video_data.get("owner", {}).get("name", ""),
+                    "author_id": video_data.get("owner", {}).get("mid", ""),
+                    "duration": video_data.get("duration", 0),
+                    "pubdate": video_data.get("pubdate", 0),
+                }
+
+                logger.info(
+                    f"成功获取B站官方元数据: 标题='{metadata['title']}', "
+                    f"作者='{metadata['author']}', "
+                    f"简介长度={len(metadata['description'])} 字符"
+                )
+
+                # 缓存结果（实例级缓存）
+                self._cached_metadata[bvid] = metadata
+
+                return metadata
+
+            except (requests.exceptions.Timeout, requests.exceptions.RequestException) as e:
+                last_err = e
+                if attempt < _OFFICIAL_API_MAX_RETRIES:
+                    backoff = _OFFICIAL_API_BACKOFF_BASE * (2 ** (attempt - 1))
+                    logger.warning(
+                        f"调用B站官方API异常({e})，{backoff:.1f}s 后重试"
+                    )
+                    time.sleep(backoff)
+                    continue
                 logger.warning(
-                    f"B站官方API返回错误: code={data.get('code')}, "
-                    f"message={data.get('message', '未知错误')}"
+                    f"调用B站官方API失败，已重试 {attempt} 次: {e}"
                 )
                 return {}
-
-            # 提取视频数据
-            video_data = data.get("data", {})
-            if not video_data:
-                logger.warning(f"B站官方API返回数据为空: bvid={bvid}")
+            except json.JSONDecodeError as e:
+                logger.warning(f"解析B站官方API响应失败: {e}")
+                return {}
+            except Exception as e:
+                logger.error(f"获取B站官方元数据时发生未知错误: {e}")
                 return {}
 
-            # 构造元数据字典
-            metadata = {
-                "title": video_data.get("title", ""),
-                "description": video_data.get("desc", ""),
-                "author": video_data.get("owner", {}).get("name", ""),
-                "author_id": video_data.get("owner", {}).get("mid", ""),
-                "duration": video_data.get("duration", 0),
-                "pubdate": video_data.get("pubdate", 0),
-            }
-
-            logger.info(
-                f"成功获取B站官方元数据: 标题='{metadata['title']}', "
-                f"作者='{metadata['author']}', "
-                f"简介长度={len(metadata['description'])} 字符"
-            )
-
-            # 缓存结果（实例级缓存）
-            self._cached_metadata[bvid] = metadata
-
-            return metadata
-
-        except requests.exceptions.Timeout:
-            logger.warning(f"调用B站官方API超时: bvid={bvid}")
-            return {}
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"调用B站官方API网络异常: {e}")
-            return {}
-        except json.JSONDecodeError as e:
-            logger.warning(f"解析B站官方API响应失败: {e}")
-            return {}
-        except Exception as e:
-            logger.error(f"获取B站官方元数据时发生未知错误: {e}")
-            return {}
+        # 理论上不会到这里（循环内均有 return），保险返回空
+        if last_err:
+            logger.warning(f"调用B站官方API最终失败: {last_err}")
+        return {}
 
     def _get_video_info_bbdown(self, url):
         """
@@ -643,8 +703,15 @@ class BilibiliDownloader(BaseDownloader):
         """
         获取视频元数据
 
-        优先使用B站官方API获取完整元数据（包括description），
-        然后用下载器API/BBDown的结果补充或覆盖某些字段。
+        以 B 站官方 API 为标题/作者/简介的主数据源（廉价、无下载）。
+
+        关键设计（L1 解耦）：
+            BBDown 模式下，get_video_info() 会触发整段音频「下载」，绝不能放进
+            元数据阶段——否则 BBDown 抖动/超时抛出的异常会连累已经成功拿到的官方
+            元数据，导致标题/作者退化成短链码 / "Unknown"（历史 bug）。
+            因此 BBDown 模式下元数据阶段零下载，实际下载由 _fetch_download_info 负责。
+            TikHub 模式下 get_video_info() 是轻量元数据调用（且提供 cid），保留，
+            但用 try/except 包住，使其失败同样不会拖垮元数据。
 
         参数:
             url: 视频URL
@@ -653,22 +720,28 @@ class BilibiliDownloader(BaseDownloader):
         返回:
             VideoMetadata: 标准化的视频元数据对象
         """
-        # 1. 首先尝试从官方API获取完整元数据
+        # 1. 主数据源：官方 API（内置 cookie + 重试加固）
         official_metadata = self._fetch_bilibili_official_metadata(video_id)
 
-        # 2. 获取下载器信息（TikHub API 或 BBDown）
-        info = self.get_video_info(url)
+        # 2. 仅 TikHub 模式才在元数据阶段调用 get_video_info（轻量 + 提供 cid）
+        use_bbdown = self.config.get("bbdown", {}).get("use_bbdown", False)
+        info: dict = {}
+        if not use_bbdown:
+            try:
+                info = self.get_video_info(url)
+            except Exception as e:
+                logger.warning(f"TikHub get_video_info 失败，降级使用官方API元数据: {e}")
+                info = {}
 
-        # 3. 合并元数据，优先使用官方API的数据
-        # 如果官方API获取失败，则使用下载器提供的数据作为回退
-        title = official_metadata.get("title") or info.get("video_title", "")
-        author = official_metadata.get("author") or info.get("author", "")
+        # 3. 字段级合并：优先官方 API；官方失败时回退到 BV 号（稳定），而非短链垃圾
+        title = official_metadata.get("title") or info.get("video_title") or video_id
+        author = official_metadata.get("author") or info.get("author") or ""
         description = official_metadata.get("description", "")  # description 只能从官方API获取
         duration = official_metadata.get("duration")
 
         # 构造 extra 字段
         extra = {}
-        if "cid" in info:
+        if info.get("cid"):
             extra["cid"] = info.get("cid")
         if official_metadata.get("author_id"):
             extra["author_id"] = official_metadata.get("author_id")
@@ -676,9 +749,10 @@ class BilibiliDownloader(BaseDownloader):
             extra["pubdate"] = official_metadata.get("pubdate")
 
         logger.info(
-            f"合并元数据完成: 标题='{title[:30]}...', "
+            f"合并元数据完成: 标题='{title[:30]}', "
             f"作者='{author}', "
-            f"简介={'有' if description else '无'}"
+            f"简介={'有' if description else '无'}, "
+            f"来源={'官方API' if official_metadata.get('title') else '回退'}"
         )
 
         return VideoMetadata(
