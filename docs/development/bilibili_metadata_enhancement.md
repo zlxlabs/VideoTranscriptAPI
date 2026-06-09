@@ -1,5 +1,37 @@
 # Bilibili 元数据增强实现报告
 
+> **2026-06-09 更新（解耦 + 加固）**：本文档下方"解决方案/数据合并策略/对现有流程的影响"等章节描述的是 2026-01-28 的初版设计（元数据阶段同时调用官方 API 和 `get_video_info`）。该设计存在一个耦合 bug，已于 2026-06-09 修复。**当前实现以本节为准**，下方历史章节保留作背景参考。
+>
+> ## 修复背景：标题/作者偶发解析失败
+>
+> 初版 `_fetch_metadata` 在拿到官方 API 元数据后，**无条件**再调用 `get_video_info(url)`。而在 **BBDown 模式**下 `get_video_info` 等价于"把整段音频下载下来"——一旦 BBDown 获取 aid 超时（`net_http_request_timedout, 120`，未登录受限），异常会冒泡，导致整个 `_fetch_metadata` 失败，连**已经成功拿到的官方 API 标题/作者一起被丢弃**，最终回退成短链码（如 `SJyImI4`）+ 作者 `Unknown`。BBDown 时好时坏，因此现象表现为"偶发"。
+>
+> ## L1 解耦：元数据阶段与下载彻底分离
+>
+> - **BBDown 模式**：元数据阶段**零下载**，标题/作者/简介只取自官方 API；官方 API 完全失败时回退到 **BV 号**（稳定），而非短链垃圾。真正的音频下载交由 `_fetch_download_info`（下载阶段）负责，其失败只影响"下不下得来"，与标题/作者解耦。
+> - **TikHub 模式**：仍在元数据阶段调用 `get_video_info`（轻量、且提供 `cid`），但用 `try/except` 包住，使其失败同样不会拖垮元数据。
+> - 这同时把 Bilibili 拉回与其他 5 个下载器一致的基类契约：`get_metadata`（廉价）与 `get_download_info`（重活）两条独立链路。
+>
+> ## L2 加固官方 API：cookie + 重试
+>
+> - **随机 buvid3 指纹 cookie**：B 站对"完全无 cookie"的服务器 IP 风控最严，附带一个随机 `buvid3`（`<大写UUID>infoc`）即可显著降低 `-412/-799` 拦截概率，**零维护**（无需真实账号）。可选 `config.bbdown.bilibili_cookie` 覆盖为真实 Cookie。
+> - **指数退避重试**：对超时/网络异常，以及风控码 `-412 / -799 / -509` 做重试（最多 3 次，退避基数 0.5s）。注意 B 站风控是 `HTTP 200 + body code 异常`，必须判 `code` 而非 HTTP 状态码。
+>
+> ## 当前字段合并优先级
+>
+> | 字段 | 来源（优先级从高到低） |
+> |------|------------------------|
+> | title | 官方 API → (仅 TikHub) `get_video_info` → **BV 号** |
+> | author | 官方 API → (仅 TikHub) `get_video_info` → `""` |
+> | description / duration / author_id / pubdate | 仅官方 API |
+> | cid | 仅 TikHub 模式 `get_video_info` |
+>
+> ## 测试
+>
+> 单测：`tests/unit/test_bilibili_metadata.py`（7 个用例），含精确复现本 bug 的回归用例 `test_official_ok_bbdown_would_fail_regression`（官方 API 成功但 BBDown 失败 → 标题/作者仍正确）。
+>
+> ---
+
 ## 概述
 
 本次更新为 Bilibili 下载器添加了从官方 API 获取完整元数据的功能，解决了原有实现中只能获取 `title` 而缺少 `description` 和 `author` 的问题。
