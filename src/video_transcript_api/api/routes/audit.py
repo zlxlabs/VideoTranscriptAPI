@@ -4,8 +4,8 @@
 提供 API 调用记录查询、历史任务浏览和摘要预览功能。
 """
 
+import asyncio
 import sqlite3
-import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -27,7 +27,8 @@ router = APIRouter(prefix="/api/audit", tags=["audit"])
 async def get_audit_stats(days: int = 30, user_info: dict = Depends(verify_token)):
     try:
         user_id = user_info.get("user_id")
-        user_stats = audit_logger.get_user_stats(user_id, days)
+        # SQLite 查询为同步阻塞调用，放到线程池避免阻塞事件循环
+        user_stats = await asyncio.to_thread(audit_logger.get_user_stats, user_id, days)
         return TranscribeResponse(
             code=200,
             message="获取统计信息成功",
@@ -49,7 +50,7 @@ async def get_audit_calls(
 ):
     try:
         user_id = user_info.get("user_id")
-        recent_calls = audit_logger.get_recent_calls(user_id, limit)
+        recent_calls = await asyncio.to_thread(audit_logger.get_recent_calls, user_id, limit)
         return TranscribeResponse(
             code=200,
             message="获取调用记录成功",
@@ -190,15 +191,15 @@ async def get_history(
         finally:
             conn.close()
 
-    # 锁竞争重试一次（50ms 间隔）
+    # 锁竞争重试一次（50ms 间隔）；查询在线程池执行，避免阻塞事件循环
     try:
-        total, items = _run_query()
+        total, items = await asyncio.to_thread(_run_query)
     except sqlite3.OperationalError as e:
         if "locked" in str(e).lower():
             logger.warning("history query: database locked, retrying in 50ms")
-            time.sleep(0.05)
+            await asyncio.sleep(0.05)
             try:
-                total, items = _run_query()
+                total, items = await asyncio.to_thread(_run_query)
             except sqlite3.OperationalError as e2:
                 logger.error("history query: database still locked after retry: %s", e2)
                 raise HTTPException(status_code=503, detail="服务暂时不可用，请稍后重试")
@@ -280,12 +281,12 @@ async def get_filter_options(user_info: dict = Depends(verify_token)):
             conn.close()
 
     try:
-        webhooks, platforms, authors = _run_query()
+        webhooks, platforms, authors = await asyncio.to_thread(_run_query)
     except sqlite3.OperationalError as e:
         if "locked" in str(e).lower():
-            time.sleep(0.05)
+            await asyncio.sleep(0.05)
             try:
-                webhooks, platforms, authors = _run_query()
+                webhooks, platforms, authors = await asyncio.to_thread(_run_query)
             except sqlite3.OperationalError as e2:
                 logger.error("filter-options: database still locked: %s", e2)
                 raise HTTPException(status_code=503, detail="服务暂时不可用，请稍后重试")
@@ -320,8 +321,8 @@ async def get_task_summary(
     api_key_masked = audit_logger._mask_api_key(api_key)
     cache_manager = get_cache_manager()
 
-    # 通过 view_token 查任务信息
-    task_info = cache_manager.get_task_by_view_token(view_token)
+    # 通过 view_token 查任务信息（同步 SQLite 调用，线程池执行）
+    task_info = await asyncio.to_thread(cache_manager.get_task_by_view_token, view_token)
     if not task_info:
         raise HTTPException(status_code=404, detail="任务不存在")
 
@@ -329,7 +330,7 @@ async def get_task_summary(
     # 若无法查到关联记录，允许访问（兼容旧数据）
     task_id = task_info.get("task_id")
     if task_id and api_key_masked:
-        try:
+        def _check_ownership() -> bool:
             with audit_logger._get_cursor() as cursor:
                 cursor.execute(
                     "SELECT 1 FROM api_audit_logs WHERE task_id = ? AND api_key_masked = ? LIMIT 1",
@@ -342,11 +343,16 @@ async def get_task_summary(
                         (task_id,),
                     )
                     if cursor.fetchone():
-                        raise HTTPException(status_code=403, detail="无权访问该任务")
-        except HTTPException:
-            raise
+                        return False
+            return True
+
+        try:
+            owned = await asyncio.to_thread(_check_ownership)
         except Exception as e:
             logger.warning("summary auth check failed, allowing access: %s", e)
+            owned = True
+        if not owned:
+            raise HTTPException(status_code=403, detail="无权访问该任务")
 
     # 任务未完成（cache.db 中完成的状态值为 'success'）
     task_status = task_info.get("status", "")
@@ -359,7 +365,7 @@ async def get_task_summary(
 
     # 获取摘要：复用现有 get_view_data_by_token 逻辑
     try:
-        view_data = cache_manager.get_view_data_by_token(view_token)
+        view_data = await asyncio.to_thread(cache_manager.get_view_data_by_token, view_token)
         if not view_data or view_data.get("status") not in ("success",):
             return TranscribeResponse(
                 code=200,

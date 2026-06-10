@@ -33,6 +33,9 @@ class BaseDownloader(ABC):
         self.config = load_config()
         self.api_key = self.config.get("tikhub", {}).get("api_key")
         self.temp_manager = get_temp_manager()
+        # 下载文件大小上限（MB），0 表示不限制；防止超长视频/直播回放填满磁盘
+        max_mb = self.config.get("storage", {}).get("max_download_size_mb", 4096)
+        self.max_download_bytes = int(max_mb or 0) * 1024 * 1024
         # 实例级缓存（任务生命周期内有效）
         self._metadata_cache: Dict[str, VideoMetadata] = {}
         self._download_info_cache: Dict[str, DownloadInfo] = {}
@@ -223,15 +226,37 @@ class BaseDownloader(ABC):
                 if expected_size:
                     logger.info(f"expected file size: {expected_size / 1024 / 1024:.2f} MB")
 
+                # 大小上限预检：Content-Length 超限直接失败（不重试）
+                if self.max_download_bytes and expected_size and expected_size > self.max_download_bytes:
+                    logger.error(
+                        f"file size {expected_size / 1024 / 1024:.0f} MB exceeds limit "
+                        f"{self.max_download_bytes / 1024 / 1024:.0f} MB, aborting: {url[:100]}"
+                    )
+                    return None
+
                 ext = os.path.splitext(filename)[1] if "." in filename else ".tmp"
                 local_path = self.temp_manager.create_temp_file(suffix=ext)
 
                 downloaded_size = 0
+                size_exceeded = False
                 with open(local_path, "wb") as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
                             downloaded_size += len(chunk)
+                            # 流式兜底：服务器未给 Content-Length 时按累计大小截断
+                            if self.max_download_bytes and downloaded_size > self.max_download_bytes:
+                                size_exceeded = True
+                                break
+
+                # 文件句柄关闭后再删除（Windows 不允许删除打开中的文件）
+                if size_exceeded:
+                    self._discard_temp(local_path)
+                    logger.error(
+                        f"download exceeded size limit "
+                        f"{self.max_download_bytes / 1024 / 1024:.0f} MB, aborting: {url[:100]}"
+                    )
+                    return None
 
                 actual_size = os.path.getsize(local_path)
                 logger.info(f"actual file size: {actual_size / 1024 / 1024:.2f} MB")

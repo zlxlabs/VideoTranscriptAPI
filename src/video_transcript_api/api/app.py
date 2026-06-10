@@ -9,9 +9,48 @@ from ..utils.notifications import init_all_notifiers, shutdown_all_notifiers
 from ..utils.ytdlp import YtdlpConfigBuilder
 from ..llm import set_default_config, log_llm_stats
 from ..llm.llm import log_llm_config_summary
-from .context import get_cache_manager, get_config, get_logger, get_static_dir, get_temp_manager
+from .context import (
+    get_audit_logger,
+    get_cache_manager,
+    get_config,
+    get_logger,
+    get_static_dir,
+    get_temp_manager,
+)
 from .routes import audit, health, tasks, users, views
 from .services.transcription import process_llm_queue, process_task_queue
+
+
+async def _periodic_maintenance(config: dict) -> None:
+    """
+    每日维护任务：按保留期清理过期缓存与审计日志，防止磁盘无限增长。
+
+    - storage.cache_retention_days：缓存（转录产物）保留天数，0 表示永久保留
+    - storage.audit_log_retention_days：审计日志保留天数，0 表示永久保留
+    """
+    logger = get_logger()
+    storage = config.get("storage", {})
+    cache_days = int(storage.get("cache_retention_days", 0) or 0)
+    audit_days = int(storage.get("audit_log_retention_days", 180) or 0)
+
+    if cache_days <= 0 and audit_days <= 0:
+        logger.info("缓存与审计日志保留期均未配置，定期清理任务退出")
+        return
+
+    logger.info(f"定期清理任务已启动: cache_retention_days={cache_days}, audit_log_retention_days={audit_days}")
+    while True:
+        try:
+            if cache_days > 0:
+                deleted = await asyncio.to_thread(get_cache_manager().cleanup_old_cache, cache_days)
+                if deleted:
+                    logger.info(f"定期清理：删除 {deleted} 条超过 {cache_days} 天的缓存记录")
+            if audit_days > 0:
+                deleted = await asyncio.to_thread(get_audit_logger().cleanup_old_logs, audit_days)
+                if deleted:
+                    logger.info(f"定期清理：删除 {deleted} 条超过 {audit_days} 天的审计日志")
+        except Exception as exc:
+            logger.exception("定期清理执行失败（下个周期重试）: %s", exc)
+        await asyncio.sleep(24 * 3600)
 
 
 def create_app() -> FastAPI:
@@ -100,7 +139,24 @@ def create_app() -> FastAPI:
         app.state.ytdlp_builder = ytdlp_builder
 
         logger.info("启动任务队列处理器")
-        asyncio.create_task(process_task_queue())
+        # 保存引用防止 task 被 GC 回收；done_callback 兜底：处理器一旦退出，
+        # 新任务会永远停在 queued 且无任何报错，必须留下 critical 日志。
+        queue_processor = asyncio.create_task(process_task_queue())
+
+        def _on_queue_processor_done(task: asyncio.Task) -> None:
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                logger.critical(f"任务队列处理器异常退出，新任务将无法被处理: {exc}")
+            else:
+                logger.critical("任务队列处理器意外退出（无异常），新任务将无法被处理")
+
+        queue_processor.add_done_callback(_on_queue_processor_done)
+        app.state.queue_processor = queue_processor
+
+        # 每日定期清理过期缓存与审计日志（cache_retention_days 此前从未生效）
+        app.state.maintenance_task = asyncio.create_task(_periodic_maintenance(config))
 
         logger.info("启动LLM队列处理器线程")
         llm_thread = threading.Thread(target=process_llm_queue, daemon=True)
@@ -143,6 +199,10 @@ def create_app() -> FastAPI:
         # 停止 ASR 监控
         if hasattr(app.state, "asr_monitor") and app.state.asr_monitor:
             app.state.asr_monitor.stop()
+
+        # 取消定期清理任务
+        if hasattr(app.state, "maintenance_task"):
+            app.state.maintenance_task.cancel()
 
         shutdown_all_notifiers()
         logger.info("API服务已关闭")

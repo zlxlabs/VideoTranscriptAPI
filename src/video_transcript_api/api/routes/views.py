@@ -1,3 +1,4 @@
+import asyncio
 import os
 import threading
 from datetime import datetime, timezone
@@ -708,7 +709,7 @@ async def add_task_by_web(request: Request):
     try:
         index_file = static_dir / "index.html"
         if index_file.exists():
-            content = index_file.read_text(encoding="utf-8")
+            content = await asyncio.to_thread(index_file.read_text, encoding="utf-8")
             return HTMLResponse(content=content)
         else:
             logger.error("Web任务添加页面文件不存在: %s", index_file)
@@ -734,8 +735,8 @@ async def export_content(view_token: str, export_type: str, request: Request):
         FileResponse: 文件响应
     """
     try:
-        # 获取查看页面数据
-        view_data = cache_manager.get_view_data_by_token(view_token)
+        # 获取查看页面数据（同步 SQLite + 文件读取，线程池执行避免阻塞事件循环）
+        view_data = await asyncio.to_thread(cache_manager.get_view_data_by_token, view_token)
         if not view_data:
             return Response(
                 content="❌ 页面不存在\n\nview_token 无效或已过期。",
@@ -772,7 +773,7 @@ async def export_content(view_token: str, export_type: str, request: Request):
             )
 
         try:
-            content = file_path.read_text(encoding="utf-8")
+            content = await asyncio.to_thread(file_path.read_text, encoding="utf-8")
         except Exception as exc:
             logger.error("读取文件失败: %s, 错误: %s", file_path, exc)
             return Response(
@@ -824,6 +825,87 @@ async def export_content(view_token: str, export_type: str, request: Request):
         )
 
 
+def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    成功任务的视图准备：渲染 HTML、统计各阶段文本字数。
+
+    包含大量同步文件读取与 Markdown 渲染，调用方需通过线程池执行，
+    避免阻塞事件循环。会就地修改 view_data（summary_html / calibrated_html），返回 stats。
+    """
+    import json
+
+    if view_data.get("summary"):
+        view_data["summary_html"] = render_markdown_to_html(view_data["summary"])
+
+    cache_dir = view_data.get("cache_dir")
+    stats: Dict[str, Any] = {"original_length": 0, "calibrated_length": 0, "summary_length": 0}
+
+    cache_dir_path = Path(cache_dir) if cache_dir else None
+    if cache_dir_path and cache_dir_path.exists():
+        # 1. 计算原始转录字数
+        funasr_file = cache_dir_path / "transcript_funasr.json"
+        capswriter_file = cache_dir_path / "transcript_capswriter.txt"
+
+        if funasr_file.exists():
+            # FunASR JSON 格式：提取 text 字段
+            try:
+                with open(funasr_file, "r", encoding="utf-8") as f:
+                    funasr_data = json.load(f)
+                # 复用现有的格式化方法
+                from ...transcriber import FunASRSpeakerClient
+
+                funasr_client = FunASRSpeakerClient()
+                transcript_text = funasr_client.format_transcript_with_speakers(funasr_data)
+                stats["original_length"] = len(transcript_text)
+                logger.debug(f"原始转录字数(FunASR): {stats['original_length']}")
+            except Exception as exc:
+                logger.error(f"计算FunASR转录字数失败: {exc}")
+        elif capswriter_file.exists():
+            # CapsWriter 纯文本格式
+            try:
+                with open(capswriter_file, "r", encoding="utf-8") as f:
+                    stats["original_length"] = len(f.read())
+                logger.debug(f"原始转录字数(CapsWriter): {stats['original_length']}")
+            except Exception as exc:
+                logger.error(f"计算CapsWriter转录字数失败: {exc}")
+
+        # 2. 计算校对文本字数
+        calibrated_file = cache_dir_path / "llm_calibrated.txt"
+        if calibrated_file.exists():
+            try:
+                with open(calibrated_file, "r", encoding="utf-8") as f:
+                    stats["calibrated_length"] = len(f.read())
+                logger.debug(f"校对文本字数: {stats['calibrated_length']}")
+            except Exception as exc:
+                logger.error(f"计算校对文本字数失败: {exc}")
+
+        # 3. 计算总结文本字数
+        summary_file = cache_dir_path / "llm_summary.txt"
+        if summary_file.exists():
+            try:
+                with open(summary_file, "r", encoding="utf-8") as f:
+                    stats["summary_length"] = len(f.read())
+                logger.debug(f"总结文本字数: {stats['summary_length']}")
+            except Exception as exc:
+                logger.error(f"计算总结文本字数失败: {exc}")
+
+        # 4. 读取校准质量统计
+        processed_file = cache_dir_path / "llm_processed.json"
+        if processed_file.exists():
+            try:
+                with open(processed_file, "r", encoding="utf-8") as f:
+                    processed_data = json.load(f)
+                cal_stats = processed_data.get("calibration_stats")
+                if cal_stats:
+                    stats["calibration_stats"] = cal_stats
+            except Exception as exc:
+                logger.error(f"读取校准统计失败: {exc}")
+
+    # 简化渲染逻辑：直接调用 render_with_cache_analysis
+    view_data["calibrated_html"] = render_calibrated_content_smart(cache_dir)
+    return stats
+
+
 @router.get("/view/{view_token}", response_class=HTMLResponse)
 async def view_transcript(
     view_token: str,
@@ -832,7 +914,8 @@ async def view_transcript(
     page: Optional[str] = None,
 ):
     try:
-        view_data = cache_manager.get_view_data_by_token(view_token)
+        # 同步 SQLite + 文件读取，线程池执行避免阻塞事件循环
+        view_data = await asyncio.to_thread(cache_manager.get_view_data_by_token, view_token)
         if not view_data:
             if raw:
                 return Response(
@@ -856,11 +939,11 @@ async def view_transcript(
 
         # 如果请求导出原始文件（GitHub Raw 模式）
         if raw:
-            return handle_raw_export(view_data, raw)
+            return await asyncio.to_thread(handle_raw_export, view_data, raw)
 
         # 如果请求 HTML 页面导出（爬虫友好模式）
         if page:
-            return handle_page_export(view_data, page)
+            return await asyncio.to_thread(handle_page_export, view_data, page)
 
         if view_data.get("created_at"):
             view_data["created_at_display"] = format_datetime_for_display(
@@ -890,95 +973,9 @@ async def view_transcript(
                 "cleaned.html",
                 {"request": request, **view_data},
             )
+        stats: Dict[str, Any] = {"original_length": 0, "calibrated_length": 0, "summary_length": 0}
         if view_data["status"] == "success":
-            if view_data.get("summary"):
-                view_data["summary_html"] = render_markdown_to_html(
-                    view_data["summary"]
-                )
-
-            cache_dir = view_data.get("cache_dir")
-
-            # 计算字数统计
-            stats = {"original_length": 0, "calibrated_length": 0, "summary_length": 0}
-
-            if cache_dir and os.path.exists(cache_dir):
-                cache_dir_path = Path(cache_dir)
-
-                # 1. 计算原始转录字数
-                funasr_file = cache_dir_path / "transcript_funasr.json"
-                capswriter_file = cache_dir_path / "transcript_capswriter.txt"
-
-                if funasr_file.exists():
-                    # FunASR JSON 格式：提取 text 字段
-                    try:
-                        import json
-
-                        with open(funasr_file, "r", encoding="utf-8") as f:
-                            funasr_data = json.load(f)
-                        # 复用现有的格式化方法
-                        from ...transcriber import FunASRSpeakerClient
-
-                        funasr_client = FunASRSpeakerClient()
-                        transcript_text = funasr_client.format_transcript_with_speakers(
-                            funasr_data
-                        )
-                        stats["original_length"] = len(transcript_text)
-                        logger.debug(
-                            f"原始转录字数(FunASR): {stats['original_length']}"
-                        )
-                    except Exception as exc:
-                        logger.error(f"计算FunASR转录字数失败: {exc}")
-                elif capswriter_file.exists():
-                    # CapsWriter 纯文本格式
-                    try:
-                        with open(capswriter_file, "r", encoding="utf-8") as f:
-                            stats["original_length"] = len(f.read())
-                        logger.debug(
-                            f"原始转录字数(CapsWriter): {stats['original_length']}"
-                        )
-                    except Exception as exc:
-                        logger.error(f"计算CapsWriter转录字数失败: {exc}")
-
-                # 2. 计算校对文本字数
-                calibrated_file = cache_dir_path / "llm_calibrated.txt"
-                if calibrated_file.exists():
-                    try:
-                        with open(calibrated_file, "r", encoding="utf-8") as f:
-                            stats["calibrated_length"] = len(f.read())
-                        logger.debug(f"校对文本字数: {stats['calibrated_length']}")
-                    except Exception as exc:
-                        logger.error(f"计算校对文本字数失败: {exc}")
-
-                # 3. 计算总结文本字数
-                summary_file = cache_dir_path / "llm_summary.txt"
-                if summary_file.exists():
-                    try:
-                        with open(summary_file, "r", encoding="utf-8") as f:
-                            stats["summary_length"] = len(f.read())
-                        logger.debug(f"总结文本字数: {stats['summary_length']}")
-                    except Exception as exc:
-                        logger.error(f"计算总结文本字数失败: {exc}")
-
-            # 4. 读取校准质量统计
-            processed_file = cache_dir_path / "llm_processed.json" if cache_dir else None
-            if processed_file and processed_file.exists():
-                try:
-                    import json
-                    with open(processed_file, "r", encoding="utf-8") as f:
-                        processed_data = json.load(f)
-                    cal_stats = processed_data.get("calibration_stats")
-                    if cal_stats:
-                        stats["calibration_stats"] = cal_stats
-                except Exception as exc:
-                    logger.error(f"读取校准统计失败: {exc}")
-
-            fallback_text = view_data.get("transcript", "")
-            transcript_path = Path(cache_dir) / "llm_calibrated.txt"
-            if transcript_path.exists():
-                fallback_text = transcript_path.read_text(encoding="utf-8")
-
-            # 简化渲染逻辑：直接调用 render_with_cache_analysis
-            view_data["calibrated_html"] = render_calibrated_content_smart(cache_dir)
+            stats = await asyncio.to_thread(_prepare_success_view, view_data)
 
         return templates.TemplateResponse(
             "transcript.html",

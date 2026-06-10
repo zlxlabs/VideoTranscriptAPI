@@ -57,7 +57,9 @@
         "temp_retention_hours": 24,           // temp 兜底保留时长（小时）：超龄且非活跃任务的孤儿文件会被清理
         "workspace_dir": "./data/workspace",   // 转录工作目录
         "cache_dir": "./data/cache",          // 缓存目录（持久化存储）
-        "cache_retention_days": 360            // 缓存保留天数（仅作用于 cache_dir，与 temp 无关）
+        "cache_retention_days": 360,           // 缓存保留天数（每日定时清理超期缓存记录及文件），0 表示永久保留
+        "audit_log_retention_days": 180,       // 审计日志保留天数（每日定时清理 audit.db 超期记录），0 表示永久保留
+        "max_download_size_mb": 4096           // 单文件下载大小上限（MB），0 表示不限制，防止超长视频填满磁盘
     },
 
     // ============================================================
