@@ -228,17 +228,17 @@ class FunASRSpeakerClient:
     # ----------------------------------------------------------------- #
     # phase 1：提交（上传 / 命中缓存 / 入队）
     # ----------------------------------------------------------------- #
-    async def _submit(self, file_path, file_size, file_hash, output_format, force_refresh):
+    async def _submit(self, file_path, file_size, file_hash, output_format, force_refresh, deadline):
         """发起 upload_request 并完成上传。
 
         返回:
             {"kind": "result", "result": <dict>}                 缓存命中或快速完成
             {"kind": "task", "task_id": <str>, "first_delay": <int>}  已入队待轮询
-        异常: FunASRQueueFull / FunASRFatal
+        异常: FunASRQueueFull / FunASRPollMiss / FunASRFatal
         """
         if file_size > 5 * 1024 * 1024:  # >5MB 使用分片
             return await self._upload_chunked(
-                file_path, file_size, file_hash, output_format, force_refresh
+                file_path, file_size, file_hash, output_format, force_refresh, deadline
             )
         return await self._upload_single(
             file_path, file_size, file_hash, output_format, force_refresh
@@ -321,7 +321,7 @@ class FunASRSpeakerClient:
         return outcome
 
     async def _upload_chunked(
-        self, file_path, file_size, file_hash, output_format, force_refresh
+        self, file_path, file_size, file_hash, output_format, force_refresh, deadline
     ):
         """分片上传"""
         chunk_size = 1024 * 1024  # 1MB分片
@@ -378,10 +378,45 @@ class FunASRSpeakerClient:
                 logger.info(f"上传进度: {progress:.1f}% ({chunk_index + 1}/{total_chunks})")
 
         logger.info("所有分片上传完成，等待处理...")
-        outcome = self._post_upload_outcome(await self.receive_message())
-        if outcome["kind"] == "task" and outcome["task_id"] is None:
-            outcome["task_id"] = task_id
-        return outcome
+        first_response = await self.receive_message()
+        return await self._finalize_with_retry(task_id, first_response, deadline)
+
+    async def _finalize_with_retry(self, task_id, response, deadline):
+        """解析分片上传后的响应；queue_full 时发 finalize_upload 重试（不重传字节）。
+
+        分片场景下 server 在 queue_full 时保留 session + 已落地文件（按 task_id 存
+        handler 级，跨连接存活），客户端只需重发轻量的 finalize_upload 即可重新走准入，
+        避免重传整个大文件。session 丢失（error）则交由上层凭 file_hash 整体重投。
+
+        异常: FunASRPollMiss（session 丢失→重投）/ FunASRFatal / FunASRTimeout
+        """
+        while True:
+            if self._is_queue_full(response):
+                qf = self._queue_full(response)
+                if time.time() + qf.retry_after >= deadline:
+                    raise FunASRTimeout("分片 finalize 重试超过总超时")
+                logger.info(
+                    f"分片队列满，{qf.retry_after}秒后发 finalize_upload 重试（不重传）"
+                )
+                await asyncio.sleep(qf.retry_after)
+                await self.send_message({
+                    "type": "finalize_upload",
+                    "data": {"task_id": task_id},
+                })
+                response = await self.receive_message()
+                continue
+
+            if response.get("type") == "error":
+                # finalize 阶段的 error（session_not_found/task_not_found）→ session 已失效，
+                # 凭 file_hash 整体重投（命中缓存秒回，否则重新分片）。
+                data = response.get("data", {}) or {}
+                logger.info(f"finalize 失败({data.get('error')})，凭 file_hash 重投")
+                raise FunASRPollMiss(data.get("error", "finalize_failed"))
+
+            outcome = self._post_upload_outcome(response)
+            if outcome["kind"] == "task" and outcome["task_id"] is None:
+                outcome["task_id"] = task_id
+            return outcome
 
     # ----------------------------------------------------------------- #
     # phase 2：轮询 task_status_batch 直到终态
@@ -498,7 +533,7 @@ class FunASRSpeakerClient:
                 # 已有 task_id（断线续轮）→ 跳过上传，直接轮询
                 if task_id is None:
                     outcome = await self._submit(
-                        audio_path, file_size, file_hash, output_format, force_refresh
+                        audio_path, file_size, file_hash, output_format, force_refresh, deadline
                     )
                     if outcome["kind"] == "result":
                         return self._finalize(outcome["result"], start_time)

@@ -5,8 +5,8 @@
 > Blast radius：1 个文件 + config + 测试。可逆。
 
 > **状态：已实现（2026-06-16）**。代码 `src/video_transcript_api/transcriber/funasr_client.py`，
-> 测试 `tests/unit/test_funasr_client_polling.py`（15 用例全绿），config 新增 4 项轮询参数。
-> 唯一遗留：分片 `queue_full` 重投的 `finalize_upload`「不重传」优化（见 §5，当前退化为整文件重投，正确但费带宽）。
+> 测试 `tests/unit/test_funasr_client_polling.py`（18 用例全绿），config 新增 4 项轮询参数。
+> 分片 `queue_full` 的 `finalize_upload`「不重传」优化已落地（见 §5）。
 
 ---
 
@@ -98,13 +98,32 @@ _poll(task_id, file_hash, first_delay, deadline):
 7. **retry_after 钳制**：`clamp(retry_after, 1, 60)`，防服务端给出异常值。
 8. **向后兼容**：upload_request 不发 `engine`/`diarize`/`language` → 走 server 默认（diarize=true），行为不变。这些新字段**本次不引入**（不扩范围），仅记为后续可选项。
 
-### 协议核对结论（已查 funASR `docs/开发/Server-Client 交互协议.md` §1.5）
+### 协议核对结论（已查 funASR 协议文档 + server `websocket_handler.py` 源码）
 - `task_status_batch` 响应 `items[]` 字段已确认：`{task_id, status, progress, result, srt_content, error}`；
   `completed` 时 JSON 内联 `result`、SRT 内联 `srt_content`；`pending/processing` 三者全 null；
   poll-miss = `status=null` + `error="task_expired"|"task_not_found"`。已据此实现 `_handle_poll_message`。
 - 终态全集 `completed/failed/timed_out/cancelled` 已全部识别。
-- **遗留 TODO**：分片 `queue_full` 的 `finalize_upload`「不重传」精确报文，协议文档指向另一设计文档未直给；
-  当前实现退化为**整文件重投**（正确，仅分片场景费带宽）。待拿到 `finalize_upload` 报文后再优化。
+
+### finalize_upload「不重传」优化（已实现，`_finalize_with_retry`）
+`queue_full` 报文：`{type:"queue_full", data:{task_id, retry_after, queue_size, max_queue_size, error, message}}`。
+两条路径的 server 行为不同（源自 `websocket_handler.py`）：
+
+```
+单文件 queue_full → server 删除已落地文件 → 客户端必须整包重传
+                   （走外层 FunASRQueueFull 分支，task_id=None 重投）✓ 不变
+
+分片   queue_full → server 保留 session+已落地文件（按 task_id 存 handler 级，
+                   跨连接存活）→ 客户端发 finalize_upload 重试，不重传字节
+                   finalize_upload 请求体: {"type":"finalize_upload","data":{"task_id": id}}
+                   finalize 响应: upload_complete|task_queued(入队成功) /
+                                  queue_full(仍满, 退避再 finalize) /
+                                  error(session 丢失 → 凭 file_hash 整体重投)
+```
+
+实现位于 `_upload_chunked` 末尾的 `_finalize_with_retry(task_id, response, deadline)`：分片队列满时
+按 `retry_after` 退避后只发 `finalize_upload`（同连接保持 session 温），`upload_chunk` 不重发；
+仍满则继续 finalize（受 `deadline` 约束）；session 丢失抛 `FunASRPollMiss` 交上层凭 hash 重投。
+测试 T13~T15 覆盖：不重传断言（`upload_chunk` 计数=6 非 12）、双 finalize、session 丢失回退。
 
 ## 6. 测试计划（tests/unit/，纯英文日志）
 
@@ -136,3 +155,5 @@ _poll(task_id, file_hash, first_delay, deadline):
 - 线② 线程解耦（管线在 funASR 处劈开 + 状态机中间态 + task_id 持久化崩溃恢复）—— 收益仅在 >10 任务真并发，与 server 准入限流意图相悖，暂不做。
 - `engine`/`diarize`/`language` 请求字段的 opt-in。
 - 批量多任务共享一条连接的 task_status_batch（>50 分批）—— 当前每任务一连接，单 id 轮询已够。
+
+> 注：分片 `finalize_upload`「不重传」优化原列为遗留 TODO，现已实现（见 §5）。

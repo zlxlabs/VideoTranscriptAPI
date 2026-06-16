@@ -427,6 +427,81 @@ def test_sparse_completed_item_no_keyerror(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# T13 - chunked queue_full -> finalize_upload retry, NO chunk re-transmit
+# --------------------------------------------------------------------------- #
+def test_chunked_queue_full_finalize_no_retransmit(monkeypatch, tmp_path):
+    clock = FakeClock()
+    chunk_acks = [
+        {"type": "chunk_received", "data": {"progress": (i + 1) / 6 * 100}}
+        for i in range(6)
+    ]
+    ws = FakeWS([
+        WELCOME,
+        {"type": "upload_ready", "data": {"task_id": "tc"}},
+        *chunk_acks,
+        {"type": "queue_full", "data": {"task_id": "tc", "retry_after": 20,
+                                        "queue_size": 50, "max_queue_size": 50}},
+        # finalize_upload retry is admitted this time
+        {"type": "upload_complete", "data": {"task_id": "tc"}},
+        batch([{"task_id": "tc", "status": "completed", "result": result_payload("fin")}]),
+    ])
+    client, _ = make_client(monkeypatch, [ws], clock)
+
+    out = run(client, big_file(tmp_path))
+
+    assert out == result_payload("fin")
+    assert 20 in clock.sleeps                          # honored retry_after
+    assert ws.sent_types.count("finalize_upload") == 1
+    assert ws.sent_types.count("upload_chunk") == 6     # NOT 12 -> no re-transmit
+    fin = next(m for m in ws.sent if m["type"] == "finalize_upload")
+    assert fin["data"] == {"task_id": "tc"}
+
+
+def test_chunked_queue_full_finalize_twice_then_success(monkeypatch, tmp_path):
+    clock = FakeClock()
+    chunk_acks = [{"type": "chunk_received", "data": {"progress": 100}} for _ in range(6)]
+    ws = FakeWS([
+        WELCOME,
+        {"type": "upload_ready", "data": {"task_id": "tc"}},
+        *chunk_acks,
+        {"type": "queue_full", "data": {"task_id": "tc", "retry_after": 15}},
+        {"type": "queue_full", "data": {"task_id": "tc", "retry_after": 15}},
+        {"type": "upload_complete", "data": {"task_id": "tc"}},
+        batch([{"task_id": "tc", "status": "completed", "result": result_payload()}]),
+    ])
+    client, _ = make_client(monkeypatch, [ws], clock)
+
+    out = run(client, big_file(tmp_path))
+
+    assert out == result_payload()
+    assert ws.sent_types.count("finalize_upload") == 2
+    assert ws.sent_types.count("upload_chunk") == 6     # still no re-transmit
+
+
+def test_chunked_finalize_session_lost_falls_back_to_reupload(monkeypatch, tmp_path):
+    clock = FakeClock()
+    chunk_acks = [{"type": "chunk_received", "data": {"progress": 100}} for _ in range(6)]
+    s1 = FakeWS([
+        WELCOME,
+        {"type": "upload_ready", "data": {"task_id": "tc"}},
+        *chunk_acks,
+        {"type": "queue_full", "data": {"task_id": "tc", "retry_after": 10}},
+        # session evicted on server -> finalize fails
+        {"type": "error", "data": {"error": "task_not_found"}},
+    ])
+    s2 = FakeWS([
+        WELCOME,
+        {"type": "task_complete", "data": {"result": result_payload("recovered")}},
+    ])
+    client, _ = make_client(monkeypatch, [s1, s2], clock)
+
+    out = run(client, big_file(tmp_path))
+
+    assert out == result_payload("recovered")
+    assert s2.sent_types[0] == "upload_request"  # full resubmit by file_hash
+
+
+# --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
 def json_cfg(**overrides):
