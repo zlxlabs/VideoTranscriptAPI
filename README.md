@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.101+-green.svg)](https://fastapi.tiangolo.com/)
-[![License](https://img.shields.io/badge/License-MIT%2B%20Commons%20Clause-yellow.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-yellow.svg)](LICENSE)
 
 开发契机和玩法分享：[LLM 吞噬一切，我用 AI 长出来的那些工具](https://mp.weixin.qq.com/s/w8VnWJcUp5VkD5J-fYCUrg)
 
@@ -169,4 +169,4 @@ uv run pytest tests/integration/       # 集成测试
 
 ## 开源协议
 
-基于 **MIT + Commons Clause** 开源。允许非商业用途的学习、修改、分发；禁止售卖或商业集成。详见 [LICENSE](LICENSE)。
+基于 **[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0)** 开源。允许任何**非商业用途**的使用、学习、修改和分发；**禁止一切商业用途**（包括企业内部用于盈利业务、对外售卖或商业集成）。学术、教育、公益、政府等非营利机构的使用视为许可范围内。详见 [LICENSE](LICENSE)。
