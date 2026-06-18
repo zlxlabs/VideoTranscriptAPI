@@ -1,5 +1,6 @@
 """有说话人文本处理器"""
 
+import re
 import time
 from typing import Dict, List, Optional, Any
 from concurrent.futures import ThreadPoolExecutor
@@ -639,6 +640,108 @@ class SpeakerAwareProcessor:
             )
 
         return merged_dialogs
+
+    @staticmethod
+    def _coerce_dialog_id(raw: Any) -> Optional[int]:
+        """将 LLM 返回的 id 规范化为 int。
+
+        接受 int、整数值的 float（3.0）、纯数字字符串（"3"）；
+        其余（"abc"、1.5、None、列表等）一律返回 None 视为 malformed。
+        """
+        if isinstance(raw, bool):  # bool 是 int 子类，显式排除
+            return None
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, float):
+            return int(raw) if raw.is_integer() else None
+        if isinstance(raw, str):
+            s = raw.strip()
+            if s.lstrip("-").isdigit():
+                return int(s)
+        return None
+
+    @staticmethod
+    def _valid_correction_text(text: Any) -> bool:
+        """校验单条 correction 的 text 是否可用。
+
+        拒绝：非字符串、空/纯空白、以及把 prompt 行格式 `[id][spk]:` 原样回吐的脏数据。
+        """
+        if not isinstance(text, str):
+            return False
+        stripped = text.strip()
+        if not stripped:
+            return False
+        # 拒绝模型把输入行格式 `[0][S0]: ...` 原样抄回
+        if re.match(r"^\[\d+\]\[", stripped):
+            return False
+        return True
+
+    def _apply_corrections_by_id(
+        self, corrections: List[Dict], original_chunk: List[Dict]
+    ) -> tuple:
+        """按 id 锚点合并校对结果。
+
+        id == original_chunk 中的下标（0 基）。speaker/时间戳/对话数量全部取自原始，
+        LLM 的输出物理上无法影响结构——结构不匹配这个故障类不再存在。
+
+        合并语义：
+        - id 命中且 text 合法 → 用校对 text（counts.applied）
+        - id 缺失（LLM 没返回该条）→ 保留原文（counts.kept_original）
+        - id 越界 → 忽略并计数（counts.unknown_id）
+        - id 重复 → 取首条，其余计数（counts.duplicate_id）
+        - id/text 非法 → 计为 malformed，该条保留原文
+
+        Returns:
+            (merged_dialogs, counts) — merged 长度恒等于 original_chunk
+        """
+        n = len(original_chunk)
+        counts = {
+            "applied": 0,
+            "kept_original": 0,
+            "unknown_id": 0,
+            "duplicate_id": 0,
+            "malformed": 0,
+        }
+
+        by_id: Dict[int, str] = {}
+        for item in corrections or []:
+            if not isinstance(item, dict):
+                counts["malformed"] += 1
+                continue
+            cid = self._coerce_dialog_id(item.get("id"))
+            text = item.get("text")
+            if cid is None or not self._valid_correction_text(text):
+                counts["malformed"] += 1
+                continue
+            if cid < 0 or cid >= n:
+                counts["unknown_id"] += 1
+                continue
+            if cid in by_id:
+                counts["duplicate_id"] += 1  # 首条已采用，丢弃后续
+                continue
+            by_id[cid] = text
+
+        merged_dialogs = []
+        for idx, original in enumerate(original_chunk):
+            original_text = original.get("original_text", original.get("text", ""))
+            if idx in by_id:
+                text = by_id[idx]
+                counts["applied"] += 1
+            else:
+                text = original.get("text", "")
+                counts["kept_original"] += 1
+            merged_dialogs.append(
+                {
+                    "start_time": original.get("start_time", "00:00:00"),
+                    "end_time": original.get("end_time", "00:00:00"),
+                    "duration": original.get("duration", 0),
+                    "speaker": original.get("speaker", "unknown"),
+                    "text": text,
+                    "original_text": original_text,
+                }
+            )
+
+        return merged_dialogs, counts
 
     def _apply_structured_fallback(
         self,
