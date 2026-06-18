@@ -496,9 +496,12 @@ class CacheManager:
                     logger.error(f"structured 类型要求 content 为字典，实际类型: {type(content)}")
                     return False
 
-                # 添加格式版本标记（兼容旧渲染器）
+                # 添加格式版本标记（用于溯源产出该缓存的校对流水线）
+                # v3: ID 锚点校对契约（corrections[{id,text}]，结构为 ground truth）。
+                # 注意：本字段仅作溯源标记，不参与缓存复用判定（复用 gate 是 llm_calibrated.txt 是否存在）；
+                # 历史 v2 缓存为修复前文本，需对个别集手动重处理才能拿到 ID 锚点修复后的结果。
                 structured_data = {
-                    "format_version": "v2",
+                    "format_version": "v3",
                     **content  # 合并传入的结构化数据
                 }
 

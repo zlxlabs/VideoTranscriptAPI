@@ -212,7 +212,7 @@ class TestSaveLLMResult:
         files = list(cache_dir.rglob("llm_processed.json"))
         assert len(files) == 1
         data = json.loads(files[0].read_text(encoding="utf-8"))
-        assert data["format_version"] == "v2"
+        assert data["format_version"] == "v3"
         assert data["sections"][0]["title"] == "Intro"
 
     def test_structured_rejects_non_dict(self, cm):

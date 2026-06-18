@@ -147,5 +147,67 @@ class TestApplyCorrectionsById(unittest.TestCase):
         self.assertEqual(counts["malformed"], 3)
 
 
+class TestVol170Regression(unittest.TestCase):
+    """End-to-end (deterministic mock) regression for the VOL.170 bug:
+    key_info has the correct '威皇小海鲜' but the ASR chunk says '微煌'. Under the
+    OLD whole-chunk-revert design, any dialog-count drift discarded the whole
+    chunk and the correction was lost. With ID anchoring the correction survives
+    even when the LLM omits some ids."""
+
+    def _run(self, corrections):
+        from video_transcript_api.llm.core.key_info_extractor import KeyInfo
+
+        p = _make_processor()
+        # 3 dialogs mirroring the real funasr segments around 00:49:54
+        chunk = [
+            {"speaker": "惠子", "text": "微煌小海鲜？", "start_time": "00:49:54",
+             "end_time": "00:49:56", "duration": 2.0},
+            {"speaker": "肥姐", "text": "威煌小海鲜是叫这个名字吗？", "start_time": "00:49:56",
+             "end_time": "00:50:01", "duration": 5.0},
+            {"speaker": "惠子", "text": "微煌小海鲜，特别有特色的花雕鸡肉锅底", "start_time": "00:50:01",
+             "end_time": "00:50:09", "duration": 8.0},
+        ]
+        result = MagicMock()
+        result.structured_output = {"corrections": corrections}
+        p.llm_client.call = MagicMock(return_value=result)
+        key_info = KeyInfo(
+            names=[], places=[], technical_terms=[],
+            brands=["威皇小海鲜"], abbreviations=[], foreign_terms=[], other_entities=[],
+        )
+        calibrated_chunks, stats = p._calibrate_chunks(
+            chunks=[chunk], original_chunks=[chunk], key_info=key_info,
+            speaker_mapping={}, title="越山吃海", description="威皇小海鲜的花雕鸡火锅",
+            selected_models={"calibrate_model": "test-model", "calibrate_reasoning_effort": None},
+            language="zh",
+        )
+        return calibrated_chunks[0], stats
+
+    def test_full_coverage_applies_brand_fix(self):
+        """LLM returns all 3 ids with 微煌/威煌 -> 威皇: every dialog corrected."""
+        merged, stats = self._run([
+            {"id": 0, "text": "威皇小海鲜？"},
+            {"id": 1, "text": "威皇小海鲜是叫这个名字吗？"},
+            {"id": 2, "text": "威皇小海鲜，特别有特色的花雕鸡锅底"},
+        ])
+        joined = " ".join(d["text"] for d in merged)
+        self.assertIn("威皇小海鲜", joined)
+        self.assertNotIn("微煌", joined)
+        self.assertEqual(stats["success_count"], 1)
+
+    def test_partial_coverage_still_keeps_brand_fix(self):
+        """Even if the LLM omits id=1, the 威皇 fix on ids 0/2 survives — the
+        whole chunk is NOT discarded (the exact old-design failure)."""
+        merged, stats = self._run([
+            {"id": 0, "text": "威皇小海鲜？"},
+            {"id": 2, "text": "威皇小海鲜，特别有特色的花雕鸡锅底"},
+        ])
+        self.assertEqual(merged[0]["text"], "威皇小海鲜？")
+        self.assertEqual(merged[2]["text"], "威皇小海鲜，特别有特色的花雕鸡锅底")
+        # id=1 omitted -> keeps original ASR text, not discarded
+        self.assertEqual(merged[1]["text"], "威煌小海鲜是叫这个名字吗？")
+        self.assertEqual(stats["fallback_count"], 0)
+        self.assertEqual(stats["dialog_counts"]["applied"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()
