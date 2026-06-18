@@ -29,6 +29,7 @@ def _make_processor():
     config.calibration_concurrent_limit = 2
     config.min_calibrate_ratio = 0.8
     config.chunk_time_budget = 300
+    config.min_correction_coverage = 0.5
 
     llm_client = MagicMock()
     key_info_extractor = MagicMock()
@@ -59,8 +60,8 @@ class TestCalibrationStats(unittest.TestCase):
         def make_result(n):
             result = MagicMock()
             result.structured_output = {
-                "calibrated_dialogs": [
-                    {"speaker": "A", "text": f"calibrated {i}"}
+                "corrections": [
+                    {"id": i, "text": f"calibrated {i}"}
                     for i in range(n)
                 ]
             }
@@ -132,9 +133,9 @@ class TestCalibrationStats(unittest.TestCase):
         # First chunk succeeds, second chunk fails
         success_result = MagicMock()
         success_result.structured_output = {
-            "calibrated_dialogs": [
-                {"speaker": "A", "text": "ok 0"},
-                {"speaker": "A", "text": "ok 1"},
+            "corrections": [
+                {"id": 0, "text": "ok 0"},
+                {"id": 1, "text": "ok 1"},
             ]
         }
         processor.llm_client.call = MagicMock(
@@ -161,16 +162,20 @@ class TestCalibrationStats(unittest.TestCase):
         self.assertEqual(cal_stats["success_count"], 1)
         self.assertEqual(cal_stats["failed_count"], 1)
 
-    def test_structure_mismatch_counts_as_fallback(self):
-        """When calibrated dialog count doesn't match original, it's a fallback."""
-        processor = _make_processor()
+    def test_partial_coverage_keeps_applied_corrections(self):
+        """REGRESSION: when the LLM returns corrections for only some ids,
+        the ID-anchor merge KEEPS those corrections (missing ids fall back to
+        original) instead of discarding the whole chunk. This is the exact bug
+        that made "威皇小海鲜" revert under the old whole-chunk-revert design."""
+        processor = _make_processor()  # max_calibration_retries=0
         chunks = [_make_chunk(3)]
 
-        # Return wrong number of dialogs to trigger mismatch
+        # LLM only returns id=0 (1 of 3) -> coverage 33% < 0.5 threshold.
+        # With no retries left, it is accepted as "partial", NOT discarded.
         result = MagicMock()
         result.structured_output = {
-            "calibrated_dialogs": [
-                {"speaker": "A", "text": "only one"},
+            "corrections": [
+                {"id": 0, "text": "fixed zero"},
             ]
         }
         processor.llm_client.call = MagicMock(return_value=result)
@@ -192,8 +197,14 @@ class TestCalibrationStats(unittest.TestCase):
         )
 
         self.assertEqual(cal_stats["total_chunks"], 1)
-        self.assertEqual(cal_stats["fallback_count"], 1)
-        self.assertEqual(cal_stats["success_count"], 0)
+        self.assertEqual(cal_stats["fallback_count"], 0)  # NOT discarded
+        self.assertEqual(cal_stats["partial_count"], 1)
+        # The applied correction survives; missing ids keep original text.
+        texts = [d["text"] for d in calibrated_chunks[0]]
+        self.assertEqual(texts[0], "fixed zero")
+        self.assertEqual(texts[1], "dialog 1")
+        self.assertEqual(cal_stats["dialog_counts"]["applied"], 1)
+        self.assertEqual(cal_stats["dialog_counts"]["kept_original"], 2)
 
 
 if __name__ == "__main__":

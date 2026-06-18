@@ -382,41 +382,63 @@ class SpeakerAwareProcessor:
         )
 
         calibrated_chunks = [None] * len(chunks)
-        # 跟踪每个 chunk 的校准状态: "success" | "fallback" | "failed"
+        # 跟踪每个 chunk 的校准状态: "success" | "partial" | "fallback" | "failed"
         chunk_statuses = ["failed"] * len(chunks)
+        # 每个 chunk 的 ID 锚点合并计数（applied/kept_original/unknown_id/duplicate_id/malformed），用于统计
+        chunk_counts = [None] * len(chunks)
+
+        def _fallback_counts(n: int) -> Dict:
+            """异常/超时回退（整块用原文）时的计数：全部保留原文。"""
+            return {
+                "applied": 0,
+                "kept_original": n,
+                "unknown_id": 0,
+                "duplicate_id": 0,
+                "malformed": 0,
+            }
 
         def calibrate_single_chunk(index: int, chunk: List[Dict]):
-            """校对单个 chunk（含质量验证和时间预算）"""
+            """校对单个 chunk（ID 锚点合并 + 覆盖率重试 + 时间预算）"""
+            n = len(chunk)
             chunk_length = sum(len(d.get("text", "")) for d in chunk)
             logger.debug(
-                f"Calibrating chunk {index + 1}/{len(chunks)}, dialog count: {len(chunk)}, length: {chunk_length}"
+                f"Calibrating chunk {index + 1}/{len(chunks)}, dialog count: {n}, length: {chunk_length}"
             )
 
             max_attempts = self.config.max_calibration_retries + 1
             fallback_strategy = self.config.structured_fallback_strategy
             chunk_budget = self.config.chunk_time_budget
+            min_coverage = self.config.min_correction_coverage
             start_time = time.monotonic()
 
-            best_quality_score = None
-            best_quality_candidate = None
+            # 追踪覆盖率最高的合并结果（重试耗尽时采用，永远不劣于原文）
+            best_candidate = None
+            best_counts = None
+            best_coverage = -1.0
             for attempt in range(max_attempts):
                 # 时间预算检查
                 elapsed = time.monotonic() - start_time
                 if elapsed > chunk_budget:
                     logger.warning(
                         f"Chunk {index + 1} time budget exhausted "
-                        f"({elapsed:.0f}s > {chunk_budget}s), falling back"
+                        f"({elapsed:.0f}s > {chunk_budget}s), using best candidate"
                     )
-                    calibrated_chunks[index] = self._apply_structured_fallback(
-                        original_chunk=chunk,
-                        best_candidate=best_quality_candidate,
-                        last_candidate=None,
-                        fallback_strategy=fallback_strategy,
-                    )
-                    chunk_statuses[index] = "failed"
+                    if best_candidate is not None:
+                        calibrated_chunks[index] = best_candidate
+                        chunk_counts[index] = best_counts
+                        chunk_statuses[index] = "partial"
+                    else:
+                        calibrated_chunks[index] = self._apply_structured_fallback(
+                            original_chunk=chunk,
+                            best_candidate=None,
+                            last_candidate=None,
+                            fallback_strategy=fallback_strategy,
+                        )
+                        chunk_counts[index] = _fallback_counts(n)
+                        chunk_statuses[index] = "failed"
                     return
                 try:
-                    # 构建 prompt（包含对话结构）
+                    # 构建 prompt（每行带 [id] 锚点）
                     chunk_text = self._format_chunk_for_prompt(chunk, speaker_mapping)
 
                     user_prompt = build_structured_calibrate_user_prompt(
@@ -424,7 +446,7 @@ class SpeakerAwareProcessor:
                         video_title=title,
                         description=description,
                         key_info=key_info_text,
-                        dialog_count=len(chunk),
+                        dialog_count=n,
                         min_ratio=self.config.min_calibrate_ratio,
                         language=language,
                     )
@@ -439,27 +461,31 @@ class SpeakerAwareProcessor:
                         task_type="calibrate_chunk",
                     )
 
-                    # 解析结构化输出
-                    calibrated_dialogs = response.structured_output.get(
-                        "calibrated_dialogs", []
-                    )
+                    # 解析结构化输出（ID 锚点修正列表）
+                    corrections = response.structured_output.get("corrections", [])
 
-                    # 合并校对结果与原始对话（保留时间戳 + 强制结构一致性检查）
-                    merged_dialogs = self._merge_calibrated_with_original(
-                        calibrated_dialogs, chunk
+                    # 按 id 查表合并：结构永不失败，缺号自动保留原文
+                    merged_dialogs, counts = self._apply_corrections_by_id(
+                        corrections, chunk
                     )
+                    coverage = (n - counts["kept_original"]) / n if n else 1.0
 
-                    # 若数量或说话人不一致，合并会降级为原始 chunk
-                    if merged_dialogs is chunk:
+                    # 追踪最佳候选（覆盖率优先）
+                    if coverage > best_coverage:
+                        best_coverage = coverage
+                        best_candidate = merged_dialogs
+                        best_counts = counts
+
+                    # 低覆盖（疑似截断/偷懒/空响应）→ 重试而非默默部分不改
+                    if coverage < min_coverage and attempt < max_attempts - 1:
                         logger.warning(
-                            f"Chunk {index + 1} calibration result structure mismatch, "
-                            f"falling back to original"
+                            f"Chunk {index + 1} low correction coverage "
+                            f"({coverage:.0%} < {min_coverage:.0%}, applied={counts['applied']}/{n}, "
+                            f"malformed={counts['malformed']}), retrying ({attempt + 1}/{max_attempts - 1})"
                         )
-                        calibrated_chunks[index] = chunk
-                        chunk_statuses[index] = "fallback"
-                        return
+                        continue
 
-                    # 步骤4: 分段质量验证（可选）
+                    # 步骤4: 分段质量验证（可选，默认关闭）
                     if self.config.structured_validation_enabled:
                         logger.debug(f"Validating chunk {index + 1}/{len(chunks)}")
 
@@ -473,12 +499,6 @@ class SpeakerAwareProcessor:
                             },
                             selected_models=selected_models,
                         )
-
-                        if validation_result.get("overall_score") is not None:
-                            score = validation_result.get("overall_score", 0)
-                            if best_quality_score is None or score > best_quality_score:
-                                best_quality_score = score
-                                best_quality_candidate = merged_dialogs
 
                         if not validation_result["passed"]:
                             if attempt < max_attempts - 1:
@@ -496,10 +516,11 @@ class SpeakerAwareProcessor:
                             )
                             calibrated_chunks[index] = self._apply_structured_fallback(
                                 original_chunk=chunk,
-                                best_candidate=best_quality_candidate,
+                                best_candidate=best_candidate,
                                 last_candidate=merged_dialogs,
                                 fallback_strategy=fallback_strategy,
                             )
+                            chunk_counts[index] = best_counts or counts
                             chunk_statuses[index] = "fallback"
                             return
 
@@ -508,9 +529,14 @@ class SpeakerAwareProcessor:
                             f"(score: {validation_result.get('overall_score', 'N/A')})"
                         )
 
+                    # 接受：覆盖率达标为 success，否则 partial（仍保留已应用的修正，不退原文）
                     calibrated_chunks[index] = merged_dialogs
-                    chunk_statuses[index] = "success"
-                    logger.debug(f"Chunk {index + 1} calibration completed")
+                    chunk_counts[index] = counts
+                    chunk_statuses[index] = "success" if coverage >= min_coverage else "partial"
+                    logger.debug(
+                        f"Chunk {index + 1} calibration completed "
+                        f"(applied={counts['applied']}/{n}, coverage={coverage:.0%})"
+                    )
                     return
 
                 except Exception as e:
@@ -522,13 +548,20 @@ class SpeakerAwareProcessor:
                         continue
 
                     logger.error(f"Chunk {index + 1} calibration failed: {e}")
-                    calibrated_chunks[index] = self._apply_structured_fallback(
-                        original_chunk=chunk,
-                        best_candidate=best_quality_candidate,
-                        last_candidate=merged_dialogs if 'merged_dialogs' in locals() else None,
-                        fallback_strategy=fallback_strategy,
-                    )
-                    chunk_statuses[index] = "failed"
+                    # 异常耗尽：优先采用历史最佳候选，否则回退原文
+                    if best_candidate is not None:
+                        calibrated_chunks[index] = best_candidate
+                        chunk_counts[index] = best_counts
+                        chunk_statuses[index] = "partial"
+                    else:
+                        calibrated_chunks[index] = self._apply_structured_fallback(
+                            original_chunk=chunk,
+                            best_candidate=None,
+                            last_candidate=None,
+                            fallback_strategy=fallback_strategy,
+                        )
+                        chunk_counts[index] = _fallback_counts(n)
+                        chunk_statuses[index] = "failed"
                     return
 
         # 并发处理
@@ -542,30 +575,52 @@ class SpeakerAwareProcessor:
             for future in concurrent.futures.as_completed(futures):
                 future.result()  # 等待完成
 
-        # 统计校准质量
+        # 统计校准质量（块级状态）
         success_count = chunk_statuses.count("success")
+        partial_count = chunk_statuses.count("partial")
         fallback_count = chunk_statuses.count("fallback")
         failed_count = chunk_statuses.count("failed")
         total = len(chunks)
+
+        # 聚合 ID 锚点合并的对话级计数（可观测：哪些 id 被改/保留/异常）
+        dialog_counts = {
+            "applied": 0,
+            "kept_original": 0,
+            "unknown_id": 0,
+            "duplicate_id": 0,
+            "malformed": 0,
+        }
+        for c in chunk_counts:
+            if not c:
+                continue
+            for key in dialog_counts:
+                dialog_counts[key] += c.get(key, 0)
 
         if failed_count == total:
             logger.warning(
                 f"All {total} chunks calibration failed, "
                 f"output is raw ASR text without calibration"
             )
-        elif failed_count > 0 or fallback_count > 0:
+        elif failed_count > 0 or fallback_count > 0 or partial_count > 0:
             logger.warning(
                 f"Calibration partial: {success_count}/{total} succeeded, "
-                f"{fallback_count} fallback, {failed_count} failed"
+                f"{partial_count} partial, {fallback_count} fallback, {failed_count} failed; "
+                f"dialogs applied={dialog_counts['applied']}, kept={dialog_counts['kept_original']}, "
+                f"malformed={dialog_counts['malformed']}"
             )
         else:
-            logger.info(f"All {total} chunks calibrated successfully")
+            logger.info(
+                f"All {total} chunks calibrated successfully "
+                f"(dialogs applied={dialog_counts['applied']}, kept={dialog_counts['kept_original']})"
+            )
 
         calibration_stats = {
             "total_chunks": total,
             "success_count": success_count,
+            "partial_count": partial_count,
             "fallback_count": fallback_count,
             "failed_count": failed_count,
+            "dialog_counts": dialog_counts,
         }
 
         return calibrated_chunks, calibration_stats
@@ -581,7 +636,7 @@ class SpeakerAwareProcessor:
             格式化的文本
         """
         parts = []
-        for dialog in chunk:
+        for idx, dialog in enumerate(chunk):
             speaker = dialog.get("speaker", "")
             text = dialog.get("text", "")
             start_time = dialog.get("start_time", "")
@@ -590,8 +645,10 @@ class SpeakerAwareProcessor:
             if speaker_mapping and speaker in speaker_mapping:
                 speaker = speaker_mapping[speaker]
 
+            # [id] 为 ID 锚点（chunk 内 0 基下标），LLM 必须按此 id 回传修正；
+            # 时间戳仅作上下文，不要求回传。
             time_tag = f"[{start_time}]" if start_time else ""
-            parts.append(f"{time_tag}[{speaker}]: {text}")
+            parts.append(f"[{idx}]{time_tag}[{speaker}]: {text}")
 
         return "\n".join(parts)
 
@@ -611,35 +668,6 @@ class SpeakerAwareProcessor:
             parts.append(f"{speaker}：{text}")
 
         return "\n\n".join(parts)
-
-    def _merge_calibrated_with_original(
-        self, calibrated_dialogs: List[Dict], original_chunk: List[Dict]
-    ) -> List[Dict]:
-        """合并校对结果与原始对话，保留时间戳和原文"""
-        if len(calibrated_dialogs) != len(original_chunk):
-            return original_chunk
-
-        merged_dialogs = []
-        for idx, calibrated in enumerate(calibrated_dialogs):
-            original = original_chunk[idx]
-            original_text = original.get("original_text", original.get("text", ""))
-
-            # 结构一致性检查：说话人必须保持一致
-            if calibrated.get("speaker") != original.get("speaker"):
-                return original_chunk
-
-            merged_dialogs.append(
-                {
-                    "start_time": original.get("start_time", "00:00:00"),
-                    "end_time": original.get("end_time", "00:00:00"),
-                    "duration": original.get("duration", 0),
-                    "speaker": original.get("speaker", "unknown"),
-                    "text": calibrated.get("text", original.get("text", "")),
-                    "original_text": original_text,
-                }
-            )
-
-        return merged_dialogs
 
     @staticmethod
     def _coerce_dialog_id(raw: Any) -> Optional[int]:

@@ -163,8 +163,9 @@ class TestNewArchitecture(unittest.TestCase):
         )
 
         self.assertIn("长度要求", new_style_prompt)
-        self.assertIn("对话数量约束", new_style_prompt)
-        self.assertIn("2 个对话", new_style_prompt)
+        # ID 锚点：约束改为「覆盖约束」，要求每个 id 都返回
+        self.assertIn("覆盖约束", new_style_prompt)
+        self.assertIn("2 段对话", new_style_prompt)
         self.assertIn("关键信息", new_style_prompt)
         self.assertIn("待校对的对话文本", new_style_prompt)
 

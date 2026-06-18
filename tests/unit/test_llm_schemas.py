@@ -65,23 +65,23 @@ class TestCalibrationResultSchema:
     """Tests for the calibration result JSON Schema."""
 
     def test_top_level_structure(self):
-        _assert_json_schema_object(CALIBRATION_RESULT_SCHEMA, ["calibrated_dialogs"])
+        _assert_json_schema_object(CALIBRATION_RESULT_SCHEMA, ["corrections"])
         assert CALIBRATION_RESULT_SCHEMA["additionalProperties"] is False
 
-    def test_calibrated_dialogs_is_array(self):
-        dialogs_prop = CALIBRATION_RESULT_SCHEMA["properties"]["calibrated_dialogs"]
-        assert dialogs_prop["type"] == "array"
+    def test_corrections_is_array(self):
+        corrections_prop = CALIBRATION_RESULT_SCHEMA["properties"]["corrections"]
+        assert corrections_prop["type"] == "array"
 
-    def test_dialog_item_required_fields(self):
-        item_schema = CALIBRATION_RESULT_SCHEMA["properties"]["calibrated_dialogs"]["items"]
+    def test_correction_item_required_fields(self):
+        # ID 锚点：每项仅 {id, text}，不含 speaker/start_time（结构是 ground truth）
+        item_schema = CALIBRATION_RESULT_SCHEMA["properties"]["corrections"]["items"]
         assert item_schema["type"] == "object"
-        assert set(item_schema["required"]) == {"start_time", "speaker", "text"}
+        assert set(item_schema["required"]) == {"id", "text"}
         assert item_schema["additionalProperties"] is False
 
-    def test_dialog_item_field_types(self):
-        props = CALIBRATION_RESULT_SCHEMA["properties"]["calibrated_dialogs"]["items"]["properties"]
-        assert props["start_time"]["type"] == "string"
-        assert props["speaker"]["type"] == "string"
+    def test_correction_item_field_types(self):
+        props = CALIBRATION_RESULT_SCHEMA["properties"]["corrections"]["items"]["properties"]
+        assert props["id"]["type"] == "integer"
         assert props["text"]["type"] == "string"
 
 

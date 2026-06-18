@@ -68,6 +68,8 @@ class LLMConfig:
     max_calibration_retries: int = 2
     calibration_concurrent_limit: int = 3
     chunk_time_budget: int = 300  # 单个 chunk 校对的时间预算（秒），超时直接 fallback
+    # ID 锚点校对：chunk 中被返回修正的对话占比低于此阈值时，视为低覆盖（疑似截断/偷懒）触发重试
+    min_correction_coverage: float = 0.5
     enable_validation: bool = False  # 是否启用分段质量验证（每个chunk独立打分，不再进行整体验证）
     # 结构化校对质量验证配置（对话流）
     structured_validation_enabled: bool = False
@@ -203,6 +205,7 @@ class LLMConfig:
                 "calibration_concurrent_limit", 3
             ),
             chunk_time_budget=calibration_config.get("chunk_time_budget", 300),
+            min_correction_coverage=calibration_config.get("min_correction_coverage", 0.5),
             # enable_validation 保持向后兼容（指向结构化校对质量验证开关）
             enable_validation=structured_validation_enabled,
             structured_validation_enabled=structured_validation_enabled,
