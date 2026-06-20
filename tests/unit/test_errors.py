@@ -10,6 +10,12 @@ from src.video_transcript_api.errors import (
     HTTPForbiddenError,
     ASRConnectionError,
     EmptyTranscriptError,
+    ResolverAuthError,
+    ResolverServerError,
+    InvalidURLError,
+    NonVideoContentError,
+    ResolverResolveError,
+    ResolverResponseError,
 )
 
 
@@ -149,6 +155,47 @@ class TestTranscriptionErrors:
     def test_empty_transcript_inherits_base(self):
         err = EmptyTranscriptError()
         assert isinstance(err, TranscriptAPIError)
+
+
+class TestResolverErrors:
+    """Tests for MediaResolverAPI-related error classes (v1 contract)."""
+
+    def test_resolver_auth_not_retryable(self):
+        err = ResolverAuthError()
+        assert err.retryable is False
+        assert isinstance(err, TranscriptAPIError)
+
+    def test_resolver_server_retryable_and_is_network(self):
+        err = ResolverServerError()
+        assert err.retryable is True
+        # 服务端错误归类为可重试网络类，便于统一处理
+        assert isinstance(err, NetworkError)
+        assert isinstance(err, TranscriptAPIError)
+
+    def test_invalid_url_not_retryable(self):
+        err = InvalidURLError()
+        assert err.retryable is False
+        assert isinstance(err, TranscriptAPIError)
+        assert not isinstance(err, NetworkError)
+
+    def test_non_video_content_not_retryable(self):
+        err = NonVideoContentError()
+        assert err.retryable is False
+        assert isinstance(err, TranscriptAPIError)
+
+    def test_resolve_error_not_retryable(self):
+        err = ResolverResolveError()
+        assert err.retryable is False
+        assert isinstance(err, TranscriptAPIError)
+
+    def test_response_error_not_retryable(self):
+        err = ResolverResponseError()
+        assert err.retryable is False
+        assert isinstance(err, TranscriptAPIError)
+
+    def test_custom_messages_preserved(self):
+        assert NonVideoContentError("note is image").message == "note is image"
+        assert InvalidURLError("bad url").message == "bad url"
 
 
 class TestCatchingBaseClassCatchesSubclass:
