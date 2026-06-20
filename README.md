@@ -26,6 +26,7 @@
 - [funasr_spk_server：funasr server 对应暴露 api，支持音视频转写，分角色，自动合并相同人物的话。](https://github.com/zj1123581321/funasr_spk_server)
 - [CapsWriter-Offline：CapsWriter 的离线版，一个好用的 PC 端的语音输入工具，支持热词、LLM处理。](https://github.com/HaujetZhao/CapsWriter-Offline)
 - [youtube_download_api：YouTube 视频下载服务，作为 yt-dlp 的可选替代后端。](https://github.com/zj1123581321/youtube_download_api)（可选）
+- MediaResolverAPI：短视频 URL → 无水印直链 + 元数据的集中解析服务，可选地接管抖音/小红书解析（可选，见[使用指南](docs/guides/media_resolver.md)）。
 - OpenAI 兼容的 API，比如 Deepseek，量大管饱。
 
 ---
@@ -54,7 +55,7 @@ cp config/config.example.jsonc config/config.jsonc
 # 编辑 config.jsonc，填写 api.auth_token、tikhub.api_key 等
 # 可选：抖音/小红书改走 MediaResolverAPI 集中解析，设
 #   downloaders.use_media_resolver=true 并配置 media_resolver 段
-#   （详见 docs/designs/media-resolver-integration.md）
+#   （使用指南：docs/guides/media_resolver.md）
 
 # 启动
 uv run python main.py --start
@@ -153,7 +154,7 @@ video-transcript-api/
 详细文档位于 [docs/](docs/) 目录：
 
 - **架构设计**：[系统架构与模块详解](docs/architecture.md)
-- **使用指南**：[多渠道通知（企微+飞书）](docs/guides/notification.md) · [多用户系统](docs/guides/multi_user_setup.md)
+- **使用指南**：[多渠道通知（企微+飞书）](docs/guides/notification.md) · [多用户系统](docs/guides/multi_user_setup.md) · [抖音/小红书 MediaResolverAPI 集成](docs/guides/media_resolver.md)
 - **API 指南**：[FunASR](docs/guides/api/funasr_spk_server_client_api.md) · [YouTube](docs/guides/api/youtube_client_guide.md) · [BBDown](docs/guides/api/bbdown_guide.md)
 - **开发文档**：[LLM 工程指南](docs/development/llm/engineering_guide.md) · [并发处理](docs/development/concurrency.md) · [日志系统](docs/development/logging.md)
 - **功能特性**：[Raw/Page 导出](docs/features/raw_export.md) · [Download URL 与元数据覆盖](docs/features/source_url_and_metadata_override.md)

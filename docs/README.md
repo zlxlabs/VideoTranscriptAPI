@@ -70,6 +70,11 @@ docs/
   - 用户管理
   - 使用统计
 
+- [MediaResolverAPI 集成（抖音/小红书）](guides/media_resolver.md)
+  - 何时启用与前置条件
+  - `use_media_resolver` 开关与 `media_resolver` 配置段
+  - 错误提示对照、SSRF 安全、回退与故障排查
+
 ---
 
 ## 🔧 开发文档
