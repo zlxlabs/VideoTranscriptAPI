@@ -52,6 +52,9 @@ uv sync
 # 配置服务
 cp config/config.example.jsonc config/config.jsonc
 # 编辑 config.jsonc，填写 api.auth_token、tikhub.api_key 等
+# 可选：抖音/小红书改走 MediaResolverAPI 集中解析，设
+#   downloaders.use_media_resolver=true 并配置 media_resolver 段
+#   （详见 docs/designs/media-resolver-integration.md）
 
 # 启动
 uv run python main.py --start
