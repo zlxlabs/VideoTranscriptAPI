@@ -11,6 +11,7 @@ All console output must be in English only (no emoji, no Chinese).
 
 import pytest
 
+from video_transcript_api.downloaders import factory
 from video_transcript_api.downloaders.factory import create_downloader
 from video_transcript_api.downloaders.youtube import YoutubeDownloader
 from video_transcript_api.downloaders.bilibili import BilibiliDownloader
@@ -18,6 +19,7 @@ from video_transcript_api.downloaders.douyin import DouyinDownloader
 from video_transcript_api.downloaders.xiaohongshu import XiaohongshuDownloader
 from video_transcript_api.downloaders.xiaoyuzhou import XiaoyuzhouDownloader
 from video_transcript_api.downloaders.generic import GenericDownloader
+from video_transcript_api.downloaders.media_resolver import MediaResolverDownloader
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +133,51 @@ class TestXiaoyuzhouRouting:
 # ---------------------------------------------------------------------------
 # Unknown / Generic fallback
 # ---------------------------------------------------------------------------
+
+class TestMediaResolverRouting:
+    """Factory flag routing (#2-A): both on/off paths must be regression-tested."""
+
+    @pytest.fixture
+    def resolver_on(self, monkeypatch):
+        monkeypatch.setattr(factory, "_use_media_resolver", lambda: True)
+
+    @pytest.fixture
+    def resolver_off(self, monkeypatch):
+        monkeypatch.setattr(factory, "_use_media_resolver", lambda: False)
+
+    @pytest.mark.parametrize("url", [
+        "https://www.douyin.com/video/7123",
+        "https://v.douyin.com/abc/",
+        "https://www.xiaohongshu.com/explore/abc",
+        "https://xhslink.com/abc",
+    ])
+    def test_flag_on_routes_to_resolver(self, resolver_on, url):
+        downloader = create_downloader(url)
+        assert isinstance(downloader, MediaResolverDownloader), (
+            f"flag on: expected MediaResolverDownloader for {url}, got {type(downloader).__name__}"
+        )
+
+    @pytest.mark.parametrize("url,expected", [
+        ("https://www.douyin.com/video/7123", DouyinDownloader),
+        ("https://www.xiaohongshu.com/explore/abc", XiaohongshuDownloader),
+    ])
+    def test_flag_off_routes_to_legacy(self, resolver_off, url, expected):
+        downloader = create_downloader(url)
+        assert isinstance(downloader, expected), (
+            f"flag off: expected {expected.__name__} for {url}, got {type(downloader).__name__}"
+        )
+
+    @pytest.mark.parametrize("url,expected", [
+        ("https://www.bilibili.com/video/BV1xx411c7XW", BilibiliDownloader),
+        ("https://www.youtube.com/watch?v=abc123", YoutubeDownloader),
+        ("https://www.xiaoyuzhoufm.com/episode/abc123", XiaoyuzhouDownloader),
+    ])
+    def test_flag_on_other_platforms_unaffected(self, resolver_on, url, expected):
+        downloader = create_downloader(url)
+        assert isinstance(downloader, expected), (
+            f"flag on: expected {expected.__name__} for {url}, got {type(downloader).__name__}"
+        )
+
 
 class TestGenericFallback:
     """Unknown URLs should fall back to GenericDownloader."""
