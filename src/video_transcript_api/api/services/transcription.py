@@ -20,6 +20,23 @@ from ..context import (
     get_user_manager,
 )
 from ...downloaders import create_downloader
+from ...errors import (
+    NonVideoContentError,
+    ResolverAuthError,
+    InvalidURLError,
+    ResolverResolveError,
+    ResolverResponseError,
+)
+
+# P0-1：解析终态异常需直达用户提示，不能被 try/except 吞掉走默认失败路径。
+# 这些异常不可重试、有明确用户文案，应冒泡到外层 handler 以 str(exc) 反馈用户。
+_TERMINAL_RESOLVER_ERRORS = (
+    NonVideoContentError,
+    ResolverAuthError,
+    InvalidURLError,
+    ResolverResolveError,
+    ResolverResponseError,
+)
 from ...transcriber import FunASRSpeakerClient, Transcriber
 from ...utils.notifications import (
     WechatNotifier,
@@ -684,6 +701,10 @@ def process_transcription(
                         f"video_id={metadata_obj.video_id}, "
                         f"title={metadata_obj.title[:50]}"
                     )
+                except _TERMINAL_RESOLVER_ERRORS:
+                    # P0-1：解析终态异常直达用户，不走默认失败路径
+                    logger.error("[元数据获取] 解析终态异常，向用户透传")
+                    raise
                 except Exception as e:
                     logger.warning(f"[元数据获取] 失败: {e}")
                     parsed_metadata = None
@@ -738,6 +759,10 @@ def process_transcription(
                     logger.info(
                         f"[下载信息] 获取成功: platform={platform}, video_id={video_id}"
                     )
+                except _TERMINAL_RESOLVER_ERRORS:
+                    # P0-1：解析终态异常直达用户，不走默认失败路径
+                    logger.error("[下载信息] 解析终态异常，向用户透传")
+                    raise
                 except Exception as e:
                     logger.warning(f"[下载信息] 获取失败: {e}")
                     download_info_obj = None
@@ -1160,6 +1185,10 @@ def process_transcription(
                     if download_info_obj is None and download_downloader:
                         try:
                             download_info_obj = download_downloader.get_download_info(parse_url)
+                        except _TERMINAL_RESOLVER_ERRORS:
+                            # P0-1：解析终态异常直达用户，不走默认失败路径
+                            logger.error("[下载信息] 解析终态异常，向用户透传")
+                            raise
                         except Exception as e:
                             logger.warning(f"[下载信息] 获取失败: {e}")
 
