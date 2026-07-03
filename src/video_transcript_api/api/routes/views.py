@@ -578,6 +578,7 @@ def generate_download_filename(title: str, platform: str, content_type: str) -> 
         "douyin": "抖音",
         "xiaohongshu": "小红书",
         "xiaoyuzhou": "小宇宙",
+        "apple_podcast": "Apple播客",
         "generic": "自定义",
     }
 

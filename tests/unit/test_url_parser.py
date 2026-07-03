@@ -112,6 +112,26 @@ class TestURLParserBasic:
         assert result.platform == "xiaoyuzhou"
         assert result.video_id == "687893e0a12f9ff06a98a597"
 
+    def test_apple_podcast_episode_url(self):
+        """Test Apple Podcast episode URL (video_id is the episode id)"""
+        parser = URLParser()
+        result = parser.parse(
+            "https://podcasts.apple.com/us/podcast/lex-fridman-podcast/id1434243584?i=1000774912806"
+        )
+
+        assert result.platform == "apple_podcast"
+        assert result.video_id == "1000774912806"
+
+    def test_apple_podcast_show_url(self):
+        """Test Apple Podcast show URL (falls back to show id)"""
+        parser = URLParser()
+        result = parser.parse(
+            "https://podcasts.apple.com/us/podcast/lex-fridman-podcast/id1434243584"
+        )
+
+        assert result.platform == "apple_podcast"
+        assert result.video_id == "1434243584"
+
     def test_generic_url(self):
         """Test generic URL (no platform matched)"""
         parser = URLParser()

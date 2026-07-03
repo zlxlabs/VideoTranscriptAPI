@@ -22,7 +22,7 @@ class ParsedURL:
     解析后的 URL 信息
 
     Attributes:
-        platform: 平台名称 (youtube/bilibili/douyin/xiaohongshu/xiaoyuzhou/generic)
+        platform: 平台名称 (youtube/bilibili/douyin/xiaohongshu/xiaoyuzhou/apple_podcast/generic)
         video_id: 视频ID (唯一标识)
         normalized_url: 规范化的URL（长链接格式）
         is_short_url: 是否为短链接
@@ -72,6 +72,10 @@ class URLParser:
         ],
         'xiaoyuzhou': [
             r'xiaoyuzhoufm\.com/episode/([a-z0-9]+)',  # 小宇宙播客
+        ],
+        'apple_podcast': [
+            r'podcasts\.apple\.com/\S*[?&]i=(\d+)',  # 剧集链接（?i=剧集ID）
+            r'podcasts\.apple\.com/\S*?/id(\d+)',  # 节目链接（仅平台识别，下载器会要求剧集参数）
         ],
         'xiaohongshu': [
             r'xiaohongshu\.com/(?:explore|discovery/item|items)/(\w+)',  # 主域名
@@ -278,6 +282,8 @@ class URLParser:
             return 'douyin'
         elif 'xiaoyuzhoufm.com' in url_lower:
             return 'xiaoyuzhou'
+        elif 'podcasts.apple.com' in url_lower:
+            return 'apple_podcast'
         elif 'xiaohongshu.com' in url_lower or 'xhslink.com' in url_lower:
             return 'xiaohongshu'
 

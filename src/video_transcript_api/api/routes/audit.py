@@ -66,7 +66,7 @@ async def get_history(
     start_date: Optional[str] = Query(None, description="开始日期，ISO格式 YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="结束日期，ISO格式 YYYY-MM-DD"),
     webhook: Optional[str] = Query(None, description="webhook地址精确过滤"),
-    platform: Optional[str] = Query(None, description="平台过滤: youtube/bilibili/xiaoyuzhou/xiaohongshu/douyin"),
+    platform: Optional[str] = Query(None, description="平台过滤: youtube/bilibili/xiaoyuzhou/apple_podcast/xiaohongshu/douyin"),
     author: Optional[str] = Query(None, description="频道/作者过滤，支持逗号分隔多选"),
     q: Optional[str] = Query(None, description="关键词搜索：匹配标题、频道名、视频URL"),
     status: Optional[str] = Query(None, description="任务状态过滤，默认只显示 success（已完成）"),

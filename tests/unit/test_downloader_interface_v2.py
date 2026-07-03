@@ -9,6 +9,7 @@ from video_transcript_api.downloaders import (
     BilibiliDownloader,
     XiaohongshuDownloader,
     XiaoyuzhouDownloader,
+    ApplePodcastDownloader,
     YoutubeDownloader,
     GenericDownloader,
 )
@@ -129,6 +130,19 @@ def test_base_downloader_caching_and_compat():
                 "platform": "xiaoyuzhou",
             },
             "m4a",
+        ),
+        (
+            ApplePodcastDownloader,
+            {
+                "video_id": "1000774912806",
+                "video_title": "apple podcast title",
+                "author": "show name",
+                "description": "desc",
+                "download_url": "http://example.com/episode.mp3",
+                "filename": "apple_podcast_1000774912806.mp3",
+                "platform": "apple_podcast",
+            },
+            "mp3",
         ),
         (
             YoutubeDownloader,

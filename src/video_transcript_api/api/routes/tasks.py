@@ -168,6 +168,8 @@ async def transcribe_video(
                         title = "Bilibili视频转录"
                     elif "xiaoyuzhoufm.com" in display_url:
                         title = "小宇宙播客转录"
+                    elif "podcasts.apple.com" in display_url:
+                        title = "Apple播客转录"
                     elif "xiaohongshu.com" in display_url or "xhslink.com" in display_url:
                         title = "小红书内容转录"
                     elif "douyin.com" in display_url:

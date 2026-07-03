@@ -36,6 +36,8 @@ class BaseDownloader(ABC):
         # 下载文件大小上限（MB），0 表示不限制；防止超长视频/直播回放填满磁盘
         max_mb = self.config.get("storage", {}).get("max_download_size_mb", 4096)
         self.max_download_bytes = int(max_mb or 0) * 1024 * 1024
+        # 下载请求附加 headers（子类可覆盖，如伪装浏览器 UA 绕过 CDN 对 bot 的 403）
+        self.download_headers: Dict[str, str] = {}
         # 实例级缓存（任务生命周期内有效）
         self._metadata_cache: Dict[str, VideoMetadata] = {}
         self._download_info_cache: Dict[str, DownloadInfo] = {}
@@ -218,7 +220,9 @@ class BaseDownloader(ABC):
             try:
                 logger.info(f"downloading file (attempt {attempt}/{max_retries}): {url[:100]}...")
 
-                response = requests.get(url, stream=True, timeout=60)
+                response = requests.get(
+                    url, headers=self.download_headers or None, stream=True, timeout=60
+                )
                 response.raise_for_status()
 
                 content_length = response.headers.get("Content-Length")

@@ -3,6 +3,7 @@ from .bilibili import BilibiliDownloader
 from .xiaohongshu import XiaohongshuDownloader
 from .youtube import YoutubeDownloader
 from .xiaoyuzhou import XiaoyuzhouDownloader
+from .apple_podcast import ApplePodcastDownloader
 from .generic import GenericDownloader
 from .media_resolver import MediaResolverDownloader
 from ..utils.logging import setup_logger, load_config
@@ -47,6 +48,7 @@ def create_downloader(url):
             BilibiliDownloader(),
             YoutubeDownloader(),
             XiaoyuzhouDownloader(),
+            ApplePodcastDownloader(),
         ])
     else:
         platform_downloaders.extend([
@@ -55,6 +57,7 @@ def create_downloader(url):
             XiaohongshuDownloader(),
             YoutubeDownloader(),
             XiaoyuzhouDownloader(),
+            ApplePodcastDownloader(),
         ])
 
     # 先尝试平台特定的下载器

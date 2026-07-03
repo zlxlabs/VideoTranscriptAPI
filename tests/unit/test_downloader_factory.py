@@ -18,6 +18,7 @@ from video_transcript_api.downloaders.bilibili import BilibiliDownloader
 from video_transcript_api.downloaders.douyin import DouyinDownloader
 from video_transcript_api.downloaders.xiaohongshu import XiaohongshuDownloader
 from video_transcript_api.downloaders.xiaoyuzhou import XiaoyuzhouDownloader
+from video_transcript_api.downloaders.apple_podcast import ApplePodcastDownloader
 from video_transcript_api.downloaders.generic import GenericDownloader
 from video_transcript_api.downloaders.media_resolver import MediaResolverDownloader
 
@@ -131,6 +132,25 @@ class TestXiaoyuzhouRouting:
 
 
 # ---------------------------------------------------------------------------
+# Apple Podcast
+# ---------------------------------------------------------------------------
+
+class TestApplePodcastRouting:
+    """Factory should return ApplePodcastDownloader for Apple Podcast URLs."""
+
+    @pytest.mark.parametrize("url", [
+        "https://podcasts.apple.com/us/podcast/lex-fridman-podcast/id1434243584?i=1000774912806",
+        "https://podcasts.apple.com/cn/podcast/some-show/id123456?i=987654",
+        "http://podcasts.apple.com/us/podcast/some-show/id123456",
+    ])
+    def test_apple_podcast_urls(self, url):
+        downloader = create_downloader(url)
+        assert isinstance(downloader, ApplePodcastDownloader), (
+            f"Expected ApplePodcastDownloader for {url}, got {type(downloader).__name__}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Unknown / Generic fallback
 # ---------------------------------------------------------------------------
 
@@ -171,6 +191,7 @@ class TestMediaResolverRouting:
         ("https://www.bilibili.com/video/BV1xx411c7XW", BilibiliDownloader),
         ("https://www.youtube.com/watch?v=abc123", YoutubeDownloader),
         ("https://www.xiaoyuzhoufm.com/episode/abc123", XiaoyuzhouDownloader),
+        ("https://podcasts.apple.com/us/podcast/show/id123456?i=987654", ApplePodcastDownloader),
     ])
     def test_flag_on_other_platforms_unaffected(self, resolver_on, url, expected):
         downloader = create_downloader(url)
