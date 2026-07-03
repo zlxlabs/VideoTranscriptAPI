@@ -4191,6 +4191,19 @@ wheels = [
 ]
 
 [[package]]
+name = "sentry-sdk"
+version = "2.64.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "certifi" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/60/31/b7341f156a5f6f36f0b4845d6f1c28a2ae4799171dba7007f3a1e9b234b4/sentry_sdk-2.64.0.tar.gz", hash = "sha256:68be2c29e14ae310f8a39e1a79916b6d85c6cb41dcce789d14ff05fe293e4c55", size = 921020, upload-time = "2026-06-30T08:13:47.682Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/36/a8/3fb9a4319efa3b26f5be0e90e6d8918df43fa7c7e977d26390f589501d82/sentry_sdk-2.64.0-py3-none-any.whl", hash = "sha256:715ea91ca860a819e8d8a50a7bde3a80d0df3b4ed7b6660a20fb9a2d084188f1", size = 498901, upload-time = "2026-06-30T08:13:45.566Z" },
+]
+
+[[package]]
 name = "socksio"
 version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -4376,6 +4389,7 @@ dependencies = [
     { name = "wecom-notifier" },
     { name = "youtube-transcript-api" },
     { name = "yt-dlp", extra = ["default"] },
+    { name = "zlx-ops-sdk" },
 ]
 
 [package.optional-dependencies]
@@ -4421,6 +4435,7 @@ requires-dist = [
     { name = "wecom-notifier", specifier = ">=0.3.1" },
     { name = "youtube-transcript-api", specifier = ">=1.2.3" },
     { name = "yt-dlp", extras = ["default"], specifier = ">=2025.12.8" },
+    { name = "zlx-ops-sdk", specifier = ">=0.1,<0.2" },
 ]
 provides-extras = ["dev"]
 
@@ -4676,4 +4691,16 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/de/72/57d02cf78eb45126bd171298d6a58a5bd48ce1a398b6b7ff00fc904f1f0c/yt_dlp_ejs-0.3.2.tar.gz", hash = "sha256:31a41292799992bdc913e03c9fac2a8c90c82a5cbbc792b2e3373b01da841e3e", size = 34678, upload-time = "2025-12-07T23:44:48.258Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9d/0d/1f0d7a735ca60b87953271b15d00eff5eef05f6118390ddf6f81982526ed/yt_dlp_ejs-0.3.2-py3-none-any.whl", hash = "sha256:f2dc6b3d1b909af1f13e021621b0af048056fca5fb07c4db6aa9bbb37a4f66a9", size = 53252, upload-time = "2025-12-07T23:44:46.605Z" },
+]
+
+[[package]]
+name = "zlx-ops-sdk"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "sentry-sdk" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cb/79/b907d1d609df2fbaeec7b7fd389d20624e765be253e5d0be65e9c08cdc96/zlx_ops_sdk-0.1.0.tar.gz", hash = "sha256:8ec9b9168e35d66778dd6966be43d3695cdeb2b1ea7ca892df0c83df492c6c23", size = 15807, upload-time = "2026-06-25T11:24:19.16Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/34/8f/560f5e5abf9e398b6dbb3c450e9589de4e37baee504a12b8319b4608b188/zlx_ops_sdk-0.1.0-py3-none-any.whl", hash = "sha256:6e83a45fab9b14976e04fbb21ac3b83f9de30271e536ce751cce6080169736b2", size = 9693, upload-time = "2026-06-25T11:24:18.221Z" },
 ]

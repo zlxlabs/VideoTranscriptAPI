@@ -9,6 +9,11 @@ services:
     container_name: video-transcript-api
     environment:
       - TZ=Asia/Shanghai
+    # 可观测 DSN 只经 env_file 注入 os.environ（不挂载、不进 git）。
+    # 缺 ops.env 也能起（SDK fail-open）。DSN 绝不写进 config.jsonc。
+    env_file:
+      - path: ops.env
+        required: false
     ports:
       # 宿主端口 8200（n305 上 portainer 已占 8000）；外部入口
       # https://sum.lexgogo.site 经 Cloudflare Tunnel 落到 :8200。

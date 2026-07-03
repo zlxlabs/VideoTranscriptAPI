@@ -35,6 +35,7 @@ dependencies = [
     "wecom-notifier>=0.3.1",
     "youtube-transcript-api>=1.2.3",
     "yt-dlp[default]>=2025.12.8",
+    "zlx-ops-sdk>=0.1,<0.2",
 ]
 
 [project.optional-dependencies]

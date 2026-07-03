@@ -18,6 +18,20 @@ config = get_config()
 router = APIRouter(tags=["health"])
 
 
+@router.get("/livez")
+async def liveness_probe():
+    """纯存活探针端点
+
+    仅表明进程可响应，**不查询任何下游依赖**（CapsWriter / FunASR / 磁盘）。
+    供部署探针与 Uptime Kuma 24×7 探活使用：下游抖动不应触发误判/回滚。
+    需要下游状态时请用 /health（深度检查）。
+
+    Returns:
+        dict: 固定 {"status": "ok"}，恒返回 200
+    """
+    return {"status": "ok"}
+
+
 @router.get("/health")
 async def health_check():
     """系统健康检查端点

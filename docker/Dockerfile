@@ -52,7 +52,14 @@ COPY main.py ./
 RUN mkdir -p data/cache data/temp data/workspace data/logs config
 
 # ============================================================
-# 8. Runtime configuration
+# 8. GIT_SHA: 供 zlx-ops-sdk 拼 release=repo@<sha>，GlitchTip 按版本聚合错误
+#    非 D3 服务由 push_to_ghcr.sh 传 --build-arg GIT_SHA
+# ============================================================
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
+
+# ============================================================
+# 9. Runtime configuration
 # ============================================================
 EXPOSE 8000
 

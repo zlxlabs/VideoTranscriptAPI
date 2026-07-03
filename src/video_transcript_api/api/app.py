@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from ..utils.notifications import init_all_notifiers, shutdown_all_notifiers
+from ..utils.observability import init_observability
 from ..utils.ytdlp import YtdlpConfigBuilder
 from ..llm import set_default_config, log_llm_stats
 from ..llm.llm import log_llm_config_summary
@@ -56,6 +57,9 @@ async def _periodic_maintenance(config: dict) -> None:
 def create_app() -> FastAPI:
     config = get_config()
     logger = get_logger()
+
+    # 最早接入错误上报（fail-open）：未配 SENTRY_DSN 时为 no-op
+    init_observability()
 
     app = FastAPI(
         title="VideoTranscriptAPI",

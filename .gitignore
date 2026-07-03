@@ -13,6 +13,10 @@ ENV/
 .env
 .venv
 
+# 可观测 DSN 注入文件（含明文 DSN，只放部署目录，仓里只留 ops.env.example）
+ops.env
+docker/ops.env
+
 # IDE配置
 .vscode/
 .idea/
