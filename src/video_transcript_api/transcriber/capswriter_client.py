@@ -412,6 +412,10 @@ class CapsWriterClient:
         )
         self.websocket = None
         self.current_task_id = None
+        # 最近一次连接被关闭时服务端发来的 close code/reason（异常断开时为 None），
+        # 供 transcribe_file 的重试逻辑判断是否值得重试
+        self.last_close_code = None
+        self.last_close_reason = None
 
         # 确保临时目录存在
         os.makedirs(self.output_dir, exist_ok=True)
@@ -512,6 +516,16 @@ class CapsWriterClient:
             self.websocket = None
             self.log("已关闭服务器连接", "warning")
 
+    def _record_close(self, exc: websockets.ConnectionClosed):
+        """记录连接关闭信息并输出日志，返回可读描述"""
+        close_frame = exc.rcvd  # 服务端发来的关闭帧；TCP 层异常断开时为 None
+        self.last_close_code = close_frame.code if close_frame else None
+        self.last_close_reason = close_frame.reason if close_frame else None
+        return (
+            f"close code: {self.last_close_code or 'N/A'}, "
+            f"reason: {self.last_close_reason or 'N/A'}"
+        )
+
     async def _send_audio_data(
         self, file_path: Path, audio_data: bytes, audio_duration: float
     ) -> Optional[str]:
@@ -530,6 +544,7 @@ class CapsWriterClient:
         # 分段发送音频数据
         offset = 0
         chunk_size = 16000 * 4 * 60  # 每分钟的数据大小
+        reported_milestones = set()  # 本次发送已输出过的进度里程碑
 
         while offset < len(audio_data):
             chunk_end = min(offset + chunk_size, len(audio_data))
@@ -547,8 +562,13 @@ class CapsWriterClient:
                 "data": base64.b64encode(audio_data[offset:chunk_end]).decode("utf-8"),
             }
 
-            # 发送消息
-            await self.websocket.send(json.dumps(message))
+            # 发送消息（长音频上传耗时较长，服务端可能因 keepalive 超时中途关闭连接）
+            try:
+                await self.websocket.send(json.dumps(message))
+            except websockets.ConnectionClosed as e:
+                close_info = self._record_close(e)
+                self.log(f"发送音频数据时连接被服务端关闭 ({close_info})", "error")
+                return None
 
             # 更新进度（仅在关键里程碑时输出，降低日志噪音）
             progress = min(chunk_end / 4 / 16000, audio_duration)
@@ -557,8 +577,8 @@ class CapsWriterClient:
             # 只在 20%, 40%, 60%, 80%, 100% 时输出
             milestones = [20, 40, 60, 80, 100]
             for milestone in milestones:
-                if not hasattr(self, f'_milestone_{milestone}') and progress_percent >= milestone:
-                    setattr(self, f'_milestone_{milestone}', True)
+                if milestone not in reported_milestones and progress_percent >= milestone:
+                    reported_milestones.add(milestone)
                     self.log(
                         f"发送进度: {progress:.2f}秒 / {audio_duration:.2f}秒 ({progress_percent:.1f}%)"
                     )
@@ -599,8 +619,9 @@ class CapsWriterClient:
                 except json.JSONDecodeError:
                     self.log("接收到非JSON数据，已忽略", "warning")
                     continue
-        except websockets.ConnectionClosed:
-            self.log("WebSocket连接已关闭", "error")
+        except websockets.ConnectionClosed as e:
+            close_info = self._record_close(e)
+            self.log(f"WebSocket连接已关闭 ({close_info})", "error")
         except Exception as e:
             self.log(f"接收结果时出错: {e}", "error")
 
@@ -767,6 +788,8 @@ class CapsWriterClient:
             tuple: (bool成功状态, list生成的文件)
         """
         file_path = Path(file_path)
+        self.last_close_code = None
+        self.last_close_reason = None
 
         try:
             # 1. 检查文件
@@ -833,6 +856,18 @@ class CapsWriterClient:
             except Exception as e:
                 last_error = str(e)
                 self.log(f"转录尝试 {attempts} 失败: {last_error}", "warning")
+
+            # 服务端以 1011 (internal error) 主动断连通常是 keepalive 超时等
+            # 确定性问题：重试会以同样方式失败，还让服务端白白重新转录一遍，
+            # 直接中止并提示排查服务端配置
+            if self.last_close_code == 1011:
+                last_error = (
+                    f"服务端主动关闭连接 (close code 1011"
+                    f"{': ' + self.last_close_reason if self.last_close_reason else ''})，"
+                    "重试无意义已提前中止，请检查 CapsWriter 服务端 keepalive 配置"
+                )
+                self.log(last_error, "error")
+                break
 
             # 如果不是最后一次尝试，等待后重试
             if attempts < self.max_retries:
