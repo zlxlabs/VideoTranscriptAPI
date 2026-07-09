@@ -1,6 +1,7 @@
 import os
 import mimetypes
 import hashlib
+import time
 import requests
 from urllib.parse import urlparse, unquote
 from .base import BaseDownloader
@@ -203,6 +204,8 @@ class GenericDownloader(BaseDownloader):
         
         # 最大重试次数
         max_retries = 3
+        # 重试退避（秒）：给瞬态故障（如文件服务重启的部署窗口）留恢复时间
+        retry_backoff = (5, 15)
         chunk_size = 1024 * 1024  # 1MB 块大小
         
         # 尝试导入企微通知器
@@ -214,6 +217,10 @@ class GenericDownloader(BaseDownloader):
             wechat_notifier = None
         
         for attempt in range(max_retries):
+            if attempt > 0:
+                delay = retry_backoff[min(attempt - 1, len(retry_backoff) - 1)]
+                logger.info(f"等待 {delay}s 后重试下载...")
+                time.sleep(delay)
             try:
                 logger.info(f"开始下载文件 (尝试 {attempt + 1}/{max_retries}): {url}")
                 

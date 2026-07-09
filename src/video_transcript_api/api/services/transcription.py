@@ -1029,6 +1029,10 @@ def process_transcription(
                     error_msg = f"YouTube API Server error: [{api_error.code}] {api_error.message}"
                     logger.error(f"[youtube-api] {error_msg}")
                     task_notifier.notify_task_status(display_url, "下载失败", error_msg)
+                    cache_manager.update_task_status(
+                        task_id, TaskStatus.FAILED,
+                        download_url=download_url, error_message=error_msg,
+                    )
                     return {"status": "failed", "message": error_msg}
 
                 except Exception as exc:
@@ -1036,6 +1040,10 @@ def process_transcription(
                     error_msg = f"YouTube API Server unexpected error: {exc}"
                     logger.exception(f"[youtube-api] {error_msg}")
                     task_notifier.notify_task_status(display_url, "下载失败", error_msg)
+                    cache_manager.update_task_status(
+                        task_id, TaskStatus.FAILED,
+                        download_url=download_url, error_message=error_msg,
+                    )
                     return {"status": "failed", "message": error_msg}
 
             # ========== 原有逻辑（非 YouTube API Server 路径）==========
@@ -1227,6 +1235,10 @@ def process_transcription(
                             task_notifier.notify_task_status(
                                 display_url, "下载失败", error_msg, title=video_title, author=author
                             )
+                            cache_manager.update_task_status(
+                                task_id, TaskStatus.FAILED,
+                                download_url=download_url, error_message=error_msg,
+                            )
                             return {"status": "failed", "message": error_msg}
 
                 if not local_file:
@@ -1234,6 +1246,10 @@ def process_transcription(
                     logger.error(error_msg)
                     task_notifier.notify_task_status(
                         display_url, "下载失败", error_msg, title=video_title, author=author
+                    )
+                    cache_manager.update_task_status(
+                        task_id, TaskStatus.FAILED,
+                        download_url=download_url, error_message=error_msg,
                     )
                     return {"status": "failed", "message": error_msg}
 
