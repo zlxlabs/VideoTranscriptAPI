@@ -216,6 +216,32 @@ class TestLayeredCacheMatrix:
         assert queued1 == []
         assert queued2 == []
 
+    def test_transcript_only_repeated_is_full_hit_without_keyerror(
+        self, monkeypatch, patch_runtime
+    ):
+        """(5) Regression for codex-review R1 item 2: a transcript-only cache
+        (calibrate=False, summarize=False on the FIRST request) has a disabled
+        calibration placeholder but NO llm_summary key at all (see the
+        skip_summary=False/DISABLED path in llm_ops._save_llm_results, which
+        never writes llm_summary.txt for a disabled layer). Resubmitting the
+        SAME transcript-only options must still be a full hit -- not a
+        KeyError from unconditionally indexing cache_data["llm_summary"]."""
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "llm_calibrated": "disabled placeholder text",
+            "llm_status": {"calibration_status": CalibrationStatus.DISABLED},
+            # deliberately no "llm_summary" key -- summarize was never requested
+        }
+
+        result, queued = _run(
+            monkeypatch, patch_runtime, cache_data,
+            {"calibrate": False, "summarize": False},
+        )
+
+        assert result["status"] == "success"
+        assert result["data"]["cached"] is True
+        assert queued == []
+
     def test_missing_processing_options_defaults_to_full_flow_legacy_gate(
         self, monkeypatch, patch_runtime
     ):
