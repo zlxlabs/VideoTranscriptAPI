@@ -352,6 +352,65 @@ class TestRedirectHopIsAlsoPinned:
 
 
 # ---------------------------------------------------------------------------
+# 6b. DNS resolution failure at validation time must fail closed, never fall
+#     back to an unpinned request (codex-review R6 #1).
+# ---------------------------------------------------------------------------
+
+
+class TestDNSResolutionFailureFailsClosed:
+    """A previous version treated a resolver error (validate_url_safe_with_ip
+    returning ip=None) as "transient, allow it through" and dispatched a
+    plain, unpinned requests.get()/head() -- which also defaults to
+    following redirects. An attacker who can make the validation-time
+    lookup fail (e.g. a domain that answers SERVFAIL/times out on the first
+    lookup) could ride that fallback straight past both the DNS-rebinding
+    pin and the redirect-hop validation. Fix: no validated IP -> fail
+    closed, raise InvalidURLError, never touch the network."""
+
+    @staticmethod
+    def _gaierror(*args, **kwargs):
+        raise socket.gaierror("Name or service not known")
+
+    def test_safe_request_raises_without_network_call(self):
+        downloader = GenericDownloader()
+        url = "https://unresolvable.example.com/audio.mp3"
+
+        with patch(GETADDRINFO_PATH, side_effect=self._gaierror), patch(
+            BASE_SEND_PATH
+        ) as mock_send:
+            with pytest.raises(InvalidURLError):
+                downloader._safe_request("get", url, timeout=5)
+
+        mock_send.assert_not_called()
+
+    def test_get_video_info_raises_without_network_call(self):
+        """No file extension -> _is_media_url falls back to a HEAD probe,
+        which must fail closed rather than dispatch unpinned."""
+        downloader = GenericDownloader()
+        url = "https://unresolvable.example.com/media-file"
+
+        with patch(GETADDRINFO_PATH, side_effect=self._gaierror), patch(
+            BASE_SEND_PATH
+        ) as mock_send:
+            with pytest.raises(InvalidURLError):
+                downloader.get_video_info(url)
+
+        mock_send.assert_not_called()
+
+    def test_download_file_raises_without_network_call(self, tmp_path):
+        downloader = _make_downloader(tmp_path)
+        url = "https://unresolvable.example.com/video.mp4"
+
+        with patch(GETADDRINFO_PATH, side_effect=self._gaierror), patch(
+            BASE_SEND_PATH
+        ) as mock_send:
+            with pytest.raises(InvalidURLError):
+                downloader.download_file(url, "video.mp4")
+
+        mock_send.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # 7. generic.py must wire the *real* hostname (not the pinned IP) into the
 #    adapter it builds, so HTTPS SNI / certificate hostname verification
 #    stays correct. (The adapter's own TLS-parameter mechanics -- that
