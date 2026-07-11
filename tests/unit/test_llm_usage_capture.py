@@ -238,3 +238,88 @@ class TestRecordingFailOpen:
         ):
             with pytest.raises(FatalError):
                 client.call(model="m", system_prompt="s", user_prompt="u")
+
+
+class TestStaleUsageSlotNotMisattributed:
+    """Regression coverage for codex-review R1 item 4.
+
+    The usage bridge slot (usage_context._last_chat_usage) is written by
+    llm/llm.py's internal call helpers whenever they get a real ChatResult
+    back from llm-compat, and is only ever POPPED by LLMClient.call()'s
+    finally block. Call sites that invoke call_llm_api() directly -- bypassing
+    LLMClient.call() entirely, e.g. llm_ops._generate_title_if_needed -- write
+    the slot but never pop it. If the NEXT LLMClient.call() then fails before
+    ever reaching a real ChatResult (so record_chat_result_usage() is never
+    called again), its finally-block pop would read that stale, unrelated
+    snapshot and misattribute its tokens to the current task/stage.
+    """
+
+    def test_stale_slot_from_earlier_direct_call_not_misattributed_on_failure(
+        self, client, recorder
+    ):
+        """Simulate the exact leak: a stale snapshot sits in the bridge slot
+        (as if left behind by a direct call_llm_api() call elsewhere), and
+        THIS call() fails before any real ChatResult is produced. The
+        recorded row must reflect THIS call's (missing) usage, not the stale
+        snapshot's tokens."""
+        from video_transcript_api.llm.core.errors import FatalError
+
+        usage_context.record_chat_result_usage(
+            model="stale-model-from-earlier-call",
+            usage=TokenUsage(prompt_tokens=999, completion_tokens=999, total_tokens=1998),
+        )
+
+        with patch(
+            "video_transcript_api.llm.core.llm_client.call_llm_api",
+            side_effect=FatalError("401 Unauthorized"),
+        ), patch(
+            "video_transcript_api.llm.core.llm_client.get_usage_recorder",
+            return_value=recorder,
+        ):
+            with pytest.raises(FatalError):
+                client.call(model="m", system_prompt="s", user_prompt="u")
+
+        with recorder._audit_logger._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT model, prompt_tokens, completion_tokens, total_tokens, usage_missing "
+                "FROM llm_usage"
+            )
+            row = cursor.fetchone()
+
+        # Must NOT be the stale snapshot (would be
+        # ("stale-model-from-earlier-call", 999, 999, 1998, 0) if the bug were
+        # still present) -- this call never reached a real ChatResult, so it
+        # must be recorded as usage_missing with the requested model as
+        # fallback, exactly like the "call_llm_api never made a real API
+        # round-trip" case already covered elsewhere (None tokens are stored
+        # as 0 by UsageRecorder, matching test_usage_none_records_zeroed_row).
+        assert row == ("m", 0, 0, 0, 1)
+
+    def test_successful_call_still_pops_its_own_usage_normally(self, client, recorder):
+        """Sanity check: the pre-call clear must not break the happy path --
+        a call that DOES produce a real ChatResult still records its own
+        (correct) usage, not a missing/empty one."""
+        chat_result = ChatResult(
+            content="ok",
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            model="actual-model",
+        )
+        with patch(
+            "video_transcript_api.llm.llm.get_sync_client",
+            return_value=_fake_sync_client(chat_result),
+        ), patch(
+            "video_transcript_api.llm.core.llm_client.get_usage_recorder",
+            return_value=recorder,
+        ):
+            result = client.call(model="requested-model", system_prompt="s", user_prompt="u")
+
+        assert result.text == "ok"
+
+        with recorder._audit_logger._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT model, prompt_tokens, completion_tokens, total_tokens, usage_missing "
+                "FROM llm_usage"
+            )
+            row = cursor.fetchone()
+
+        assert row == ("actual-model", 10, 5, 15, 0)
