@@ -583,11 +583,24 @@ def process_transcription(
                 # 计算统计信息
                 original_length = len(transcript)
                 calibrated_length = len(cache_data.get("llm_calibrated", ""))
-                summary_text = cache_data["llm_summary"]
                 calibrated_text = cache_data.get("llm_calibrated", "")
 
-                # 判断是否跳过了总结（总结文本和校对文本相同）
-                skip_summary = summary_text == calibrated_text
+                # 判断是否跳过了总结：
+                # - 真正的"短文本跳过"：summary 与 calibrated 内容相同（见
+                #   llm_ops._save_llm_results 的 SKIPPED_SHORT 分支，会把
+                #   calibrated 文本原样复制成 summary 落盘）；
+                # - 本次/历史请求根本未要求总结（summarize=False，见函数顶部
+                #   注释：disabled 时不落盘 llm_summary.txt）：has_llm_summary
+                #   为 False，此时 cache_data 里没有 "llm_summary" 键，不能无
+                #   条件下标访问，否则 KeyError（这正是本次修复的问题）。
+                #   两种情况在展示上等价，都走"未生成总结"文案，与周边已有的
+                #   skip_summary 分支保持一致。
+                if has_llm_summary:
+                    summary_text = cache_data["llm_summary"]
+                    skip_summary = summary_text == calibrated_text
+                else:
+                    summary_text = calibrated_text
+                    skip_summary = True
 
                 # 构建完整的消息格式
                 speaker_info = "（含说话人识别）" if has_speaker_recognition else ""
