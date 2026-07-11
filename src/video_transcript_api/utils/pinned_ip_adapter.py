@@ -1,0 +1,118 @@
+"""
+IP 钉定（pinned）HTTP(S) 传输适配器 —— 用于闭合 SSRF 校验的 DNS rebinding
+TOCTOU 窗口。
+
+背景：url_validator.validate_url_safe 先自行解析域名并校验解析到的 IP 是否
+安全，但如果调用方随后直接把原始 URL（域名形式）交给 requests/urllib3 去
+发起真正的网络请求，requests 会*重新独立解析一次 DNS*。攻击者控制的域名
+完全可以在这两次解析之间切换 DNS 记录（先解析成公网 IP 通过校验，实际连接
+时再解析成内网/云元数据 IP），从而绕过 SSRF 防护 —— 这是经典的 DNS
+rebinding / Time-Of-Check-Time-Of-Use（TOCTOU）漏洞。
+
+本模块提供的 PinnedIPHTTPAdapter 把"校验"和"连接"绑定到同一次 DNS 解析
+结果上：调用方先用 url_validator 拿到已验证的 IP，再用这个 IP 构造适配器，
+后续无论 requests 内部怎么处理，实际 TCP 连接都会直接打到这个 IP，不会再
+触发任何新的 DNS 查询。
+
+同时必须保证这么做不会削弱 HTTPS 的安全性：
+- SNI（server_hostname）仍然发送真实域名，保证走 SNI 路由的 CDN/负载均衡
+  能正确识别目标站点；
+- 证书主机名校验（assert_hostname）仍然按真实域名匹配证书，而不是按 IP
+  匹配 —— 否则大多数证书（CN/SAN 都是域名而非 IP）校验必然失败，为了"图
+  省事"而把 assert_hostname 也设成 IP 或直接关闭校验，等于用一个安全问题
+  换另一个安全问题。
+
+实现参考了社区里 forced-ip-https-adapter 这类小工具的通用做法（重写请求
+URL 的 host 部分为目标 IP、保留原始 Host 头、通过 urllib3
+HTTPSConnectionPool 的 assert_hostname/server_hostname 钉住证书校验和 SNI
+用的主机名），但不引入新依赖，直接基于项目已有的 requests/urllib3 自实现。
+"""
+
+from urllib.parse import urlparse, urlunparse
+
+from requests.adapters import HTTPAdapter
+
+from .logging import setup_logger
+
+logger = setup_logger("pinned_ip_adapter")
+
+
+class PinnedIPHTTPAdapter(HTTPAdapter):
+    """
+    requests HTTPAdapter 子类：把对 `hostname` 的连接钉定到 `pinned_ip`。
+
+    一个实例只服务于一个 (hostname, pinned_ip) 目标对，用完即弃 —— 调用方
+    应该为每一次 SSRF 校验（含每一跳重定向）都构造一个新实例，不要跨不同
+    目标复用，否则 send() 会因为主机名不匹配而拒绝请求（防御性检查，避免
+    悄悄把请求发到一个从未被校验过的目标上）。
+
+    工作原理：
+    1. send() 把请求 URL 中的 hostname 替换成 pinned_ip，这样 requests/
+       urllib3 内部的连接池查找、真正的 socket.connect() 都直接使用这个 IP，
+       不会再触发针对 hostname 的新 DNS 解析。
+    2. 显式设置 Host 头为原始 hostname —— 否则 http.client 会根据连接池的
+       host（此时是 IP）自动生成 Host 头，破坏虚拟主机路由。
+    3. HTTPS 场景下，init_poolmanager() 把 server_hostname（SNI）和
+       assert_hostname（证书主机名校验目标）都固定为原始 hostname，让
+       urllib3 在"物理连接 IP"的同时，仍然按真实域名做 SNI 和证书校验。
+    """
+
+    def __init__(self, hostname: str, pinned_ip: str, is_https: bool, **kwargs):
+        """
+        参数:
+            hostname: 校验时使用、且后续 TLS 校验/Host 头仍要使用的真实域名
+            pinned_ip: url_validator 校验通过时实际解析并检查过的 IP，
+                       真正的 TCP 连接将钉定到这个地址
+            is_https: 目标是否为 https —— 只有 https 才需要注入
+                       server_hostname/assert_hostname（这两个是 urllib3
+                       HTTPSConnectionPool 专属的 TLS 参数，普通 HTTP 连接
+                       池不认识，也不需要）
+        """
+        self._hostname = hostname
+        self._pinned_ip = pinned_ip
+        self._is_https = is_https
+        super().__init__(**kwargs)
+
+    def init_poolmanager(self, *args, **kwargs):
+        """
+        初始化底层 urllib3 PoolManager。
+
+        HTTPS 场景下注入 server_hostname / assert_hostname，确保连接池虽然
+        以 pinned_ip 为 key，SNI 和证书主机名校验依然针对真实域名进行
+        （否则默认会退化为用连接池的 host，即 IP 本身，绝大多数证书的
+        CN/SAN 都是域名而非 IP，会导致校验失败或被迫关闭校验）。
+        """
+        if self._is_https:
+            kwargs["server_hostname"] = self._hostname
+            kwargs["assert_hostname"] = self._hostname
+        return super().init_poolmanager(*args, **kwargs)
+
+    def send(self, request, **kwargs):
+        """
+        发送请求前，把请求 URL 的主机部分重写为已钉定的 IP，并强制设置
+        Host 头为原始域名，随后交给父类完成实际发送。
+        """
+        request.url = self._pin_to_ip(request.url)
+        request.headers["Host"] = self._hostname
+        return super().send(request, **kwargs)
+
+    def _pin_to_ip(self, url: str) -> str:
+        """
+        把 URL 的 hostname 部分替换成已钉定的 IP，保留 scheme/port/path 等
+        其余部分不变。
+
+        抛出:
+            ValueError: URL 的 hostname 与本实例钉定的 hostname 不一致 ——
+                        说明调用方复用了该实例服务于另一个未经校验的目标，
+                        这是编程错误，必须拒绝而不是静默连接到未知主机
+        """
+        parsed = urlparse(url)
+        if parsed.hostname != self._hostname:
+            raise ValueError(
+                f"PinnedIPHTTPAdapter 已钉定 {self._hostname}，"
+                f"但收到了针对 {parsed.hostname} 的请求，拒绝发送"
+            )
+
+        host_part = f"[{self._pinned_ip}]" if ":" in self._pinned_ip else self._pinned_ip
+        netloc = f"{host_part}:{parsed.port}" if parsed.port else host_part
+        return urlunparse(parsed._replace(netloc=netloc))

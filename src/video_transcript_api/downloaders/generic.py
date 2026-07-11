@@ -12,6 +12,7 @@ from ..utils.logging import setup_logger
 # 可被测试通过 monkeypatch.setattr("...url_validator.validate_url_safe", ...) 打桩，
 # 具名导入会在导入时绑定函数对象，使得对源模块属性的打桩失效。
 from ..utils import url_validator
+from ..utils.pinned_ip_adapter import PinnedIPHTTPAdapter
 import datetime
 
 # 创建日志记录器
@@ -82,15 +83,15 @@ class GenericDownloader(BaseDownloader):
         对 URL 做 SSRF 校验后发起请求，并逐跳校验重定向目标。
 
         不使用 requests 自带的 allow_redirects=True 自动跳转，而是手动跟随并
-        在每一跳都重新调用 validate_url_safe，防止公网 URL 通过 302 等方式
-        跳转到内网/云元数据地址造成 SSRF 绕过。
+        在每一跳都重新校验 + 钉定 IP（见 _dispatch_pinned_request），防止
+        公网 URL 通过 302 等方式跳转到内网/云元数据地址造成 SSRF 绕过。
 
         参数:
             method: 'head' 或 'get'
             url: 请求 URL
-            **kwargs: 透传给 requests.head/requests.get 的参数（如 timeout、
-                      stream、headers）。不要传入 allow_redirects，本方法强制
-                      关闭自动跳转以便逐跳校验
+            **kwargs: 透传给底层请求的参数（如 timeout、stream、headers）。
+                      不要传入 allow_redirects，本方法自己手动处理重定向，
+                      从不让底层库自动跳转
 
         返回:
             requests.Response: 最终（非重定向）响应
@@ -98,13 +99,11 @@ class GenericDownloader(BaseDownloader):
         抛出:
             InvalidURLError: 任意一跳未通过 SSRF 校验，或重定向跳数超过上限
         """
-        request_func = requests.head if method == "head" else requests.get
         current_url = url
         redirect_count = 0
 
         while True:
-            self._validate_or_raise(current_url)
-            response = request_func(current_url, allow_redirects=False, **kwargs)
+            response = self._dispatch_pinned_request(method, current_url, **kwargs)
 
             if response.is_redirect:
                 redirect_count += 1
@@ -125,6 +124,68 @@ class GenericDownloader(BaseDownloader):
                 continue
 
             return response
+
+    def _dispatch_pinned_request(self, method: str, url: str, **kwargs) -> requests.Response:
+        """
+        校验 URL 安全性，并把真正发起的网络连接"钉"在校验时已解析、已检查过
+        的那个 IP 上，再发起一次请求。
+
+        背景（DNS rebinding TOCTOU）：如果只是校验通过后就把原始 URL（域名
+        形式）交给 requests 发起请求，requests/urllib3 会独立地重新解析一次
+        DNS —— 攻击者控制的域名完全可能在"校验时解析"和"连接时解析"这两次
+        解析之间切换 DNS 记录（先给公网 IP 通过校验，连接时再给内网/云元数据
+        IP），从而绕过 SSRF 防护。这里改为：校验函数把它解析并检查过的 IP
+        原样返回，网络连接直接使用这个 IP（PinnedIPHTTPAdapter），不再触发
+        任何针对该域名的新 DNS 查询，彻底消除这个窗口。
+
+        不经过 requests.Session 的自动重定向/Cookie/Hook 流水线 —— 那些都由
+        _safe_request 的手动循环自己实现，这里只需要"发一次请求、拿到一个
+        Response"，用 Session.prepare_request 只是为了复用默认请求头
+        （User-Agent 等）的构造逻辑。
+
+        参数:
+            method: 'head' 或 'get'
+            url: 请求 URL（尚未做过 SSRF 校验）
+            **kwargs: 透传给 HTTPAdapter.send 的参数（timeout、stream 等）；
+                      headers 会被合并进构造出的请求中
+
+        返回:
+            requests.Response
+
+        抛出:
+            InvalidURLError: URL 未通过 SSRF 校验
+        """
+        try:
+            _, pinned_ip = url_validator.validate_url_safe_with_ip(url)
+        except url_validator.URLValidationError as e:
+            logger.error(f"URL 安全校验未通过，已阻止请求: {url}, 原因: {e}")
+            raise InvalidURLError("URL 指向内部网络地址，已被安全策略拦截") from e
+
+        request_func = requests.head if method == "head" else requests.get
+
+        if pinned_ip is None:
+            # validate_url_safe 对 DNS 解析失败采用"放行，可能是瞬时故障"的
+            # 宽松策略，此时没有已验证的 IP 可钉，只能退化为不钉 IP 的普通
+            # 请求 —— 这与本次修复之前的行为一致，不引入新的失败模式；真正
+            # 发起连接时如果 DNS 仍然失败会在这里自然报错。
+            logger.warning(f"DNS 解析失败，无法钉定已校验 IP，回退为未钉 IP 的请求: {url}")
+            return request_func(url, **kwargs)
+
+        parsed_url = urlparse(url)
+        headers = kwargs.pop("headers", None)
+        prepared = requests.Session().prepare_request(
+            requests.Request(method.upper(), url, headers=headers)
+        )
+
+        adapter = PinnedIPHTTPAdapter(
+            hostname=parsed_url.hostname,
+            pinned_ip=pinned_ip,
+            is_https=(parsed_url.scheme == "https"),
+        )
+        try:
+            return adapter.send(prepared, **kwargs)
+        finally:
+            adapter.close()
 
     def _is_media_url(self, url):
         """
