@@ -426,13 +426,20 @@ class AuditLogger:
 
     def cleanup_old_logs(self, days: int = 90) -> int:
         """
-        清理指定天数之前的日志记录
+        清理指定天数之前的日志记录（api_audit_logs + llm_usage，同一 cutoff）
+
+        llm_usage（schema v3 新增的 LLM token 用量审计表，见 usage_recorder.py）
+        此前从未被任何清理逻辑覆盖——每次 LLM 调用都会插一行，配置了
+        audit_log_retention_days 也拦不住它无限增长（codex-review R4 #3）。
+        两张表的时间列都用同一个 `%Y-%m-%d %H:%M:%S` strftime 格式落库
+        （见 log_api_call 的 request_time 与 usage_recorder.record 的
+        created_at），因此直接复用同一个 cutoff_date，保持清理口径一致。
 
         Args:
             days: 保留天数，默认90天
 
         Returns:
-            int: 删除的记录数量
+            int: 删除的记录数量（两张表合计）
         """
         try:
             # 使用 Python 计算截止日期，避免 SQL 格式化注入
@@ -443,10 +450,19 @@ class AuditLogger:
                     DELETE FROM api_audit_logs
                     WHERE request_time < ?
                 ''', (cutoff_date,))
+                audit_deleted = cursor.rowcount
 
-                deleted_count = cursor.rowcount
+                cursor.execute('''
+                    DELETE FROM llm_usage
+                    WHERE created_at < ?
+                ''', (cutoff_date,))
+                usage_deleted = cursor.rowcount
 
-            logger.info(f"清理了 {deleted_count} 条超过 {days} 天的审计日志记录")
+            deleted_count = audit_deleted + usage_deleted
+            logger.info(
+                f"清理了 {audit_deleted} 条超过 {days} 天的审计日志记录、"
+                f"{usage_deleted} 条超过 {days} 天的 LLM 用量记录"
+            )
             return deleted_count
 
         except Exception as e:

@@ -321,6 +321,94 @@ class TestCRUDOperations:
         assert len(calls) == 1
         assert calls[0]["endpoint"] == "/new"
 
+    def test_cleanup_old_logs_also_cleans_llm_usage(self, audit_logger):
+        """codex-review R4 #3: cleanup_old_logs must also purge llm_usage rows
+        older than the same cutoff -- otherwise configuring
+        audit_log_retention_days still leaves llm_usage (one row per LLM
+        call) growing forever, since it's only ever inserted into, never
+        cleaned by the periodic maintenance job (app.py's
+        _periodic_maintenance -> AuditLogger.cleanup_old_logs)."""
+        conn = sqlite3.connect(audit_logger.db_path)
+        conn.execute(
+            """
+            INSERT INTO llm_usage
+            (task_id, stage, model, prompt_tokens, completion_tokens,
+             total_tokens, duration_ms, usage_missing, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("old-task", "calibration", "gpt-x", 10, 20, 30, 100, 0, "2020-01-01 00:00:00"),
+        )
+        conn.execute(
+            """
+            INSERT INTO llm_usage
+            (task_id, stage, model, prompt_tokens, completion_tokens,
+             total_tokens, duration_ms, usage_missing, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("new-task", "summary", "gpt-x", 10, 20, 30, 100, 0, "2099-01-01 00:00:00"),
+        )
+        conn.commit()
+        conn.close()
+
+        deleted = audit_logger.cleanup_old_logs(days=1)
+        assert deleted == 1
+
+        conn = sqlite3.connect(audit_logger.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT task_id FROM llm_usage")
+        remaining = [row[0] for row in cursor.fetchall()]
+        conn.close()
+
+        assert remaining == ["new-task"]
+
+    def test_cleanup_old_logs_uses_same_cutoff_for_both_tables(self, audit_logger):
+        """Old rows in BOTH api_audit_logs and llm_usage (same cutoff) must be
+        deleted together in a single cleanup_old_logs call, and the returned
+        count must reflect both tables combined."""
+        conn = sqlite3.connect(audit_logger.db_path)
+        conn.execute(
+            "INSERT INTO api_audit_logs (api_key_masked, endpoint, request_time) VALUES (?, ?, ?)",
+            ("test****test", "/old", "2020-01-01 00:00:00"),
+        )
+        conn.execute(
+            "INSERT INTO api_audit_logs (api_key_masked, endpoint, request_time) VALUES (?, ?, ?)",
+            ("test****test", "/new", "2099-01-01 00:00:00"),
+        )
+        conn.execute(
+            """
+            INSERT INTO llm_usage
+            (task_id, stage, model, prompt_tokens, completion_tokens,
+             total_tokens, duration_ms, usage_missing, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("old-task", "calibration", "gpt-x", 10, 20, 30, 100, 0, "2020-01-01 00:00:00"),
+        )
+        conn.execute(
+            """
+            INSERT INTO llm_usage
+            (task_id, stage, model, prompt_tokens, completion_tokens,
+             total_tokens, duration_ms, usage_missing, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("new-task", "summary", "gpt-x", 10, 20, 30, 100, 0, "2099-01-01 00:00:00"),
+        )
+        conn.commit()
+        conn.close()
+
+        deleted = audit_logger.cleanup_old_logs(days=1)
+        assert deleted == 2  # 1 old api_audit_logs row + 1 old llm_usage row
+
+        calls = audit_logger.get_recent_calls(limit=10)
+        assert len(calls) == 1
+        assert calls[0]["endpoint"] == "/new"
+
+        conn = sqlite3.connect(audit_logger.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT task_id FROM llm_usage")
+        remaining = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        assert remaining == ["new-task"]
+
     def test_get_all_users_stats(self, audit_logger):
         """get_all_users_stats should return stats for all active users."""
         audit_logger.log_api_call(api_key="key12345678", user_id="user_a", endpoint="/a")
