@@ -3,10 +3,15 @@ import mimetypes
 import hashlib
 import time
 import requests
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, urljoin
 from .base import BaseDownloader
 from .models import VideoMetadata, DownloadInfo
+from ..errors import InvalidURLError
 from ..utils.logging import setup_logger
+# 模块级导入（而非 from...import 具名导入）：保持 url_validator.validate_url_safe
+# 可被测试通过 monkeypatch.setattr("...url_validator.validate_url_safe", ...) 打桩，
+# 具名导入会在导入时绑定函数对象，使得对源模块属性的打桩失效。
+from ..utils import url_validator
 import datetime
 
 # 创建日志记录器
@@ -38,46 +43,128 @@ class GenericDownloader(BaseDownloader):
         """
         判断是否可以处理该URL
         通用下载器作为兜底，可以处理任何URL
-        
+
         参数:
             url: 视频URL
-            
+
         返回:
             bool: 总是返回True作为兜底处理器
         """
         return True
-    
+
+    # 重定向最大跟随跳数：既要允许正常的 CDN/短链跳转，又要防止恶意或
+    # 异常服务器无限重定向拖垮下载线程
+    _MAX_REDIRECTS = 5
+
+    def _validate_or_raise(self, url: str) -> None:
+        """
+        对 URL 做 SSRF 安全校验（协议白名单 + 私网/回环/链路本地/云元数据拦截 +
+        DNS 二次解析校验），失败时转换为面向用户可读的 InvalidURLError。
+
+        GenericDownloader 是兜底处理器（can_handle 恒为 True），任何未被其他
+        平台专用下载器识别的 URL 都会落到这里，必须在发起任何网络请求前拦截。
+
+        参数:
+            url: 待校验的 URL
+
+        抛出:
+            InvalidURLError: URL 指向内网/回环/链路本地/云元数据等不安全地址，
+                              或协议不在 http/https 白名单内
+        """
+        try:
+            url_validator.validate_url_safe(url)
+        except url_validator.URLValidationError as e:
+            logger.error(f"URL 安全校验未通过，已阻止请求: {url}, 原因: {e}")
+            raise InvalidURLError("URL 指向内部网络地址，已被安全策略拦截") from e
+
+    def _safe_request(self, method: str, url: str, **kwargs) -> requests.Response:
+        """
+        对 URL 做 SSRF 校验后发起请求，并逐跳校验重定向目标。
+
+        不使用 requests 自带的 allow_redirects=True 自动跳转，而是手动跟随并
+        在每一跳都重新调用 validate_url_safe，防止公网 URL 通过 302 等方式
+        跳转到内网/云元数据地址造成 SSRF 绕过。
+
+        参数:
+            method: 'head' 或 'get'
+            url: 请求 URL
+            **kwargs: 透传给 requests.head/requests.get 的参数（如 timeout、
+                      stream、headers）。不要传入 allow_redirects，本方法强制
+                      关闭自动跳转以便逐跳校验
+
+        返回:
+            requests.Response: 最终（非重定向）响应
+
+        抛出:
+            InvalidURLError: 任意一跳未通过 SSRF 校验，或重定向跳数超过上限
+        """
+        request_func = requests.head if method == "head" else requests.get
+        current_url = url
+        redirect_count = 0
+
+        while True:
+            self._validate_or_raise(current_url)
+            response = request_func(current_url, allow_redirects=False, **kwargs)
+
+            if response.is_redirect:
+                redirect_count += 1
+                if redirect_count > self._MAX_REDIRECTS:
+                    if kwargs.get("stream"):
+                        response.close()
+                    raise InvalidURLError(
+                        f"重定向次数超过上限（{self._MAX_REDIRECTS}），已终止请求: {url}"
+                    )
+                next_url = urljoin(current_url, response.headers["Location"])
+                logger.info(
+                    f"跟随重定向 ({redirect_count}/{self._MAX_REDIRECTS}): "
+                    f"{current_url} -> {next_url}"
+                )
+                if kwargs.get("stream"):
+                    response.close()
+                current_url = next_url
+                continue
+
+            return response
+
     def _is_media_url(self, url):
         """
         检查URL是否直接指向媒体文件
-        
+
         参数:
             url: 文件URL
-            
+
         返回:
             bool: 是否是媒体文件URL
+
+        抛出:
+            InvalidURLError: HEAD 探测过程中命中不安全的重定向目标
         """
         try:
             parsed_url = urlparse(url)
             path = unquote(parsed_url.path.lower())
-            
+
             # 检查URL路径中的文件扩展名
             _, ext = os.path.splitext(path)
             if ext in self.supported_extensions:
                 return True
-            
-            # 尝试HEAD请求获取Content-Type
+
+            # 尝试HEAD请求获取Content-Type（经 SSRF 校验 + 逐跳重定向校验）
             try:
-                response = requests.head(url, allow_redirects=True, timeout=10)
+                response = self._safe_request("head", url, timeout=10)
                 content_type = response.headers.get('Content-Type', '').lower()
-                
+
                 # 检查Content-Type是否是音视频类型
                 if any(media_type in content_type for media_type in ['audio/', 'video/']):
                     return True
-            except:
+            except InvalidURLError:
+                # SSRF 拦截需要向上抛出终止整个处理流程，不能当作"探测失败"忽略
+                raise
+            except requests.exceptions.RequestException:
                 pass
-                
+
             return False
+        except InvalidURLError:
+            raise
         except Exception as e:
             logger.error(f"检查媒体URL失败: {str(e)}")
             return False
@@ -92,8 +179,15 @@ class GenericDownloader(BaseDownloader):
             
         返回:
             dict: 包含视频信息的字典
+
+        抛出:
+            InvalidURLError: URL 未通过 SSRF 安全校验
         """
         logger.info(f"通用下载器处理URL: {url}")
+
+        # SSRF 校验：generic 下载器是兜底处理器，任何 URL 都可能落到这里，
+        # 必须先过安全校验再发起任何网络请求（含下方的媒体类型 HEAD 探测）
+        self._validate_or_raise(url)
 
         try:
             cache_id = self.extract_video_id(url)
@@ -116,10 +210,10 @@ class GenericDownloader(BaseDownloader):
             if not filename or not any(filename.endswith(ext) for ext in self.supported_extensions):
                 # 根据时间戳生成文件名
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                # 尝试从HEAD请求获取文件类型
+                # 尝试从HEAD请求获取文件类型（经 SSRF 校验 + 逐跳重定向校验）
                 ext = '.mp4'  # 默认扩展名
                 try:
-                    response = requests.head(url, allow_redirects=True, timeout=10)
+                    response = self._safe_request('head', url, timeout=10)
                     content_type = response.headers.get('Content-Type', '').lower()
                     # 根据Content-Type确定扩展名
                     if 'audio/mpeg' in content_type or 'audio/mp3' in content_type:
@@ -130,7 +224,10 @@ class GenericDownloader(BaseDownloader):
                         ext = '.mp3'  # 默认音频格式
                     elif 'video/' in content_type:
                         ext = '.mp4'  # 默认视频格式
-                except:
+                except InvalidURLError:
+                    # SSRF 拦截需要向上抛出终止整个处理流程，不能静默回退默认扩展名
+                    raise
+                except requests.exceptions.RequestException:
                     pass
                 filename = f"generic_{timestamp}{ext}"
             
@@ -192,7 +289,14 @@ class GenericDownloader(BaseDownloader):
             
         返回:
             str: 本地文件路径，如果下载失败则返回None
+
+        抛出:
+            InvalidURLError: URL 未通过 SSRF 安全校验（永久性错误，不重试）
         """
+        # SSRF 校验：generic 下载器是兜底处理器，任何 URL 都可能落到这里，
+        # 必须先过安全校验再发起任何网络请求
+        self._validate_or_raise(url)
+
         # 落到当前任务的专属目录（data/temp/task_<id>/），实现：
         # 1) 任务结束时由 clean_up_task 一并 rmtree，不残留；
         # 2) 不同任务即使同名文件也写在各自目录，避免同名碰撞互相覆盖/误删。
@@ -234,9 +338,10 @@ class GenericDownloader(BaseDownloader):
                         resume_header['Range'] = f'bytes={initial_pos}-'
                         logger.info(f"检测到部分下载文件，从 {initial_pos} 字节处续传")
                 
-                # 发起请求
+                # 发起请求（经 SSRF 校验 + 逐跳重定向校验）
                 try:
-                    response = requests.get(
+                    response = self._safe_request(
+                        'get',
                         url,
                         headers=resume_header,
                         stream=True,
@@ -251,7 +356,8 @@ class GenericDownloader(BaseDownloader):
                             os.remove(local_path)
                             logger.info("已删除部分下载文件，准备重新下载")
                         # 重新发起请求（不带 Range header）
-                        response = requests.get(
+                        response = self._safe_request(
+                            'get',
                             url,
                             stream=True,
                             timeout=(30, 300)
@@ -311,7 +417,13 @@ class GenericDownloader(BaseDownloader):
                 
                 logger.info(f"文件下载成功: {local_path} (大小: {final_size / (1024*1024):.2f} MB)")
                 return local_path
-                
+
+            except InvalidURLError:
+                # SSRF 拦截是永久性错误（重定向目标不安全），重试无意义，
+                # 必须直接向上抛出终止整个下载，不能被当作瞬态故障重试或吞掉
+                logger.error(f"下载中止：URL 未通过 SSRF 安全校验 (尝试 {attempt + 1}/{max_retries}): {url}")
+                raise
+
             except requests.exceptions.ChunkedEncodingError as e:
                 logger.warning(f"分块编码错误 (尝试 {attempt + 1}/{max_retries}): {str(e)}")
                 if attempt < max_retries - 1:
