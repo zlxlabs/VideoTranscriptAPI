@@ -123,6 +123,18 @@ config.wechat/feishu.webhook     (全局配置)
 
 两个平台接收到的消息内容相同，格式自动适配。
 
+### 校对/总结状态文案（诚实状态模型）
+
+若任务通过 `processing_options` 关闭了校对或总结（见[处理深度开关功能文档](../features/processing_options.md)），"LLM 完成"通知的转录统计行会体现真实状态，不再统一显示"未生成"：
+
+| 总结状态 | 通知文案 |
+|---|---|
+| 生成失败（`failed`） | "生成失败" |
+| 主动关闭（`disabled`） | "未启用" |
+| 其他（未生成/处理中） | "未生成" |
+
+校对质量异常（`partial`/`none`）时，通知正文会额外附带一段 `⚠️ 校准部分异常` / `⚠️ 校准完全失败` 警告文案（`api/services/llm_ops.py::_build_calibration_warning()`）。
+
 ## 相关文件
 
 | 文件 | 说明 |

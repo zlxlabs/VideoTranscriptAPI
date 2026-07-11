@@ -16,8 +16,10 @@
 
 - **多平台支持**：YouTube、Bilibili、抖音、小红书、小宇宙播客、Apple Podcast，工厂模式自动匹配下载器
 - **双引擎转录**：CapsWriter-Offline（通用转录）+ FunASR（说话人识别）
-- **智能文本处理**：LLM 自动校对 ASR 错误、专有名词纠错、说话人推断、内容总结
-- **企业级功能**：SQLite + 文件系统双层缓存、多用户管理、审计日志、多渠道通知（企业微信 + 飞书）、任务历史浏览器
+- **智能文本处理**：LLM 自动校对 ASR 错误、专有名词纠错、按说话人采样+置信度降级的说话人推断、内容总结
+- **处理深度可控**：`processing_options` 开关按任务控制是否校对/总结，分层缓存产物只增不减，重复请求自动复用已有层
+- **诚实状态模型**：校对（full/partial/none/disabled）与总结（generated/skipped_short/failed/pending/disabled）状态全链路透传，不再用占位字符串掩盖失败
+- **企业级功能**：SQLite + 文件系统双层缓存、多用户管理、审计日志（含 LLM token 用量统计）、多渠道通知（企业微信 + 飞书）、任务历史浏览器
 - **风控系统**：敏感词检测、多策略文本脱敏、风险模型自动切换
 
 ## 外部依赖
@@ -94,6 +96,25 @@ curl -X POST "http://localhost:8000/api/transcribe" \
   }'
 ```
 
+### 只转录不校对/不总结
+
+通过 `processing_options` 按任务控制处理深度，`calibrate`/`summarize` 均默认 `true`（等价历史行为）：
+
+```bash
+curl -X POST "http://localhost:8000/api/transcribe" \
+  -H "Authorization: Bearer your-auth-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.youtube.com/watch?v=xxx",
+    "processing_options": {
+      "calibrate": false,
+      "summarize": false
+    }
+  }'
+```
+
+分层缓存产物只增不减：后续若对同一视频提交 `calibrate: true` 的请求，只会补跑缺失的校对层，已存在的转录不会重新下载。完整语义见 [处理深度开关功能文档](docs/features/processing_options.md)。
+
 ### 查询任务状态
 
 ```bash
@@ -112,13 +133,14 @@ curl -X GET "http://localhost:8000/api/task/{task_id}" \
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/api/transcribe` | POST | 提交转录任务 |
+| `/api/transcribe` | POST | 提交转录任务（支持 `processing_options` 处理深度开关） |
 | `/api/task/{task_id}` | GET | 查询任务状态 |
-| `/api/audit/stats` | GET | 调用统计 |
+| `/api/recalibrate` | POST | 重新校对（唯一强制重做例外，忽略分层缓存保护） |
+| `/api/audit/stats` | GET | 调用统计，含 LLM token 用量聚合（按阶段汇总 prompt/completion/total tokens） |
 | `/api/audit/calls` | GET | 调用记录 |
-| `/api/audit/history` | GET | 任务历史查询（支持多条件过滤、分页、关键词搜索） |
+| `/api/audit/history` | GET | 任务历史查询（支持多条件过滤、分页、关键词搜索），含 `calibration_status`/`summary_status` 状态字段 |
 | `/api/audit/filter-options` | GET | 获取过滤选项（webhook/平台/频道列表） |
-| `/api/audit/summary` | GET | 任务摘要预览（前 300 字） |
+| `/api/audit/summary` | GET | 任务摘要预览（前 300 字），基于诚实状态模型返回 `summary_status` |
 | `/api/users/profile` | GET | 当前用户信息 |
 | `/view/{view_token}` | GET | 结果查看页 |
 | `/view/{view_token}?raw=calibrated` | GET | 纯文本导出 |
@@ -157,7 +179,7 @@ video-transcript-api/
 - **使用指南**：[多渠道通知（企微+飞书）](docs/guides/notification.md) · [多用户系统](docs/guides/multi_user_setup.md) · [抖音/小红书 MediaResolverAPI 集成](docs/guides/media_resolver.md)
 - **API 指南**：[FunASR](docs/guides/api/funasr_spk_server_client_api.md) · [YouTube](docs/guides/api/youtube_client_guide.md) · [BBDown](docs/guides/api/bbdown_guide.md)
 - **开发文档**：[LLM 工程指南](docs/development/llm/engineering_guide.md) · [并发处理](docs/development/concurrency.md) · [日志系统](docs/development/logging.md)
-- **功能特性**：[Raw/Page 导出](docs/features/raw_export.md) · [Download URL 与元数据覆盖](docs/features/source_url_and_metadata_override.md)
+- **功能特性**：[处理深度开关（processing_options）](docs/features/processing_options.md) · [Raw/Page 导出](docs/features/raw_export.md) · [Download URL 与元数据覆盖](docs/features/source_url_and_metadata_override.md)
 
 ---
 
