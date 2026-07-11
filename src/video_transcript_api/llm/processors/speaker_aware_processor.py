@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import concurrent.futures
 
 from ...utils.logging import setup_logger
+from ...utils.llm_status import CalibrationStatus
 from ..core.config import LLMConfig
 from ..core.llm_client import LLMClient
 from ..core.key_info_extractor import KeyInfoExtractor, KeyInfo
@@ -630,6 +631,17 @@ class SpeakerAwareProcessor:
                 f"(dialogs applied={dialog_counts['applied']}, kept={dialog_counts['kept_original']})"
             )
 
+        # 诚实状态口径：failed_count==0 且 fallback_count==0 → full；
+        # 全部 chunk 都是 fallback/failed（即没有任何 chunk 干净成功）→ none；否则 partial。
+        # 注意 partial_count（覆盖率不足但仍应用了部分修正）不参与该判定——
+        # 只要没有 chunk 整体降级或失败，仍视为 full，因为每个 chunk 都保留了真实的 LLM 修正。
+        if failed_count == 0 and fallback_count == 0:
+            calibration_status = CalibrationStatus.FULL
+        elif (failed_count + fallback_count) == total:
+            calibration_status = CalibrationStatus.NONE
+        else:
+            calibration_status = CalibrationStatus.PARTIAL
+
         calibration_stats = {
             "total_chunks": total,
             "success_count": success_count,
@@ -637,6 +649,7 @@ class SpeakerAwareProcessor:
             "fallback_count": fallback_count,
             "failed_count": failed_count,
             "dialog_counts": dialog_counts,
+            "calibration_status": calibration_status,
         }
 
         return calibrated_chunks, calibration_stats

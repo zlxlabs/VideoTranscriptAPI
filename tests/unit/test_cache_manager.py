@@ -487,3 +487,209 @@ class TestLLMConfigFallback:
         view_data = cm.get_view_data_by_token(cache_hit["view_token"])
         assert view_data is not None
         assert view_data.get("llm_config") is None
+
+
+# ---------------------------------------------------------------------------
+# task_status.calibration_status / summary_status columns (migration)
+# ---------------------------------------------------------------------------
+
+class TestLLMStatusColumnMigration:
+    """Tests for the calibration_status/summary_status column migration."""
+
+    def test_columns_exist_after_init(self, cm):
+        with cm._get_cursor() as cursor:
+            cursor.execute("PRAGMA table_info(task_status)")
+            columns = [col[1] for col in cursor.fetchall()]
+        assert "calibration_status" in columns
+        assert "summary_status" in columns
+
+    def test_migration_is_idempotent(self, cache_dir):
+        """Re-initializing CacheManager against the same on-disk DB (simulating
+        a process restart) must not error and must not duplicate the columns."""
+        cm1 = CacheManager(cache_dir=str(cache_dir))
+        cm1.close()
+
+        cm2 = CacheManager(cache_dir=str(cache_dir))
+        try:
+            with cm2._get_cursor() as cursor:
+                cursor.execute("PRAGMA table_info(task_status)")
+                columns = [col[1] for col in cursor.fetchall()]
+            assert columns.count("calibration_status") == 1
+            assert columns.count("summary_status") == 1
+        finally:
+            cm2.close()
+
+
+class TestUpdateTaskStatusLLMStatusColumns:
+    """Tests for update_task_status writing the new calibration_status/summary_status columns."""
+
+    def test_sets_calibration_and_summary_status_columns(self, cm):
+        task = cm.create_task(url="https://example.com/colvid", platform="youtube", media_id="colvid")
+        cm.update_task_status(
+            task["task_id"], "success", platform="youtube", media_id="colvid",
+            calibration_status="full", summary_status="generated",
+        )
+        row = cm.get_task_by_id(task["task_id"])
+        assert row["calibration_status"] == "full"
+        assert row["summary_status"] == "generated"
+
+    def test_omitted_status_columns_stay_null(self, cm):
+        task = cm.create_task(url="https://example.com/colvid2", platform="youtube", media_id="colvid2")
+        cm.update_task_status(task["task_id"], "queued")
+        row = cm.get_task_by_id(task["task_id"])
+        assert row["calibration_status"] is None
+        assert row["summary_status"] is None
+
+
+# ---------------------------------------------------------------------------
+# save_llm_status: llm_status.json read-modify-write (honest status model)
+# ---------------------------------------------------------------------------
+
+class TestSaveLLMStatus:
+    """Tests for CacheManager.save_llm_status / llm_status.json persistence."""
+
+    def test_writes_new_status_file(self, cm, cache_dir):
+        _save_sample_capswriter(cm)
+        ok = cm.save_llm_status(
+            platform="youtube",
+            media_id="vid1",
+            use_speaker_recognition=False,
+            calibration_status="full",
+            calibration_stats={
+                "total_segments": 2, "calibrated_segments": 2,
+                "fallback_segments": 0, "low_quality_segments": 0,
+            },
+            summary_status="generated",
+        )
+        assert ok is True
+        files = list(cache_dir.rglob("llm_status.json"))
+        assert len(files) == 1
+        data = json.loads(files[0].read_text(encoding="utf-8"))
+        assert data["calibration_status"] == "full"
+        assert data["summary_status"] == "generated"
+        assert data["calibration_stats"]["total_segments"] == 2
+        assert "updated_at" in data
+
+    def test_merge_preserves_untouched_fields(self, cm, cache_dir):
+        """A later call that only updates calibration_status must not clobber
+        the summary_status written by a previous call. This is what makes the
+        calibrate_only recalibrate path (no summary re-run) safe: it can update
+        calibration_status without accidentally erasing a prior GENERATED summary_status."""
+        _save_sample_capswriter(cm)
+        cm.save_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            calibration_status="full", summary_status="generated",
+        )
+        cm.save_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            calibration_status="partial",
+            # summary_status intentionally omitted (None) -> must be preserved
+        )
+        files = list(cache_dir.rglob("llm_status.json"))
+        data = json.loads(files[0].read_text(encoding="utf-8"))
+        assert data["calibration_status"] == "partial"
+        assert data["summary_status"] == "generated"
+
+    def test_returns_false_when_cache_missing(self, cm):
+        ok = cm.save_llm_status(
+            platform="youtube", media_id="does-not-exist",
+            use_speaker_recognition=False, calibration_status="full",
+        )
+        assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# get_view_data_by_token: summary_state (honest status model, fixes the
+# "总结处理中..." permanent placeholder bug)
+# ---------------------------------------------------------------------------
+
+class TestGetViewDataSummaryState:
+    """Tests for the summary_state field on get_view_data_by_token, covering
+    the four honest states plus the legacy (no llm_status.json) fallback."""
+
+    def _make_success_task(self, cm, media_id="vidX"):
+        _save_sample_capswriter(cm, media_id=media_id)
+        task = cm.create_task(
+            url=f"https://example.com/{media_id}",
+            platform="youtube", media_id=media_id,
+        )
+        cm.update_task_status(
+            task["task_id"], "success", platform="youtube", media_id=media_id,
+        )
+        return task
+
+    def test_generated_state_returns_real_summary(self, cm):
+        task = self._make_success_task(cm, "vidgen")
+        cm.save_llm_result(
+            platform="youtube", media_id="vidgen", use_speaker_recognition=False,
+            llm_type="summary", content="A real generated summary.",
+        )
+        cm.save_llm_status(
+            platform="youtube", media_id="vidgen", use_speaker_recognition=False,
+            summary_status="generated",
+        )
+
+        view_data = cm.get_view_data_by_token(task["view_token"])
+        assert view_data["summary_state"] == "generated"
+        assert view_data["summary"] == "A real generated summary."
+
+    def test_skipped_short_state_has_no_placeholder_summary(self, cm):
+        task = self._make_success_task(cm, "vidskip")
+        cm.save_llm_status(
+            platform="youtube", media_id="vidskip", use_speaker_recognition=False,
+            summary_status="skipped_short",
+        )
+
+        view_data = cm.get_view_data_by_token(task["view_token"])
+        assert view_data["summary_state"] == "skipped_short"
+        assert view_data["summary"] is None
+
+    def test_failed_state_has_no_placeholder_summary(self, cm):
+        task = self._make_success_task(cm, "vidfail")
+        cm.save_llm_status(
+            platform="youtube", media_id="vidfail", use_speaker_recognition=False,
+            summary_status="failed",
+        )
+
+        view_data = cm.get_view_data_by_token(task["view_token"])
+        assert view_data["summary_state"] == "failed"
+        assert view_data["summary"] is None
+
+    def test_pending_state_when_summary_status_pending(self, cm):
+        task = self._make_success_task(cm, "vidpending")
+        cm.save_llm_status(
+            platform="youtube", media_id="vidpending", use_speaker_recognition=False,
+            summary_status="pending",
+        )
+
+        view_data = cm.get_view_data_by_token(task["view_token"])
+        assert view_data["summary_state"] == "pending"
+        assert view_data["summary"] is None
+
+    def test_legacy_no_status_file_with_summary_file_is_generated(self, cm):
+        """Old cache predating llm_status.json but with a real llm_summary.txt
+        must still show the summary."""
+        task = self._make_success_task(cm, "vidlegacy1")
+        cm.save_llm_result(
+            platform="youtube", media_id="vidlegacy1", use_speaker_recognition=False,
+            llm_type="summary", content="Legacy summary text.",
+        )
+
+        view_data = cm.get_view_data_by_token(task["view_token"])
+        assert view_data["summary_state"] == "generated"
+        assert view_data["summary"] == "Legacy summary text."
+
+    def test_legacy_no_status_file_no_summary_file_is_not_placeholder(self, cm):
+        """THE BUG THIS FIXES: an old task with no llm_status.json and no
+        llm_summary.txt must NOT show the "processing..." placeholder forever.
+        It must be reported as a definite non-pending state (no summary was
+        ever generated), not as still-processing."""
+        task = self._make_success_task(cm, "vidlegacy2")
+
+        view_data = cm.get_view_data_by_token(task["view_token"])
+        # Legacy tasks (predating this feature) can't be told apart from
+        # "text was too short to summarize" vs "summary generation failed",
+        # so they're conservatively bucketed as skipped_short (non-error UI).
+        assert view_data["summary_state"] == "skipped_short"
+        assert view_data["summary"] is None
+        assert "处理中" not in (view_data.get("summary") or "")

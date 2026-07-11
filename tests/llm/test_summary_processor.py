@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import Mock, patch
 from video_transcript_api.llm.processors.summary_processor import SummaryProcessor
 from video_transcript_api.llm.core.config import LLMConfig
+from video_transcript_api.utils.llm_status import SummaryStatus
 
 
 class TestSummaryProcessor(unittest.TestCase):
@@ -28,12 +29,13 @@ class TestSummaryProcessor(unittest.TestCase):
         )
 
     def test_short_text_returns_none(self):
-        """Test short text skips summary generation"""
+        """Test short text skips summary generation (status=SKIPPED_SHORT, not a failure)"""
         result = self.processor.process(
             text="This is a very short text.",  # < 500 chars
             title="Test Title",
         )
-        self.assertIsNone(result)
+        self.assertIsNone(result.text)
+        self.assertEqual(result.status, SummaryStatus.SKIPPED_SHORT)
 
     @patch('video_transcript_api.llm.core.llm_client.LLMClient.call')
     def test_long_text_generates_summary(self, mock_call):
@@ -48,8 +50,9 @@ class TestSummaryProcessor(unittest.TestCase):
             title="Test Title",
         )
 
-        self.assertIsNotNone(result)
-        self.assertIn("summary", result.lower())
+        self.assertIsNotNone(result.text)
+        self.assertIn("summary", result.text.lower())
+        self.assertEqual(result.status, SummaryStatus.GENERATED)
 
     def test_single_speaker_prompt_selection(self):
         """Test single speaker prompt selection"""
@@ -94,7 +97,7 @@ class TestSummaryProcessor(unittest.TestCase):
 
     @patch('video_transcript_api.llm.core.llm_client.LLMClient.call')
     def test_summary_too_short_returns_none(self, mock_call):
-        """Test summary generation returns None if result too short"""
+        """Test summary generation returns status=FAILED if result too short (not SKIPPED_SHORT)"""
         # Mock LLM response with very short text
         mock_response = Mock()
         mock_response.text = "Short"  # < 50 chars
@@ -105,11 +108,12 @@ class TestSummaryProcessor(unittest.TestCase):
             title="Test Title",
         )
 
-        self.assertIsNone(result)
+        self.assertIsNone(result.text)
+        self.assertEqual(result.status, SummaryStatus.FAILED)
 
     @patch('video_transcript_api.llm.core.llm_client.LLMClient.call')
     def test_exception_handling(self, mock_call):
-        """Test exception handling returns None gracefully"""
+        """Test exception handling returns status=FAILED gracefully (no raise)"""
         # Mock LLM call to raise exception
         self.llm_client.call = Mock(side_effect=Exception("Test error"))
 
@@ -118,8 +122,9 @@ class TestSummaryProcessor(unittest.TestCase):
             title="Test Title",
         )
 
-        # Should return None instead of raising exception
-        self.assertIsNone(result)
+        # Should return a FAILED SummaryResult instead of raising exception
+        self.assertIsNone(result.text)
+        self.assertEqual(result.status, SummaryStatus.FAILED)
 
     @patch('video_transcript_api.llm.core.llm_client.LLMClient.call')
     def test_selected_models_parameter(self, mock_call):
