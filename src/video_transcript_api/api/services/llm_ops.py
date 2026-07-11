@@ -227,6 +227,16 @@ def _handle_llm_task(llm_task: dict):
                             calibration_status = merged_llm_status.get("calibration_status")
                         if summary_status is None:
                             summary_status = merged_llm_status.get("summary_status")
+                            # 通知误报修复（codex-review R8 #1）：summary_status
+                            # 为 None 说明本轮压根没碰总结层（例如分层缓存"只补
+                            # 校对"，processing_options.summarize=False），但缓存
+                            # 里可能已经有真实落盘的总结——result_dict["内容总结"]
+                            # 此时仍是协调器本轮的 None，若不回填，随后的完成通知
+                            # 会把"缓存里真实存在的总结"误报成"总结未生成"，丢失
+                            # 用户本该看到的内容。
+                            _restore_cached_summary_for_notification(
+                                result_dict, merged_snapshot,
+                            )
 
                     result_stats["calibration_status"] = calibration_status
                     result_stats["summary_status"] = summary_status
@@ -413,6 +423,45 @@ def _build_result_dict(coordinator_result: dict) -> dict:
         result_dict["structured_data"] = coordinator_result["structured_data"]
 
     return result_dict
+
+
+def _restore_cached_summary_for_notification(result_dict: dict, merged_snapshot: Optional[dict]) -> None:
+    """分层缓存"只补校对"场景下，用缓存里已有的总结文本回填通知用的结果字典。
+
+    背景（codex-review R8 #1）：coordinator 本轮若因
+    processing_options.summarize=False 而跳过总结（例如缓存已有
+    llm_summary.txt，本轮只补校对层），_build_result_dict() 产出的
+    result_dict["内容总结"] 仍是 None、skip_summary=True——这只反映"本轮
+    是否重新生成"，不反映"总结是否存在"。_save_llm_results 内部对
+    llm_status.json 的合并语义是对的（保留旧值），但随后 _send_notification
+    直接消费这份内存态的 result_dict，会把缓存里真实存在的总结误报成
+    "总结未生成"。
+
+    只在"本轮确实没有产出总结文本 + 缓存里确实有真实落盘的总结"两个条件都
+    满足时才回填：调用方（_handle_llm_task）已经把本次调用限定在
+    summary_status 合并前为 None（本轮未触碰该层）的分支里，因此这里不会
+    把"本轮真实尝试但失败"（FAILED，缓存不会有 llm_summary.txt）误伪装成
+    成功。
+
+    Args:
+        result_dict: _build_result_dict() 的输出，原地修改（补回总结文本、
+            skip_summary 与 stats.summary_length）
+        merged_snapshot: cache_manager.get_cache(...) 返回的合并后缓存快照，
+            可能为 None（缓存未命中）
+    """
+    if result_dict.get("内容总结") is not None:
+        return
+    if not merged_snapshot or "llm_summary" not in merged_snapshot:
+        return
+
+    cached_summary_text = merged_snapshot.get("llm_summary") or ""
+    if not cached_summary_text:
+        return
+
+    result_dict["内容总结"] = cached_summary_text
+    result_dict["skip_summary"] = False
+    result_dict.setdefault("stats", {})["summary_length"] = len(cached_summary_text)
+    logger.info("本轮未生成总结，已从缓存回填真实总结文本用于通知")
 
 
 def _should_backfill_summary(cache_data: dict, calibrate_only: bool) -> bool:
