@@ -503,129 +503,139 @@ def _save_llm_results(
     if not (platform and media_id):
         return None
 
-    # ---- 分层缓存保护：判断本轮是否需要"已存在层不覆盖" ----
+    # ---- 分层缓存保护：判断本轮是否需要"已存在层不覆盖"，整段持媒体锁 ----
     # processing_options 缺省按全流程兜底，此时 calibrate_requested/summarize_requested
     # 均为 True，need_snapshot 恒为 False，不会发起额外的 get_cache 查询——保证本函数
     # 现有全部调用方（包括不传 processing_options 的旧测试）行为完全不变。
-    if processing_options is None:
-        processing_options = {"calibrate": True, "summarize": True}
-    calibrate_requested = processing_options.get("calibrate", True)
-    summarize_requested = processing_options.get("summarize", True)
+    #
+    # 加锁范围覆盖"判断层是否已存在 -> 写入产物 -> 合并落盘状态"整段
+    # （codex-review R3 #1）：同一媒体的两个并发任务（例如任务 A 只要
+    # summarize、任务 B 只要 calibrate）如果不共享这把锁，A 在判断阶段拍下
+    # 的"校对层不存在"快照会在 B 写入真实校对产物之后过期——A 恢复执行后
+    # 仍会用这份过期快照，把自己的格式化原文/占位内容当作"层不存在时的
+    # 兜底"覆盖到 B 刚写好的真实产物之上，破坏"缓存产物只增不减"的分层
+    # 缓存不变式。cache_manager.media_lock 是 RLock，本函数末尾调用的
+    # save_llm_status 内部也会请求同一把锁，同线程可重入，不会死锁。
+    with cache_manager.media_lock(platform, media_id):
+        if processing_options is None:
+            processing_options = {"calibrate": True, "summarize": True}
+        calibrate_requested = processing_options.get("calibrate", True)
+        summarize_requested = processing_options.get("summarize", True)
 
-    calibrated_exists_before = False
-    summary_exists_before = False
-    need_snapshot = (not calibrate_requested) or (not summarize_requested)
-    if need_snapshot:
-        existing_snapshot = cache_manager.get_cache(
-            platform, media_id, use_speaker_recognition=use_speaker_recognition,
-        )
-        if existing_snapshot:
-            calibrated_exists_before = "llm_calibrated" in existing_snapshot
-            summary_exists_before = "llm_summary" in existing_snapshot
-
-    # 校对层已存在、且本轮未请求（重新）校对 -> 抑制写入，保护已有的真实产物
-    # 不被本轮 skip_calibration=True 产出的占位内容覆盖。
-    suppress_calibration = calibrated_exists_before and not calibrate_requested
-
-    # 总结层的"关闭"语义二次判定：
-    # - 已有真实产物（GENERATED/SKIPPED_SHORT 都会落盘文件）-> 本轮未触碰，
-    #   保留旧值（None，走 save_llm_status 的合并语义）。
-    # - 尚无产物 -> 用户首次显式关闭总结，记为 DISABLED（区别于"文本过短跳过"）。
-    # calibrate_only 且未 backfill 的 recalibrate 分支维持原样：summary_status
-    # 此时已是协调器给出的 None（"本轮未尝试"），不需要在这里重新判定。
-    if not (calibrate_only and not summary_backfill) and not summarize_requested:
-        summary_status = None if summary_exists_before else SummaryStatus.DISABLED
-
-    # 保存校对文本
-    if calibrate_success and not suppress_calibration:
-        cache_manager.save_llm_result(
-            platform=platform,
-            media_id=media_id,
-            use_speaker_recognition=use_speaker_recognition,
-            llm_type="calibrated",
-            content=calibrated_text,
-        )
-        logger.info(f"校对文本已保存到缓存: {task_id}")
-    elif suppress_calibration:
-        logger.info(f"校对层已存在且本轮未请求重新校对，跳过覆盖: {task_id}")
-    else:
-        logger.warning(f"校对失败，跳过保存校对文件: {task_id}")
-
-    # 保存总结文本：按 summary_status 三态（+DISABLED/保留）分支（不再用
-    # skip_summary/summary_success 二元判定——旧逻辑里 skip_summary 与
-    # summary_success 永远互补，导致"文本过短"分支实际不可达，"生成失败"
-    # 被悄悄吞掉，既不落盘校对文本兜底也不报错）
-    if calibrate_only and not summary_backfill:
-        logger.info(f"仅校对模式，保留原有总结文件: {task_id}")
-    elif summary_status == SummaryStatus.GENERATED:
-        if summary_text is not None:
-            logger.info(f"保存LLM总结到缓存: {task_id}")
-            cache_manager.save_llm_result(
-                platform=platform,
-                media_id=media_id,
-                use_speaker_recognition=use_speaker_recognition,
-                llm_type="summary",
-                content=summary_text,
+        calibrated_exists_before = False
+        summary_exists_before = False
+        need_snapshot = (not calibrate_requested) or (not summarize_requested)
+        if need_snapshot:
+            existing_snapshot = cache_manager.get_cache(
+                platform, media_id, use_speaker_recognition=use_speaker_recognition,
             )
-        else:
-            logger.warning(f"总结状态为 generated 但文本为空，跳过保存: {task_id}")
-    elif summary_status == SummaryStatus.SKIPPED_SHORT:
-        if calibrate_success:
-            logger.info(f"文本过短，保存校对文本作为总结: {task_id}")
+            if existing_snapshot:
+                calibrated_exists_before = "llm_calibrated" in existing_snapshot
+                summary_exists_before = "llm_summary" in existing_snapshot
+
+        # 校对层已存在、且本轮未请求（重新）校对 -> 抑制写入，保护已有的真实产物
+        # 不被本轮 skip_calibration=True 产出的占位内容覆盖。
+        suppress_calibration = calibrated_exists_before and not calibrate_requested
+
+        # 总结层的"关闭"语义二次判定：
+        # - 已有真实产物（GENERATED/SKIPPED_SHORT 都会落盘文件）-> 本轮未触碰，
+        #   保留旧值（None，走 save_llm_status 的合并语义）。
+        # - 尚无产物 -> 用户首次显式关闭总结，记为 DISABLED（区别于"文本过短跳过"）。
+        # calibrate_only 且未 backfill 的 recalibrate 分支维持原样：summary_status
+        # 此时已是协调器给出的 None（"本轮未尝试"），不需要在这里重新判定。
+        if not (calibrate_only and not summary_backfill) and not summarize_requested:
+            summary_status = None if summary_exists_before else SummaryStatus.DISABLED
+
+        # 保存校对文本
+        if calibrate_success and not suppress_calibration:
             cache_manager.save_llm_result(
                 platform=platform,
                 media_id=media_id,
                 use_speaker_recognition=use_speaker_recognition,
-                llm_type="summary",
+                llm_type="calibrated",
                 content=calibrated_text,
             )
-    elif summary_status == SummaryStatus.FAILED:
-        # 关键修复：总结失败不再把校对文本复制成总结文件，避免"生成失败"被
-        # 伪装成"文本过短"的正常路径（诚实状态模型的核心诉求）
-        logger.warning(f"总结生成失败，不落盘复制校对文本: {task_id}")
-    elif summary_status == SummaryStatus.DISABLED:
-        logger.info(f"总结已禁用（本任务未启用内容总结），不生成总结文件: {task_id}")
-    elif summary_status is None and not summarize_requested:
-        logger.info(f"总结层已存在且本轮未请求生成总结，保留原有总结文件: {task_id}")
-    else:
-        logger.warning(f"总结状态未知或仍在处理中({summary_status})，跳过保存总结文件: {task_id}")
+            logger.info(f"校对文本已保存到缓存: {task_id}")
+        elif suppress_calibration:
+            logger.info(f"校对层已存在且本轮未请求重新校对，跳过覆盖: {task_id}")
+        else:
+            logger.warning(f"校对失败，跳过保存校对文件: {task_id}")
 
-    # 保存结构化数据（同样受校对层抑制保护，避免覆盖已有的真实说话人校对结果）
-    if (
-        use_speaker_recognition
-        and calibrate_success
-        and not suppress_calibration
-        and "structured_data" in result_dict
-    ):
-        structured_data = result_dict["structured_data"]
-        cal_stats_for_save = stats.get("calibration_stats")
-        if cal_stats_for_save:
-            structured_data["calibration_stats"] = cal_stats_for_save
-        save_ok = cache_manager.save_llm_result(
+        # 保存总结文本：按 summary_status 三态（+DISABLED/保留）分支（不再用
+        # skip_summary/summary_success 二元判定——旧逻辑里 skip_summary 与
+        # summary_success 永远互补，导致"文本过短"分支实际不可达，"生成失败"
+        # 被悄悄吞掉，既不落盘校对文本兜底也不报错）
+        if calibrate_only and not summary_backfill:
+            logger.info(f"仅校对模式，保留原有总结文件: {task_id}")
+        elif summary_status == SummaryStatus.GENERATED:
+            if summary_text is not None:
+                logger.info(f"保存LLM总结到缓存: {task_id}")
+                cache_manager.save_llm_result(
+                    platform=platform,
+                    media_id=media_id,
+                    use_speaker_recognition=use_speaker_recognition,
+                    llm_type="summary",
+                    content=summary_text,
+                )
+            else:
+                logger.warning(f"总结状态为 generated 但文本为空，跳过保存: {task_id}")
+        elif summary_status == SummaryStatus.SKIPPED_SHORT:
+            if calibrate_success:
+                logger.info(f"文本过短，保存校对文本作为总结: {task_id}")
+                cache_manager.save_llm_result(
+                    platform=platform,
+                    media_id=media_id,
+                    use_speaker_recognition=use_speaker_recognition,
+                    llm_type="summary",
+                    content=calibrated_text,
+                )
+        elif summary_status == SummaryStatus.FAILED:
+            # 关键修复：总结失败不再把校对文本复制成总结文件，避免"生成失败"被
+            # 伪装成"文本过短"的正常路径（诚实状态模型的核心诉求）
+            logger.warning(f"总结生成失败，不落盘复制校对文本: {task_id}")
+        elif summary_status == SummaryStatus.DISABLED:
+            logger.info(f"总结已禁用（本任务未启用内容总结），不生成总结文件: {task_id}")
+        elif summary_status is None and not summarize_requested:
+            logger.info(f"总结层已存在且本轮未请求生成总结，保留原有总结文件: {task_id}")
+        else:
+            logger.warning(f"总结状态未知或仍在处理中({summary_status})，跳过保存总结文件: {task_id}")
+
+        # 保存结构化数据（同样受校对层抑制保护，避免覆盖已有的真实说话人校对结果）
+        if (
+            use_speaker_recognition
+            and calibrate_success
+            and not suppress_calibration
+            and "structured_data" in result_dict
+        ):
+            structured_data = result_dict["structured_data"]
+            cal_stats_for_save = stats.get("calibration_stats")
+            if cal_stats_for_save:
+                structured_data["calibration_stats"] = cal_stats_for_save
+            save_ok = cache_manager.save_llm_result(
+                platform=platform,
+                media_id=media_id,
+                use_speaker_recognition=use_speaker_recognition,
+                llm_type="structured",
+                content=structured_data,
+            )
+            if save_ok:
+                logger.info(f"结构化数据已保存到缓存: {platform}/{media_id}/llm_processed.json")
+            else:
+                logger.warning(f"结构化数据保存失败: {task_id}")
+
+        # 写入统一的诚实状态落盘文件 llm_status.json（两条路径都写）。
+        # calibration_status/summary_status 为 None 时（本轮未触碰该层）传 None 给
+        # save_llm_status，其合并语义会保留旧值，不会把已有的真实状态误覆盖。
+        effective_calibration_status = None if suppress_calibration else stats.get("calibration_status")
+        effective_calibration_stats = None if suppress_calibration else stats.get("calibration_stats")
+        cache_manager.save_llm_status(
             platform=platform,
             media_id=media_id,
             use_speaker_recognition=use_speaker_recognition,
-            llm_type="structured",
-            content=structured_data,
+            calibration_status=effective_calibration_status,
+            calibration_stats=effective_calibration_stats,
+            summary_status=summary_status,
         )
-        if save_ok:
-            logger.info(f"结构化数据已保存到缓存: {platform}/{media_id}/llm_processed.json")
-        else:
-            logger.warning(f"结构化数据保存失败: {task_id}")
-
-    # 写入统一的诚实状态落盘文件 llm_status.json（两条路径都写）。
-    # calibration_status/summary_status 为 None 时（本轮未触碰该层）传 None 给
-    # save_llm_status，其合并语义会保留旧值，不会把已有的真实状态误覆盖。
-    effective_calibration_status = None if suppress_calibration else stats.get("calibration_status")
-    effective_calibration_stats = None if suppress_calibration else stats.get("calibration_stats")
-    cache_manager.save_llm_status(
-        platform=platform,
-        media_id=media_id,
-        use_speaker_recognition=use_speaker_recognition,
-        calibration_status=effective_calibration_status,
-        calibration_stats=effective_calibration_stats,
-        summary_status=summary_status,
-    )
 
     if calibrate_success or summary_success:
         logger.info(f"LLM结果已保存到缓存: {platform}/{media_id}")

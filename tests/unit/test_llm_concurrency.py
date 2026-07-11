@@ -8,6 +8,7 @@ All console output must be in English only (no emoji, no Chinese).
 """
 
 import threading
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -27,6 +28,17 @@ class _DummyQueue:
 class _DummyCacheManager:
     def __init__(self):
         self.saved = []
+
+    @contextmanager
+    def media_lock(self, platform, media_id):
+        """No-op stand-in mirroring CacheManager.media_lock's public contract.
+
+        _save_llm_results wraps its layered-cache check/write/merge section
+        in this per-media lock; a no-op keeps these tests exercising true
+        cross-task concurrency (the real lock only serializes tasks sharing
+        the same media, and each task here uses a distinct media_id anyway).
+        """
+        yield
 
     def save_llm_result(self, *, platform, media_id, use_speaker_recognition, llm_type, content):
         self.saved.append(

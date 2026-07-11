@@ -40,9 +40,12 @@ class CacheManager:
         # 使用线程本地存储来管理数据库连接
         self._local = threading.local()
 
-        # 按 (platform, media_id) 粒度的进程内锁池，保护 llm_status.json 的
-        # 读-改-写不被跨任务并发踩踏（例如一个任务补校对、另一个任务补总结，
-        # 两者同时读-合并-写同一份 llm_status.json 时后写者会覆盖先写者字段）。
+        # 按 (platform, media_id) 粒度的进程内锁池，保护缓存产物（llm_status.json
+        # 的读-改-写，以及分层缓存"层是否已存在"的判定 + 写入，见 media_lock()
+        # 文档）不被跨任务并发踩踏。用 RLock 而不是 Lock：调用方（例如
+        # llm_ops._save_llm_results）可能持锁写入产物后，内部再调用本类的
+        # save_llm_status()，其内部也会请求同一把锁——同一线程必须能重入，
+        # 否则会自锁死锁。
         # 懒创建 + 引用计数弹出，实现模式与 api/context.py 的 task_lock 池
         # 一致，但弹出判断改用引用计数而非"释放后检查 locked()"——后者存在
         # 生命周期竞态（codex-review R3 #2）：等待线程已经从字典里取出锁
@@ -53,7 +56,9 @@ class CacheManager:
         # 的临界区。引用计数在"从字典取出锁对象"的同一个 guard 临界区内
         # +1（严格早于 acquire()，因此不存在"已取到对象但计数未体现"的
         # 窗口），释放锁之后再 -1，归零才真正弹出，从根上消除这个窗口。
-        self._media_locks: Dict[str, threading.Lock] = {}
+        # 注：threading.RLock 在本项目所用 Python 版本上没有 locked() 方法，
+        # 这也是弹出判断必须用引用计数、不能用 locked() 的另一个原因。
+        self._media_locks: Dict[str, threading.RLock] = {}
         self._media_lock_refcounts: Dict[str, int] = {}
         self._media_locks_guard = threading.Lock()
 
@@ -88,26 +93,44 @@ class CacheManager:
             cursor.close()
             
     @contextmanager
-    def _media_lock(self, platform: str, media_id: str):
-        """按 (platform, media_id) 粒度加锁的上下文管理器。
+    def media_lock(self, platform: str, media_id: str):
+        """按 (platform, media_id) 粒度加锁的上下文管理器（公开 API）。
 
-        用于保护同一媒体的 llm_status.json 读-改-写不被并发任务踩踏——
-        task_lock（api/context.py）是按 task_id 加锁的，锁不住"两个不同
-        task_id、但操作同一份媒体缓存"这种跨任务场景（例如一个任务只补
-        校对、另一个任务只补总结，二者并发调用 save_llm_status 时若无锁，
-        读-改-写语义下后写者会用自己读到的旧快照覆盖先写者刚写入的字段）。
+        用于保护同一媒体的缓存产物读-改-写不被并发任务踩踏——task_lock
+        （api/context.py）是按 task_id 加锁的，锁不住"两个不同 task_id、
+        但操作同一份媒体缓存"这种跨任务场景。两类已知场景：
+
+        1. llm_status.json 的读-改-写（本类内部使用，见 save_llm_status）：
+           例如一个任务只补校对、另一个任务只补总结，二者并发调用
+           save_llm_status 时若无锁，读-改-写语义下后写者会用自己读到的
+           旧快照覆盖先写者刚写入的字段。
+        2. 分层缓存"层是否已存在"的判定与写入（llm_ops._save_llm_results
+           使用，见该函数文档，codex-review R3 #1）：任务 A 请求的处理
+           深度不含某一层，需要靠"该层此前是否已存在"决定是否抑制写入；
+           这个判定 + 写入必须与另一个并发任务对同一层的真实写入互斥，
+           否则 A 会拿着写入前拍下的旧快照，在写入前那一刻把已经被写入
+           的真实产物覆盖掉。
+
+        公开为 media_lock（而非内部私有方法）供 llm_ops 等上层模块直接
+        使用，把"判定 -> 写入 -> 合并状态"整段纳入同一把锁的保护范围。
+
+        用 RLock：调用方可能已经持有这把锁（例如 llm_ops._save_llm_results
+        持锁写入产物后，最终会调用本类的 save_llm_status，其内部也会请求
+        同一把锁）——RLock 允许同一线程重入，避免这种调用链自锁死锁。
 
         实现模式与 api/context.py 的 task_lock 基本一致：懒创建锁对象，
-        用守护锁保护锁字典本身的读写；区别在于弹出判断用引用计数（而非
-        释放后检查 locked()，该写法有生命周期竞态，见 __init__ 中
-        self._media_locks 字段上的注释），归零才真正从字典弹出，避免锁池
-        随媒体数量无限增长。
+        用守护锁保护锁字典本身的读写；弹出判断用引用计数（而非释放后检查
+        locked()，该写法有生命周期竞态——等待线程可能已从字典取到锁对象、
+        但尚未 acquire 时，持有者释放并见"当前无人持有"就弹出，导致后续
+        线程新建另一把锁对象、与仍在等待的线程各持一把锁同时进入临界区，
+        codex-review R3 #2 已修复），归零才真正从字典弹出，避免锁池随
+        媒体数量无限增长。
         """
         key = f"{platform}:{media_id}"
         with self._media_locks_guard:
             lock = self._media_locks.get(key)
             if lock is None:
-                lock = threading.Lock()
+                lock = threading.RLock()
                 self._media_locks[key] = lock
                 self._media_lock_refcounts[key] = 0
             # 计数必须在这个 guard 临界区内完成，且严格早于下面的
@@ -650,8 +673,8 @@ class CacheManager:
         try:
             # 全程持锁：同一媒体的读-改-写不能被另一个任务的并发调用打断，
             # 否则两个任务各自读到旧快照后先后写回，后写者会用自己那份
-            # 缺字段的旧快照覆盖先写者刚合并进去的字段（见 _media_lock 文档）。
-            with self._media_lock(platform, media_id):
+            # 缺字段的旧快照覆盖先写者刚合并进去的字段（见 media_lock 文档）。
+            with self.media_lock(platform, media_id):
                 cache_data = self.get_cache(platform, media_id, use_speaker_recognition=use_speaker_recognition)
                 if not cache_data:
                     logger.warning(f"未找到缓存记录，无法写入 llm_status.json: {platform}/{media_id}")
