@@ -33,11 +33,22 @@ def env(cm, monkeypatch):
 
     The SSRF validator does real DNS resolution and blocks non-allowlisted
     private IPs — orthogonal to the behavior under test, so stub it out.
+    Both entry points need stubbing: validate_url_safe (used for simple
+    pass/fail gates) and validate_url_safe_with_ip (used by
+    GenericDownloader's IP-pinned request path, see downloaders/generic.py
+    and utils/pinned_ip_adapter.py — codex-review R5 #1) — otherwise
+    GenericDownloader.get_metadata()/get_video_info() still hit the real,
+    unstubbed DNS-rebinding-safe validator for RECORDER_URL's non-http
+    scheme and raise for real.
     """
     monkeypatch.setattr(svc, "cache_manager", cm)
     monkeypatch.setattr(svc, "get_notification_router", lambda: MagicMock())
     monkeypatch.setattr(
         "video_transcript_api.utils.url_validator.validate_url_safe", lambda url: url
+    )
+    monkeypatch.setattr(
+        "video_transcript_api.utils.url_validator.validate_url_safe_with_ip",
+        lambda url: (url, None),
     )
     return cm
 
