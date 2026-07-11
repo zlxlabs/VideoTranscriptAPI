@@ -564,10 +564,24 @@ def process_transcription(
                 and cached_calibration_status != CalibrationStatus.DISABLED
                 and cached_calibration_status != CalibrationStatus.NONE
             )
-            need_calibrated = processing_options.get("calibrate", True) and not calibrated_layer_satisfied
+            calibrate_requested = processing_options.get("calibrate", True)
+            need_calibrated = calibrate_requested and not calibrated_layer_satisfied
             need_summary = processing_options.get("summarize", True) and not has_llm_summary
 
-            if not need_calibrated and not need_summary:
+            # need_calibrated=False 不代表校对层已经有任何产物——calibrate=False
+            # 会无条件把它压成 False，即便 llm_calibrated 压根不存在（比如只有
+            # transcript 层的旧缓存，或该媒体第一次请求、LLM 从未跑过一次）。
+            # 这种情况下 calibrate_requested=False 是唯一让 need_calibrated=False
+            # 的原因，has_llm_calibrated 仍是 False——不能把它和"层已满足"混为
+            # 一谈，否则下面会把从未存在的 llm_calibrated 读成空字符串，发出
+            # 空校对通知，任务行也不会被标记为 disabled（codex-review R5 #2）。
+            # summary 层不需要同样处理：summary 的 disabled/failed 本来就不落盘
+            # llm_summary.txt（见上面的分层命中判定注释），has_llm_summary=False
+            # 在 calibrate=True 场景下的展示分支已经能正确回退（用 calibrated_text
+            # 兜底），不存在"读空字符串"的问题。
+            calibration_effectively_missing = not calibrate_requested and not has_llm_calibrated
+
+            if not need_calibrated and not need_summary and not calibration_effectively_missing:
                 logger.info("缓存中已有 LLM 结果，直接使用")
                 cache_type = "含说话人识别" if has_speaker_recognition else "普通转录"
                 engine_info = "FunASR" if has_speaker_recognition else "CapsWriter"
@@ -734,11 +748,19 @@ def process_transcription(
                 queued_transcription_data = transcription_data if has_speaker_recognition else None
                 queued_use_speaker_recognition = has_speaker_recognition
             else:
-                # 校对层已满足（need_calibrated=False 时，本分支必然是 need_summary=True），
-                # 只缺总结：复用已有校对文本作为总结输入（而非原始转录，质量更高），
-                # 并强制走纯文本路径（transcription_data=None）避免二次说话人推断浪费
-                # LLM 调用——_prepare_llm_content 在 transcription_data 为空时会回退
-                # 到纯文本分支，与 use_speaker_recognition 是否为 True 无关。
+                # need_calibrated=False 到这里有两种情况：
+                # 1) 校对层已满足，只缺总结：复用已有校对文本作为总结输入（而非
+                #    原始转录，质量更高），并强制走纯文本路径
+                #    （transcription_data=None）避免二次说话人推断浪费 LLM 调用
+                #    ——_prepare_llm_content 在 transcription_data 为空时会回退
+                #    到纯文本分支，与 use_speaker_recognition 是否为 True 无关。
+                # 2) calibration_effectively_missing 命中（calibrate=False 且
+                #    校对层从未存在过，need_summary 可能同时为 False——两层都
+                #    从未处理过；也可能为 True——只是校对层缺失、总结层本身
+                #    还需要真实生成）：cache_data.get("llm_calibrated") 取不到
+                #    值，回退到原始转录——这个分支本身就是把请求交给 llm_ops
+                #    的 skip_calibration 本地格式化路径去产出 disabled 占位
+                #    产物，语义上仍然正确。
                 queued_transcript = cache_data.get("llm_calibrated") or transcript
                 queued_transcription_data = None
                 queued_use_speaker_recognition = has_speaker_recognition
