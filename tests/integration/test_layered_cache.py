@@ -169,6 +169,35 @@ class TestLayeredCacheMatrix:
         # (no save_cache call for a fresh transcript).
         assert task["transcript"] == "RAW uncalibrated transcript"
 
+    def test_calibration_none_then_full_flow_requeues_calibration_again(
+        self, monkeypatch, patch_runtime
+    ):
+        """codex-review R4 #2: cache has a fallback-formatted-original
+        llm_calibrated.txt from a PRIOR calibration attempt that fully
+        degraded (calibration_status=none -- llm_ops._save_llm_results now
+        persists that fallback artifact instead of dropping it). A
+        subsequent full-flow request must still treat calibration as
+        MISSING and re-queue a real attempt -- "an artifact exists" must not
+        be conflated with "already satisfied", exactly like the existing
+        disabled-placeholder case above, otherwise one failed attempt would
+        permanently lock the media into the failed fallback text."""
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "llm_calibrated": "fallback formatted original text (calibration fully failed)",
+            "llm_status": {"calibration_status": CalibrationStatus.NONE},
+        }
+
+        result, queued = _run(
+            monkeypatch, patch_runtime, cache_data,
+            {"calibrate": True, "summarize": True},
+        )
+
+        assert result["status"] == "success"
+        assert len(queued) == 1
+        task = queued[0]
+        assert task["processing_options"] == {"calibrate": True, "summarize": True}
+        assert task["transcript"] == "RAW uncalibrated transcript"
+
     def test_calibrate_only_then_full_flow_requeues_summary_only(
         self, monkeypatch, patch_runtime
     ):

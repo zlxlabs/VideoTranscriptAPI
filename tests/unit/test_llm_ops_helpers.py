@@ -765,3 +765,160 @@ class TestSaveLLMResultsLayeredCacheSuppression:
         ]
         assert structured_calls == []
         assert result["calibration_status"] == CalibrationStatus.DISABLED
+
+
+class TestSaveLLMResultsCalibrationNoneStillPersists:
+    """codex-review R4 #2: total calibration failure (calibration_status=NONE)
+    must still persist the fallback formatted-original text the processor
+    returns -- skipping the save entirely (the old behavior) means the view
+    page can only str() the raw dict, and the same request keeps re-running
+    the LLM forever because the cache never has llm_calibrated.txt. The
+    honest-status invariant is preserved: calibration_status is still
+    recorded as NONE -- "an artifact exists" and "calibration succeeded" are
+    two different facts."""
+
+    def _patch_cache_manager(self, monkeypatch):
+        from video_transcript_api.api.services import llm_ops
+
+        mock_cm = MagicMock()
+        monkeypatch.setattr(llm_ops, "cache_manager", mock_cm)
+        return mock_cm
+
+    def _calibrated_calls(self, mock_cm):
+        return [
+            c for c in mock_cm.save_llm_result.call_args_list
+            if c.kwargs.get("llm_type") == "calibrated"
+        ]
+
+    def test_calibration_none_still_saves_fallback_calibrated_text(self, monkeypatch):
+        mock_cm = self._patch_cache_manager(monkeypatch)
+
+        result = _save_llm_results(
+            task_id="none1",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict={
+                "校对文本": "fallback formatted original text",
+                "内容总结": "a real summary",
+                "skip_summary": False,
+                "summary_status": SummaryStatus.GENERATED,
+                "stats": {"calibration_status": CalibrationStatus.NONE},
+                "models_used": {},
+                "calibrate_success": False,
+                "summary_success": True,
+            },
+            calibrate_only=False,
+            summary_backfill=False,
+        )
+
+        calibrated_calls = self._calibrated_calls(mock_cm)
+        assert len(calibrated_calls) == 1
+        assert calibrated_calls[0].kwargs["content"] == "fallback formatted original text"
+        # Status stays honestly NONE -- the artifact existing doesn't mean
+        # calibration succeeded.
+        assert result["calibration_status"] == CalibrationStatus.NONE
+        mock_cm.save_llm_status.assert_called_once()
+        assert mock_cm.save_llm_status.call_args.kwargs["calibration_status"] == (
+            CalibrationStatus.NONE
+        )
+
+    def test_calibration_none_skipped_short_still_saves_summary_standin(
+        self, monkeypatch
+    ):
+        """NONE + SKIPPED_SHORT combo: the calibrated (fallback) text must
+        still stand in as the summary file, otherwise llm_summary.txt is
+        permanently missing and recalibrate's backfill mechanism would try
+        to regenerate it forever."""
+        mock_cm = self._patch_cache_manager(monkeypatch)
+
+        _save_llm_results(
+            task_id="none2",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict={
+                "校对文本": "fallback formatted original text",
+                "内容总结": None,
+                "skip_summary": True,
+                "summary_status": SummaryStatus.SKIPPED_SHORT,
+                "stats": {"calibration_status": CalibrationStatus.NONE},
+                "models_used": {},
+                "calibrate_success": False,
+                "summary_success": False,
+            },
+            calibrate_only=False,
+            summary_backfill=False,
+        )
+
+        summary_calls = [
+            c for c in mock_cm.save_llm_result.call_args_list
+            if c.kwargs.get("llm_type") == "summary"
+        ]
+        assert len(summary_calls) == 1
+        assert summary_calls[0].kwargs["content"] == "fallback formatted original text"
+
+    def test_calibration_none_with_speaker_recognition_still_saves_structured_data(
+        self, monkeypatch
+    ):
+        """NONE + speaker recognition: structured_data (chunk-level fallback
+        dialogs) must still be persisted, matching calibrated_text."""
+        mock_cm = self._patch_cache_manager(monkeypatch)
+
+        structured = {"dialogs": [{"speaker": "S0", "text": "raw fallback"}]}
+        _save_llm_results(
+            task_id="none3",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=True,
+            result_dict={
+                "校对文本": "fallback formatted original text",
+                "内容总结": "a real summary",
+                "skip_summary": False,
+                "summary_status": SummaryStatus.GENERATED,
+                "stats": {"calibration_status": CalibrationStatus.NONE},
+                "models_used": {},
+                "calibrate_success": False,
+                "summary_success": True,
+                "structured_data": structured,
+            },
+            calibrate_only=False,
+            summary_backfill=False,
+        )
+
+        structured_calls = [
+            c for c in mock_cm.save_llm_result.call_args_list
+            if c.kwargs.get("llm_type") == "structured"
+        ]
+        assert len(structured_calls) == 1
+        assert structured_calls[0].kwargs["content"]["dialogs"] == structured["dialogs"]
+
+    def test_calibration_none_suppressed_still_skips_save(self, monkeypatch):
+        """NONE this round but the calibrated layer already existed and this
+        round didn't request (re)calibration -> suppression still wins, the
+        existing real layer must not be clobbered by this round's NONE
+        fallback text."""
+        mock_cm = self._patch_cache_manager(monkeypatch)
+        mock_cm.get_cache.return_value = {"llm_calibrated": "existing REAL calibrated text"}
+
+        _save_llm_results(
+            task_id="none4",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict={
+                "校对文本": "this round's NONE fallback text",
+                "内容总结": "a real summary",
+                "skip_summary": False,
+                "summary_status": SummaryStatus.GENERATED,
+                "stats": {"calibration_status": CalibrationStatus.NONE},
+                "models_used": {},
+                "calibrate_success": False,
+                "summary_success": True,
+            },
+            calibrate_only=False,
+            summary_backfill=False,
+            processing_options={"calibrate": False, "summarize": True},
+        )
+
+        assert self._calibrated_calls(mock_cm) == []
