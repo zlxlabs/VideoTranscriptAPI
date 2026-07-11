@@ -24,27 +24,37 @@ from .services.transcription import process_llm_queue, process_task_queue
 
 async def _periodic_maintenance(config: dict) -> None:
     """
-    每日维护任务：按保留期清理过期缓存与审计日志，防止磁盘无限增长。
+    每日维护任务：按保留期清理过期缓存、任务状态记录与审计日志，防止磁盘/数据库无限增长。
 
     - storage.cache_retention_days：缓存（转录产物）保留天数，0 表示永久保留
+    - storage.task_status_retention_days：task_status 表终态（success/failed）
+      任务记录保留天数，0 表示永久保留
     - storage.audit_log_retention_days：审计日志保留天数，0 表示永久保留
     """
     logger = get_logger()
     storage = config.get("storage", {})
     cache_days = int(storage.get("cache_retention_days", 0) or 0)
+    task_status_days = int(storage.get("task_status_retention_days", 180) or 0)
     audit_days = int(storage.get("audit_log_retention_days", 180) or 0)
 
-    if cache_days <= 0 and audit_days <= 0:
-        logger.info("缓存与审计日志保留期均未配置，定期清理任务退出")
+    if cache_days <= 0 and task_status_days <= 0 and audit_days <= 0:
+        logger.info("缓存、任务状态与审计日志保留期均未配置，定期清理任务退出")
         return
 
-    logger.info(f"定期清理任务已启动: cache_retention_days={cache_days}, audit_log_retention_days={audit_days}")
+    logger.info(
+        f"定期清理任务已启动: cache_retention_days={cache_days}, "
+        f"task_status_retention_days={task_status_days}, audit_log_retention_days={audit_days}"
+    )
     while True:
         try:
             if cache_days > 0:
                 deleted = await asyncio.to_thread(get_cache_manager().cleanup_old_cache, cache_days)
                 if deleted:
                     logger.info(f"定期清理：删除 {deleted} 条超过 {cache_days} 天的缓存记录")
+            if task_status_days > 0:
+                deleted = await asyncio.to_thread(get_cache_manager().cleanup_task_status, task_status_days)
+                if deleted:
+                    logger.info(f"定期清理：删除 {deleted} 条超过 {task_status_days} 天的终态任务状态记录")
             if audit_days > 0:
                 deleted = await asyncio.to_thread(get_audit_logger().cleanup_old_logs, audit_days)
                 if deleted:
