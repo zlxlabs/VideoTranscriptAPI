@@ -682,13 +682,28 @@ class CacheManager:
             logger.error(f"清理缓存失败: {e}")
             return 0
 
-    def cleanup_task_status(self, retention_days: int) -> int:
+    def cleanup_task_status(
+        self, retention_days: int, cache_retention_days: Optional[int] = None
+    ) -> int:
         """
         清理过期的终态任务状态记录（task_status 表）
 
         仅删除已进入终态（success/failed）且完成时间早于保留期的记录；
         非终态任务（queued/processing/calibrating）一律保留，避免误删仍在
         处理中、或崩溃后等待启动恢复扫描（recover_orphaned_tasks）的任务。
+
+        view_token 保护（codex-review R3 #3）：/view/{view_token} 的解析
+        链路完全依赖本表——get_view_data_by_token -> get_task_by_view_token
+        -> `SELECT * FROM task_status WHERE view_token = ?`，view_token 不
+        存在于 video_cache 表。因此删除终态任务行会立刻使其 view 链接失效，
+        即使底层缓存产物（video_cache 行 + 文件）仍在保留期内。为维持
+        "链接寿命不短于缓存寿命"的不变式，调用方传入 cache_retention_days
+        时：
+        - cache_retention_days > 0 且 retention_days 短于它：把生效保留期
+          钳制到 cache_retention_days（取二者较大值），并记 warning；
+        - cache_retention_days <= 0（缓存永久保留）：直接跳过清理并记
+          warning——缓存永不过期意味着 view 链接也必须永久有效；
+        - 不传（None，向后兼容旧调用方/测试）：维持原有行为，不做钳制。
 
         时间比较基准优先取 completed_at，若为历史遗留的 NULL（理论上
         update_task_status/recover_orphaned_tasks 在把状态写为终态的同一
@@ -703,11 +718,31 @@ class CacheManager:
         Args:
             retention_days: 保留天数，早于 (当前 UTC 时间 - retention_days) 的
                 终态记录会被删除
+            cache_retention_days: 缓存（转录产物）保留天数配置，用于上述
+                view_token 保护钳制；None 表示调用方未提供、不钳制，
+                0 或负数表示缓存永久保留、跳过清理
 
         Returns:
             int: 实际删除的记录数
         """
         try:
+            if cache_retention_days is not None:
+                if cache_retention_days <= 0:
+                    logger.warning(
+                        "task_status 清理已跳过：cache_retention_days<=0 表示缓存永久保留，"
+                        "而 /view/{view_token} 链接依赖 task_status 行解析，"
+                        "提前删除会造成缓存尚在、链接已死"
+                    )
+                    return 0
+                if retention_days < cache_retention_days:
+                    logger.warning(
+                        f"task_status_retention_days({retention_days}) 短于 "
+                        f"cache_retention_days({cache_retention_days})，已钳制为后者："
+                        "/view/{view_token} 链接依赖 task_status 行解析，"
+                        "提前删除会造成缓存尚在、链接已死"
+                    )
+                    retention_days = cache_retention_days
+
             cutoff = (
                 datetime.datetime.now(datetime.timezone.utc)
                 - datetime.timedelta(days=retention_days)

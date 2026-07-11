@@ -176,3 +176,84 @@ class TestCleanupTaskStatus:
         assert deleted == 1
         assert cm.get_task_by_id(at_cutoff) is not None, "row exactly at cutoff must be kept (strict <)"
         assert cm.get_task_by_id(before_cutoff) is None, "row older than cutoff must be deleted"
+
+
+class TestCleanupTaskStatusCacheRetentionClamp:
+    """codex-review R3 finding #3: /view/{view_token} resolution depends on
+    the task_status table (get_view_data_by_token -> get_task_by_view_token
+    -> SELECT ... FROM task_status WHERE view_token = ?), so deleting a
+    terminal task row invalidates its view link even while the underlying
+    cache artifacts (video_cache row + files) are still retained.
+
+    With the shipped example config (cache_retention_days=360 >
+    task_status_retention_days=180) every view link would die at day 180
+    although its content survives until day 360. Fix: cleanup_task_status
+    clamps the effective retention to at least cache_retention_days when
+    the caller provides it (max of the two), and skips cleanup entirely
+    when cache_retention_days<=0 (cache kept forever -> links must be kept
+    forever too). Callers that do not pass cache_retention_days (all the
+    older tests above) keep the exact previous behavior.
+    """
+
+    def test_retention_clamped_up_to_cache_retention_when_shorter(self, cm):
+        """task retention (30) shorter than cache retention (180): a terminal
+        row aged between the two (100 days) must survive -- its cache is
+        still alive, so its view link must keep resolving. A row older than
+        the cache retention (400 days) is deleted as usual."""
+        within_cache_window = _insert_task(
+            cm, TaskStatus.SUCCESS, completed_at=_days_ago(100), created_at=_days_ago(100)
+        )
+        beyond_cache_window = _insert_task(
+            cm, TaskStatus.SUCCESS, completed_at=_days_ago(400), created_at=_days_ago(400)
+        )
+
+        deleted = cm.cleanup_task_status(retention_days=30, cache_retention_days=180)
+
+        assert deleted == 1
+        assert cm.get_task_by_id(within_cache_window) is not None, (
+            "terminal row younger than cache_retention_days must be kept so its "
+            "view link keeps resolving while the cache still exists"
+        )
+        assert cm.get_task_by_id(beyond_cache_window) is None
+
+    def test_normal_config_behavior_unchanged(self, cm):
+        """task retention (180) already >= cache retention (30): no clamping,
+        identical behavior to the unclamped call."""
+        recent = _insert_task(
+            cm, TaskStatus.SUCCESS, completed_at=_days_ago(100), created_at=_days_ago(100)
+        )
+        old = _insert_task(
+            cm, TaskStatus.FAILED, completed_at=_days_ago(200), created_at=_days_ago(200)
+        )
+
+        deleted = cm.cleanup_task_status(retention_days=180, cache_retention_days=30)
+
+        assert deleted == 1
+        assert cm.get_task_by_id(recent) is not None
+        assert cm.get_task_by_id(old) is None
+
+    def test_cache_retained_forever_skips_cleanup(self, cm):
+        """cache_retention_days=0 means the cache is kept forever, so view
+        links must never be severed: cleanup becomes a no-op."""
+        ancient = _insert_task(
+            cm, TaskStatus.SUCCESS, completed_at=_days_ago(4000), created_at=_days_ago(4000)
+        )
+
+        deleted = cm.cleanup_task_status(retention_days=180, cache_retention_days=0)
+
+        assert deleted == 0
+        assert cm.get_task_by_id(ancient) is not None, (
+            "no terminal row may be deleted while the cache is retained forever"
+        )
+
+    def test_omitting_cache_retention_keeps_previous_behavior(self, cm):
+        """Callers that do not pass cache_retention_days (legacy signature)
+        must get the exact pre-fix semantics: plain retention_days cutoff."""
+        old = _insert_task(
+            cm, TaskStatus.SUCCESS, completed_at=_days_ago(400), created_at=_days_ago(400)
+        )
+
+        deleted = cm.cleanup_task_status(retention_days=180)
+
+        assert deleted == 1
+        assert cm.get_task_by_id(old) is None

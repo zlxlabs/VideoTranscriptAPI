@@ -28,7 +28,10 @@ async def _periodic_maintenance(config: dict) -> None:
 
     - storage.cache_retention_days：缓存（转录产物）保留天数，0 表示永久保留
     - storage.task_status_retention_days：task_status 表终态（success/failed）
-      任务记录保留天数，0 表示永久保留
+      任务记录保留天数，0 表示永久保留。注意 /view/{view_token} 链接依赖
+      task_status 行解析，因此该值不应短于 cache_retention_days；短于时
+      cleanup_task_status 会按缓存保留期执行（钳制并记 warning），缓存
+      永久保留（0）时任务状态清理会被跳过
     - storage.audit_log_retention_days：审计日志保留天数，0 表示永久保留
     """
     logger = get_logger()
@@ -52,7 +55,12 @@ async def _periodic_maintenance(config: dict) -> None:
                 if deleted:
                     logger.info(f"定期清理：删除 {deleted} 条超过 {cache_days} 天的缓存记录")
             if task_status_days > 0:
-                deleted = await asyncio.to_thread(get_cache_manager().cleanup_task_status, task_status_days)
+                # 同时传 cache_retention_days：view 链接解析依赖 task_status 行，
+                # 保留期倒挂（task < cache）时由 cleanup_task_status 钳制为缓存
+                # 保留期，避免缓存尚在、/view 链接已死（codex-review R3 #3）。
+                deleted = await asyncio.to_thread(
+                    get_cache_manager().cleanup_task_status, task_status_days, cache_days
+                )
                 if deleted:
                     logger.info(f"定期清理：删除 {deleted} 条超过 {task_status_days} 天的终态任务状态记录")
             if audit_days > 0:
