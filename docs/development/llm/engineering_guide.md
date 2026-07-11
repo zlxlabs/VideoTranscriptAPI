@@ -12,7 +12,8 @@
 4. [Reasoning Effort 配置](#4-reasoning-effort-配置)
 5. [错误处理](#5-错误处理)
 6. [可观测性](#6-可观测性)
-7. [完整使用示例](#附录完整使用示例)
+7. [项目实践：说话人推断与诚实状态模型](#7-项目实践说话人推断与诚实状态模型)
+8. [完整使用示例](#附录完整使用示例)
 
 ---
 
@@ -880,6 +881,45 @@ def setup_logging(level: str = "INFO"):
 2024-03-15 14:23:03 | INFO     | llm | [a1b2c3d4] LLM request completed | latency_ms=1823.45 | tokens=1234
 2024-03-15 14:23:05 | ERROR    | llm | [e5f6g7h8] LLM request failed: 429 Too Many Requests
 ```
+
+---
+
+## 7. 项目实践：说话人推断与诚实状态模型
+
+以下两点是本项目（VideoTranscriptAPI）在上述通用实践基础上落地的具体设计，记录于此供后续项目复用思路（区别于前面章节的通用示例代码，这里直接对应本仓库的真实实现路径）。
+
+### 7.1 说话人推断：按人采样 + confidence 降级
+
+早期实现对整段对话做"全局前 N 字符截断"采样，导致晚出场的说话人拿不到足够的发言样本，LLM 推断质量差且不可控。重构后的 `SpeakerInferencer`（`src/video_transcript_api/llm/core/speaker_inferencer.py`）改为**按说话人采样**：
+
+- 每个说话人独立取前 `samples_per_speaker` 条发言（默认 3 条，单条截断 120 字符），总字符数不超过 `max_chars_per_speaker`（默认 400）——不管这个人第几次出场都能拿到样本
+- 首次出场前额外采集 `context_dialogs` 条他人发言作为上下文（默认 2 条），捕捉"XX你好""欢迎 XX"之类的称呼线索
+- LLM 返回推断结果时同时给出每个说话人的 confidence；`_apply_confidence_gate()` 按 `confidence_threshold`（默认 0.6）过滤：达标才采用推断姓名，未达标降级为 `说话人N` 占位符（N 优先取原始标签的数字序号，如 `Speaker3` → `3`；标签无数字时按其在列表中的出场顺序编号）
+
+这样避免了"把低置信度的猜测当作确定结论展示给用户"——宁可展示占位符也不展示错误姓名。四个参数均在 `config.jsonc` 的 `llm.speaker_inference` 段配置：
+
+```jsonc
+"llm": {
+    // ...
+    "speaker_inference": {
+        "samples_per_speaker": 3,      // 每个说话人采样的发言条数上限
+        "max_chars_per_speaker": 400,  // 每个说话人采样文本的总字符上限
+        "context_dialogs": 2,          // 首次出场前，采集他人发言作为上下文的条数
+        "confidence_threshold": 0.6    // 低于此置信度时不采用推断姓名，降级为"说话人N"
+    }
+}
+```
+
+### 7.2 校对/总结的诚实状态模型（简述）
+
+早期实现里，"总结跳过（文本过短）"与"总结失败"共用同一个 `None` 返回值，下游无法区分，最终表现为前端永久显示"总结处理中..."的 bug。修复方式是引入显式状态枚举（`src/video_transcript_api/utils/llm_status.py`），把"尝试了但失败"和"根本没尝试/没必要尝试"彻底分开：
+
+- `CalibrationStatus`：`full`（全部成功）/ `partial`（部分降级）/ `none`（全部失败降级为原文）/ `disabled`（用户主动关闭校对）
+- `SummaryStatus`：`generated`（成功）/ `skipped_short`（文本过短，正常跳过）/ `failed`（触发了但失败）/ `pending`（处理中）/ `disabled`（用户主动关闭总结）
+
+状态沿 processor → coordinator → llm_ops → cache_manager → 前端全链路传递，落盘到缓存目录的 `llm_status.json`（读-改-写按字段合并，避免部分更新时误覆盖已有状态）与 `task_status` 表的对应列。这一模式的通用启示：**任何"跳过"和"失败"共享同一哨兵值（`None`/`""`/`0`）的设计，长期看几乎必然演化成一个不可调试的 bug**；引入显式状态枚举的成本远低于事后排查"为什么这个字段一直是空的"。
+
+完整语义与前端/通知渲染细节见 [处理深度开关功能文档](../../features/processing_options.md) 与[系统架构文档](../../architecture.md#诚实状态模型)。
 
 ---
 
