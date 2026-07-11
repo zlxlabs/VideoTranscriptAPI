@@ -137,10 +137,17 @@ class CacheManager:
                 table_sql = result[0]
 
                 # 迁移1: 移除view_token UNIQUE约束
+                # 注意：重建后的表结构里已经内联了当前全部已知列（见
+                # _rebuild_task_status_table），但这里刻意不再 return——
+                # 后续迁移2-5 的 PRAGMA 存在性检查本身是幂等的（列已存在则
+                # 跳过 ALTER TABLE），让它们继续跑一遍是双重保险：即使未来
+                # 有人往表里加新列却忘了同步更新重建逻辑，旧库升级也不会
+                # 再次丢列。历史 bug：这里曾经 return，导致重建表跳过了
+                # 之后新增的 calibration_status/summary_status 字段，老库
+                # 升级后 LLM 完成时 UPDATE 报 "no such column"。
                 if 'UNIQUE' in table_sql and 'view_token' in table_sql:
                     logger.info("检测到view_token UNIQUE约束，开始数据库迁移...")
                     self._rebuild_task_status_table(cursor)
-                    return
 
                 # 迁移2: 添加 llm_config 字段
                 cursor.execute("PRAGMA table_info(task_status)")
@@ -204,7 +211,11 @@ class CacheManager:
         # 删除旧表
         cursor.execute("DROP TABLE task_status")
 
-        # 重新创建表（包含 llm_config 和 download_url 字段）
+        # 重新创建表：直接内联当前全部已知列（llm_config/download_url/
+        # error_message/calibration_status/summary_status），而不是只建出
+        # 迁移1当时存在的那几列再指望后续迁移补齐——见 _migrate_database()
+        # 里放弃提前 return 的注释，这里是同一个修复的另一半：两处任何一处
+        # 单独修都不足以根治"旧库升级丢新列"的问题。
         cursor.execute('''
             CREATE TABLE task_status (
                 task_id TEXT PRIMARY KEY,
@@ -221,6 +232,9 @@ class CacheManager:
                 completed_at TIMESTAMP,
                 cache_id INTEGER,
                 llm_config TEXT,
+                error_message TEXT,
+                calibration_status TEXT,
+                summary_status TEXT,
                 FOREIGN KEY (cache_id) REFERENCES video_cache(id)
             )
         ''')
@@ -250,13 +264,17 @@ class CacheManager:
                 row_map.get("completed_at"),
                 row_map.get("cache_id"),
                 row_map.get("llm_config"),
+                row_map.get("error_message"),
+                row_map.get("calibration_status"),
+                row_map.get("summary_status"),
             ]
 
             cursor.execute('''
                 INSERT INTO task_status
                 (task_id, view_token, url, download_url, platform, media_id, use_speaker_recognition,
-                 status, title, author, created_at, completed_at, cache_id, llm_config)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 status, title, author, created_at, completed_at, cache_id, llm_config,
+                 error_message, calibration_status, summary_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', new_row_data)
 
         logger.info(f"数据库迁移完成，恢复了 {len(existing_data)} 条记录")
