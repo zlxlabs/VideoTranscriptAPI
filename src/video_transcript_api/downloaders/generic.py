@@ -153,7 +153,9 @@ class GenericDownloader(BaseDownloader):
             requests.Response
 
         抛出:
-            InvalidURLError: URL 未通过 SSRF 校验
+            InvalidURLError: URL 未通过 SSRF 校验；或校验时无法获得已验证 IP
+                              （如 DNS 解析失败）—— fail-closed，不回退为不钉
+                              IP 的普通请求
         """
         try:
             _, pinned_ip = url_validator.validate_url_safe_with_ip(url)
@@ -161,15 +163,26 @@ class GenericDownloader(BaseDownloader):
             logger.error(f"URL 安全校验未通过，已阻止请求: {url}, 原因: {e}")
             raise InvalidURLError("URL 指向内部网络地址，已被安全策略拦截") from e
 
-        request_func = requests.head if method == "head" else requests.get
-
         if pinned_ip is None:
-            # validate_url_safe 对 DNS 解析失败采用"放行，可能是瞬时故障"的
-            # 宽松策略，此时没有已验证的 IP 可钉，只能退化为不钉 IP 的普通
-            # 请求 —— 这与本次修复之前的行为一致，不引入新的失败模式；真正
-            # 发起连接时如果 DNS 仍然失败会在这里自然报错。
-            logger.warning(f"DNS 解析失败，无法钉定已校验 IP，回退为未钉 IP 的请求: {url}")
-            return request_func(url, **kwargs)
+            # fail-closed（codex-review R6 #1）：validate_url_safe_with_ip 对
+            # DNS 解析失败曾经历过"放行，可能是瞬时故障"的宽松策略，本方法
+            # 过去也照着这个假设回退成不钉 IP 的普通 requests.get()/head()
+            # ——但那条回退路径既没有钉 IP，又用的是 requests 的默认行为
+            # （自动跟随重定向），等于同时打开了 DNS rebinding 和"跳到私网"
+            # 两条 SSRF 绕过通道：攻击者只需要让校验时刻的解析报出一次可控
+            # 的临时性错误（如域名先返回 SERVFAIL/超时），就能把本应被拦截
+            # 的目标直接放到不设防的请求路径上。
+            #
+            # 是否存在"宽松放行"的正当场景？评估过一种可能——某些运行环境
+            # 的 DNS 解析函数受限（如容器网络策略只允许特定域名解析），会让
+            # 合法请求也遇到解析报错。但那属于该环境自身的网络配置问题，
+            # 应该在部署层面解决（如修正 DNS/网络策略、把目标域名加入
+            # download_url_allowlist），不能反过来放宽 SSRF 边界——安全兜底
+            # 优先于"尽量放行"。调用方（_safe_request 及其上层的重试与
+            # InvalidURLError 用户可读报错）已经能正确处理这里的拒绝，不会
+            # 引入新的、无法诊断的失败模式。
+            logger.error(f"DNS 解析失败，无法钉定已校验 IP，按 fail-closed 策略拒绝请求: {url}")
+            raise InvalidURLError(f"URL 安全校验无法确认目标 IP，已按安全策略拒绝访问: {url}")
 
         parsed_url = urlparse(url)
         headers = kwargs.pop("headers", None)

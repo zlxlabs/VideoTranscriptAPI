@@ -9,9 +9,28 @@ fired in the same second while the recorder was mid-redeploy.
 Console output English only.
 """
 
+import socket
+
 import requests
 
 from video_transcript_api.downloaders.generic import GenericDownloader
+
+# GenericDownloader routes every request through validate_url_safe_with_ip's
+# IP-pinned dispatch (see downloaders/generic.py::_dispatch_pinned_request).
+# Since codex-review R6 #1, a validation-time DNS failure fails closed
+# (raises InvalidURLError) instead of falling back to a plain requests.get()
+# call -- so "files.internal" (not a real resolvable domain) must have its
+# DNS lookup faked to succeed, and the simulated "connection refused" must
+# be injected at the transport layer the pinned dispatch actually reaches
+# (requests.adapters.HTTPAdapter.send), matching the pattern used in
+# tests/unit/downloaders/test_generic_ssrf.py.
+GETADDRINFO_PATH = "video_transcript_api.utils.url_validator.socket.getaddrinfo"
+BASE_SEND_PATH = "requests.adapters.HTTPAdapter.send"
+
+
+def _public_addrinfo(*args, **kwargs):
+    """Fake socket.getaddrinfo returning a single public IPv4 address."""
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
 
 
 class _StubTempManager:
@@ -37,9 +56,8 @@ class TestDownloadRetryBackoff:
         def refuse(*args, **kwargs):
             raise requests.exceptions.ConnectionError("connection refused")
 
-        monkeypatch.setattr(
-            "video_transcript_api.downloaders.generic.requests.get", refuse
-        )
+        monkeypatch.setattr(GETADDRINFO_PATH, _public_addrinfo)
+        monkeypatch.setattr(BASE_SEND_PATH, refuse)
         sleeps = []
         monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
 
