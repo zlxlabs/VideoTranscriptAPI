@@ -816,3 +816,159 @@ class TestTranscriptOnlyCacheBothSwitchesOffIsNotFullHit:
             assert "未启用" in sent_text
         finally:
             real_cm.close()
+
+
+class TestCalibrateOnlyBackfillPreservesExistingSummaryNotification:
+    """codex-review R8 #1: a cache that already has a REAL summary but a
+    disabled/missing calibration layer (e.g. a prior calibrate=False &
+    summarize=True request). A subsequent request that only needs to
+    backfill calibration (processing_options={"calibrate": True,
+    "summarize": False}, mirroring transcription.py's need_summary=False
+    decision when llm_summary.txt already exists) must not lose the
+    existing summary in the completion notification.
+
+    Before the fix, _build_result_dict() derived skip_summary purely from
+    THIS round's coordinator output (summary_text=None because the
+    coordinator was told to skip summary) -- even though
+    _save_llm_results()/save_llm_status() correctly preserved the real
+    generated summary on disk via merge semantics. _send_notification()
+    then consumed the stale in-memory result_dict and reported "总结未生成"
+    (summary not generated), discarding a summary that genuinely exists in
+    the cache.
+    """
+
+    def test_calibrate_backfill_with_existing_summary_notifies_real_summary(
+        self, tmp_path
+    ):
+        real_cm = CacheManager(cache_dir=str(tmp_path / "cache"))
+        try:
+            # ---- Seed a prior calibrate=False & summarize=True run: a real
+            # summary already exists, calibration is only a locally-formatted
+            # disabled placeholder.
+            real_cm.save_cache(
+                platform="youtube",
+                url="https://www.youtube.com/watch?v=abc123",
+                media_id="abc123",
+                use_speaker_recognition=False,
+                transcript_data="RAW uncalibrated transcript",
+                transcript_type="capswriter",
+                title="cached title",
+                author="cached author",
+                description="cached desc",
+            )
+            real_cm.save_llm_result(
+                platform="youtube", media_id="abc123", use_speaker_recognition=False,
+                llm_type="calibrated",
+                content="RAW uncalibrated transcript (locally formatted)",
+            )
+            real_cm.save_llm_result(
+                platform="youtube", media_id="abc123", use_speaker_recognition=False,
+                llm_type="summary",
+                content="EXISTING real summary text from a prior generation",
+            )
+            real_cm.save_llm_status(
+                platform="youtube", media_id="abc123", use_speaker_recognition=False,
+                calibration_status=CalibrationStatus.DISABLED,
+                summary_status=SummaryStatus.GENERATED,
+            )
+
+            task_id = real_cm.create_task(
+                url="https://www.youtube.com/watch?v=abc123",
+                use_speaker_recognition=False,
+                platform="youtube",
+                media_id="abc123",
+            )["task_id"]
+            real_cm.update_task_status(task_id, TaskStatus.CALIBRATING)
+
+            # ---- Mirrors transcription.py's "校对层缺失/未启用，总结层已满足"
+            # queuing decision: calibrate=True (real calibration requested),
+            # summarize=False (llm_summary.txt already exists).
+            llm_task = {
+                "task_id": task_id,
+                "url": "https://www.youtube.com/watch?v=abc123",
+                "display_url": "https://www.youtube.com/watch?v=abc123",
+                "platform": "youtube",
+                "media_id": "abc123",
+                "video_title": "cached title",
+                "author": "cached author",
+                "description": "cached desc",
+                "transcript": "RAW uncalibrated transcript",
+                "use_speaker_recognition": False,
+                "transcription_data": None,
+                "is_generic": False,
+                "wechat_webhook": None,
+                "notification_channel": None,
+                "notification_webhooks": {},
+                "processing_options": {"calibrate": True, "summarize": False},
+            }
+
+            # coordinator.process(skip_summary=True): this round performs a
+            # real calibration pass but never touches summary -- summary_text
+            # and summary_status are both None ("not attempted this round"),
+            # exactly the signal _save_llm_results()/llm_ops relies on to
+            # preserve the cached summary untouched.
+            coordinator = MagicMock()
+            coordinator.process.return_value = {
+                "calibrated_text": "REAL calibrated text from this round",
+                "summary_text": None,
+                "stats": {
+                    "calibration_status": CalibrationStatus.FULL,
+                    "calibration_stats": {
+                        "total_segments": 1, "calibrated_segments": 1,
+                        "fallback_segments": 0, "low_quality_segments": 0,
+                    },
+                    "summary_status": None,
+                },
+                "models_used": {},
+                "structured_data": None,
+            }
+
+            notification_router = MagicMock()
+            notification_router.send_long_text = MagicMock()
+            notification_router.send_text = MagicMock()
+
+            ctxs = [
+                patch.object(llm_ops, "cache_manager", real_cm),
+                patch.object(llm_ops, "llm_coordinator", coordinator),
+                patch.object(llm_ops, "llm_task_queue", MagicMock()),
+                patch.object(llm_ops, "get_notification_router", lambda: notification_router),
+                patch.object(llm_ops, "_generate_title_if_needed", lambda t, title, tr: title),
+            ]
+            for c in ctxs:
+                c.start()
+            try:
+                llm_ops._handle_llm_task(llm_task)
+            finally:
+                for c in ctxs:
+                    c.stop()
+
+            # ---- Task row: real calibration result, and the merged
+            # (preserved) summary status -- not lost/reset to NULL.
+            row = real_cm.get_task_by_id(task_id)
+            assert row["status"] == "success"
+            assert row["calibration_status"] == CalibrationStatus.FULL
+            assert row["summary_status"] == SummaryStatus.GENERATED
+
+            # ---- llm_status.json / cache content: the real summary text
+            # survives untouched on disk, calibration is upgraded from the
+            # disabled placeholder to the real text.
+            cache_data = real_cm.get_cache(
+                "youtube", "abc123", use_speaker_recognition=False
+            )
+            assert cache_data["llm_calibrated"] == "REAL calibrated text from this round"
+            assert cache_data["llm_summary"] == "EXISTING real summary text from a prior generation"
+            assert cache_data["llm_status"]["calibration_status"] == CalibrationStatus.FULL
+            assert cache_data["llm_status"]["summary_status"] == SummaryStatus.GENERATED
+
+            # ---- Notification: must carry the real cached summary text
+            # and must NOT report "总结未生成" (summary not generated) --
+            # this is the codex-review R8 #1 regression this test locks down.
+            assert notification_router.send_long_text.called
+            call_kwargs = notification_router.send_long_text.call_args.kwargs
+            sent_text = call_kwargs["text"]
+            assert "EXISTING real summary text from a prior generation" in sent_text
+            assert "总结未生成" not in sent_text
+            assert "未生成" not in sent_text
+            assert call_kwargs["is_summary"] is True
+        finally:
+            real_cm.close()
