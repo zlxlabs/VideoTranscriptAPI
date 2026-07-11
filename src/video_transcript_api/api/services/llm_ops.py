@@ -165,6 +165,15 @@ def _handle_llm_task(llm_task: dict):
                         media_id=media_id or "",
                         skip_summary=skip_summary_for_coordinator,
                         skip_calibration=skip_calibration_for_coordinator,
+                        # 分层缓存"只补总结"场景：transcription.py 把 content 强制
+                        # 降级为纯文本（transcription_data=None，避免重跑说话人
+                        # 分块校对），协调器自身的说话人数自动推断因此必然判成单
+                        # 说话人（0）。cached_speaker_count 是 transcription.py 从
+                        # 缓存的 llm_processed.json 里读回的真实说话人数，回传给
+                        # 协调器覆盖这个误判，让总结仍然使用多说话人 Prompt
+                        # （codex-review R5 #3）。None 表示没有更优信息，协调器按
+                        # 自身推断走，不影响其余调用方。
+                        speaker_count_hint=llm_task.get("cached_speaker_count"),
                     )
 
                 # 适配返回格式

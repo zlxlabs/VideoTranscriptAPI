@@ -742,6 +742,20 @@ def process_transcription(
             # 缓存部分命中（transcript 已在，但请求的层里至少一层缺失），记录计数
             tracker.count("cache_hit_partial")
 
+            # 只在"强制降级为纯文本"的 else 分支里才需要：读缓存里已落盘的说话人
+            # 结构化数据（llm_processed.json，见 cache_manager.get_cache），在不
+            # 重跑说话人分块校对的前提下把真实说话人数回传给协调器，供总结环节
+            # 选择正确的多/单说话人 Prompt（codex-review R5 #3，详见下方 else
+            # 分支注释）。没有说话人识别、或缓存里还没有结构化产物（比如说话人
+            # 识别但从未真正过一次 LLM 校对）时保持 None——协调器会退回自己的
+            # 自动推断，不引入新的失败模式。
+            cached_speaker_count = None
+            if has_speaker_recognition:
+                cached_structured = cache_data.get("llm_processed") or {}
+                cached_speaker_mapping = cached_structured.get("speaker_mapping")
+                if cached_speaker_mapping:
+                    cached_speaker_count = len(cached_speaker_mapping)
+
             if need_calibrated:
                 # 校对层缺失，需要真实（重新）校对：沿用原始转录内容
                 queued_transcript = transcript
@@ -754,6 +768,10 @@ def process_transcription(
                 #    （transcription_data=None）避免二次说话人推断浪费 LLM 调用
                 #    ——_prepare_llm_content 在 transcription_data 为空时会回退
                 #    到纯文本分支，与 use_speaker_recognition 是否为 True 无关。
+                #    强制纯文本会让协调器的说话人数自动推断失真（纯文本必然判
+                #    成单说话人），所以上面读出 cached_speaker_count 随任务一起
+                #    传下去，由协调器覆盖这个误判（而不是重新推断一次说话人，
+                #    那样就违背了"避免二次说话人推断"的初衷）。
                 # 2) calibration_effectively_missing 命中（calibrate=False 且
                 #    校对层从未存在过，need_summary 可能同时为 False——两层都
                 #    从未处理过；也可能为 True——只是校对层缺失、总结层本身
@@ -784,6 +802,7 @@ def process_transcription(
                         "transcript": queued_transcript,
                         "use_speaker_recognition": queued_use_speaker_recognition,
                         "transcription_data": queued_transcription_data,
+                        "cached_speaker_count": cached_speaker_count,
                         "is_generic": is_generic_downloader or is_from_generic,
                         "wechat_webhook": wechat_webhook,
                         "notification_channel": notification_channel,

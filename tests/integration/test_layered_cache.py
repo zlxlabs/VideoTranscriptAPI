@@ -226,6 +226,64 @@ class TestLayeredCacheMatrix:
         # Force plain-text routing downstream (no re-diarization LLM call).
         assert task["transcription_data"] is None
 
+    def test_calibrate_only_speaker_cache_propagates_cached_speaker_count(
+        self, monkeypatch, patch_runtime
+    ):
+        """codex-review R5 #3: same "只补总结" decision as the test above,
+        but for a speaker-recognition cache. transcription_data is still
+        forced to None (no re-diarization), but the real speaker count from
+        the cached llm_processed.json structured data must be read and
+        threaded onto the queued task as cached_speaker_count, so llm_ops/
+        coordinator can override the (otherwise wrong, plain-text-implied)
+        single-speaker auto-inference for the summary step."""
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "transcript_type": "funasr",
+            "transcript_data": {
+                "segments": [
+                    {"speaker": "S0", "text": "hello", "start_time": 0, "end_time": 1}
+                ]
+            },
+            "use_speaker_recognition": True,
+            "llm_calibrated": "REAL calibrated text from a genuine speaker-aware pass",
+            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+            "llm_processed": {
+                "dialogs": [{"speaker": "Alice", "text": "hello"}],
+                "speaker_mapping": {"S0": "Alice", "S1": "Bob", "S2": "Carol"},
+            },
+        }
+
+        result, queued = _run(
+            monkeypatch, patch_runtime, cache_data,
+            {"calibrate": True, "summarize": True},
+        )
+
+        assert result["status"] == "success"
+        assert len(queued) == 1
+        task = queued[0]
+        assert task["processing_options"] == {"calibrate": False, "summarize": True}
+        assert task["transcription_data"] is None
+        assert task["use_speaker_recognition"] is True
+        assert task["cached_speaker_count"] == 3
+
+    def test_non_speaker_cache_leaves_cached_speaker_count_none(
+        self, monkeypatch, patch_runtime
+    ):
+        """Non-speaker caches must not fabricate a speaker count."""
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "llm_calibrated": "REAL calibrated text from a genuine LLM pass",
+            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+        }
+
+        result, queued = _run(
+            monkeypatch, patch_runtime, cache_data,
+            {"calibrate": True, "summarize": True},
+        )
+
+        assert len(queued) == 1
+        assert queued[0]["cached_speaker_count"] is None
+
     def test_repeated_identical_full_options_is_idempotent(
         self, monkeypatch, patch_runtime
     ):
@@ -450,8 +508,11 @@ class TestSpeakerCacheSummaryOnlyBackfillEndToEnd:
                 content="REAL calibrated text from a genuine speaker-aware pass",
             )
             existing_structured = {
-                "dialogs": [{"speaker": "Alice", "text": "hello"}],
-                "speaker_mapping": {"S0": "Alice"},
+                "dialogs": [
+                    {"speaker": "Alice", "text": "hello"},
+                    {"speaker": "Bob", "text": "hi there"},
+                ],
+                "speaker_mapping": {"S0": "Alice", "S1": "Bob"},
             }
             real_cm.save_llm_result(
                 platform="youtube", media_id="abc123", use_speaker_recognition=True,
@@ -493,6 +554,14 @@ class TestSpeakerCacheSummaryOnlyBackfillEndToEnd:
                 "transcript": "REAL calibrated text from a genuine speaker-aware pass",
                 "use_speaker_recognition": True,
                 "transcription_data": None,
+                # codex-review R5 #3: transcription.py reads this from the
+                # cached llm_processed.json's speaker_mapping (see
+                # TestLayeredCacheMatrix.
+                # test_calibrate_only_speaker_cache_propagates_cached_speaker_count)
+                # and threads it through so the coordinator doesn't
+                # misjudge this as single-speaker just because
+                # transcription_data was forced to None above.
+                "cached_speaker_count": len(existing_structured["speaker_mapping"]),
                 "is_generic": False,
                 "wechat_webhook": None,
                 "notification_channel": None,
@@ -538,6 +607,14 @@ class TestSpeakerCacheSummaryOnlyBackfillEndToEnd:
             row = real_cm.get_task_by_id(task_id)
             assert row["status"] == "success"
             assert row["error_message"] is None
+
+            # codex-review R5 #3: the real (>1) speaker count must reach the
+            # coordinator despite content being plain text (transcription_data
+            # forced None above) -- this is what lets SummaryProcessor pick
+            # the multi-speaker prompt instead of silently defaulting to
+            # single-speaker.
+            coordinator.process.assert_called_once()
+            assert coordinator.process.call_args.kwargs["speaker_count_hint"] == 2
 
             cache_data = real_cm.get_cache(
                 "youtube", "abc123", use_speaker_recognition=True
