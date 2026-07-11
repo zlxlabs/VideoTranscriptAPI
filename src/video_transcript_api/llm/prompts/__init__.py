@@ -658,19 +658,27 @@ from .unified_validation_prompts import (  # noqa: E402
 
 SPEAKER_INFERENCE_SYSTEM_PROMPT = """你是专业的说话人识别专家。你的任务是基于转录内容推断每个说话人的真实姓名或身份。
 
+## 输入说明
+
+转录样本按"说话人首次出现的时间顺序"分组给出，每组可能包含：
+- 该说话人首次出现的时间戳（如有）
+- 首次出场前，其他人称呼/提及该说话人的上下文片段（若存在，是判断身份的强信号）
+- 该说话人本人的发言样本（仅为代表性片段，并非全部对话）
+
 ## 推断规则
 
 1. **优先使用视频描述中的人名信息**：如果描述中提到具体人名，优先使用这些名字
-2. 根据内容中的自我介绍、称呼等信息进行确认和匹配
-3. 结合视频标题、作者信息进行合理推测
-4. 如果无法确定，使用描述性身份（如"主持人"、"嘉宾"等）
-5. 确信度请如实评估（0-1之间）
-6. 姓名长度应合理（通常2-4个字符）
-7. **保持人名的准确性**：避免随意修改描述中已明确提到的人名
+2. **优先利用上下文中的称呼线索**：他人如何称呼/介绍这个说话人，往往比其自我介绍更可靠
+3. 根据内容中的自我介绍、称呼等信息进行确认和匹配
+4. 结合视频标题、作者信息进行合理推测
+5. 如果无法确定，使用描述性身份（如"主持人"、"嘉宾"等）
+6. **确信度请逐个说话人如实评估（0-1之间）**：证据越薄弱（样本少、无称呼线索、纯靠猜测）confidence 应越低，不要笼统给高分
+7. 姓名长度应合理（通常2-4个字符）
+8. **保持人名的准确性**：避免随意修改描述中已明确提到的人名
 
 ## 输出格式
 
-必须输出 JSON 格式，包含 speaker_mapping, confidence, reasoning 字段。"""
+必须输出 JSON 格式，包含 speaker_mapping、confidence（每个说话人对应一个 0-1 的置信度）、reasoning 字段。"""
 
 
 def build_speaker_inference_user_prompt(
@@ -684,7 +692,8 @@ def build_speaker_inference_user_prompt(
     构建说话人推断任务的 User Prompt
 
     Args:
-        context_snippets: 转录内容片段
+        context_snippets: 转录内容片段（已按说话人分组、按首次出现时间排序，
+            每组含首次出现时间戳与出场上下文，见 SpeakerInferencer._format_sample_dialogs）
         original_speakers: 原始说话人标识列表
         video_title: 视频标题
         author: 作者
@@ -705,8 +714,8 @@ def build_speaker_inference_user_prompt(
     # 原始说话人标识
     parts.append(f"\n**原始说话人标识**：{', '.join(original_speakers)}")
 
-    # 转录内容片段
-    parts.append("\n**转录内容片段**：")
+    # 转录内容片段（按说话人分组，按首次出现时间排序，含出场上下文）
+    parts.append("\n**转录内容片段**（按说话人首次出现顺序分组，标注首次出现时间与出场上下文）：")
     parts.append(context_snippets)
 
     return "\n".join(parts)
