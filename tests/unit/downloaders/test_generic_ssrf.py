@@ -441,3 +441,100 @@ class TestCertificateHostnamePinningWiredCorrectly:
         assert captured["hostname"] == "public.example.com"
         assert captured["pinned_ip"] == "93.184.216.34"
         assert captured["is_https"] is True
+
+
+# ---------------------------------------------------------------------------
+# 8. Dispatch must merge deployment environment settings (HTTP(S)_PROXY,
+#    NO_PROXY, REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE) instead of silently
+#    ignoring them (codex-review R6 #2).
+#
+# Before the fix, _dispatch_pinned_request built a PinnedIPHTTPAdapter and
+# called its .send() directly, bypassing requests.Session.send() and
+# Session.merge_environment_settings() entirely -- so an operator's
+# HTTPS_PROXY / REQUESTS_CA_BUNDLE env vars had no effect on this code
+# path: requests silently fell back to a direct connection and the
+# default CA bundle, even though every other requests call in the process
+# honored them. The fix constructs a per-request Session purely to merge
+# these settings and look up the mounted adapter (Session.get_adapter),
+# then dispatches through that adapter's send() directly -- still skipping
+# Session.send()'s own redirect/cookie/hook bookkeeping, which
+# _safe_request's manual per-hop loop already replaces.
+# ---------------------------------------------------------------------------
+
+
+def _clear_proxy_env(monkeypatch):
+    """Deterministic env: no proxy config from the ambient shell/CI leaks
+    into a test that doesn't explicitly set one."""
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"):
+        monkeypatch.delenv(var, raising=False)
+
+
+class TestEnvironmentSettingsMergedThroughSession:
+    def test_https_proxy_env_var_reaches_the_dispatched_send(self, monkeypatch):
+        _clear_proxy_env(monkeypatch)
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.internal:3128")
+        downloader = GenericDownloader()
+        url = "https://public.example.com/audio.mp3"
+
+        with patch(GETADDRINFO_PATH, side_effect=_public_addrinfo), patch(
+            BASE_SEND_PATH, return_value=_ok_response()
+        ) as mock_send:
+            downloader._safe_request("get", url, timeout=5)
+
+        sent_kwargs = mock_send.call_args.kwargs
+        assert sent_kwargs["proxies"]["https"] == "http://proxy.internal:3128"
+
+    def test_proxy_present_skips_ip_pinning_keeps_original_hostname_url(self, monkeypatch):
+        """Connecting through a proxy is the proxy's job: pinning our own
+        resolved IP into the request is meaningless (the proxy has its own
+        DNS view) and can break hostname-based proxy ACLs, so with a proxy
+        configured the dispatched request must NOT be rewritten to the
+        pinned IP."""
+        _clear_proxy_env(monkeypatch)
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.internal:3128")
+        downloader = GenericDownloader()
+        url = "https://public.example.com/audio.mp3"
+
+        with patch(GETADDRINFO_PATH, side_effect=_public_addrinfo), patch(
+            BASE_SEND_PATH, return_value=_ok_response()
+        ) as mock_send:
+            downloader._safe_request("get", url, timeout=5)
+
+        sent_request = mock_send.call_args[0][0]
+        assert sent_request.url == url
+
+    def test_requests_ca_bundle_env_var_is_merged_into_verify(self, monkeypatch, tmp_path):
+        _clear_proxy_env(monkeypatch)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        monkeypatch.delenv("CURL_CA_BUNDLE", raising=False)
+        ca_bundle = tmp_path / "ca.pem"
+        ca_bundle.write_text("fake-ca")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(ca_bundle))
+        downloader = GenericDownloader()
+        url = "https://public.example.com/audio.mp3"
+
+        with patch(GETADDRINFO_PATH, side_effect=_public_addrinfo), patch(
+            BASE_SEND_PATH, return_value=_ok_response()
+        ) as mock_send:
+            downloader._safe_request("get", url, timeout=5)
+
+        sent_kwargs = mock_send.call_args.kwargs
+        assert sent_kwargs["verify"] == str(ca_bundle)
+
+    def test_no_proxy_no_ca_bundle_pinning_behavior_not_regressed(self, monkeypatch):
+        """Without any proxy/CA-bundle env vars, dispatch must still pin
+        the connection to the resolved IP exactly as before this fix."""
+        _clear_proxy_env(monkeypatch)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        monkeypatch.delenv("CURL_CA_BUNDLE", raising=False)
+        downloader = GenericDownloader()
+        url = "https://public.example.com/audio.mp3"
+
+        with patch(GETADDRINFO_PATH, side_effect=_public_addrinfo), patch(
+            BASE_SEND_PATH, return_value=_ok_response()
+        ) as mock_send:
+            downloader._safe_request("get", url, timeout=5)
+
+        sent_request = mock_send.call_args[0][0]
+        assert sent_request.url == "https://93.184.216.34/audio.mp3"
+        assert sent_request.headers["Host"] == "public.example.com"
