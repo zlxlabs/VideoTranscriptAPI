@@ -21,8 +21,7 @@ from ..context import (
     get_logger,
     task_lock,
 )
-from ...llm import call_llm_api
-from ...llm.core.usage_context import bind_task_id
+from ...llm.core.usage_context import bind_task_id, set_context
 from ...utils.notifications import (
     WechatNotifier,
     send_long_text_wechat,
@@ -307,14 +306,19 @@ def _generate_title_if_needed(llm_task: dict, video_title: str, transcript: str)
 
     try:
         config_llm = config.get("llm", {})
-        generated_title = call_llm_api(
-            config_llm.get("summary_model"),
-            title_prompt,
-            config_llm.get("api_key"),
-            config_llm.get("base_url"),
-            config_llm.get("max_retries", 2),
-            config_llm.get("retry_delay", 5),
-        )
+        # 复用应用级单例 LLMCoordinator 已配置好的 LLMClient（api_key/base_url/
+        # 重试策略均已就绪），而不是直接调用底层 call_llm_api()——避免重复拼装
+        # 配置参数，同时天然获得 LLMClient.call() 内置的 token 用量审计记录。
+        # set_context(stage="title") 只细化 stage，task_id 沿用 _handle_llm_task
+        # 入口处 bind_task_id() 绑定的当前任务 ID。
+        with set_context(stage="title"):
+            response = llm_coordinator.llm_client.call(
+                model=config_llm.get("summary_model"),
+                system_prompt="You are a helpful assistant.",
+                user_prompt=title_prompt,
+                task_type="title",
+            )
+        generated_title = response.text
 
         generated_title = (
             generated_title.strip()
@@ -331,7 +335,9 @@ def _generate_title_if_needed(llm_task: dict, video_title: str, transcript: str)
             logger.warning("LLM生成的标题不合规，使用默认标题")
             return "自定义文件总结"
     except Exception as exc:
-        logger.error(f"LLM生成标题失败: {exc}")
+        # 标题生成失败是合理的降级路径（退默认标题），但仍需 warning 级别留痕，
+        # 避免真实故障（如模型配置错误、鉴权失败）被彻底静默、无从排查。
+        logger.warning(f"LLM生成标题失败，使用默认标题兜底: {exc}")
         return "自定义文件总结"
 
 
