@@ -666,6 +666,20 @@ class TestGetViewDataSummaryState:
         assert view_data["summary_state"] == "pending"
         assert view_data["summary"] is None
 
+    def test_disabled_state_has_no_placeholder_summary(self, cm):
+        """summary_status=disabled (user turned off processing_options.summarize)
+        must surface as its own state, with no fabricated summary text -- same
+        shape as failed/skipped_short, distinct value."""
+        task = self._make_success_task(cm, "viddisabled")
+        cm.save_llm_status(
+            platform="youtube", media_id="viddisabled", use_speaker_recognition=False,
+            summary_status="disabled",
+        )
+
+        view_data = cm.get_view_data_by_token(task["view_token"])
+        assert view_data["summary_state"] == "disabled"
+        assert view_data["summary"] is None
+
     def test_legacy_no_status_file_with_summary_file_is_generated(self, cm):
         """Old cache predating llm_status.json but with a real llm_summary.txt
         must still show the summary."""
