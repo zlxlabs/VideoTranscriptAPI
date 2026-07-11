@@ -47,6 +47,7 @@ from ...utils.notifications.channel import _clean_url
 from ...utils.rendering import get_base_url
 from ...utils.perf_tracker import PerfTracker
 from ...utils.task_status import TaskStatus
+from ...utils.llm_status import CalibrationStatus
 
 logger = get_logger()
 config = get_config()
@@ -83,6 +84,46 @@ class NotificationConfig(BaseModel):
         return v
 
 
+class ProcessingOptions(BaseModel):
+    """处理深度开关：控制本次任务要跑到哪一步（只转录 / 转录+校对 / 全流程）。
+
+    两个字段互相独立，默认均为 True（等价于历史行为：完整跑校对+总结）。
+    summarize=True 且 calibrate=False 是合法组合——总结会基于未经 LLM 校对的
+    原始转录文本生成，其质量可能受 ASR 识别噪声（错别字、断句错误等）影响，
+    但仍然可用；系统不做硬性拦截，由调用方自行权衡。
+    """
+
+    calibrate: bool = Field(True, description="是否执行 LLM 校对")
+    summarize: bool = Field(
+        True,
+        description=(
+            "是否生成内容总结。若 calibrate=False，总结将基于未经校对的原始转录"
+            "文本生成，质量可能受 ASR 识别噪声影响"
+        ),
+    )
+
+
+def normalize_processing_options(
+    processing_options: Optional["ProcessingOptions"],
+) -> dict:
+    """将请求里的 processing_options 归一化为 plain dict。
+
+    None（调用方未指定）等价于全部启用（calibrate=True, summarize=True），
+    与历史行为保持一致——这是贯穿 task dict / llm_task_queue payload 的统一
+    "缺省即全流程"约定，下游（tasks.py/transcription.py/llm_ops.py）都应
+    通过本函数或同等的 `.get(...) or DEFAULT` 兜底来读取，不要直接假设键存在。
+
+    Args:
+        processing_options: 请求体里的 ProcessingOptions 实例，可能为 None
+
+    Returns:
+        dict: {"calibrate": bool, "summarize": bool}
+    """
+    if processing_options is None:
+        return {"calibrate": True, "summarize": True}
+    return processing_options.model_dump()
+
+
 class TranscribeRequest(BaseModel):
     """转录请求数据模型"""
 
@@ -102,6 +143,10 @@ class TranscribeRequest(BaseModel):
     )
     notification_config: Optional[NotificationConfig] = Field(
         None, description="通知配置（可选，指定渠道和自定义 webhook）"
+    )
+    processing_options: Optional[ProcessingOptions] = Field(
+        None,
+        description="处理深度开关（只转录/转录+校对/全流程）。None 等价于全部启用",
     )
 
     @field_validator("wechat_webhook", "feishu_webhook")
@@ -279,6 +324,12 @@ async def process_task_queue():
             notification_webhooks = task.get("notification_webhooks", {})
             download_url = task.get("download_url")
             metadata_override = task.get("metadata_override")
+            # 处理深度开关（只转录/转录+校对/全流程）：task dict 里缺失时按全流程兜底，
+            # 与 normalize_processing_options(None) 的语义保持一致。
+            processing_options = task.get("processing_options") or {
+                "calibrate": True,
+                "summarize": True,
+            }
 
             try:
                 cache_manager.update_task_status(task_id, TaskStatus.PROCESSING, download_url=download_url)
@@ -293,6 +344,7 @@ async def process_task_queue():
                     metadata_override,
                     notification_channel=notification_channel,
                     notification_webhooks=notification_webhooks,
+                    processing_options=processing_options,
                 )
 
                 def task_completed(future_result):
@@ -335,7 +387,7 @@ async def process_task_queue():
 def process_transcription(
     task_id, url, use_speaker_recognition=False, wechat_webhook=None,
     download_url=None, metadata_override=None, notification_channel=None,
-    notification_webhooks=None,
+    notification_webhooks=None, processing_options=None,
 ):
     """
     处理视频转录
@@ -349,9 +401,13 @@ def process_transcription(
         metadata_override: 元数据覆盖（dict）
         notification_channel: 指定通知渠道（wechat/feishu/None=全部）
         notification_webhooks: per-channel webhook dict {"wechat": "...", "feishu": "..."}
+        processing_options: 处理深度开关 dict {"calibrate": bool, "summarize": bool}，
+            None 时按全流程兜底（向后兼容旧调用方）
     """
     if notification_webhooks is None:
         notification_webhooks = {}
+    if processing_options is None:
+        processing_options = {"calibrate": True, "summarize": True}
     # 性能追踪器：记录各阶段耗时
     tracker = PerfTracker(task_id=task_id)
 
@@ -483,7 +539,26 @@ def process_transcription(
             has_llm_calibrated = "llm_calibrated" in cache_data
             has_llm_summary = "llm_summary" in cache_data
 
-            if has_llm_calibrated and has_llm_summary:
+            # ---- 分层缓存命中判定（相对本次请求的 processing_options）----
+            # 缓存产物只增不减：required = {transcript} ∪ (calibrate→calibrated) ∪
+            # (summarize→summary)。transcript 已保证存在（否则不会进到这个分支）。
+            #
+            # calibrated 层的"已满足"判定不能只看文件是否存在——如果上一轮请求
+            # calibrate=False，llm_calibrated.txt 仍会被写入（内容是本地格式化的
+            # 原文，calibration_status=disabled），此时若本轮请求 calibrate=True，
+            # 必须视为"缺失"以触发真实校对，而不是把 disabled 占位文本误当成
+            # 已完成的校对结果直接返回。summary 层没有这个问题：disabled/failed
+            # 都不落盘 llm_summary.txt（见 llm_ops._save_llm_results），因此文件
+            # 存在即代表该层已有确定性产物（generated 或 skipped_short）。
+            cached_llm_status = cache_data.get("llm_status") or {}
+            cached_calibration_status = cached_llm_status.get("calibration_status")
+            calibrated_layer_satisfied = (
+                has_llm_calibrated and cached_calibration_status != CalibrationStatus.DISABLED
+            )
+            need_calibrated = processing_options.get("calibrate", True) and not calibrated_layer_satisfied
+            need_summary = processing_options.get("summarize", True) and not has_llm_summary
+
+            if not need_calibrated and not need_summary:
                 logger.info("缓存中已有 LLM 结果，直接使用")
                 cache_type = "含说话人识别" if has_speaker_recognition else "普通转录"
                 engine_info = "FunASR" if has_speaker_recognition else "CapsWriter"
@@ -611,8 +686,28 @@ def process_transcription(
                 transcript="正在处理已存在的转录文本...",
             )
 
-            # 缓存部分命中（有转录但无 LLM 结果），记录计数
+            # 缓存部分命中（transcript 已在，但请求的层里至少一层缺失），记录计数
             tracker.count("cache_hit_partial")
+
+            if need_calibrated:
+                # 校对层缺失，需要真实（重新）校对：沿用原始转录内容
+                queued_transcript = transcript
+                queued_transcription_data = transcription_data if has_speaker_recognition else None
+                queued_use_speaker_recognition = has_speaker_recognition
+            else:
+                # 校对层已满足（need_calibrated=False 时，本分支必然是 need_summary=True），
+                # 只缺总结：复用已有校对文本作为总结输入（而非原始转录，质量更高），
+                # 并强制走纯文本路径（transcription_data=None）避免二次说话人推断浪费
+                # LLM 调用——_prepare_llm_content 在 transcription_data 为空时会回退
+                # 到纯文本分支，与 use_speaker_recognition 是否为 True 无关。
+                queued_transcript = cache_data.get("llm_calibrated") or transcript
+                queued_transcription_data = None
+                queued_use_speaker_recognition = has_speaker_recognition
+
+            queued_processing_options = {
+                "calibrate": need_calibrated,
+                "summarize": need_summary,
+            }
 
             try:
                 llm_task_queue.put(
@@ -625,20 +720,21 @@ def process_transcription(
                         "video_title": video_title,
                         "author": author,
                         "description": description,
-                        "transcript": transcript,
-                        "use_speaker_recognition": has_speaker_recognition,
-                        "transcription_data": transcription_data
-                        if has_speaker_recognition
-                        else None,
+                        "transcript": queued_transcript,
+                        "use_speaker_recognition": queued_use_speaker_recognition,
+                        "transcription_data": queued_transcription_data,
                         "is_generic": is_generic_downloader or is_from_generic,
                         "wechat_webhook": wechat_webhook,
                         "notification_channel": notification_channel,
                         "notification_webhooks": notification_webhooks,
                         "perf_tracker": tracker,
+                        "processing_options": queued_processing_options,
                     }
                 )
                 logger.info(
-                    f"将LLM任务加入队列: {task_id}, 标题: {video_title}, 说话人识别: {has_speaker_recognition}"
+                    f"将LLM任务加入队列: {task_id}, 标题: {video_title}, "
+                    f"说话人识别: {has_speaker_recognition}, "
+                    f"需补层: calibrate={need_calibrated}, summarize={need_summary}"
                 )
                 # 转录已就绪、LLM 校对/总结进行中 → calibrating（终态由 LLM 阶段写）
                 cache_manager.update_task_status(
@@ -855,6 +951,7 @@ def process_transcription(
                                     "notification_channel": notification_channel,
                                     "notification_webhooks": notification_webhooks,
                                     "perf_tracker": tracker,
+                                    "processing_options": processing_options,
                                 }
                             )
                             logger.info(f"[youtube-api] LLM task queued: {task_id}")
@@ -989,6 +1086,7 @@ def process_transcription(
                                     "notification_channel": notification_channel,
                                     "notification_webhooks": notification_webhooks,
                                     "perf_tracker": tracker,
+                                    "processing_options": processing_options,
                                 }
                             )
                             logger.info(f"[youtube-api] LLM task queued: {task_id}")
@@ -1126,6 +1224,7 @@ def process_transcription(
                             "notification_channel": notification_channel,
                             "notification_webhooks": notification_webhooks,
                             "perf_tracker": tracker,
+                            "processing_options": processing_options,
                         }
                     )
                     logger.info(
@@ -1363,6 +1462,7 @@ def process_transcription(
                                 "notification_channel": notification_channel,
                                 "notification_webhooks": notification_webhooks,
                                 "perf_tracker": tracker,
+                                "processing_options": processing_options,
                             }
                         )
                         logger.info(

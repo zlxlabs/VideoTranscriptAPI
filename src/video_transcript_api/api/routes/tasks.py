@@ -13,6 +13,7 @@ from ..services.transcription import (
     RecalibrateRequest,
     TranscribeRequest,
     TranscribeResponse,
+    normalize_processing_options,
     verify_token,
 )
 from ...utils.notifications import send_view_link_wechat, get_notification_router
@@ -63,10 +64,12 @@ async def transcribe_video(
         # 只有在有有效字段时才设置 metadata_override
         normalized_metadata_override = filtered_metadata if filtered_metadata else None
 
+    effective_processing_options = normalize_processing_options(request_body.processing_options)
     logger.info(
         f"收到转录API请求 - URL: {url}, 说话人识别: {request_body.use_speaker_recognition}, "
         f"自定义企微webhook: {request_body.wechat_webhook is not None}, "
-        f"download_url: {normalized_download_url}, metadata_override: {normalized_metadata_override}"
+        f"download_url: {normalized_download_url}, metadata_override: {normalized_metadata_override}, "
+        f"processing_options: {effective_processing_options}"
     )
 
     start_time = datetime.datetime.now()
@@ -143,6 +146,7 @@ async def transcribe_video(
                 "user_info": user_info,
                 "download_url": normalized_download_url,
                 "metadata_override": normalized_metadata_override,
+                "processing_options": effective_processing_options,
             }
 
             try:
