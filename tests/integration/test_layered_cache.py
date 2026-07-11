@@ -22,7 +22,8 @@ All console output must be in English only (no emoji, no Chinese).
 import pytest
 
 import video_transcript_api.api.services.transcription as transcription
-from video_transcript_api.utils.llm_status import CalibrationStatus
+from video_transcript_api.cache.cache_manager import CacheManager
+from video_transcript_api.utils.llm_status import CalibrationStatus, SummaryStatus
 
 
 class DummyQueue:
@@ -257,3 +258,103 @@ class TestLayeredCacheMatrix:
         # Legacy default (all True): calibrated layer already real (no
         # llm_status -> not disabled) so only summary is missing.
         assert queued[0]["processing_options"] == {"calibrate": False, "summarize": True}
+
+
+class TestFullHitMirrorsCacheStatusOnTaskRow:
+    """Regression for codex-review R2 item 2: a full cache hit takes no
+    further LLM action and calls update_task_status(..., SUCCESS) directly --
+    but the task_status row backing that call is BRAND NEW (created earlier
+    by the endpoint handler via create_task, columns start out NULL). Without
+    mirroring the media's real llm_status.json into that call,
+    calibration_status/summary_status stay NULL on the row forever, so
+    /api/audit/history reports empty status for a task whose underlying cache
+    is actually fully processed.
+
+    Unlike the rest of this file (which uses DummyCacheManager to isolate the
+    hit/miss decision), this test uses a REAL CacheManager against a tmp_path
+    SQLite DB + cache directory -- it seeds the cache the way a genuine prior
+    full-flow run (with LLM calls mocked out) would leave it on disk, then
+    drives the actual second-request full-hit code path end to end and reads
+    back the real task_status columns, comparing them against the real
+    llm_status.json file on disk.
+    """
+
+    def test_full_hit_task_row_mirrors_llm_status_json(
+        self, monkeypatch, patch_runtime, tmp_path
+    ):
+        real_cm = CacheManager(cache_dir=str(tmp_path / "cache"))
+        try:
+            # ---- Simulate a prior full-flow run (LLM calls mocked out at
+            # their own layer -- see test_llm_ops_status_backfill.py for that
+            # coverage). What matters here is the ON-DISK end state such a
+            # run leaves behind: transcript + both LLM layers + a real
+            # llm_status.json with non-trivial (non-"full", non-default)
+            # values, so a naive "hardcode full/generated" fix would not
+            # accidentally pass this assertion.
+            real_cm.save_cache(
+                platform="youtube",
+                url="https://www.youtube.com/watch?v=abc123",
+                media_id="abc123",
+                use_speaker_recognition=False,
+                transcript_data="RAW uncalibrated transcript",
+                transcript_type="capswriter",
+                title="cached title",
+                author="cached author",
+                description="cached desc",
+            )
+            real_cm.save_llm_result(
+                platform="youtube", media_id="abc123", use_speaker_recognition=False,
+                llm_type="calibrated", content="real calibrated text",
+            )
+            real_cm.save_llm_result(
+                platform="youtube", media_id="abc123", use_speaker_recognition=False,
+                llm_type="summary", content="real summary",
+            )
+            real_cm.save_llm_status(
+                platform="youtube", media_id="abc123", use_speaker_recognition=False,
+                calibration_status=CalibrationStatus.PARTIAL,
+                summary_status=SummaryStatus.GENERATED,
+            )
+
+            # ---- Second request for the SAME URL: the endpoint handler
+            # would create_task() before enqueueing; replicate that here.
+            task_id = real_cm.create_task(
+                url="https://www.youtube.com/watch?v=abc123",
+                use_speaker_recognition=False,
+                platform="youtube",
+                media_id="abc123",
+            )["task_id"]
+
+            monkeypatch.setattr(transcription, "cache_manager", real_cm)
+
+            result = transcription.process_transcription(
+                task_id=task_id,
+                url="https://www.youtube.com/watch?v=abc123",
+                use_speaker_recognition=False,
+                wechat_webhook=None,
+                download_url=None,
+                metadata_override=None,
+                processing_options={"calibrate": True, "summarize": True},
+            )
+
+            assert result["status"] == "success"
+            assert result["data"]["cached"] is True
+
+            row = real_cm.get_task_by_id(task_id)
+            assert row is not None
+            assert row["status"] == "success"
+
+            cache_data = real_cm.get_cache(
+                "youtube", "abc123", use_speaker_recognition=False
+            )
+            llm_status = cache_data["llm_status"]
+
+            # The bug this fixes: these two used to be NULL on a full-hit row.
+            assert row["calibration_status"] is not None
+            assert row["summary_status"] is not None
+            assert row["calibration_status"] == llm_status["calibration_status"]
+            assert row["summary_status"] == llm_status["summary_status"]
+            assert row["calibration_status"] == CalibrationStatus.PARTIAL
+            assert row["summary_status"] == SummaryStatus.GENERATED
+        finally:
+            real_cm.close()
