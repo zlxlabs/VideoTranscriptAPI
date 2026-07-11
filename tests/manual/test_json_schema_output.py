@@ -21,10 +21,9 @@ from video_transcript_api.llm import (
     reset_llm_stats,
     log_llm_stats,
 )
-from video_transcript_api.llm.schemas import (
-    CALIBRATION_RESULT_SCHEMA,
-    SPEAKER_MAPPING_SCHEMA,
-)
+from video_transcript_api.llm.schemas import CALIBRATION_RESULT_SCHEMA
+# SPEAKER_MAPPING_SCHEMA 唯一定义在 prompts.schemas（llm.schemas 中的重复定义已删除）
+from video_transcript_api.llm.prompts.schemas import SPEAKER_MAPPING_SCHEMA
 from video_transcript_api.api.context import get_config
 
 
