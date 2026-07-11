@@ -16,7 +16,7 @@ from .logger import setup_logger
 logger = setup_logger("audit_logger")
 
 # Schema 版本号，每次表结构变更时递增
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 class AuditLogger:
@@ -123,6 +123,9 @@ class AuditLogger:
         if version < 2:
             self._migrate_v2(cursor)
 
+        if version < 3:
+            self._migrate_v3(cursor)
+
         if version < CURRENT_SCHEMA_VERSION:
             self._set_schema_version(cursor, CURRENT_SCHEMA_VERSION)
             logger.info(f"Schema 迁移完成: v{version} -> v{CURRENT_SCHEMA_VERSION}")
@@ -160,6 +163,35 @@ class AuditLogger:
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_wechat_webhook ON api_audit_logs(wechat_webhook)"
+        )
+
+    def _migrate_v3(self, cursor):
+        """v3 迁移：新增 llm_usage 表，记录 LLM 调用 token 用量（按任务/阶段审计）
+
+        每行对应一次 LLMClient.call() 调用，记录 prompt/completion/total token
+        用量、耗时、所属任务 task_id 与处理阶段 stage。provider 未回报 usage 时
+        仍写入一行（token 记 0），并通过 usage_missing 标记，避免静默丢弃。
+        """
+        logger.info("执行 schema 迁移 v3: 创建 llm_usage 表")
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS llm_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                model TEXT NOT NULL,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                usage_missing INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+        ''')
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_llm_usage_task_id ON llm_usage(task_id)'
+        )
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_llm_usage_created_at ON llm_usage(created_at)'
         )
 
     def _mask_api_key(self, api_key: str) -> str:

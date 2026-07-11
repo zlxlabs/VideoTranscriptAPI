@@ -1,13 +1,15 @@
 """LLM 客户端薄封装
 
 重试、provider 翻译、内容审查降级均由 llm-compat SyncLLMClient 内部处理。
-本层只负责：参数组装 → call_llm_api 转发 → 结果包装 → 错误映射。
+本层只负责：参数组装 → call_llm_api 转发 → 结果包装 → 错误映射 → token 用量审计记录。
 """
 
+import time
 from typing import Dict, Optional
 from dataclasses import dataclass
 
 from ...utils.logging import setup_logger
+from ...utils.logging.usage_recorder import get_usage_recorder
 from ..llm import call_llm_api, LLMCallError, StructuredResult
 from .errors import (
     map_llm_compat_error,
@@ -16,6 +18,7 @@ from .errors import (
     TimeoutError as LLMTimeoutError,
     TruncationError,
 )
+from .usage_context import get_context, pop_chat_result_usage
 
 logger = setup_logger(__name__)
 
@@ -57,6 +60,7 @@ class LLMClient:
             TruncationError: 输出截断
             RetryableError: llm-compat 重试耗尽后的错误
         """
+        start = time.monotonic()
         try:
             result = call_llm_api(
                 model=model,
@@ -84,3 +88,56 @@ class LLMClient:
             raise
         except Exception as e:
             raise map_llm_compat_error(e) from e
+        finally:
+            # 无论成功/失败都记一行用量审计（fail-open，不影响上面的返回值/异常）
+            duration_ms = int((time.monotonic() - start) * 1000)
+            self._record_usage(model=model, duration_ms=duration_ms)
+
+    def _record_usage(self, *, model: str, duration_ms: int) -> None:
+        """将 call_llm_api() 内部桥接的 ChatResult usage 快照落审计库。
+
+        usage 快照由 `llm/llm.py` 的三个调用辅助函数在拿到 llm-compat
+        ChatResult 后写入 `usage_context` 的桥接槽（同线程、调用完立即读出，
+        详见 `usage_context.py` 模块文档）。task_id/stage 从当前调用上下文
+        读取（由 `llm_ops._handle_llm_task` 与 `coordinator.py`/processors
+        通过 contextvars 设置，跨 ThreadPoolExecutor 需显式 copy_context 传播）。
+
+        本方法自身也包一层 try/except：即便 usage_context/UsageRecorder 出现
+        非预期异常，也绝不能影响 call() 的返回值或已经在传播的异常
+        （fail-open，见类文档）。
+
+        Args:
+            model: 请求时使用的模型名（桥接快照缺失或未回报 model 时的兜底值）
+            duration_ms: 本次 call() 调用耗时（毫秒，含内部重试/Self-Correction）
+        """
+        try:
+            snapshot = pop_chat_result_usage()
+            context = get_context()
+
+            if snapshot is None:
+                # call_llm_api() 从未走到任何真实 API 往返（如参数构建阶段就失败），
+                # 仍记一行，flag usage_missing，避免静默丢弃这次调用尝试。
+                get_usage_recorder().record(
+                    task_id=context.get("task_id"),
+                    stage=context.get("stage"),
+                    model=model,
+                    prompt_tokens=None,
+                    completion_tokens=None,
+                    total_tokens=None,
+                    duration_ms=duration_ms,
+                    usage_missing=True,
+                )
+                return
+
+            get_usage_recorder().record(
+                task_id=context.get("task_id"),
+                stage=context.get("stage"),
+                model=snapshot.model or model,
+                prompt_tokens=snapshot.prompt_tokens,
+                completion_tokens=snapshot.completion_tokens,
+                total_tokens=snapshot.total_tokens,
+                duration_ms=duration_ms,
+                usage_missing=snapshot.usage_missing,
+            )
+        except Exception as exc:
+            logger.warning(f"LLM usage 记录钩子异常（不影响 LLM 调用主流程）: {exc}")

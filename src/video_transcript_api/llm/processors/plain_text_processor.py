@@ -1,5 +1,6 @@
 """无说话人文本处理器"""
 
+import contextvars
 from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor
 import concurrent.futures
@@ -9,6 +10,7 @@ from ...utils.logging import setup_logger
 from ..core.config import LLMConfig
 from ..core.llm_client import LLMClient
 from ..core.key_info_extractor import KeyInfoExtractor, KeyInfo
+from ..core.usage_context import set_context
 from ..validators.unified_quality_validator import UnifiedQualityValidator
 from ..segmenters.text_segmenter import TextSegmenter
 from ..prompts import (
@@ -274,12 +276,15 @@ class PlainTextProcessor:
                     # 黄灯区：进入质量验证或直接接受
                     candidate = calibrated_text_retry
                     if self.config.segmentation_validation_enabled:
-                        validation_result = self.quality_validator.validate(
-                            original=segment,
-                            calibrated=candidate,
-                            context={"title": title, "author": "", "description": description},
-                            selected_models=selected_models,
-                        )
+                        # 细化 stage=validation，仅覆盖本次质量验证调用的审计标签，
+                        # 退出 with 块后自动恢复为外层的 calibration
+                        with set_context(stage="validation"):
+                            validation_result = self.quality_validator.validate(
+                                original=segment,
+                                calibrated=candidate,
+                                context={"title": title, "author": "", "description": description},
+                                selected_models=selected_models,
+                            )
                         if validation_result.get("passed"):
                             calibrated_segments[index] = candidate
                             return
@@ -298,12 +303,15 @@ class PlainTextProcessor:
 
                 # 黄灯区：触发质量验证（或直接通过）
                 if self.config.segmentation_validation_enabled:
-                    validation_result = self.quality_validator.validate(
-                        original=segment,
-                        calibrated=calibrated_text,
-                        context={"title": title, "author": "", "description": description},
-                        selected_models=selected_models,
-                    )
+                    # 细化 stage=validation，仅覆盖本次质量验证调用的审计标签，
+                    # 退出 with 块后自动恢复为外层的 calibration
+                    with set_context(stage="validation"):
+                        validation_result = self.quality_validator.validate(
+                            original=segment,
+                            calibrated=calibrated_text,
+                            context={"title": title, "author": "", "description": description},
+                            selected_models=selected_models,
+                        )
                     if validation_result.get("passed"):
                         calibrated_segments[index] = calibrated_text
                         return
@@ -326,10 +334,15 @@ class PlainTextProcessor:
                 calibrated_segments[index] = formatted_segment
 
         # 并发处理
+        # 注意：ThreadPoolExecutor worker 线程不会自动继承主线程的 contextvars
+        # （task_id/stage 审计上下文），必须显式 contextvars.copy_context().run
+        # 传播，否则 worker 线程内的 LLM 调用会被记成 task_id='unknown'
         max_workers = min(len(segments), self.config.concurrent_workers)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
-                executor.submit(calibrate_single_segment, i, seg)
+                executor.submit(
+                    contextvars.copy_context().run, calibrate_single_segment, i, seg
+                )
                 for i, seg in enumerate(segments)
             ]
 

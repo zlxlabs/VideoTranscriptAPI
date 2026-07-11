@@ -1,5 +1,6 @@
 """有说话人文本处理器"""
 
+import contextvars
 import re
 import time
 from typing import Dict, List, Optional, Any
@@ -11,6 +12,7 @@ from ..core.config import LLMConfig
 from ..core.llm_client import LLMClient
 from ..core.key_info_extractor import KeyInfoExtractor, KeyInfo
 from ..core.speaker_inferencer import SpeakerInferencer
+from ..core.usage_context import set_context
 from ..validators.unified_quality_validator import UnifiedQualityValidator
 from ..segmenters.dialog_segmenter import DialogSegmenter
 from ..prompts import (
@@ -101,16 +103,19 @@ class SpeakerAwareProcessor:
                 d.get("speaker", "") for d in base_dialogs if d.get("speaker")
             )
         )
-        speaker_inference_result = self.speaker_inferencer.infer(
-            speakers=speakers,
-            dialogs=base_dialogs,
-            title=title,
-            author=author,
-            description=description,
-            key_info=key_info,
-            platform=platform,
-            media_id=media_id,
-        )
+        # 细化 stage=speaker_inference，仅覆盖本次说话人推断调用的审计标签，
+        # 退出 with 块后自动恢复为外层的 calibration
+        with set_context(stage="speaker_inference"):
+            speaker_inference_result = self.speaker_inferencer.infer(
+                speakers=speakers,
+                dialogs=base_dialogs,
+                title=title,
+                author=author,
+                description=description,
+                key_info=key_info,
+                platform=platform,
+                media_id=media_id,
+            )
         speaker_mapping = speaker_inference_result.get("mapping", {})
         speaker_inference_meta = speaker_inference_result.get("meta", {})
 
@@ -492,16 +497,19 @@ class SpeakerAwareProcessor:
                     if self.config.structured_validation_enabled:
                         logger.debug(f"Validating chunk {index + 1}/{len(chunks)}")
 
-                        validation_result = self.quality_validator.validate(
-                            original=chunk,
-                            calibrated=merged_dialogs,
-                            context={
-                                "title": title,
-                                "author": "",
-                                "description": description,
-                            },
-                            selected_models=selected_models,
-                        )
+                        # 细化 stage=validation，仅覆盖本次质量验证调用的审计标签，
+                        # 退出 with 块后自动恢复为外层的 calibration
+                        with set_context(stage="validation"):
+                            validation_result = self.quality_validator.validate(
+                                original=chunk,
+                                calibrated=merged_dialogs,
+                                context={
+                                    "title": title,
+                                    "author": "",
+                                    "description": description,
+                                },
+                                selected_models=selected_models,
+                            )
 
                         if not validation_result["passed"]:
                             if attempt < max_attempts - 1:
@@ -568,10 +576,15 @@ class SpeakerAwareProcessor:
                     return
 
         # 并发处理
+        # 注意：ThreadPoolExecutor worker 线程不会自动继承主线程的 contextvars
+        # （task_id/stage 审计上下文），必须显式 contextvars.copy_context().run
+        # 传播，否则 worker 线程内的 LLM 调用会被记成 task_id='unknown'
         max_workers = min(len(chunks), self.config.calibration_concurrent_limit)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
-                executor.submit(calibrate_single_chunk, i, chunk)
+                executor.submit(
+                    contextvars.copy_context().run, calibrate_single_chunk, i, chunk
+                )
                 for i, chunk in enumerate(chunks)
             ]
 

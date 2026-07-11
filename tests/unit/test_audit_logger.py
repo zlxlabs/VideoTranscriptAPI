@@ -503,3 +503,132 @@ class TestWebhookLogging:
 
         assert rows["t1"] == "https://hook.example.com/key=aaa"
         assert rows["t2"] == "https://hook.example.com/key=bbb"
+
+
+# ============================================================
+# Migration V3 Tests (llm_usage table)
+# ============================================================
+
+
+class TestMigrateV3:
+    """Verify that _migrate_v3 creates the llm_usage table and indexes."""
+
+    def test_fresh_db_has_llm_usage_table(self, tmp_db):
+        """A freshly created DB should include the llm_usage table."""
+        AuditLogger(db_path=tmp_db)
+        conn = sqlite3.connect(tmp_db)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='llm_usage'"
+        )
+        assert cursor.fetchone() is not None
+        conn.close()
+
+    def test_fresh_db_llm_usage_columns(self, tmp_db):
+        """llm_usage table should have the expected columns."""
+        AuditLogger(db_path=tmp_db)
+        conn = sqlite3.connect(tmp_db)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(llm_usage)")
+        columns = {col[1] for col in cursor.fetchall()}
+        conn.close()
+
+        expected_columns = {
+            "id", "task_id", "stage", "model", "prompt_tokens",
+            "completion_tokens", "total_tokens", "duration_ms",
+            "usage_missing", "created_at",
+        }
+        assert expected_columns == columns
+
+    def test_fresh_db_has_llm_usage_indexes(self, tmp_db):
+        """A freshly created DB should have llm_usage indexes on task_id/created_at."""
+        AuditLogger(db_path=tmp_db)
+        conn = sqlite3.connect(tmp_db)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_llm_usage_%'"
+        )
+        indexes = {row[0] for row in cursor.fetchall()}
+        conn.close()
+        assert {"idx_llm_usage_task_id", "idx_llm_usage_created_at"}.issubset(indexes)
+
+    def test_v2_db_migrates_to_v3(self, tmp_db):
+        """An existing v2 DB (without llm_usage table) should gain it after migration."""
+        # Manually create a v2-style database (schema_version=2, no llm_usage table)
+        conn = sqlite3.connect(tmp_db)
+        conn.execute('''CREATE TABLE schema_version (version INTEGER NOT NULL)''')
+        conn.execute("INSERT INTO schema_version (version) VALUES (2)")
+        conn.execute('''
+            CREATE TABLE api_audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_key_masked TEXT NOT NULL,
+                user_id TEXT,
+                endpoint TEXT NOT NULL,
+                video_url TEXT,
+                request_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                processing_time_ms INTEGER,
+                status_code INTEGER,
+                task_id TEXT,
+                user_agent TEXT,
+                remote_ip TEXT,
+                wechat_webhook TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+
+        logger_instance = AuditLogger(db_path=tmp_db)
+
+        conn = sqlite3.connect(tmp_db)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='llm_usage'"
+        )
+        assert cursor.fetchone() is not None
+        conn.close()
+
+        with logger_instance._get_cursor() as cursor:
+            version = logger_instance._get_schema_version(cursor)
+        assert version == CURRENT_SCHEMA_VERSION
+
+    def test_v3_migration_is_idempotent(self, tmp_db):
+        """Running the v2->v3 migration twice on the same DB must not raise errors."""
+        # Build a v2 DB first
+        conn = sqlite3.connect(tmp_db)
+        conn.execute('''CREATE TABLE schema_version (version INTEGER NOT NULL)''')
+        conn.execute("INSERT INTO schema_version (version) VALUES (2)")
+        conn.execute('''
+            CREATE TABLE api_audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_key_masked TEXT NOT NULL,
+                user_id TEXT,
+                endpoint TEXT NOT NULL,
+                video_url TEXT,
+                request_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                processing_time_ms INTEGER,
+                status_code INTEGER,
+                task_id TEXT,
+                user_agent TEXT,
+                remote_ip TEXT,
+                wechat_webhook TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+
+        # First migration run (v2 -> v3)
+        logger_instance = AuditLogger(db_path=tmp_db)
+        # Second run against the now-v3 database must be a no-op, not an error
+        logger_instance._init_database()
+
+        with logger_instance._get_cursor() as cursor:
+            version = logger_instance._get_schema_version(cursor)
+        assert version == CURRENT_SCHEMA_VERSION
+
+        conn = sqlite3.connect(tmp_db)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(llm_usage)")
+        columns = {col[1] for col in cursor.fetchall()}
+        conn.close()
+        assert "task_id" in columns
+        assert "usage_missing" in columns

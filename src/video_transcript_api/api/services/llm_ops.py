@@ -21,6 +21,7 @@ from ..context import (
     task_lock,
 )
 from ...llm import call_llm_api
+from ...llm.core.usage_context import bind_task_id
 from ...utils.notifications import (
     WechatNotifier,
     send_long_text_wechat,
@@ -68,6 +69,9 @@ def _handle_llm_task(llm_task: dict):
         llm_task: LLM 任务字典，包含 task_id, url, video_title, transcript 等
     """
     task_id = llm_task.get("task_id")
+    # 绑定 task_id 到当前 worker 线程的审计上下文（token 用量按任务/阶段落库用），
+    # 线程池会复用线程处理后续任务，每次任务入口都重新绑定即可，无需成对 reset
+    bind_task_id(task_id)
 
     # 从 transcription 阶段传递过来的性能追踪器，若无则创建新实例
     tracker: PerfTracker = llm_task.pop("perf_tracker", None) or PerfTracker(task_id=task_id)
