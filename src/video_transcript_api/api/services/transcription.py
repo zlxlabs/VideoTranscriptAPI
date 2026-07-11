@@ -663,7 +663,22 @@ def process_transcription(
 
                 logger.info(f"已发送缓存的 LLM 结果: {video_title}")
 
-                # 缓存全命中（含 LLM 结果）：无后续 LLM 工作，直接置终态 success
+                # 缓存全命中（含 LLM 结果）：无后续 LLM 工作，直接置终态 success。
+                # 把本次已读到的 llm_status.json 快照（cached_llm_status，见上方
+                # 分层缓存命中判定）镜像进这条新建的 task_status 行——否则
+                # create_task 建出的行 calibration_status/summary_status 默认为
+                # NULL，/api/audit/history 对全命中任务会返回空状态，与缓存目录
+                # 里的真实状态不一致（codex-review R2）。沿用 llm_ops 里"从
+                # llm_status.json 读回未触碰层"的同一模式：优先用 llm_status.json
+                # 里的显式值；缺失时（早于诚实状态模型上线的旧缓存）按现有产物
+                # 文件推导合理默认——calibrated_layer_satisfied 已排除 disabled
+                # 占位符，此时真实存在校对文件即可推断为 full；summary 无法
+                # 可靠区分 generated 与 skipped_short，缺失时保持 None，不瞎编。
+                mirrored_calibration_status = cached_calibration_status
+                if mirrored_calibration_status is None and calibrated_layer_satisfied:
+                    mirrored_calibration_status = CalibrationStatus.FULL
+                mirrored_summary_status = cached_llm_status.get("summary_status")
+
                 cache_manager.update_task_status(
                     task_id,
                     TaskStatus.SUCCESS,
@@ -673,6 +688,8 @@ def process_transcription(
                     author=author,
                     cache_id=cache_data.get("cache_id"),
                     download_url=download_url,
+                    calibration_status=mirrored_calibration_status,
+                    summary_status=mirrored_summary_status,
                 )
 
                 # 缓存完全命中（含 LLM 结果），记录计数并输出性能摘要
