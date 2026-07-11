@@ -475,3 +475,244 @@ class TestSaveLLMResultsSummaryStatus:
         # ...and the status file write must pass summary_status=None (preserve, not erase).
         mock_cm.save_llm_status.assert_called_once()
         assert mock_cm.save_llm_status.call_args.kwargs["summary_status"] is None
+
+
+class TestSaveLLMResultsLayeredCacheSuppression:
+    """Test the "don't overwrite an already-satisfied layer" protection added
+    for per-task processing depth (processing_options.calibrate/summarize).
+
+    The guard only activates when processing_options explicitly requests
+    calibrate=False or summarize=False AND the corresponding cache file
+    already existed before this round started -- it must be a complete no-op
+    (zero extra cache_manager.get_cache calls, identical behavior) for every
+    caller that omits processing_options entirely (the default is
+    calibrate=True/summarize=True), which is what all the older tests in this
+    file exercise.
+    """
+
+    def _patch_cache_manager(self, monkeypatch):
+        from video_transcript_api.api.services import llm_ops
+
+        mock_cm = MagicMock()
+        monkeypatch.setattr(llm_ops, "cache_manager", mock_cm)
+        return mock_cm
+
+    def _calibrated_calls(self, mock_cm):
+        return [
+            c for c in mock_cm.save_llm_result.call_args_list
+            if c.kwargs.get("llm_type") == "calibrated"
+        ]
+
+    def _summary_calls(self, mock_cm):
+        return [
+            c for c in mock_cm.save_llm_result.call_args_list
+            if c.kwargs.get("llm_type") == "summary"
+        ]
+
+    def test_default_processing_options_never_probes_cache(self, monkeypatch):
+        """Omitting processing_options (all existing callers) must not trigger
+        the new get_cache() snapshot lookup at all -- zero behavior change."""
+        mock_cm = self._patch_cache_manager(monkeypatch)
+
+        _save_llm_results(
+            task_id="t1",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict={
+                "校对文本": "calibrated body",
+                "内容总结": "a summary",
+                "skip_summary": False,
+                "summary_status": SummaryStatus.GENERATED,
+                "stats": {"calibration_status": CalibrationStatus.FULL},
+                "models_used": {},
+                "calibrate_success": True,
+                "summary_success": True,
+            },
+            calibrate_only=False,
+            summary_backfill=False,
+        )
+
+        mock_cm.get_cache.assert_not_called()
+        assert len(self._calibrated_calls(mock_cm)) == 1
+        assert len(self._summary_calls(mock_cm)) == 1
+
+    def test_calibrate_false_with_existing_calibrated_file_suppresses_write(
+        self, monkeypatch
+    ):
+        """calibrate=False this round + calibrated layer already exists ->
+        must NOT overwrite llm_calibrated.txt, and must pass
+        calibration_status=None to save_llm_status (preserve the real status,
+        not the disabled placeholder this round's skip_calibration produced)."""
+        mock_cm = self._patch_cache_manager(monkeypatch)
+        mock_cm.get_cache.return_value = {
+            "llm_calibrated": "existing REAL calibrated text",
+            "llm_summary": "existing summary",
+        }
+
+        result = _save_llm_results(
+            task_id="t2",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict={
+                "校对文本": "disabled placeholder text",
+                "内容总结": "fresh summary",
+                "skip_summary": False,
+                "summary_status": SummaryStatus.GENERATED,
+                "stats": {"calibration_status": CalibrationStatus.DISABLED},
+                "models_used": {},
+                "calibrate_success": True,
+                "summary_success": True,
+            },
+            calibrate_only=False,
+            summary_backfill=False,
+            processing_options={"calibrate": False, "summarize": True},
+        )
+
+        assert self._calibrated_calls(mock_cm) == []
+        assert len(self._summary_calls(mock_cm)) == 1  # summary was requested, still written
+        mock_cm.save_llm_status.assert_called_once()
+        assert mock_cm.save_llm_status.call_args.kwargs["calibration_status"] is None
+        assert mock_cm.save_llm_status.call_args.kwargs["calibration_stats"] is None
+        assert result["calibration_status"] is None
+
+    def test_calibrate_false_no_existing_file_writes_disabled_placeholder(
+        self, monkeypatch
+    ):
+        """calibrate=False this round but NO prior calibrated layer -> this is
+        a genuine first-time disable; the disabled/formatted text must still
+        be written (it's the only "calibrated" artifact this task will ever
+        produce) and calibration_status=DISABLED must be persisted."""
+        mock_cm = self._patch_cache_manager(monkeypatch)
+        mock_cm.get_cache.return_value = {}  # nothing exists yet
+
+        result = _save_llm_results(
+            task_id="t3",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict={
+                "校对文本": "formatted passthrough text",
+                "内容总结": None,
+                "skip_summary": True,
+                "summary_status": None,
+                "stats": {"calibration_status": CalibrationStatus.DISABLED},
+                "models_used": {},
+                "calibrate_success": True,
+                "summary_success": False,
+            },
+            calibrate_only=False,
+            summary_backfill=False,
+            processing_options={"calibrate": False, "summarize": False},
+        )
+
+        calibrated_calls = self._calibrated_calls(mock_cm)
+        assert len(calibrated_calls) == 1
+        assert calibrated_calls[0].kwargs["content"] == "formatted passthrough text"
+        assert result["calibration_status"] == CalibrationStatus.DISABLED
+
+    def test_summarize_false_no_existing_summary_marks_disabled_no_write(
+        self, monkeypatch
+    ):
+        """summarize=False + no prior summary file -> DISABLED status, and
+        (unlike skipped_short) the calibrated text must NOT be copied in as a
+        stand-in summary file."""
+        mock_cm = self._patch_cache_manager(monkeypatch)
+        mock_cm.get_cache.return_value = {"llm_calibrated": "some calibrated text"}
+
+        result = _save_llm_results(
+            task_id="t4",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict={
+                "校对文本": "calibrated body",
+                "内容总结": None,
+                "skip_summary": True,
+                "summary_status": None,  # coordinator's raw skip_summary output
+                "stats": {"calibration_status": CalibrationStatus.FULL},
+                "models_used": {},
+                "calibrate_success": True,
+                "summary_success": False,
+            },
+            calibrate_only=False,
+            summary_backfill=False,
+            processing_options={"calibrate": True, "summarize": False},
+        )
+
+        assert self._summary_calls(mock_cm) == []
+        assert result["summary_status"] == SummaryStatus.DISABLED
+        mock_cm.save_llm_status.assert_called_once()
+        assert mock_cm.save_llm_status.call_args.kwargs["summary_status"] == (
+            SummaryStatus.DISABLED
+        )
+
+    def test_summarize_false_with_existing_summary_preserves_old_value(
+        self, monkeypatch
+    ):
+        """summarize=False this round but a real summary already exists (from
+        an earlier full run) -> must NOT overwrite, and must pass
+        summary_status=None to preserve the existing GENERATED value rather
+        than stamping DISABLED over it."""
+        mock_cm = self._patch_cache_manager(monkeypatch)
+        mock_cm.get_cache.return_value = {
+            "llm_calibrated": "old calibrated text",
+            "llm_summary": "old real summary",
+        }
+
+        result = _save_llm_results(
+            task_id="t5",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict={
+                "校对文本": "freshly recalibrated text",
+                "内容总结": None,
+                "skip_summary": True,
+                "summary_status": None,
+                "stats": {"calibration_status": CalibrationStatus.FULL},
+                "models_used": {},
+                "calibrate_success": True,
+                "summary_success": False,
+            },
+            calibrate_only=False,
+            summary_backfill=False,
+            processing_options={"calibrate": True, "summarize": False},
+        )
+
+        assert self._summary_calls(mock_cm) == []
+        assert result["summary_status"] is None
+        mock_cm.save_llm_status.assert_called_once()
+        assert mock_cm.save_llm_status.call_args.kwargs["summary_status"] is None
+
+    def test_recalibrate_bypasses_suppression_even_if_layer_exists(self, monkeypatch):
+        """calibrate_only=True (the /api/recalibrate endpoint) never sets
+        processing_options, so it defaults to calibrate=True -- the
+        suppression guard must never engage for it, preserving the existing
+        "recalibrate always overwrites" contract."""
+        mock_cm = self._patch_cache_manager(monkeypatch)
+
+        _save_llm_results(
+            task_id="t6",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict={
+                "校对文本": "recalibrated body",
+                "内容总结": "fresh summary",
+                "skip_summary": False,
+                "summary_status": SummaryStatus.GENERATED,
+                "stats": {"calibration_status": CalibrationStatus.FULL},
+                "models_used": {},
+                "calibrate_success": True,
+                "summary_success": True,
+            },
+            calibrate_only=True,
+            summary_backfill=True,
+            # processing_options intentionally omitted, matching the real
+            # recalibrate call site in tasks.py.
+        )
+
+        mock_cm.get_cache.assert_not_called()
+        assert len(self._calibrated_calls(mock_cm)) == 1

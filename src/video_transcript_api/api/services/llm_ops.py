@@ -11,6 +11,7 @@
 
 import time
 from pathlib import Path
+from typing import Optional
 from ..context import (
     get_cache_manager,
     get_config,
@@ -116,6 +117,16 @@ def _handle_llm_task(llm_task: dict):
                 # 是否为仅校对模式（重新校对场景）
                 calibrate_only = llm_task.get("calibrate_only", False)
 
+                # 处理深度开关（只转录/转录+校对/全流程）：缺失时按全流程兜底，
+                # 与 transcription.normalize_processing_options(None) 语义一致。
+                # recalibrate 场景不设置该键，天然落到全流程默认，不影响既有行为。
+                processing_options = llm_task.get("processing_options") or {
+                    "calibrate": True,
+                    "summarize": True,
+                }
+                calibrate_requested = processing_options.get("calibrate", True)
+                summarize_requested = processing_options.get("summarize", True)
+
                 # 仅校对模式下，若缓存里 llm_summary.txt 缺失/为空，顺手补跑一次 summary
                 # 避免老任务卡在 view 页的 "总结处理中..." 状态
                 summary_backfill = False
@@ -131,8 +142,18 @@ def _handle_llm_task(llm_task: dict):
                             f"auto-backfill enabled"
                         )
 
-                # 协调器需要知道是否跳过 summary：backfill 时强制跑 summary
-                skip_summary_for_coordinator = calibrate_only and not summary_backfill
+                # 协调器需要知道是否跳过 summary：backfill 时强制跑 summary；
+                # 请求本身关闭 summarize 时同样跳过（两个互不相关的"跳过"原因
+                # OR 到同一个协调器参数——协调器不需要关心具体原因，产出的
+                # None 状态由 _save_llm_results 按 processing_options 归一化为
+                # "保留旧值" 或 "disabled"，见该函数内的三态判定注释）。
+                skip_summary_for_coordinator = (
+                    (calibrate_only and not summary_backfill) or not summarize_requested
+                )
+                # 校对是否跳过：仅由本轮 processing_options.calibrate 决定。
+                # recalibrate 从不设置 processing_options，默认 calibrate=True，
+                # 因此 recalibrate 永远真实执行校对，不受本开关影响。
+                skip_calibration_for_coordinator = not calibrate_requested
 
                 # 调用新架构（包含校对和总结）
                 with tracker.track("llm_processing"):
@@ -144,6 +165,7 @@ def _handle_llm_task(llm_task: dict):
                         platform=platform or "",
                         media_id=media_id or "",
                         skip_summary=skip_summary_for_coordinator,
+                        skip_calibration=skip_calibration_for_coordinator,
                     )
 
                 # 适配返回格式
@@ -151,8 +173,11 @@ def _handle_llm_task(llm_task: dict):
 
                 logger.info(f"LLM处理完成，开始保存结果和发送微信通知: {task_id}")
 
-                # 保存结果到缓存
-                _save_llm_results(
+                # 保存结果到缓存。返回值是本轮实际落盘的"有效"状态（分层缓存场景下，
+                # 本轮未真正处理的层会被抑制为 None，避免污染已有的真实状态）——
+                # 用它覆盖 result_dict.stats，确保随后的通知与任务状态更新看到的是
+                # 一致的、真实反映落盘结果的状态，而不是协调器这一轮的原始输出。
+                effective_status = _save_llm_results(
                     task_id=task_id,
                     platform=platform,
                     media_id=media_id,
@@ -160,7 +185,19 @@ def _handle_llm_task(llm_task: dict):
                     result_dict=result_dict,
                     calibrate_only=calibrate_only,
                     summary_backfill=summary_backfill,
+                    processing_options=processing_options,
                 )
+                if effective_status:
+                    # setdefault 而非直接下标：result_dict["stats"] 在真实
+                    # _build_result_dict() 产出中恒定存在，这里用 setdefault 只是
+                    # 防御测试/未来调用方传入不含 stats 键的精简 result_dict。
+                    result_stats = result_dict.setdefault("stats", {})
+                    result_stats["calibration_status"] = effective_status.get(
+                        "calibration_status"
+                    )
+                    result_stats["summary_status"] = effective_status.get(
+                        "summary_status"
+                    )
 
                 # 发送通知（多渠道）
                 if not calibrate_only:
@@ -377,6 +414,7 @@ def _save_llm_results(
     result_dict: dict,
     calibrate_only: bool,
     summary_backfill: bool = False,
+    processing_options: Optional[dict] = None,
 ):
     """保存 LLM 处理结果到缓存
 
@@ -389,6 +427,16 @@ def _save_llm_results(
         calibrate_only: 是否仅校对模式
         summary_backfill: 仅校对模式下是否需要补写 summary 文件
             （原任务缺失 llm_summary.txt 时由 _handle_llm_task 置为 True）
+        processing_options: 本轮处理深度开关 {"calibrate": bool, "summarize": bool}，
+            None 时按全流程兜底（向后兼容旧调用方，包括本模块所有既有单测）。
+            用于分层缓存场景下的"已存在层不覆盖"保护：仅当某一层在本轮开始前
+            已经存在、且本轮 processing_options 未请求该层时才会抑制写入。
+
+    Returns:
+        Optional[dict]: 本次实际落盘的"有效"状态
+            {"calibration_status": ..., "summary_status": ...}（值可能为 None，
+            表示该层本轮未触碰、旧值原样保留）。platform/media_id 缺失时返回
+            None（沿用早退语义，调用方应据此跳过覆盖 result_dict）。
     """
     calibrated_text = result_dict.get("校对文本", "")
     summary_text = result_dict.get("内容总结")
@@ -423,10 +471,43 @@ def _save_llm_results(
         )
 
     if not (platform and media_id):
-        return
+        return None
+
+    # ---- 分层缓存保护：判断本轮是否需要"已存在层不覆盖" ----
+    # processing_options 缺省按全流程兜底，此时 calibrate_requested/summarize_requested
+    # 均为 True，need_snapshot 恒为 False，不会发起额外的 get_cache 查询——保证本函数
+    # 现有全部调用方（包括不传 processing_options 的旧测试）行为完全不变。
+    if processing_options is None:
+        processing_options = {"calibrate": True, "summarize": True}
+    calibrate_requested = processing_options.get("calibrate", True)
+    summarize_requested = processing_options.get("summarize", True)
+
+    calibrated_exists_before = False
+    summary_exists_before = False
+    need_snapshot = (not calibrate_requested) or (not summarize_requested)
+    if need_snapshot:
+        existing_snapshot = cache_manager.get_cache(
+            platform, media_id, use_speaker_recognition=use_speaker_recognition,
+        )
+        if existing_snapshot:
+            calibrated_exists_before = "llm_calibrated" in existing_snapshot
+            summary_exists_before = "llm_summary" in existing_snapshot
+
+    # 校对层已存在、且本轮未请求（重新）校对 -> 抑制写入，保护已有的真实产物
+    # 不被本轮 skip_calibration=True 产出的占位内容覆盖。
+    suppress_calibration = calibrated_exists_before and not calibrate_requested
+
+    # 总结层的"关闭"语义二次判定：
+    # - 已有真实产物（GENERATED/SKIPPED_SHORT 都会落盘文件）-> 本轮未触碰，
+    #   保留旧值（None，走 save_llm_status 的合并语义）。
+    # - 尚无产物 -> 用户首次显式关闭总结，记为 DISABLED（区别于"文本过短跳过"）。
+    # calibrate_only 且未 backfill 的 recalibrate 分支维持原样：summary_status
+    # 此时已是协调器给出的 None（"本轮未尝试"），不需要在这里重新判定。
+    if not (calibrate_only and not summary_backfill) and not summarize_requested:
+        summary_status = None if summary_exists_before else SummaryStatus.DISABLED
 
     # 保存校对文本
-    if calibrate_success:
+    if calibrate_success and not suppress_calibration:
         cache_manager.save_llm_result(
             platform=platform,
             media_id=media_id,
@@ -435,12 +516,15 @@ def _save_llm_results(
             content=calibrated_text,
         )
         logger.info(f"校对文本已保存到缓存: {task_id}")
+    elif suppress_calibration:
+        logger.info(f"校对层已存在且本轮未请求重新校对，跳过覆盖: {task_id}")
     else:
         logger.warning(f"校对失败，跳过保存校对文件: {task_id}")
 
-    # 保存总结文本：按 summary_status 三态分支（不再用 skip_summary/summary_success
-    # 二元判定——旧逻辑里 skip_summary 与 summary_success 永远互补，导致"文本过短"
-    # 分支实际不可达，"生成失败"被悄悄吞掉，既不落盘校对文本兜底也不报错）
+    # 保存总结文本：按 summary_status 三态（+DISABLED/保留）分支（不再用
+    # skip_summary/summary_success 二元判定——旧逻辑里 skip_summary 与
+    # summary_success 永远互补，导致"文本过短"分支实际不可达，"生成失败"
+    # 被悄悄吞掉，既不落盘校对文本兜底也不报错）
     if calibrate_only and not summary_backfill:
         logger.info(f"仅校对模式，保留原有总结文件: {task_id}")
     elif summary_status == SummaryStatus.GENERATED:
@@ -469,11 +553,20 @@ def _save_llm_results(
         # 关键修复：总结失败不再把校对文本复制成总结文件，避免"生成失败"被
         # 伪装成"文本过短"的正常路径（诚实状态模型的核心诉求）
         logger.warning(f"总结生成失败，不落盘复制校对文本: {task_id}")
+    elif summary_status == SummaryStatus.DISABLED:
+        logger.info(f"总结已禁用（本任务未启用内容总结），不生成总结文件: {task_id}")
+    elif summary_status is None and not summarize_requested:
+        logger.info(f"总结层已存在且本轮未请求生成总结，保留原有总结文件: {task_id}")
     else:
         logger.warning(f"总结状态未知或仍在处理中({summary_status})，跳过保存总结文件: {task_id}")
 
-    # 保存结构化数据
-    if use_speaker_recognition and calibrate_success and "structured_data" in result_dict:
+    # 保存结构化数据（同样受校对层抑制保护，避免覆盖已有的真实说话人校对结果）
+    if (
+        use_speaker_recognition
+        and calibrate_success
+        and not suppress_calibration
+        and "structured_data" in result_dict
+    ):
         structured_data = result_dict["structured_data"]
         cal_stats_for_save = stats.get("calibration_stats")
         if cal_stats_for_save:
@@ -491,14 +584,16 @@ def _save_llm_results(
             logger.warning(f"结构化数据保存失败: {task_id}")
 
     # 写入统一的诚实状态落盘文件 llm_status.json（两条路径都写）。
-    # summary_status 为 None 时（本轮未尝试生成总结）传 None 给 save_llm_status，
-    # 其合并语义会保留旧值，不会把已有的 summary 状态误覆盖。
+    # calibration_status/summary_status 为 None 时（本轮未触碰该层）传 None 给
+    # save_llm_status，其合并语义会保留旧值，不会把已有的真实状态误覆盖。
+    effective_calibration_status = None if suppress_calibration else stats.get("calibration_status")
+    effective_calibration_stats = None if suppress_calibration else stats.get("calibration_stats")
     cache_manager.save_llm_status(
         platform=platform,
         media_id=media_id,
         use_speaker_recognition=use_speaker_recognition,
-        calibration_status=stats.get("calibration_status"),
-        calibration_stats=stats.get("calibration_stats"),
+        calibration_status=effective_calibration_status,
+        calibration_stats=effective_calibration_stats,
         summary_status=summary_status,
     )
 
@@ -506,6 +601,11 @@ def _save_llm_results(
         logger.info(f"LLM结果已保存到缓存: {platform}/{media_id}")
     else:
         logger.warning(f"LLM处理全部失败，未保存任何结果文件: {task_id}")
+
+    return {
+        "calibration_status": effective_calibration_status,
+        "summary_status": summary_status,
+    }
 
 
 def _send_notification(
@@ -553,11 +653,17 @@ def _send_notification(
     speaker_info = "（含说话人识别）" if use_speaker_recognition else ""
     model_config_text = format_llm_config_markdown(models_used)
 
-    # 通知里的总结状态文案：failed 时明确写"生成失败"，避免和"文本过短未生成"
-    # 这种正常路径混为一谈（诚实状态模型的一部分）。缺失 summary_status 时
-    # （legacy 调用方）保持历史文案"未生成"不变。
+    # 通知里的总结状态文案：failed 时明确写"生成失败"，disabled 时明确写
+    # "未启用"（用户主动关闭，不是失败）——避免和"文本过短未生成"这种正常路径
+    # 混为一谈（诚实状态模型的一部分）。缺失/其他 summary_status 时（legacy
+    # 调用方或分层缓存"本轮未触碰、保留旧值"的 None）保持历史文案"未生成"不变。
     summary_status = stats.get("summary_status")
-    summary_status_label = "生成失败" if summary_status == SummaryStatus.FAILED else "未生成"
+    if summary_status == SummaryStatus.FAILED:
+        summary_status_label = "生成失败"
+    elif summary_status == SummaryStatus.DISABLED:
+        summary_status_label = "未启用"
+    else:
+        summary_status_label = "未生成"
 
     # 校对文本超过此阈值时，不发送全文到通知渠道（避免刷屏）
     NOTIFICATION_TEXT_THRESHOLD = 5000
