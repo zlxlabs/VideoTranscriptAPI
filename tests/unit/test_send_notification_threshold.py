@@ -48,6 +48,69 @@ def mock_dependencies():
         }
 
 
+class TestSendNotificationSummaryStatusLabel:
+    """Test the summary status label text shown in the notification body:
+    'disabled' (user turned off summarize) must read distinctly from
+    'failed' (a genuine LLM/processing failure) -- conflating the two would
+    misreport a deliberate user choice as an error."""
+
+    def test_disabled_status_shows_not_enabled_label(self, mock_dependencies):
+        result_dict = {
+            "校对文本": "some calibrated text",
+            "内容总结": None,
+            "skip_summary": True,
+            "stats": {
+                "original_length": 100,
+                "calibrated_length": 100,
+                "summary_length": 0,
+                "summary_status": "disabled",
+            },
+            "models_used": {},
+        }
+
+        _send_notification(
+            task_id="task_disabled",
+            video_title="Disabled Summary Video",
+            display_url="https://example.com/video-disabled",
+            use_speaker_recognition=False,
+            result_dict=result_dict,
+        )
+
+        router = mock_dependencies["router"]
+        call_kwargs = router.send_long_text.call_args[1]
+        assert "未启用" in call_kwargs["text"]
+        assert "生成失败" not in call_kwargs["text"]
+
+    def test_failed_status_still_shows_generation_failed_label(self, mock_dependencies):
+        """Regression: the pre-existing 'failed' label must be unaffected by
+        adding the new 'disabled' branch."""
+        result_dict = {
+            "校对文本": "some calibrated text",
+            "内容总结": None,
+            "skip_summary": True,
+            "stats": {
+                "original_length": 100,
+                "calibrated_length": 100,
+                "summary_length": 0,
+                "summary_status": "failed",
+            },
+            "models_used": {},
+        }
+
+        _send_notification(
+            task_id="task_failed",
+            video_title="Failed Summary Video",
+            display_url="https://example.com/video-failed",
+            use_speaker_recognition=False,
+            result_dict=result_dict,
+        )
+
+        router = mock_dependencies["router"]
+        call_kwargs = router.send_long_text.call_args[1]
+        assert "生成失败" in call_kwargs["text"]
+        assert "未启用" not in call_kwargs["text"]
+
+
 class TestSendNotificationThreshold:
     """Test notification text length threshold when summary is skipped."""
 
