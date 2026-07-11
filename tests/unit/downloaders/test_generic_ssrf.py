@@ -44,6 +44,7 @@ import socket
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from video_transcript_api.downloaders.generic import GenericDownloader
 from video_transcript_api.errors import InvalidURLError
@@ -538,3 +539,193 @@ class TestEnvironmentSettingsMergedThroughSession:
         sent_request = mock_send.call_args[0][0]
         assert sent_request.url == "https://93.184.216.34/audio.mp3"
         assert sent_request.headers["Host"] == "public.example.com"
+
+
+# ---------------------------------------------------------------------------
+# 9. Multi-candidate pinned IP retry (codex-review R8 #2).
+#
+# A dual-stack / multi-node domain can resolve to several validated public
+# addresses. Before this fix, _dispatch_pinned_request only ever pinned the
+# FIRST one -- if that address happened to be unreachable from the current
+# network, the pinned request kept retrying the same dead IP forever (via
+# download_file's outer retry loop), even though the SAME DNS resolution
+# already contained another, reachable candidate. The fix threads the whole
+# validated candidate list through and retries the next one on a
+# connection-type failure (ConnectionError/Timeout) -- but only those:
+# HTTP-level errors (never raised by HTTPAdapter.send() itself) and SSRF
+# rejections (raised before any candidate is tried) must never trigger a
+# switch.
+# ---------------------------------------------------------------------------
+
+
+def _multi_public_addrinfo(*ips):
+    """Fake socket.getaddrinfo() returning several public IPv4 addresses in
+    the given order, exactly what a real dual-stack/multi-node DNS answer
+    looks like for a single hostname resolution."""
+    def _fake(*args, **kwargs):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))
+            for ip in ips
+        ]
+    return _fake
+
+
+class TestPinnedIpCandidateRetry:
+    def test_first_candidate_unreachable_second_succeeds_two_requests_total(
+        self, tmp_path
+    ):
+        """First validated candidate refuses the connection; the second
+        (from the SAME DNS resolution) must be tried next, pinned just like
+        the first, and the download must succeed -- exactly 2 requests
+        total, not 1 (giving up) and not >2 (no unnecessary extra
+        candidates tried once one has already succeeded)."""
+        downloader = _make_downloader(tmp_path)
+        url = "https://multi.example.com/audio.mp3"
+
+        # Snapshot request.url/Host as plain strings at call time, not the
+        # PreparedRequest object itself: PinnedIPHTTPAdapter.send() mutates
+        # request.url IN PLACE on each candidate attempt (see
+        # utils/pinned_ip_adapter.py), and _dispatch_pinned_request
+        # deliberately reuses the SAME PreparedRequest object across
+        # candidates -- so a list of object references would have every
+        # entry retroactively reflect the LATEST mutation instead of each
+        # call's own state.
+        sent_urls = []
+        sent_hosts = []
+
+        def fake_send(request, **kwargs):
+            sent_urls.append(request.url)
+            sent_hosts.append(request.headers["Host"])
+            if len(sent_urls) == 1:
+                raise requests.exceptions.ConnectionError("connection refused")
+            return _ok_response()
+
+        with patch(
+            GETADDRINFO_PATH,
+            side_effect=_multi_public_addrinfo("93.184.216.1", "93.184.216.2"),
+        ), patch(BASE_SEND_PATH, side_effect=fake_send):
+            local_path = downloader.download_file(url, "audio.mp3")
+
+        assert local_path is not None
+        assert len(sent_urls) == 2
+        # Every attempt was individually pinned -- no "bare"/unpinned
+        # request to the hostname ever went out.
+        assert sent_urls[0] == "https://93.184.216.1/audio.mp3"
+        assert sent_urls[1] == "https://93.184.216.2/audio.mp3"
+        assert sent_hosts[0] == "multi.example.com"
+        assert sent_hosts[1] == "multi.example.com"
+
+    def test_http_error_response_does_not_switch_candidate(self, tmp_path):
+        """A non-connection-type outcome (the server actually answered,
+        just with an error status) must NOT be treated as "this candidate
+        is dead" -- HTTPAdapter.send() never raises for 4xx/5xx on its own,
+        so the candidate loop naturally never sees an exception here; this
+        test locks that down end to end (only 1 request, no switch)."""
+        downloader = _make_downloader(tmp_path)
+        url = "https://multi.example.com/audio.mp3"
+
+        def _error_response():
+            resp = MagicMock()
+            resp.is_redirect = False
+            resp.status_code = 404
+            resp.headers = {}
+            return resp
+
+        sent_urls = []
+
+        def fake_send(request, **kwargs):
+            sent_urls.append(request.url)
+            return _error_response()
+
+        with patch(
+            GETADDRINFO_PATH,
+            side_effect=_multi_public_addrinfo("93.184.216.1", "93.184.216.2"),
+        ), patch(BASE_SEND_PATH, side_effect=fake_send):
+            response = downloader._safe_request("get", url, timeout=5)
+
+        assert response.status_code == 404
+        assert len(sent_urls) == 1
+        assert sent_urls[0] == "https://93.184.216.1/audio.mp3"
+
+    def test_all_candidates_fail_raises_original_error_each_tried_once(
+        self, tmp_path
+    ):
+        """Every validated candidate refuses the connection -- the original
+        exception must propagate (so download_file's own outer retry/backoff
+        logic still sees a ConnectionError, unchanged from before this fix),
+        and each candidate must be tried exactly once, in order, not
+        re-tried within the same _safe_request call."""
+        downloader = _make_downloader(tmp_path)
+        url = "https://multi.example.com/audio.mp3"
+
+        sent_urls = []
+
+        def fake_send(request, **kwargs):
+            sent_urls.append(request.url)
+            raise requests.exceptions.ConnectionError(f"refused: {request.url}")
+
+        with patch(
+            GETADDRINFO_PATH,
+            side_effect=_multi_public_addrinfo(
+                "93.184.216.1", "93.184.216.2", "93.184.216.3"
+            ),
+        ), patch(BASE_SEND_PATH, side_effect=fake_send):
+            with pytest.raises(requests.exceptions.ConnectionError):
+                downloader._safe_request("get", url, timeout=5)
+
+        assert sent_urls == [
+            "https://93.184.216.1/audio.mp3",
+            "https://93.184.216.2/audio.mp3",
+            "https://93.184.216.3/audio.mp3",
+        ]
+
+    def test_candidate_list_capped_at_three_even_with_more_resolved(
+        self, tmp_path
+    ):
+        """Even if DNS resolves more than 3 public addresses, at most 3 are
+        ever tried per _safe_request call -- the documented cap that keeps
+        this retry from multiplying unboundedly against download_file's own
+        outer retry loop."""
+        downloader = _make_downloader(tmp_path)
+        url = "https://multi.example.com/audio.mp3"
+        five_ips = [f"93.184.216.{i}" for i in range(1, 6)]
+
+        sent_urls = []
+
+        def fake_send(request, **kwargs):
+            sent_urls.append(request.url)
+            raise requests.exceptions.ConnectionError("refused")
+
+        with patch(
+            GETADDRINFO_PATH, side_effect=_multi_public_addrinfo(*five_ips)
+        ), patch(BASE_SEND_PATH, side_effect=fake_send):
+            with pytest.raises(requests.exceptions.ConnectionError):
+                downloader._safe_request("get", url, timeout=5)
+
+        assert sent_urls == [
+            f"https://{ip}/audio.mp3" for ip in five_ips[:3]
+        ]
+
+    def test_timeout_error_also_switches_candidate(self, tmp_path):
+        """requests.exceptions.Timeout (ConnectTimeout/ReadTimeout) is the
+        other connection-type failure that must trigger a candidate switch,
+        not just the base ConnectionError."""
+        downloader = _make_downloader(tmp_path)
+        url = "https://multi.example.com/audio.mp3"
+
+        sent_urls = []
+
+        def fake_send(request, **kwargs):
+            sent_urls.append(request.url)
+            if len(sent_urls) == 1:
+                raise requests.exceptions.ConnectTimeout("connect timed out")
+            return _ok_response()
+
+        with patch(
+            GETADDRINFO_PATH,
+            side_effect=_multi_public_addrinfo("93.184.216.1", "93.184.216.2"),
+        ), patch(BASE_SEND_PATH, side_effect=fake_send):
+            response = downloader._safe_request("get", url, timeout=5)
+
+        assert response.status_code == 200
+        assert len(sent_urls) == 2

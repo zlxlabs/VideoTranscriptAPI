@@ -125,6 +125,12 @@ class GenericDownloader(BaseDownloader):
 
             return response
 
+    # 钉定候选 IP 上限：与 url_validator.validate_url_safe_with_ips 的默认值
+    # 保持一致（见该函数文档的取舍说明）。这里单独声明一个类常量，而不是
+    # 依赖 url_validator 的默认参数，是为了让"最多重试几个候选地址"这个
+    # 影响本类请求行为的数字在 generic.py 内可见、可独立调整。
+    _MAX_PINNED_IP_CANDIDATES = 3
+
     def _dispatch_pinned_request(self, method: str, url: str, **kwargs) -> requests.Response:
         """
         校验 URL 安全性，并把真正发起的网络连接"钉"在校验时已解析、已检查过
@@ -159,10 +165,31 @@ class GenericDownloader(BaseDownloader):
         的访问控制还是按主机名而非 IP 生效的，继续钉 IP 反而可能打破代理
         路由或绕开代理自身的访问控制。此时改为不挂载 PinnedIPHTTPAdapter，
         让 Session 用默认适配器按原始域名正常经代理请求——前面的
-        validate_url_safe_with_ip 校验依然生效，只是"钉住连接到同一个 IP"
+        validate_url_safe_with_ips 校验依然生效，只是"钉住连接到同一个 IP"
         这一层被代理的存在天然打破了；代理链路下的 DNS rebinding 风险由
         代理自身的 DNS 解析和网络策略决定，运维一旦选择接入代理，就已经把
         这段信任交给了代理，这里视为可接受的边界。
+
+        多候选 IP 钉定重试（codex-review R8 #2）：双栈/多节点域名解析出的
+        多个公网候选地址里，第一条（常见 AAAA 优先）在当前网络恰好不可达
+        时，只钉第一条的实现会反复重试同一个死地址——即便同一次解析结果里
+        还有其他可达的候选，也永远不会被尝试到。这里改为拿
+        validate_url_safe_with_ips 返回的全部候选（最多
+        _MAX_PINNED_IP_CANDIDATES 个），按顺序逐个钉定尝试：只有连接类错误
+        （requests.exceptions.ConnectionError / Timeout，含其子类
+        ConnectTimeout / ReadTimeout）才换下一个候选重试——这类错误说明
+        "这个 IP 连不上"，换一个候选是合理的补救；HTTP 4xx/5xx 从不会作为
+        异常从 HTTPAdapter.send() 抛出（由调用方对 Response 显式调
+        raise_for_status()），SSRF 拒绝发生在候选循环开始之前，两者都不会
+        触发换址，保持"服务器给出了明确响应/安全策略已拒绝"这类结果的
+        确定性，不会被误当成"网络不可达"重试成另一个地址。
+
+        不与 download_file 外层的下载重试循环（最多 3 次、每次间隔退避）
+        叠成 O(n*m) 请求风暴：候选地址本身已经限定在
+        _MAX_PINNED_IP_CANDIDATES（3）个以内，候选之间不额外等待——"尝试
+        全部候选"在外层看来仍然只是一次尝试；只有当本轮全部候选都失败时，
+        才会真正耗尽外层的这一次尝试，交给外层已有的退避重试机制处理，
+        最坏情况下总请求数是 3（外层）× 3（候选）= 9 次，仍在合理范围内。
 
         参数:
             method: 'head' 或 'get'
@@ -174,18 +201,23 @@ class GenericDownloader(BaseDownloader):
             requests.Response
 
         抛出:
-            InvalidURLError: URL 未通过 SSRF 校验；或校验时无法获得已验证 IP
-                              （如 DNS 解析失败）—— fail-closed，不回退为不钉
-                              IP 的普通请求
+            InvalidURLError: URL 未通过 SSRF 校验；或校验时无法获得任何已
+                              验证 IP（如 DNS 解析失败）—— fail-closed，不
+                              回退为不钉 IP 的普通请求
+            requests.exceptions.RequestException: 全部候选 IP 均连接失败
+                              时，抛出最后一个候选的原始异常；或非连接类
+                              错误直接透传（不换址）
         """
         try:
-            _, pinned_ip = url_validator.validate_url_safe_with_ip(url)
+            _, pinned_ips = url_validator.validate_url_safe_with_ips(
+                url, max_candidates=self._MAX_PINNED_IP_CANDIDATES,
+            )
         except url_validator.URLValidationError as e:
             logger.error(f"URL 安全校验未通过，已阻止请求: {url}, 原因: {e}")
             raise InvalidURLError("URL 指向内部网络地址，已被安全策略拦截") from e
 
-        if pinned_ip is None:
-            # fail-closed（codex-review R6 #1）：validate_url_safe_with_ip 对
+        if not pinned_ips:
+            # fail-closed（codex-review R6 #1）：validate_url_safe_with_ips 对
             # DNS 解析失败曾经历过"放行，可能是瞬时故障"的宽松策略，本方法
             # 过去也照着这个假设回退成不钉 IP 的普通 requests.get()/head()
             # ——但那条回退路径既没有钉 IP，又用的是 requests 的默认行为
@@ -213,6 +245,12 @@ class GenericDownloader(BaseDownloader):
             prepared = session.prepare_request(
                 requests.Request(method.upper(), url, headers=headers)
             )
+            # PinnedIPHTTPAdapter.send() 会把 request.url 原地改写成钉定 IP
+            # 的形式（见 utils/pinned_ip_adapter.py），供下面多候选重试循环
+            # 在每次尝试前重置回未钉定的原始形式——否则第二个候选调用
+            # _pin_to_ip() 时会因为看到上一次改写后的 IP（而不是真实
+            # hostname）而拒绝发送。
+            original_prepared_url = prepared.url
 
             # 合并部署环境配置：HTTP(S)_PROXY/NO_PROXY 决定的代理，以及
             # REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE 决定的自定义 CA 证书。
@@ -228,29 +266,51 @@ class GenericDownloader(BaseDownloader):
             )
             scheme_has_proxy = bool(settings["proxies"].get(parsed_url.scheme))
 
+            send_kwargs = dict(kwargs)
+            send_kwargs.update(settings)
+
             if scheme_has_proxy:
                 logger.info(
                     f"检测到 {parsed_url.scheme} 代理配置，连接由代理建立，"
                     f"跳过 IP 钉定，按原始域名经代理请求（校验仍已通过）: {url}"
                 )
-            else:
+                # 未挂载 PinnedIPHTTPAdapter，session.get_adapter() 返回
+                # Session 默认适配器，按原始域名正常经代理请求；代理场景下
+                # 换址没有意义（代理有自己独立的网络视角），不进入下面的
+                # 多候选重试循环。
+                target_adapter = session.get_adapter(prepared.url)
+                return target_adapter.send(prepared, **send_kwargs)
+
+            for candidate_index, candidate_ip in enumerate(pinned_ips):
+                prepared.url = original_prepared_url
+
                 adapter = PinnedIPHTTPAdapter(
                     hostname=parsed_url.hostname,
-                    pinned_ip=pinned_ip,
+                    pinned_ip=candidate_ip,
                     is_https=(parsed_url.scheme == "https"),
                 )
-                # 用与请求 URL 匹配的 scheme 前缀挂载，替换 Session 默认的
-                # 同前缀适配器；session.get_adapter() 会按最长前缀匹配选中
-                # 它。整个 Session 只服务这一次请求，用完即弃（finally 里
-                # session.close() 会级联关闭挂载的适配器），不会有跨请求的
-                # 挂载残留风险。
+                # 用与请求 URL 匹配的 scheme 前缀挂载，替换 Session 默认/
+                # 上一个候选的同前缀适配器；session.get_adapter() 会按最长
+                # 前缀匹配选中它。整个 Session 只服务这一次请求，用完即弃
+                # （finally 里 session.close() 会级联关闭挂载的适配器），
+                # 不会有跨请求的挂载残留风险。
                 session.mount(f"{parsed_url.scheme}://", adapter)
+                target_adapter = session.get_adapter(prepared.url)
 
-            send_kwargs = dict(kwargs)
-            send_kwargs.update(settings)
-
-            target_adapter = session.get_adapter(prepared.url)
-            return target_adapter.send(prepared, **send_kwargs)
+                try:
+                    return target_adapter.send(prepared, **send_kwargs)
+                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+                    is_last_candidate = candidate_index == len(pinned_ips) - 1
+                    if is_last_candidate:
+                        # 全部候选都已连接失败，透传最后一个候选的原始异常，
+                        # 交给上层（_safe_request/download_file）已有的重试
+                        # 与错误处理逻辑，不在这里吞掉或改写异常类型。
+                        raise
+                    logger.warning(
+                        f"钉定 IP {candidate_ip} 连接失败（{exc.__class__.__name__}），"
+                        f"尝试下一个已验证候选地址 "
+                        f"({candidate_index + 2}/{len(pinned_ips)}): {url}"
+                    )
         finally:
             session.close()
 
