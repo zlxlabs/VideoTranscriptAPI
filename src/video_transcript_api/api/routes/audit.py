@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from ..context import get_audit_logger, get_cache_manager, get_logger
 from ..services.transcription import TranscribeResponse, verify_token
 from ...utils.logging.usage_recorder import get_usage_recorder
+from ...utils.llm_status import SummaryStatus
 
 logger = get_logger()
 audit_logger = get_audit_logger()
@@ -155,7 +156,9 @@ async def get_history(
             t.title,
             t.author,
             t.platform,
-            t.status
+            t.status,
+            t.calibration_status,
+            t.summary_status
         FROM api_audit_logs a
         LEFT JOIN cache.task_status t ON a.task_id = t.task_id
         WHERE {where_clause}
@@ -197,6 +200,9 @@ async def get_history(
                     "author": row[7],
                     "platform": row[8],
                     "status": row[9] or "unknown",
+                    # 诚实状态模型字段：前端本次不强制消费，供后续 UI 迭代使用
+                    "calibration_status": row[10],
+                    "summary_status": row[11],
                 })
             return total, items
         finally:
@@ -381,17 +387,32 @@ async def get_task_summary(
             return TranscribeResponse(
                 code=200,
                 message="摘要不可用",
-                data={"summary": "", "status": view_data.get("status") if view_data else "unknown"},
+                data={"summary": None, "status": view_data.get("status") if view_data else "unknown"},
             )
 
-        raw_summary = view_data.get("summary", "")
-        # 取前 300 个 Unicode 字符
-        preview = raw_summary[:300] if raw_summary else ""
+        # 诚实状态模型：不再把"总结处理中..."之类的占位字符串当真实摘要返回。
+        # summary_state 由 cache_manager.get_view_data_by_token 提供
+        # （generated/skipped_short/failed/pending）；只有 generated 才有真实文本。
+        raw_summary = view_data.get("summary")
+        summary_state = view_data.get("summary_state")
+        if summary_state is None:
+            # 向后兼容：view_data 尚未带 summary_state 字段（如旧版 cache_manager
+            # 或手工构造的 mock），退回旧的"非空字符串即视为已生成"启发式判断。
+            summary_state = SummaryStatus.GENERATED if raw_summary else None
+
+        if summary_state == SummaryStatus.GENERATED and raw_summary:
+            # 取前 300 个 Unicode 字符
+            preview = raw_summary[:300]
+            return TranscribeResponse(
+                code=200,
+                message="获取摘要成功",
+                data={"summary": preview, "status": "success", "summary_status": summary_state},
+            )
 
         return TranscribeResponse(
             code=200,
-            message="获取摘要成功",
-            data={"summary": preview, "status": "success"},
+            message="摘要不可用",
+            data={"summary": None, "status": "success", "summary_status": summary_state},
         )
     except Exception as exc:
         logger.exception("get summary failed for view_token=%s: %s", view_token, exc)

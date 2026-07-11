@@ -96,18 +96,26 @@
     </div>
     {% endif %}
 
-    <!-- 校准质量警告 -->
-    {% if stats and stats.calibration_stats %}
+    <!-- 校准质量警告：以 stats.calibration_status（full/partial/none）为准，
+         两条校对路径（纯文本 segment 口径 / 说话人结构化 chunk 口径）统一在此渲染，
+         不再只有结构化路径才能出警告。 -->
+    {% if stats and stats.calibration_status and stats.calibration_status != 'full' %}
     {% set cal = stats.calibration_stats %}
-    {% if cal.failed_count == cal.total_chunks and cal.total_chunks > 0 %}
+    {% if stats.calibration_status == 'none' %}
     <div class="calibration-warning" style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:10px 14px;margin:8px 0;font-size:0.9em;color:#991b1b;display:flex;align-items:center;gap:8px;">
         <span>&#x26A0;&#xFE0F;</span>
-        <span><strong>校准失败</strong>：LLM API 超时，当前显示为未校准的原始语音识别文本，可能包含较多错别字。建议点击上方「重新校对」按钮。</span>
+        <span><strong>校准失败</strong>：LLM 校对异常或多次降级，当前显示为未校准的原始语音识别文本，可能包含较多错别字。建议点击上方「重新校对」按钮。</span>
     </div>
-    {% elif cal.failed_count > 0 or cal.fallback_count > 0 %}
+    {% elif stats.calibration_status == 'partial' %}
     <div class="calibration-warning" style="background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;padding:10px 14px;margin:8px 0;font-size:0.9em;color:#92400e;display:flex;align-items:center;gap:8px;">
         <span>&#x26A0;&#xFE0F;</span>
-        <span><strong>校准部分异常</strong>：{{ cal.success_count }}/{{ cal.total_chunks }} 段校准成功，{{ cal.fallback_count }} 段降级，{{ cal.failed_count }} 段失败。部分内容可能包含错别字。</span>
+        <span><strong>校准部分异常</strong>：
+        {%- if cal and cal.total_chunks is defined %}
+            {{ cal.success_count }}/{{ cal.total_chunks }} 段校准成功，{{ cal.fallback_count }} 段降级，{{ cal.failed_count }} 段失败。
+        {%- elif cal and cal.total_segments is defined %}
+            {{ cal.calibrated_segments }}/{{ cal.total_segments }} 段校准成功，{{ cal.fallback_segments }} 段降级为原文{% if cal.low_quality_segments %}，其中 {{ cal.low_quality_segments }} 段质量存疑{% endif %}。
+        {%- endif %}
+        部分内容可能包含错别字。</span>
     </div>
     {% endif %}
     {% endif %}
@@ -199,7 +207,12 @@
         <div class="content" id="summary-content-block">
             {% if summary_html %}
                 {{ summary_html|safe }}
+            {% elif summary_state == 'failed' %}
+                <p style="color: #991b1b; font-style: italic;">⚠️ 总结生成失败，可点击下方「重新校对」按钮重试。</p>
+            {% elif summary_state == 'skipped_short' %}
+                <p style="color: var(--text-secondary); font-style: italic;">该任务未生成总结（原始文本过短，未达到生成总结的长度阈值）。</p>
             {% else %}
+                {# summary_state == 'pending'，或旧数据缺失该字段时的兜底 #}
                 <p style="color: var(--text-secondary); font-style: italic;">总结处理中...</p>
             {% endif %}
         </div>

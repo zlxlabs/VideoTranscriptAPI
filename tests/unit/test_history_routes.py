@@ -53,6 +53,8 @@ def db_pair(tmp_path):
     al = AuditLogger(db_path=audit_db_path)
 
     # Minimal cache.db matching production task_status schema
+    # (includes calibration_status/summary_status: the honest-status-model
+    # columns that /api/audit/history now selects)
     conn = sqlite3.connect(cache_db_path)
     conn.execute('''
         CREATE TABLE task_status (
@@ -69,20 +71,25 @@ def db_pair(tmp_path):
             completed_at TIMESTAMP,
             cache_id   TEXT,
             llm_config TEXT,
-            download_url TEXT
+            download_url TEXT,
+            calibration_status TEXT,
+            summary_status TEXT
         )
     ''')
     conn.commit()
     conn.close()
 
     def insert_task(task_id, view_token, platform="youtube", title="Test Title",
-                    author="Test Author", status="success"):
+                    author="Test Author", status="success",
+                    calibration_status=None, summary_status=None):
         c = sqlite3.connect(cache_db_path)
         c.execute(
             "INSERT OR IGNORE INTO task_status "
-            "(task_id, view_token, platform, title, author, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (task_id, view_token, platform, title, author, status),
+            "(task_id, view_token, platform, title, author, status, "
+            "calibration_status, summary_status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (task_id, view_token, platform, title, author, status,
+             calibration_status, summary_status),
         )
         c.commit()
         c.close()
@@ -366,6 +373,38 @@ class TestHistoryEndpoint:
         item = next(i for i in resp.json()["data"]["items"] if i["task_id"] == "task-vt")
         assert item["view_token"] == "my-view-token-abc"
         assert item["title"] == "My Video Title"
+
+    def test_response_includes_calibration_and_summary_status(self, history_client):
+        """Items should carry the honest-status-model columns from the cache JOIN
+        (frontend does not consume them yet, but the API must surface them)."""
+        client, setup = history_client
+        al = setup["audit_logger"]
+        insert = setup["insert_task"]
+
+        _log(al, "task-status")
+        insert("task-status", "vt-status", calibration_status="partial",
+               summary_status="generated")
+
+        resp = client.get("/api/audit/history")
+        assert resp.status_code == 200
+        item = next(i for i in resp.json()["data"]["items"] if i["task_id"] == "task-status")
+        assert item["calibration_status"] == "partial"
+        assert item["summary_status"] == "generated"
+
+    def test_calibration_and_summary_status_null_when_not_set(self, history_client):
+        """Tasks without these columns populated must not break the response (None, not KeyError)."""
+        client, setup = history_client
+        al = setup["audit_logger"]
+        insert = setup["insert_task"]
+
+        _log(al, "task-nostatus")
+        insert("task-nostatus", "vt-nostatus")
+
+        resp = client.get("/api/audit/history")
+        assert resp.status_code == 200
+        item = next(i for i in resp.json()["data"]["items"] if i["task_id"] == "task-nostatus")
+        assert item["calibration_status"] is None
+        assert item["summary_status"] is None
 
     def test_api_key_masked_in_response(self, history_client):
         """Response data should include api_key_masked for localStorage key construction."""
@@ -715,8 +754,10 @@ class TestSummaryEndpoint:
         resp = client.get("/api/audit/summary?view_token=vt-other")
         assert resp.status_code == 403
 
-    def test_empty_summary_returns_empty_string(self, summary_setup):
-        """Completed task with empty summary text returns 200 with empty string."""
+    def test_empty_summary_returns_none_not_placeholder(self, summary_setup):
+        """Completed task with empty summary text returns 200 with summary=None
+        (honest status model: no more '' or placeholder strings standing in
+        for "no real summary content")."""
         client, db_pair, mock_cache = summary_setup
         al = db_pair["audit_logger"]
         _log(al, "task-nosumm")
@@ -726,10 +767,11 @@ class TestSummaryEndpoint:
 
         resp = client.get("/api/audit/summary?view_token=vt-ns")
         assert resp.status_code == 200
-        assert resp.json()["data"]["summary"] == ""
+        assert resp.json()["data"]["summary"] is None
 
-    def test_summary_missing_key_returns_empty_string(self, summary_setup):
-        """view_data without 'summary' key degrades gracefully to empty string."""
+    def test_summary_missing_key_returns_none_not_placeholder(self, summary_setup):
+        """view_data without 'summary' key degrades gracefully to summary=None
+        (not an empty string, not a "processing..." placeholder)."""
         client, db_pair, mock_cache = summary_setup
         al = db_pair["audit_logger"]
         _log(al, "task-nokey")
@@ -739,4 +781,22 @@ class TestSummaryEndpoint:
 
         resp = client.get("/api/audit/summary?view_token=vt-nk")
         assert resp.status_code == 200
-        assert resp.json()["data"]["summary"] == ""
+        assert resp.json()["data"]["summary"] is None
+
+    def test_summary_status_surfaced_in_response(self, summary_setup):
+        """The new summary_status field must be surfaced verbatim from view_data.summary_state
+        so the frontend can eventually distinguish skipped/failed/pending."""
+        client, db_pair, mock_cache = summary_setup
+        al = db_pair["audit_logger"]
+        _log(al, "task-failedsum")
+
+        mock_cache.get_task_by_view_token.return_value = {"task_id": "task-failedsum", "status": "success"}
+        mock_cache.get_view_data_by_token.return_value = {
+            "status": "success", "summary": None, "summary_state": "failed",
+        }
+
+        resp = client.get("/api/audit/summary?view_token=vt-failedsum")
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["summary"] is None
+        assert data["summary_status"] == "failed"
