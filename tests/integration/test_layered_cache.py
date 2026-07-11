@@ -19,10 +19,15 @@ tests/features/test_transcription_flow_regression.py.
 All console output must be in English only (no emoji, no Chinese).
 """
 
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 import video_transcript_api.api.services.transcription as transcription
+from video_transcript_api.api.services import llm_ops
 from video_transcript_api.cache.cache_manager import CacheManager
+from video_transcript_api.utils.task_status import TaskStatus
 from video_transcript_api.utils.llm_status import CalibrationStatus, SummaryStatus
 
 
@@ -356,5 +361,171 @@ class TestFullHitMirrorsCacheStatusOnTaskRow:
             assert row["summary_status"] == llm_status["summary_status"]
             assert row["calibration_status"] == CalibrationStatus.PARTIAL
             assert row["summary_status"] == SummaryStatus.GENERATED
+        finally:
+            real_cm.close()
+
+
+class TestSpeakerCacheSummaryOnlyBackfillEndToEnd:
+    """Regression coverage for codex-review R4 item 1: a speaker-recognition
+    (funasr) cache that already has a REAL calibrated layer + structured
+    data (llm_processed.json) but no summary. A subsequent full-flow request
+    for the same URL must only backfill the summary layer, reusing the
+    existing calibrated text via the forced plain-text route
+    (transcription_data=None) while use_speaker_recognition stays True on
+    the queued task -- exactly the shape that once risked
+    `structured_data["calibration_stats"] = ...` crashing on None.
+
+    Unlike TestLayeredCacheMatrix (which only asserts the transcription.py
+    queuing DECISION), this drives the queued task all the way through
+    llm_ops._handle_llm_task/_save_llm_results against a REAL CacheManager,
+    so it also asserts the actual on-disk outcome: task success, summary
+    persisted, and the pre-existing llm_processed.json left untouched.
+
+    Note: as of the suppress_calibration guard added for codex-review R3,
+    this exact call path (processing_options={"calibrate": False, ...} with
+    the calibrated layer already present) was already crash-safe -- this
+    test documents/locks that invariant for the speaker-recognition case
+    (previously only covered with use_speaker_recognition=False). The
+    TypeError itself is reproduced and locked down at the unit level in
+    tests/unit/test_llm_ops_helpers.py::
+    TestSaveLLMResultsLayeredCacheSuppression::
+    test_structured_data_none_does_not_crash_when_not_suppressed, which
+    exercises the other real call path (calibrate_only=True recalibrate,
+    where suppression is unconditionally bypassed).
+    """
+
+    def test_summary_only_backfill_preserves_existing_structured_data(self, tmp_path):
+        real_cm = CacheManager(cache_dir=str(tmp_path / "cache"))
+        try:
+            # ---- Seed a prior full speaker-recognition run: real
+            # calibration + structured data, summary missing.
+            real_cm.save_cache(
+                platform="youtube",
+                url="https://www.youtube.com/watch?v=abc123",
+                media_id="abc123",
+                use_speaker_recognition=True,
+                transcript_data={
+                    "segments": [
+                        {"speaker": "S0", "text": "hello", "start_time": 0, "end_time": 1}
+                    ]
+                },
+                transcript_type="funasr",
+                title="cached title",
+                author="cached author",
+                description="cached desc",
+            )
+            real_cm.save_llm_result(
+                platform="youtube", media_id="abc123", use_speaker_recognition=True,
+                llm_type="calibrated",
+                content="REAL calibrated text from a genuine speaker-aware pass",
+            )
+            existing_structured = {
+                "dialogs": [{"speaker": "Alice", "text": "hello"}],
+                "speaker_mapping": {"S0": "Alice"},
+            }
+            real_cm.save_llm_result(
+                platform="youtube", media_id="abc123", use_speaker_recognition=True,
+                llm_type="structured", content=existing_structured,
+            )
+            real_cm.save_llm_status(
+                platform="youtube", media_id="abc123", use_speaker_recognition=True,
+                calibration_status=CalibrationStatus.FULL,
+                calibration_stats={
+                    "total_chunks": 1, "success_count": 1,
+                    "fallback_count": 0, "failed_count": 0,
+                },
+                summary_status=None,
+            )
+
+            task_id = real_cm.create_task(
+                url="https://www.youtube.com/watch?v=abc123",
+                use_speaker_recognition=True,
+                platform="youtube",
+                media_id="abc123",
+            )["task_id"]
+            real_cm.update_task_status(task_id, TaskStatus.CALIBRATING)
+
+            # ---- Mirrors transcription.py's "校对层已满足，只缺总结" queuing
+            # decision (see TestLayeredCacheMatrix.
+            # test_calibrate_only_then_full_flow_requeues_summary_only): the
+            # calibrated text is reused as input, transcription_data is
+            # forced None (plain-text routing), use_speaker_recognition
+            # stays True.
+            llm_task = {
+                "task_id": task_id,
+                "url": "https://www.youtube.com/watch?v=abc123",
+                "display_url": "https://www.youtube.com/watch?v=abc123",
+                "platform": "youtube",
+                "media_id": "abc123",
+                "video_title": "cached title",
+                "author": "cached author",
+                "description": "cached desc",
+                "transcript": "REAL calibrated text from a genuine speaker-aware pass",
+                "use_speaker_recognition": True,
+                "transcription_data": None,
+                "is_generic": False,
+                "wechat_webhook": None,
+                "notification_channel": None,
+                "notification_webhooks": {},
+                "processing_options": {"calibrate": False, "summarize": True},
+            }
+
+            coordinator = MagicMock()
+            # Real coordinator.process(skip_calibration=True) behavior for the
+            # plain-text route: structured_data is None (only the
+            # speaker-aware dialog-list route ever produces it).
+            coordinator.process.return_value = {
+                "calibrated_text": "REAL calibrated text from a genuine speaker-aware pass",
+                "summary_text": "a real fresh summary",
+                "stats": {
+                    "calibration_status": CalibrationStatus.DISABLED,
+                    "calibration_stats": {
+                        "total_segments": 0, "calibrated_segments": 0,
+                        "fallback_segments": 0, "low_quality_segments": 0,
+                    },
+                    "summary_status": SummaryStatus.GENERATED,
+                },
+                "models_used": {},
+                "structured_data": None,
+            }
+
+            ctxs = [
+                patch.object(llm_ops, "cache_manager", real_cm),
+                patch.object(llm_ops, "llm_coordinator", coordinator),
+                patch.object(llm_ops, "llm_task_queue", MagicMock()),
+                patch.object(llm_ops, "_send_notification", MagicMock()),
+                patch.object(llm_ops, "get_notification_router", lambda: MagicMock()),
+                patch.object(llm_ops, "_generate_title_if_needed", lambda t, title, tr: title),
+            ]
+            for c in ctxs:
+                c.start()
+            try:
+                llm_ops._handle_llm_task(llm_task)
+            finally:
+                for c in ctxs:
+                    c.stop()
+
+            row = real_cm.get_task_by_id(task_id)
+            assert row["status"] == "success"
+            assert row["error_message"] is None
+
+            cache_data = real_cm.get_cache(
+                "youtube", "abc123", use_speaker_recognition=True
+            )
+            assert cache_data["llm_summary"] == "a real fresh summary"
+
+            # The pre-existing structured data (llm_processed.json) must
+            # survive untouched on disk -- this round produced no new
+            # structured data (plain-text route), so it must not be
+            # overwritten/wiped. get_cache() doesn't surface this file's
+            # content directly, so read it back from the cache dir.
+            import json
+
+            structured_file = Path(cache_data["file_path"]) / "llm_processed.json"
+            assert structured_file.exists()
+            with open(structured_file, "r", encoding="utf-8") as f:
+                persisted_structured = json.load(f)
+            assert persisted_structured["dialogs"] == existing_structured["dialogs"]
+            assert persisted_structured["speaker_mapping"] == existing_structured["speaker_mapping"]
         finally:
             real_cm.close()

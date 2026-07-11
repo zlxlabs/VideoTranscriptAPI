@@ -600,7 +600,16 @@ def _save_llm_results(
         else:
             logger.warning(f"总结状态未知或仍在处理中({summary_status})，跳过保存总结文件: {task_id}")
 
-        # 保存结构化数据（同样受校对层抑制保护，避免覆盖已有的真实说话人校对结果）
+        # 保存结构化数据（同样受校对层抑制保护，避免覆盖已有的真实说话人校对结果）。
+        # structured_data 只有内容按"对话列表"路径（speaker_aware_processor）真实处理
+        # 时才是 dict——一旦本轮走了纯文本路由（_prepare_llm_content 在
+        # transcription_data 缺失/类型异常时会回退纯文本，例如 calibrate_only=True
+        # 的 recalibrate 从不设置 processing_options、天然绕过上面的
+        # suppress_calibration 保护），协调器返回的 structured_data 就是 None。
+        # 不能无条件下标赋值，否则 TypeError 会让本应成功落盘的总结也被判定为
+        # 任务失败（codex-review R4 #1）。isinstance 校验兜底：非 dict 时跳过保存，
+        # 缓存里已有的结构化产物原样保留（诚实状态模型下"本轮没有新产物"不等于
+        # "清空旧产物"）。
         if (
             use_speaker_recognition
             and calibrate_success
@@ -608,20 +617,26 @@ def _save_llm_results(
             and "structured_data" in result_dict
         ):
             structured_data = result_dict["structured_data"]
-            cal_stats_for_save = stats.get("calibration_stats")
-            if cal_stats_for_save:
-                structured_data["calibration_stats"] = cal_stats_for_save
-            save_ok = cache_manager.save_llm_result(
-                platform=platform,
-                media_id=media_id,
-                use_speaker_recognition=use_speaker_recognition,
-                llm_type="structured",
-                content=structured_data,
-            )
-            if save_ok:
-                logger.info(f"结构化数据已保存到缓存: {platform}/{media_id}/llm_processed.json")
+            if isinstance(structured_data, dict):
+                cal_stats_for_save = stats.get("calibration_stats")
+                if cal_stats_for_save:
+                    structured_data["calibration_stats"] = cal_stats_for_save
+                save_ok = cache_manager.save_llm_result(
+                    platform=platform,
+                    media_id=media_id,
+                    use_speaker_recognition=use_speaker_recognition,
+                    llm_type="structured",
+                    content=structured_data,
+                )
+                if save_ok:
+                    logger.info(f"结构化数据已保存到缓存: {platform}/{media_id}/llm_processed.json")
+                else:
+                    logger.warning(f"结构化数据保存失败: {task_id}")
             else:
-                logger.warning(f"结构化数据保存失败: {task_id}")
+                logger.info(
+                    f"本轮结构化数据非 dict（{type(structured_data).__name__}，"
+                    f"通常因走了纯文本路由），跳过保存，保留缓存中已有的结构化产物: {task_id}"
+                )
 
         # 写入统一的诚实状态落盘文件 llm_status.json（两条路径都写）。
         # calibration_status/summary_status 为 None 时（本轮未触碰该层）传 None 给
