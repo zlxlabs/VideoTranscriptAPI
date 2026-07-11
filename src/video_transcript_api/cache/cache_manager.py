@@ -43,8 +43,18 @@ class CacheManager:
         # 按 (platform, media_id) 粒度的进程内锁池，保护 llm_status.json 的
         # 读-改-写不被跨任务并发踩踏（例如一个任务补校对、另一个任务补总结，
         # 两者同时读-合并-写同一份 llm_status.json 时后写者会覆盖先写者字段）。
-        # 懒创建 + 用后即弹出，实现模式与 api/context.py 的 task_lock 池一致。
+        # 懒创建 + 引用计数弹出，实现模式与 api/context.py 的 task_lock 池
+        # 一致，但弹出判断改用引用计数而非"释放后检查 locked()"——后者存在
+        # 生命周期竞态（codex-review R3 #2）：等待线程已经从字典里取出锁
+        # 对象、但还未真正调用 acquire() 的窗口内，持有者释放锁后见
+        # `not lock.locked()`（此时确实没人持有）就把锁从字典弹出；第三个
+        # 线程随后为同一个 key 新建一把不同的锁对象，导致等待线程（仍持有
+        # 旧锁对象的引用）和第三个线程（持有新锁对象）可以同时进入本应互斥
+        # 的临界区。引用计数在"从字典取出锁对象"的同一个 guard 临界区内
+        # +1（严格早于 acquire()，因此不存在"已取到对象但计数未体现"的
+        # 窗口），释放锁之后再 -1，归零才真正弹出，从根上消除这个窗口。
         self._media_locks: Dict[str, threading.Lock] = {}
+        self._media_lock_refcounts: Dict[str, int] = {}
         self._media_locks_guard = threading.Lock()
 
         # 初始化数据库
@@ -87,9 +97,11 @@ class CacheManager:
         校对、另一个任务只补总结，二者并发调用 save_llm_status 时若无锁，
         读-改-写语义下后写者会用自己读到的旧快照覆盖先写者刚写入的字段）。
 
-        实现模式与 api/context.py 的 task_lock 完全一致：懒创建锁对象，
-        用守护锁保护锁字典本身的读写，释放后若锁已空闲则从字典弹出，
-        避免锁池随媒体数量无限增长。
+        实现模式与 api/context.py 的 task_lock 基本一致：懒创建锁对象，
+        用守护锁保护锁字典本身的读写；区别在于弹出判断用引用计数（而非
+        释放后检查 locked()，该写法有生命周期竞态，见 __init__ 中
+        self._media_locks 字段上的注释），归零才真正从字典弹出，避免锁池
+        随媒体数量无限增长。
         """
         key = f"{platform}:{media_id}"
         with self._media_locks_guard:
@@ -97,14 +109,22 @@ class CacheManager:
             if lock is None:
                 lock = threading.Lock()
                 self._media_locks[key] = lock
+                self._media_lock_refcounts[key] = 0
+            # 计数必须在这个 guard 临界区内完成，且严格早于下面的
+            # lock.acquire()：这样任何"晚到但已经拿到锁对象引用"的线程都
+            # 会先把自己算进计数，持有者释放时才能看到这个意向，不会误判
+            # 锁已空闲。
+            self._media_lock_refcounts[key] += 1
         lock.acquire()
         try:
             yield
         finally:
             lock.release()
             with self._media_locks_guard:
-                if not lock.locked():
+                self._media_lock_refcounts[key] -= 1
+                if self._media_lock_refcounts[key] <= 0:
                     self._media_locks.pop(key, None)
+                    self._media_lock_refcounts.pop(key, None)
 
     def _init_database(self):
         """初始化数据库表结构"""
