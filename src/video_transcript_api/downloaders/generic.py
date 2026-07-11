@@ -138,10 +138,31 @@ class GenericDownloader(BaseDownloader):
         原样返回，网络连接直接使用这个 IP（PinnedIPHTTPAdapter），不再触发
         任何针对该域名的新 DNS 查询，彻底消除这个窗口。
 
-        不经过 requests.Session 的自动重定向/Cookie/Hook 流水线 —— 那些都由
-        _safe_request 的手动循环自己实现，这里只需要"发一次请求、拿到一个
-        Response"，用 Session.prepare_request 只是为了复用默认请求头
-        （User-Agent 等）的构造逻辑。
+        每次调用构造一个新的 requests.Session（而非复用单例）：Session 本身
+        不是线程安全的，本方法可能被并发的下载任务同时调用，per-request 新建
+        开销很小，换来无需操心跨线程共享状态。用这个 Session 只为两件事：
+        1) 通过 Session.merge_environment_settings 合并部署环境配置
+           （HTTP(S)_PROXY / NO_PROXY / REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE
+           等——见下方 codex-review R6 #2 说明），2) 作为 PinnedIPHTTPAdapter
+           的挂载点，通过 Session.get_adapter 按 URL 前缀取出实际发送请求的
+           适配器。不调用 Session.send()/Session.request()：那条路径即使传
+           allow_redirects=False，内部仍会在响应上预取一次下一跳信息用于
+           Response.next()（读 Location、抽取 Cookie、重建 auth），这属于
+           _safe_request 自己实现的逐跳重定向校验不需要、也不应该由 Session
+           重复处理的"自动重定向/Cookie/Hook 流水线"；这里改为拿到 Session
+           选中并已合并好环境设置的适配器后，直接调用它的 send()，只借用
+           Session 做配置合并与适配器挂载查找，不借用它的响应后处理逻辑。
+
+        代理场景（codex-review R6 #2）：如果这次请求命中了 HTTP(S)_PROXY /
+        显式配置的代理，真正的 TCP/TLS 连接由代理服务器建立，我方解析并
+        钉住的 IP 对代理没有意义——代理有自己独立的 DNS/网络视角，很多代理
+        的访问控制还是按主机名而非 IP 生效的，继续钉 IP 反而可能打破代理
+        路由或绕开代理自身的访问控制。此时改为不挂载 PinnedIPHTTPAdapter，
+        让 Session 用默认适配器按原始域名正常经代理请求——前面的
+        validate_url_safe_with_ip 校验依然生效，只是"钉住连接到同一个 IP"
+        这一层被代理的存在天然打破了；代理链路下的 DNS rebinding 风险由
+        代理自身的 DNS 解析和网络策略决定，运维一旦选择接入代理，就已经把
+        这段信任交给了代理，这里视为可接受的边界。
 
         参数:
             method: 'head' 或 'get'
@@ -186,19 +207,52 @@ class GenericDownloader(BaseDownloader):
 
         parsed_url = urlparse(url)
         headers = kwargs.pop("headers", None)
-        prepared = requests.Session().prepare_request(
-            requests.Request(method.upper(), url, headers=headers)
-        )
 
-        adapter = PinnedIPHTTPAdapter(
-            hostname=parsed_url.hostname,
-            pinned_ip=pinned_ip,
-            is_https=(parsed_url.scheme == "https"),
-        )
+        session = requests.Session()
         try:
-            return adapter.send(prepared, **kwargs)
+            prepared = session.prepare_request(
+                requests.Request(method.upper(), url, headers=headers)
+            )
+
+            # 合并部署环境配置：HTTP(S)_PROXY/NO_PROXY 决定的代理，以及
+            # REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE 决定的自定义 CA 证书。
+            # merge_environment_settings 是 Session.request() 内部用来做
+            # 这件事的同一个方法，这里显式调用以便在不经过 Session.send()
+            # 的情况下也能拿到同样的合并结果。
+            settings = session.merge_environment_settings(
+                prepared.url,
+                {},
+                kwargs.get("stream"),
+                kwargs.get("verify"),
+                kwargs.get("cert"),
+            )
+            scheme_has_proxy = bool(settings["proxies"].get(parsed_url.scheme))
+
+            if scheme_has_proxy:
+                logger.info(
+                    f"检测到 {parsed_url.scheme} 代理配置，连接由代理建立，"
+                    f"跳过 IP 钉定，按原始域名经代理请求（校验仍已通过）: {url}"
+                )
+            else:
+                adapter = PinnedIPHTTPAdapter(
+                    hostname=parsed_url.hostname,
+                    pinned_ip=pinned_ip,
+                    is_https=(parsed_url.scheme == "https"),
+                )
+                # 用与请求 URL 匹配的 scheme 前缀挂载，替换 Session 默认的
+                # 同前缀适配器；session.get_adapter() 会按最长前缀匹配选中
+                # 它。整个 Session 只服务这一次请求，用完即弃（finally 里
+                # session.close() 会级联关闭挂载的适配器），不会有跨请求的
+                # 挂载残留风险。
+                session.mount(f"{parsed_url.scheme}://", adapter)
+
+            send_kwargs = dict(kwargs)
+            send_kwargs.update(settings)
+
+            target_adapter = session.get_adapter(prepared.url)
+            return target_adapter.send(prepared, **send_kwargs)
         finally:
-            adapter.close()
+            session.close()
 
     def _is_media_url(self, url):
         """
