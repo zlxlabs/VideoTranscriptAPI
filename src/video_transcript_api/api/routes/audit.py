@@ -12,9 +12,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..context import get_audit_logger, get_cache_manager, get_logger
 from ..services.transcription import TranscribeResponse, verify_token
+from ...utils.logging.usage_recorder import get_usage_recorder
 
 logger = get_logger()
 audit_logger = get_audit_logger()
+usage_recorder = get_usage_recorder()
 
 # 延迟导入，避免循环依赖；同时保持模块级引用供测试 mock 使用
 from ..context import get_user_manager as _get_user_manager
@@ -25,15 +27,24 @@ router = APIRouter(prefix="/api/audit", tags=["audit"])
 
 @router.get("/stats")
 async def get_audit_stats(days: int = 30, user_info: dict = Depends(verify_token)):
+    """获取 API 调用统计与 LLM token 用量统计（按 days 时间窗口）。
+
+    llm_usage 聚合块不区分调用方用户（token 用量按任务/阶段审计，非按用户维度），
+    与 user_stats 共用同一个 days 参数控制统计窗口。
+    """
     try:
         user_id = user_info.get("user_id")
         # SQLite 查询为同步阻塞调用，放到线程池避免阻塞事件循环
         user_stats = await asyncio.to_thread(audit_logger.get_user_stats, user_id, days)
+        # LLM token 用量统计（按 stage 聚合 + 总计），查询失败时 usage_recorder
+        # 内部已 fail-open 返回全零结构，不会导致整个 /stats 接口 500
+        llm_usage = await asyncio.to_thread(usage_recorder.get_stats, days)
         return TranscribeResponse(
             code=200,
             message="获取统计信息成功",
             data={
                 "user_stats": user_stats,
+                "llm_usage": llm_usage,
                 "is_multi_user_mode": user_manager.is_multi_user_mode(),
                 "total_users": user_manager.get_user_count(),
             },

@@ -8,6 +8,7 @@ from .core.llm_client import LLMClient
 from .core.cache_manager import CacheManager
 from .core.key_info_extractor import KeyInfoExtractor
 from .core.speaker_inferencer import SpeakerInferencer
+from .core.usage_context import set_context
 from .validators.unified_quality_validator import UnifiedQualityValidator
 from .processors.plain_text_processor import PlainTextProcessor
 from .processors.speaker_aware_processor import SpeakerAwareProcessor
@@ -137,15 +138,19 @@ class LLMCoordinator:
         # 步骤 2: 校对处理（路由到对应处理器）
         logger.info("Step 1/2: Calibration processing")
 
-        calibration_result = self._route_to_calibration_processor(
-            content=content,
-            title=title,
-            author=author,
-            description=description,
-            platform=platform,
-            media_id=media_id,
-            selected_models=selected_models,
-        )
+        # 用 contextvar 标记当前处理阶段为 calibration，供 LLM 调用链路末端的
+        # token 用量审计记录使用（跨 ThreadPoolExecutor 需 processor 内部显式
+        # copy_context 传播，见 plain_text_processor.py / speaker_aware_processor.py）
+        with set_context(stage="calibration"):
+            calibration_result = self._route_to_calibration_processor(
+                content=content,
+                title=title,
+                author=author,
+                description=description,
+                platform=platform,
+                media_id=media_id,
+                selected_models=selected_models,
+            )
 
         # 提取校对文本和说话人信息
         calibrated_text = calibration_result.get("calibrated_text", "")
@@ -157,15 +162,16 @@ class LLMCoordinator:
             logger.info("Step 2/2: Summary generation SKIPPED (skip_summary=True)")
         else:
             logger.info("Step 2/2: Summary generation")
-            summary_text = self._generate_summary_if_needed(
-                text=calibrated_text,
-                title=title,
-                author=author,
-                description=description,
-                speaker_count=speaker_count,
-                transcription_data=self._extract_transcription_data(content),
-                selected_models=selected_models,
-            )
+            with set_context(stage="summary"):
+                summary_text = self._generate_summary_if_needed(
+                    text=calibrated_text,
+                    title=title,
+                    author=author,
+                    description=description,
+                    speaker_count=speaker_count,
+                    transcription_data=self._extract_transcription_data(content),
+                    selected_models=selected_models,
+                )
 
         # 步骤 4: 合并结果
         return {
