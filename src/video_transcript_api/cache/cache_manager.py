@@ -557,7 +557,20 @@ class CacheManager:
                             cache_data['llm_status'] = json.load(f)
                     except (OSError, json.JSONDecodeError) as status_exc:
                         logger.warning(f"读取 llm_status.json 失败，忽略: {status_exc}")
-                        
+
+                # 读取说话人结构化数据（仅说话人识别路径才会有：dialogs/speaker_mapping
+                # 等，见 save_llm_result(llm_type="structured")）。可能不存在：非说话人
+                # 缓存、或说话人缓存尚未完成一次真实校对。调用方（如分层缓存"只补总结"
+                # 场景）用它拿到真实说话人数，避免总结时因内容被降级为纯文本而误判为
+                # 单说话人（codex-review R5 #3）。
+                llm_processed_file = file_path / "llm_processed.json"
+                if llm_processed_file.exists():
+                    try:
+                        with open(llm_processed_file, 'r', encoding='utf-8') as f:
+                            cache_data['llm_processed'] = json.load(f)
+                    except (OSError, json.JSONDecodeError) as processed_exc:
+                        logger.warning(f"读取 llm_processed.json 失败，忽略: {processed_exc}")
+
                 cache_data['file_path'] = str(file_path)
                 
                 logger.info(f"缓存命中: {platform}/{media_id}, 说话人识别: {cache_data['use_speaker_recognition']}")

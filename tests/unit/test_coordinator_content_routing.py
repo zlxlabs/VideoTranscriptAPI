@@ -206,5 +206,107 @@ def test_extract_speaker_count_from_dialogs(coordinator):
     assert speaker_count == 2
 
 
+class TestSpeakerCountHintOverridesAutoInference:
+    """codex-review R5 #3: the layered-cache "summary-only backfill" path
+    (transcription.py) forces content to plain text (transcription_data=None)
+    to avoid re-running speaker-aware calibration -- but plain text always
+    makes _extract_speaker_count() return 0 (single-speaker), even when the
+    underlying media genuinely has multiple speakers. speaker_count_hint lets
+    a caller that already knows the real count (read from the cached
+    llm_processed.json) override that misjudgment without re-inferring
+    speakers, so SummaryProcessor still gets a correct multi-speaker
+    speaker_count and picks the right prompt / structured context.
+    """
+
+    def _make_long_enough_calibrated_text(self):
+        # mock_config_dict's min_summary_threshold is 500 -- must clear it or
+        # _generate_summary_if_needed short-circuits before ever calling
+        # summary_processor.process().
+        return "x" * 600
+
+    def test_hint_is_passed_to_summary_processor(self, coordinator):
+        long_text = self._make_long_enough_calibrated_text()
+        coordinator.plain_text_processor.process = Mock(
+            return_value={
+                "calibrated_text": long_text,
+                "key_info": {},
+                "stats": {
+                    "original_length": len(long_text),
+                    "calibrated_length": len(long_text),
+                    "calibration_status": "disabled",
+                },
+            }
+        )
+        summary_result = MagicMock()
+        summary_result.text = "a" * 100
+        summary_result.status = "generated"
+        coordinator.summary_processor.process = Mock(return_value=summary_result)
+
+        # content is plain text -- exactly what the forced plain-text
+        # downgrade in transcription.py's summary-only backfill produces,
+        # even though the media actually has 3 speakers.
+        coordinator.process(
+            content=long_text,
+            title="Test Video",
+            speaker_count_hint=3,
+        )
+
+        coordinator.summary_processor.process.assert_called_once()
+        call_kwargs = coordinator.summary_processor.process.call_args.kwargs
+        assert call_kwargs["speaker_count"] == 3
+
+    def test_hint_skips_auto_inference_entirely(self, coordinator):
+        """Not just overridden -- _extract_speaker_count must not even run,
+        since re-deriving from plain-text content would always be wrong."""
+        long_text = self._make_long_enough_calibrated_text()
+        coordinator.plain_text_processor.process = Mock(
+            return_value={
+                "calibrated_text": long_text,
+                "key_info": {},
+                "stats": {
+                    "original_length": len(long_text),
+                    "calibrated_length": len(long_text),
+                },
+            }
+        )
+        summary_result = MagicMock()
+        summary_result.text = "a" * 100
+        summary_result.status = "generated"
+        coordinator.summary_processor.process = Mock(return_value=summary_result)
+
+        with patch.object(coordinator, "_extract_speaker_count") as mock_extract:
+            coordinator.process(
+                content=long_text,
+                title="Test Video",
+                speaker_count_hint=3,
+            )
+            mock_extract.assert_not_called()
+
+    def test_no_hint_falls_back_to_auto_inference(self, coordinator):
+        """Backward compatibility: omitting speaker_count_hint (every
+        existing call site) must reproduce the pre-existing auto-inference
+        behavior exactly -- plain text still yields speaker_count=0."""
+        long_text = self._make_long_enough_calibrated_text()
+        coordinator.plain_text_processor.process = Mock(
+            return_value={
+                "calibrated_text": long_text,
+                "key_info": {},
+                "stats": {
+                    "original_length": len(long_text),
+                    "calibrated_length": len(long_text),
+                },
+            }
+        )
+        summary_result = MagicMock()
+        summary_result.text = "a" * 100
+        summary_result.status = "generated"
+        coordinator.summary_processor.process = Mock(return_value=summary_result)
+
+        coordinator.process(content=long_text, title="Test Video")
+
+        call_kwargs = coordinator.summary_processor.process.call_args.kwargs
+        assert call_kwargs["speaker_count"] == 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

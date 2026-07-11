@@ -110,6 +110,7 @@ class LLMCoordinator:
         media_id: str = "",
         skip_summary: bool = False,
         skip_calibration: bool = False,
+        speaker_count_hint: Optional[int] = None,
     ) -> Dict:
         """处理文本（统一入口）
 
@@ -126,6 +127,15 @@ class LLMCoordinator:
                 时为 True）。跳过时不发起校对相关 LLM 调用，只做本地格式化/保留说话人
                 标注，calibration_status 统一标记为 DISABLED（"用户主动关闭"，区别于
                 NONE"尝试但失败"）。
+            speaker_count_hint: 调用方已知的说话人数量，提供时直接覆盖
+                _extract_speaker_count() 的自动推断结果（codex-review R5 #3）。
+                用途：分层缓存"只补总结"场景——为避免重跑说话人分块校对，
+                content 会被强制降级为纯文本（transcription_data=None），此时
+                _extract_speaker_count() 只能按纯文本判定为单说话人（返回 0），
+                即便原始内容其实有多个说话人，导致总结用错单说话人 Prompt、
+                丢失结构化对话语境。调用方（llm_ops._handle_llm_task）从缓存的
+                llm_processed.json 里读出真实说话人数回传，None 表示"没有更优信息，
+                按自动推断走"，不影响其余调用方（保持向后兼容）。
 
         Returns:
             处理结果字典:
@@ -165,7 +175,14 @@ class LLMCoordinator:
 
         # 提取校对文本和说话人信息
         calibrated_text = calibration_result.get("calibrated_text", "")
-        speaker_count = self._extract_speaker_count(content, calibration_result)
+        if speaker_count_hint is not None:
+            # 调用方提供了更可靠的说话人数（见上方参数文档），跳过自动推断——
+            # content 在"只补总结"场景下已被强制降级为纯文本，自动推断在这里
+            # 必然得到 0（误判为单说话人），必须以调用方回传的真实值为准。
+            speaker_count = speaker_count_hint
+            logger.debug(f"Using caller-provided speaker_count_hint: {speaker_count}")
+        else:
+            speaker_count = self._extract_speaker_count(content, calibration_result)
 
         # 步骤 3: 总结生成（基于校对文本，可跳过）
         # summary_status 为 None 表示"本轮未尝试生成"（仅 calibrate_only 重新校对场景，
