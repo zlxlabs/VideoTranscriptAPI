@@ -15,6 +15,7 @@ class TestCalibrationStatus:
         assert CalibrationStatus.FULL == "full"
         assert CalibrationStatus.PARTIAL == "partial"
         assert CalibrationStatus.NONE == "none"
+        assert CalibrationStatus.DISABLED == "disabled"
 
     def test_is_str_subclass(self):
         """Must behave as plain str for JSON/SQLite round-tripping."""
@@ -28,6 +29,7 @@ class TestSummaryStatus:
         assert SummaryStatus.SKIPPED_SHORT == "skipped_short"
         assert SummaryStatus.FAILED == "failed"
         assert SummaryStatus.PENDING == "pending"
+        assert SummaryStatus.DISABLED == "disabled"
 
     def test_is_str_subclass(self):
         assert isinstance(SummaryStatus.GENERATED, str)

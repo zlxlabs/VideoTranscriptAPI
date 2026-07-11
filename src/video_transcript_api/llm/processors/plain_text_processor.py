@@ -57,6 +57,7 @@ class PlainTextProcessor:
         platform: str = "",
         media_id: str = "",
         selected_models: Optional[Dict] = None,
+        skip_calibration: bool = False,
     ) -> Dict:
         """处理无说话人文本
 
@@ -68,11 +69,40 @@ class PlainTextProcessor:
             platform: 平台标识
             media_id: 媒体 ID
             selected_models: 选定的模型（可选）
+            skip_calibration: 是否跳过 LLM 校对（processing_options.calibrate=False 时为 True）。
+                跳过时不发起任何 LLM 调用，仅复用 _format_plain_text 做本地格式化，
+                calibration_status 标记为 DISABLED（区别于"尝试但失败"的 NONE）。
 
         Returns:
             处理结果字典
         """
-        logger.info(f"Start processing plain text: {title}, length: {len(text)}")
+        logger.info(
+            f"Start processing plain text: {title}, length: {len(text)}, "
+            f"skip_calibration={skip_calibration}"
+        )
+
+        if skip_calibration:
+            # 校对已禁用：不提取关键信息、不分段、不调用 LLM，直接本地格式化原文。
+            # calibrated_text 即为该格式化文本，供下游（校对文件/总结输入）复用。
+            formatted_text = self._format_plain_text(text)
+            logger.info(
+                f"Calibration disabled by request, produced formatted passthrough "
+                f"text (length: {len(formatted_text)})"
+            )
+            return {
+                "calibrated_text": formatted_text,
+                "key_info": KeyInfo([], [], [], [], [], [], []).to_dict(),
+                "stats": {
+                    "original_length": len(text),
+                    "calibrated_length": len(formatted_text),
+                    "segment_count": 0,
+                    "total_segments": 0,
+                    "calibrated_segments": 0,
+                    "fallback_segments": 0,
+                    "low_quality_segments": 0,
+                    "calibration_status": CalibrationStatus.DISABLED,
+                },
+            }
 
         # 步骤0: 检测语言
         detected_language = detect_language(text)

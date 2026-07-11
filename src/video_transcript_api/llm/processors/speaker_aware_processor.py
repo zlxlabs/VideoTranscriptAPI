@@ -63,6 +63,7 @@ class SpeakerAwareProcessor:
         platform: str = "",
         media_id: str = "",
         selected_models: Optional[Dict] = None,
+        skip_calibration: bool = False,
     ) -> Dict:
         """处理有说话人文本
 
@@ -74,6 +75,10 @@ class SpeakerAwareProcessor:
             platform: 平台标识
             media_id: 媒体 ID
             selected_models: 选定的模型
+            skip_calibration: 是否跳过分块 LLM 校对调用（processing_options.calibrate=False
+                时为 True）。说话人推断、说话人映射、对话规范化合并这些步骤仍会执行——
+                它们属于"转录"交付物（谁在说话）而非"校对"（文字是否准确），跳过的只是
+                逐块把文本喂给 LLM 做文字校正/纠错的那一步。
 
         Returns:
             处理结果字典
@@ -81,7 +86,8 @@ class SpeakerAwareProcessor:
         base_dialogs = self._coerce_dialogs(dialogs)
         total_length = sum(len(d.get("text", "")) for d in base_dialogs)
         logger.info(
-            f"Start processing speaker-aware text: {title}, dialog count: {len(base_dialogs)}, total length: {total_length}"
+            f"Start processing speaker-aware text: {title}, dialog count: {len(base_dialogs)}, "
+            f"total length: {total_length}, skip_calibration={skip_calibration}"
         )
 
         # 步骤0: 检测语言
@@ -125,26 +131,51 @@ class SpeakerAwareProcessor:
             base_dialogs, speaker_mapping
         )
 
-        # 步骤2: 分段
-        chunks = self.segmenter.segment(normalized_dialogs)
-        logger.debug(f"Dialogs segmented: {len(chunks)} chunks")
+        if skip_calibration:
+            # 校对已禁用：跳过分段与逐块 LLM 校对调用，直接使用规范化后的对话作为
+            # 最终产物（说话人标注/合并已在上面完成，属于转录交付物，照常保留）。
+            chunks: List[List[Dict]] = []
+            calibrated_dialogs = normalized_dialogs
+            calibration_stats = {
+                "total_chunks": 0,
+                "success_count": 0,
+                "partial_count": 0,
+                "fallback_count": 0,
+                "failed_count": 0,
+                "dialog_counts": {
+                    "applied": 0,
+                    "kept_original": len(normalized_dialogs),
+                    "unknown_id": 0,
+                    "duplicate_id": 0,
+                    "malformed": 0,
+                },
+                "calibration_status": CalibrationStatus.DISABLED,
+            }
+            logger.info(
+                f"Calibration disabled by request, using normalized dialogs as-is "
+                f"({len(normalized_dialogs)} dialogs, no chunk-level LLM calls)"
+            )
+        else:
+            # 步骤2: 分段
+            chunks = self.segmenter.segment(normalized_dialogs)
+            logger.debug(f"Dialogs segmented: {len(chunks)} chunks")
 
-        # 步骤3: 分段校对（每段独立验证）
-        calibrated_chunks, calibration_stats = self._calibrate_chunks(
-            chunks=chunks,
-            original_chunks=chunks,  # 传入原始chunk用于验证
-            key_info=key_info,
-            speaker_mapping=speaker_mapping,
-            title=title,
-            description=description,
-            selected_models=selected_models,
-            language=detected_language,
-        )
+            # 步骤3: 分段校对（每段独立验证）
+            calibrated_chunks, calibration_stats = self._calibrate_chunks(
+                chunks=chunks,
+                original_chunks=chunks,  # 传入原始chunk用于验证
+                key_info=key_info,
+                speaker_mapping=speaker_mapping,
+                title=title,
+                description=description,
+                selected_models=selected_models,
+                language=detected_language,
+            )
 
-        # 合并校对结果（不再进行整体验证）
-        calibrated_dialogs = []
-        for chunk in calibrated_chunks:
-            calibrated_dialogs.extend(chunk)
+            # 合并校对结果（不再进行整体验证）
+            calibrated_dialogs = []
+            for chunk in calibrated_chunks:
+                calibrated_dialogs.extend(chunk)
 
         # 构建文本用于统计
         original_text = self._build_text_from_dialogs(normalized_dialogs)
