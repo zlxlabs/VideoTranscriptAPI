@@ -41,7 +41,8 @@
 | **抖音** | DouyinDownloader | TikHub API 获取无水印流 |
 | **小红书** | XiaohongshuDownloader | TikHub v3 接口 |
 | **小宇宙播客** | XiaoyuzhouDownloader | 网页爬虫解析 |
-| **通用链接** | GenericDownloader | 直接流式下载、断点续传 |
+| **Apple Podcast** | ApplePodcastDownloader | 网页解析获取音频直链 |
+| **通用链接** | GenericDownloader | 直接流式下载、断点续传（SSRF 校验 + 重定向逐跳校验） |
 
 **工厂模式实现**：
 
