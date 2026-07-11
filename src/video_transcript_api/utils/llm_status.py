@@ -29,6 +29,8 @@ class CalibrationStatus(StrEnum):
     FULL = "full"        # 全部内容成功由 LLM 校对，没有任何原文兜底
     PARTIAL = "partial"  # 部分内容降级为原文或低质量输出，部分正常
     NONE = "none"         # 全部内容降级为原文（LLM 校对完全失败）
+    DISABLED = "disabled"  # 用户通过 processing_options.calibrate=False 主动关闭校对
+                            # （区别于 NONE：NONE 是"尝试了但失败"，DISABLED 是"根本没尝试"）
 
 
 class SummaryStatus(StrEnum):
@@ -42,3 +44,6 @@ class SummaryStatus(StrEnum):
     SKIPPED_SHORT = "skipped_short"  # 原文过短，未触发总结生成（正常路径，非失败）
     FAILED = "failed"                # 触发了生成但失败（LLM 异常或输出过短/为空）
     PENDING = "pending"              # 总结阶段尚未执行完成（任务仍在处理中）
+    DISABLED = "disabled"            # 用户通过 processing_options.summarize=False 主动关闭总结
+                                      # （区别于 SKIPPED_SHORT：SKIPPED_SHORT 是"想生成但文本太短"，
+                                      # DISABLED 是"用户压根不想要总结"）

@@ -108,6 +108,7 @@ class LLMCoordinator:
         platform: str = "",
         media_id: str = "",
         skip_summary: bool = False,
+        skip_calibration: bool = False,
     ) -> Dict:
         """处理文本（统一入口）
 
@@ -118,7 +119,12 @@ class LLMCoordinator:
             description: 描述
             platform: 平台标识
             media_id: 媒体 ID
-            skip_summary: 是否跳过总结生成（重新校对场景使用）
+            skip_summary: 是否跳过总结生成（重新校对场景使用；跳过时 summary_status
+                保持 None——"本轮未尝试"，由下游合并语义保留旧值）
+            skip_calibration: 是否跳过 LLM 校对（processing_options.calibrate=False
+                时为 True）。跳过时不发起校对相关 LLM 调用，只做本地格式化/保留说话人
+                标注，calibration_status 统一标记为 DISABLED（"用户主动关闭"，区别于
+                NONE"尝试但失败"）。
 
         Returns:
             处理结果字典:
@@ -130,7 +136,10 @@ class LLMCoordinator:
                 "structured_data": dict,       # 结构化数据（仅有说话人）
             }
         """
-        logger.info(f"Processing content for: {title} (skip_summary={skip_summary})")
+        logger.info(
+            f"Processing content for: {title} "
+            f"(skip_summary={skip_summary}, skip_calibration={skip_calibration})"
+        )
 
         # 获取模型配置（敏感词降级由 llm-compat 自动处理）
         selected_models = self.config.get_models()
@@ -150,6 +159,7 @@ class LLMCoordinator:
                 platform=platform,
                 media_id=media_id,
                 selected_models=selected_models,
+                skip_calibration=skip_calibration,
             )
 
         # 提取校对文本和说话人信息
@@ -225,6 +235,7 @@ class LLMCoordinator:
         platform: str,
         media_id: str,
         selected_models: Dict,
+        skip_calibration: bool = False,
     ) -> Dict:
         """路由到对应的校对处理器
 
@@ -236,6 +247,7 @@ class LLMCoordinator:
             platform: 平台标识
             media_id: 媒体 ID
             selected_models: 选定的模型
+            skip_calibration: 是否跳过 LLM 校对，透传给具体处理器
 
         Returns:
             校对结果字典
@@ -251,6 +263,7 @@ class LLMCoordinator:
                 platform=platform,
                 media_id=media_id,
                 selected_models=selected_models,
+                skip_calibration=skip_calibration,
             )
         elif isinstance(content, list):
             # 对话列表 - 使用 SpeakerAwareProcessor
@@ -263,6 +276,7 @@ class LLMCoordinator:
                 platform=platform,
                 media_id=media_id,
                 selected_models=selected_models,
+                skip_calibration=skip_calibration,
             )
         elif isinstance(content, dict):
             # 如果传入字典，尝试提取 segments 字段
@@ -280,6 +294,7 @@ class LLMCoordinator:
                     platform=platform,
                     media_id=media_id,
                     selected_models=selected_models,
+                    skip_calibration=skip_calibration,
                 )
             else:
                 raise ValueError(
