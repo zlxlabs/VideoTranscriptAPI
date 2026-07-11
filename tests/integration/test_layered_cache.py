@@ -19,6 +19,7 @@ tests/features/test_transcription_flow_regression.py.
 All console output must be in English only (no emoji, no Chinese).
 """
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -556,5 +557,185 @@ class TestSpeakerCacheSummaryOnlyBackfillEndToEnd:
                 persisted_structured = json.load(f)
             assert persisted_structured["dialogs"] == existing_structured["dialogs"]
             assert persisted_structured["speaker_mapping"] == existing_structured["speaker_mapping"]
+        finally:
+            real_cm.close()
+
+
+class TestTranscriptOnlyCacheBothSwitchesOffIsNotFullHit:
+    """codex-review R5 #2: a cache that has ONLY the transcript layer (no
+    llm_calibrated/llm_summary/llm_status at all -- e.g. an old pre-LLM
+    cache, or simply the very first request for this media) combined with
+    calibrate=False AND summarize=False must NOT be misjudged as "cache
+    already has LLM results".
+
+    Before the fix, need_calibrated/need_summary were computed False purely
+    because the REQUEST didn't want those layers -- not because they
+    already existed -- so the code took the "cache has full LLM results"
+    display branch, read the nonexistent llm_calibrated as an empty string,
+    sent an essentially blank calibration notification, and never marked
+    the task row/llm_status.json as calibration-disabled (so a later
+    calibrate=True request could not tell "already disabled" from
+    "never attempted").
+
+    The fix routes this case through the SAME enqueue-to-llm_task_queue
+    path already used for genuine partial hits, so the existing
+    skip_calibration/skip_summary machinery in llm_ops/coordinator
+    produces exactly the outcome a brand-new calibrate=False&summarize=False
+    request would -- no bespoke inline handling in transcription.py.
+    """
+
+    def test_missing_llm_layers_with_both_switches_off_is_queued_not_displayed(
+        self, monkeypatch, patch_runtime
+    ):
+        """Decision-level check (mirrors TestLayeredCacheMatrix): a
+        transcript-only cache must be queued for real (disabled) LLM
+        processing, not treated as an already-complete full hit."""
+        cache_data = {**BASE_CACHE_DATA}  # transcript layer ONLY
+
+        result, queued = _run(
+            monkeypatch, patch_runtime, cache_data,
+            {"calibrate": False, "summarize": False},
+        )
+
+        assert result["status"] == "success"
+        assert len(queued) == 1
+        task = queued[0]
+        assert task["processing_options"] == {"calibrate": False, "summarize": False}
+        # Real (raw) transcript reused as input -- no re-download/re-transcribe.
+        assert task["transcript"] == "RAW uncalibrated transcript"
+
+    def test_queued_task_end_to_end_produces_disabled_status_and_real_notification(
+        self, tmp_path
+    ):
+        """End-to-end: drive the queued task all the way through
+        llm_ops._handle_llm_task/_save_llm_results against a REAL
+        CacheManager and a captured notification router, and assert on the
+        actual observable outcomes the review flagged as broken:
+        - the push notification is non-empty and carries the real
+          (locally-formatted) calibrated text, with the "disabled" wording
+          the codebase already uses for a genuinely-off layer (not silently
+          treated as "not yet generated")
+        - the task row is marked calibration_status=disabled (not left NULL)
+        - llm_calibrated.txt actually gets written to disk, so the view
+          page's ?raw=calibrated can render real content instead of hitting
+          the "file does not exist" branch forever
+        """
+        real_cm = CacheManager(cache_dir=str(tmp_path / "cache"))
+        try:
+            # ---- Seed a transcript-only cache: LLM has never run for this
+            # media at all (no llm_calibrated/llm_summary/llm_status).
+            real_cm.save_cache(
+                platform="youtube",
+                url="https://www.youtube.com/watch?v=abc123",
+                media_id="abc123",
+                use_speaker_recognition=False,
+                transcript_data="RAW uncalibrated transcript",
+                transcript_type="capswriter",
+                title="cached title",
+                author="cached author",
+                description="cached desc",
+            )
+
+            task_id = real_cm.create_task(
+                url="https://www.youtube.com/watch?v=abc123",
+                use_speaker_recognition=False,
+                platform="youtube",
+                media_id="abc123",
+            )["task_id"]
+            real_cm.update_task_status(task_id, TaskStatus.CALIBRATING)
+
+            # ---- Mirrors transcription.py's fixed queuing decision for this
+            # scenario (see TestTranscriptOnlyCacheBothSwitchesOffIsNotFullHit
+            # above): calibrate=False & summarize=False, both genuinely
+            # missing -> queued for real (disabled) processing.
+            llm_task = {
+                "task_id": task_id,
+                "url": "https://www.youtube.com/watch?v=abc123",
+                "display_url": "https://www.youtube.com/watch?v=abc123",
+                "platform": "youtube",
+                "media_id": "abc123",
+                "video_title": "cached title",
+                "author": "cached author",
+                "description": "cached desc",
+                "transcript": "RAW uncalibrated transcript",
+                "use_speaker_recognition": False,
+                "transcription_data": None,
+                "is_generic": False,
+                "wechat_webhook": None,
+                "notification_channel": None,
+                "notification_webhooks": {},
+                "processing_options": {"calibrate": False, "summarize": False},
+            }
+
+            # coordinator.process(skip_calibration=True, skip_summary=True):
+            # calibration_status is DISABLED (local formatting, no LLM call),
+            # summary_text/summary_status are None ("not attempted this
+            # round" -- _save_llm_results is the one that turns the missing
+            # summary layer into an explicit DISABLED status, exercised for
+            # real below, not mocked).
+            coordinator = MagicMock()
+            coordinator.process.return_value = {
+                "calibrated_text": "RAW uncalibrated transcript (locally formatted)",
+                "summary_text": None,
+                "stats": {
+                    "calibration_status": CalibrationStatus.DISABLED,
+                    "calibration_stats": {
+                        "total_segments": 0, "calibrated_segments": 0,
+                        "fallback_segments": 0, "low_quality_segments": 0,
+                    },
+                    "summary_status": None,
+                },
+                "models_used": {},
+                "structured_data": None,
+            }
+
+            notification_router = MagicMock()
+            notification_router.send_long_text = MagicMock()
+            notification_router.send_text = MagicMock()
+
+            ctxs = [
+                patch.object(llm_ops, "cache_manager", real_cm),
+                patch.object(llm_ops, "llm_coordinator", coordinator),
+                patch.object(llm_ops, "llm_task_queue", MagicMock()),
+                patch.object(llm_ops, "get_notification_router", lambda: notification_router),
+                patch.object(llm_ops, "_generate_title_if_needed", lambda t, title, tr: title),
+            ]
+            for c in ctxs:
+                c.start()
+            try:
+                llm_ops._handle_llm_task(llm_task)
+            finally:
+                for c in ctxs:
+                    c.stop()
+
+            # ---- Task row: success, and calibration explicitly marked
+            # disabled (not left NULL as the pre-fix full-hit branch did).
+            row = real_cm.get_task_by_id(task_id)
+            assert row["status"] == "success"
+            assert row["calibration_status"] == CalibrationStatus.DISABLED
+            assert row["summary_status"] == SummaryStatus.DISABLED
+
+            # ---- llm_status.json on disk mirrors the same disabled states,
+            # and llm_calibrated.txt is real -- the view page can render it.
+            cache_data = real_cm.get_cache(
+                "youtube", "abc123", use_speaker_recognition=False
+            )
+            assert cache_data["llm_status"]["calibration_status"] == CalibrationStatus.DISABLED
+            assert cache_data["llm_status"]["summary_status"] == SummaryStatus.DISABLED
+            assert cache_data["llm_calibrated"] == "RAW uncalibrated transcript (locally formatted)"
+
+            calibrated_file = Path(cache_data["file_path"]) / "llm_calibrated.txt"
+            assert calibrated_file.exists()
+            assert calibrated_file.read_text(encoding="utf-8").strip() != ""
+
+            # ---- Notification: non-empty, carries the real calibrated
+            # text (not a blank string), and uses the codebase's existing
+            # "disabled" wording rather than silently implying "not yet
+            # generated".
+            assert notification_router.send_long_text.called
+            sent_text = notification_router.send_long_text.call_args.kwargs["text"]
+            assert sent_text.strip() != ""
+            assert "RAW uncalibrated transcript (locally formatted)" in sent_text
+            assert "未启用" in sent_text
         finally:
             real_cm.close()
