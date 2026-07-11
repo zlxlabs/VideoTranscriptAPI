@@ -6,9 +6,11 @@ with tmp_path fixtures and no side effects.
 """
 import json
 import threading
+import time
 
 import pytest
 
+import src.video_transcript_api.cache.cache_manager as cache_manager_module
 from src.video_transcript_api.cache.cache_manager import CacheManager
 
 
@@ -596,6 +598,191 @@ class TestSaveLLMStatus:
             use_speaker_recognition=False, calibration_status="full",
         )
         assert ok is False
+
+    def test_concurrent_updates_to_different_fields_do_not_lose_either(
+        self, cm, cache_dir, monkeypatch
+    ):
+        """Regression for the cross-task read-modify-write race (codex-review R2):
+        two threads concurrently call save_llm_status for the SAME media, one
+        updating only calibration_status (e.g. a recalibrate task) and the
+        other updating only summary_status (e.g. a summary-backfill task).
+
+        Without a per-media lock, the read-merge-write is not atomic across
+        threads: both can read the same pre-update snapshot, then each writes
+        its own merge back, and whichever writes last silently reverts the
+        other's field to its pre-update value (a classic lost update).
+
+        To make the race deterministic instead of relying on timing luck, the
+        read step (json.load, used by both save_llm_status's own read and its
+        internal get_cache() call) is slowed down so both threads are
+        guaranteed to have read their snapshot before either writes back --
+        this is the worst-case interleaving the per-media lock must prevent.
+        With the lock, the second thread's critical section cannot start
+        until the first's read-modify-write has fully completed, so its read
+        always observes the first thread's write and neither field is lost.
+        """
+        _save_sample_capswriter(cm)
+        # Seed a baseline file so both threads' reads hit an *existing*
+        # llm_status.json (the slow-read hook only fires on json.load, which
+        # is only invoked when there is a file to parse).
+        cm.save_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            calibration_status="none",
+        )
+
+        original_load = json.load
+
+        def slow_load(*args, **kwargs):
+            result = original_load(*args, **kwargs)
+            time.sleep(0.05)
+            return result
+
+        monkeypatch.setattr(cache_manager_module.json, "load", slow_load)
+
+        barrier = threading.Barrier(2)
+        errors = []
+
+        def update_calibration():
+            try:
+                barrier.wait()
+                cm.save_llm_status(
+                    platform="youtube", media_id="vid1",
+                    use_speaker_recognition=False,
+                    calibration_status="full",
+                )
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+
+        def update_summary():
+            try:
+                barrier.wait()
+                cm.save_llm_status(
+                    platform="youtube", media_id="vid1",
+                    use_speaker_recognition=False,
+                    summary_status="generated",
+                )
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=update_calibration),
+            threading.Thread(target=update_summary),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == [], f"Thread errors: {errors}"
+        files = list(cache_dir.rglob("llm_status.json"))
+        assert len(files) == 1
+        data = json.loads(files[0].read_text(encoding="utf-8"))
+        assert data["calibration_status"] == "full", (
+            "calibration_status lost to a concurrent write -- read-modify-write "
+            "was not serialized per (platform, media_id)"
+        )
+        assert data["summary_status"] == "generated", (
+            "summary_status lost to a concurrent write -- read-modify-write "
+            "was not serialized per (platform, media_id)"
+        )
+
+    def test_write_is_atomic_concurrent_readers_never_see_partial_json(
+        self, cm, cache_dir, monkeypatch
+    ):
+        """The write path must go through a temp-file-then-os.replace swap so
+        a concurrent reader polling llm_status.json during a write always sees
+        either the fully-old or fully-new content, never a truncated/empty
+        file. A direct `open(path, 'w')` truncates the file immediately (at
+        open time), so a slow writer leaves a 0-byte file on disk for the
+        entire write duration -- exactly the window this test probes by
+        slowing down json.dump and busy-polling the file from another thread.
+        """
+        _save_sample_capswriter(cm)
+        cm.save_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            calibration_status="none",
+        )
+        status_file = list(cache_dir.rglob("llm_status.json"))[0]
+
+        original_dump = json.dump
+
+        def slow_dump(*args, **kwargs):
+            result = original_dump(*args, **kwargs)
+            time.sleep(0.05)
+            return result
+
+        monkeypatch.setattr(cache_manager_module.json, "dump", slow_dump)
+
+        read_errors = []
+        stop = threading.Event()
+
+        def reader():
+            while not stop.is_set():
+                try:
+                    text = status_file.read_text(encoding="utf-8")
+                    json.loads(text)
+                except json.JSONDecodeError as exc:
+                    read_errors.append(str(exc) or "empty/partial content")
+                except FileNotFoundError:
+                    pass
+
+        reader_thread = threading.Thread(target=reader)
+        reader_thread.start()
+        try:
+            cm.save_llm_status(
+                platform="youtube", media_id="vid1", use_speaker_recognition=False,
+                calibration_status="full",
+            )
+        finally:
+            stop.set()
+            reader_thread.join()
+
+        assert read_errors == [], (
+            f"Concurrent reader observed truncated/partial JSON: {read_errors}"
+        )
+
+        # No leftover .tmp artifact after a successful atomic swap.
+        tmp_files = [
+            f for f in status_file.parent.iterdir()
+            if f.name.startswith("llm_status.json.tmp")
+        ]
+        assert tmp_files == []
+
+    def test_corrupted_status_file_does_not_crash_save(self, cm, cache_dir):
+        """save_llm_status's own read-merge-write must tolerate a corrupted
+        (e.g. truncated by a crash mid-write) existing llm_status.json by
+        treating it as empty and rewriting cleanly, rather than raising."""
+        _save_sample_capswriter(cm)
+        cm.save_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            calibration_status="full",
+        )
+        status_files = list(cache_dir.rglob("llm_status.json"))
+        status_files[0].write_text("{not valid json!!", encoding="utf-8")
+
+        ok = cm.save_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            summary_status="generated",
+        )
+        assert ok is True
+        data = json.loads(status_files[0].read_text(encoding="utf-8"))
+        assert data["summary_status"] == "generated"
+
+    def test_corrupted_status_file_does_not_crash_get_cache(self, cm, cache_dir):
+        """A hand-corrupted llm_status.json must not raise from get_cache;
+        downstream readers (e.g. _resolve_summary_state) see no llm_status key
+        and fall back to their legacy-compat inference instead of crashing."""
+        _save_sample_capswriter(cm)
+        cm.save_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            calibration_status="full", summary_status="generated",
+        )
+        status_files = list(cache_dir.rglob("llm_status.json"))
+        status_files[0].write_text("{not valid json!!", encoding="utf-8")
+
+        result = cm.get_cache(platform="youtube", media_id="vid1")
+        assert result is not None
+        assert "llm_status" not in result
 
 
 # ---------------------------------------------------------------------------

@@ -39,7 +39,14 @@ class CacheManager:
             
         # 使用线程本地存储来管理数据库连接
         self._local = threading.local()
-        
+
+        # 按 (platform, media_id) 粒度的进程内锁池，保护 llm_status.json 的
+        # 读-改-写不被跨任务并发踩踏（例如一个任务补校对、另一个任务补总结，
+        # 两者同时读-合并-写同一份 llm_status.json 时后写者会覆盖先写者字段）。
+        # 懒创建 + 用后即弹出，实现模式与 api/context.py 的 task_lock 池一致。
+        self._media_locks: Dict[str, threading.Lock] = {}
+        self._media_locks_guard = threading.Lock()
+
         # 初始化数据库
         self._init_database()
         
@@ -70,6 +77,35 @@ class CacheManager:
         finally:
             cursor.close()
             
+    @contextmanager
+    def _media_lock(self, platform: str, media_id: str):
+        """按 (platform, media_id) 粒度加锁的上下文管理器。
+
+        用于保护同一媒体的 llm_status.json 读-改-写不被并发任务踩踏——
+        task_lock（api/context.py）是按 task_id 加锁的，锁不住"两个不同
+        task_id、但操作同一份媒体缓存"这种跨任务场景（例如一个任务只补
+        校对、另一个任务只补总结，二者并发调用 save_llm_status 时若无锁，
+        读-改-写语义下后写者会用自己读到的旧快照覆盖先写者刚写入的字段）。
+
+        实现模式与 api/context.py 的 task_lock 完全一致：懒创建锁对象，
+        用守护锁保护锁字典本身的读写，释放后若锁已空闲则从字典弹出，
+        避免锁池随媒体数量无限增长。
+        """
+        key = f"{platform}:{media_id}"
+        with self._media_locks_guard:
+            lock = self._media_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._media_locks[key] = lock
+        lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
+            with self._media_locks_guard:
+                if not lock.locked():
+                    self._media_locks.pop(key, None)
+
     def _init_database(self):
         """初始化数据库表结构"""
         with self._get_cursor() as cursor:
@@ -592,39 +628,59 @@ class CacheManager:
             bool: 是否保存成功（找不到对应缓存记录时返回 False）
         """
         try:
-            cache_data = self.get_cache(platform, media_id, use_speaker_recognition=use_speaker_recognition)
-            if not cache_data:
-                logger.warning(f"未找到缓存记录，无法写入 llm_status.json: {platform}/{media_id}")
-                return False
+            # 全程持锁：同一媒体的读-改-写不能被另一个任务的并发调用打断，
+            # 否则两个任务各自读到旧快照后先后写回，后写者会用自己那份
+            # 缺字段的旧快照覆盖先写者刚合并进去的字段（见 _media_lock 文档）。
+            with self._media_lock(platform, media_id):
+                cache_data = self.get_cache(platform, media_id, use_speaker_recognition=use_speaker_recognition)
+                if not cache_data:
+                    logger.warning(f"未找到缓存记录，无法写入 llm_status.json: {platform}/{media_id}")
+                    return False
 
-            file_path = Path(cache_data['file_path'])
-            status_file = file_path / "llm_status.json"
+                file_path = Path(cache_data['file_path'])
+                status_file = file_path / "llm_status.json"
 
-            # 读取已有内容作为合并基础（不存在或损坏则视为空）
-            existing: Dict[str, Any] = {}
-            if status_file.exists():
+                # 读取已有内容作为合并基础（不存在或损坏则视为空）
+                existing: Dict[str, Any] = {}
+                if status_file.exists():
+                    try:
+                        with open(status_file, 'r', encoding='utf-8') as f:
+                            existing = json.load(f)
+                    except (OSError, json.JSONDecodeError) as read_exc:
+                        logger.warning(f"读取旧 llm_status.json 失败，将整份重写: {read_exc}")
+                        existing = {}
+
+                if calibration_status is not None:
+                    existing['calibration_status'] = calibration_status
+                if calibration_stats is not None:
+                    existing['calibration_stats'] = calibration_stats
+                if summary_status is not None:
+                    existing['summary_status'] = summary_status
+                existing['updated_at'] = datetime.datetime.now(datetime.timezone.utc).strftime(
+                    '%Y-%m-%d %H:%M:%S'
+                )
+
+                # 原子写入：先写同目录下的临时文件再 os.replace 原地替换，
+                # 避免并发读者（get_cache 等）在写入过程中读到半截 JSON。
+                # 临时文件名带 pid+线程 id，避免罕见的"锁已释放但旧临时文件
+                # 还未清理"场景下与其他写者相互冲突。
+                tmp_file = status_file.with_name(
+                    f"{status_file.name}.tmp{os.getpid()}_{threading.get_ident()}"
+                )
                 try:
-                    with open(status_file, 'r', encoding='utf-8') as f:
-                        existing = json.load(f)
-                except (OSError, json.JSONDecodeError) as read_exc:
-                    logger.warning(f"读取旧 llm_status.json 失败，将整份重写: {read_exc}")
-                    existing = {}
+                    with open(tmp_file, 'w', encoding='utf-8') as f:
+                        json.dump(existing, f, ensure_ascii=False, indent=2)
+                    os.replace(tmp_file, status_file)
+                except Exception:
+                    # 写入/替换失败时清理残留临时文件，不让半成品文件留在缓存目录里
+                    try:
+                        tmp_file.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    raise
 
-            if calibration_status is not None:
-                existing['calibration_status'] = calibration_status
-            if calibration_stats is not None:
-                existing['calibration_stats'] = calibration_stats
-            if summary_status is not None:
-                existing['summary_status'] = summary_status
-            existing['updated_at'] = datetime.datetime.now(datetime.timezone.utc).strftime(
-                '%Y-%m-%d %H:%M:%S'
-            )
-
-            with open(status_file, 'w', encoding='utf-8') as f:
-                json.dump(existing, f, ensure_ascii=False, indent=2)
-
-            logger.info(f"llm_status.json 已更新: {platform}/{media_id}")
-            return True
+                logger.info(f"llm_status.json 已更新: {platform}/{media_id}")
+                return True
 
         except Exception as e:
             logger.error(f"保存 llm_status.json 失败: {e}")
