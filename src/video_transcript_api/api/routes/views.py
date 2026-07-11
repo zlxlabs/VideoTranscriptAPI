@@ -22,6 +22,7 @@ from ...utils.rendering import (
     render_transcript_content,
 )
 from ...utils.timeutil import format_datetime_for_display
+from ...utils.llm_status import CalibrationStatus
 
 logger = get_logger()
 cache_manager = get_cache_manager()
@@ -826,6 +827,31 @@ async def export_content(view_token: str, export_type: str, request: Request):
         )
 
 
+def _derive_legacy_calibration_status(cal_stats: Dict[str, Any]) -> str:
+    """为没有 llm_status.json 的旧结构化缓存现算 calibration_status。
+
+    口径与 SpeakerAwareProcessor._calibrate_chunks 里写入的公式完全一致：
+    failed_count==0 且 fallback_count==0 → full；全部 chunk 都是 fallback/failed → none；
+    否则 partial。这里独立重算一次（而不是导入 processor），避免 API 路由层
+    反向依赖 llm 处理器内部实现，保持层次解耦。
+
+    Args:
+        cal_stats: llm_processed.json 里的 calibration_stats 字典（chunk 口径）
+
+    Returns:
+        CalibrationStatus 取值；字段缺失时保守返回 None 对应的空字符串场景由调用方处理
+    """
+    total = cal_stats.get("total_chunks", 0)
+    failed = cal_stats.get("failed_count", 0)
+    fallback = cal_stats.get("fallback_count", 0)
+
+    if failed == 0 and fallback == 0:
+        return CalibrationStatus.FULL
+    if total and (failed + fallback) == total:
+        return CalibrationStatus.NONE
+    return CalibrationStatus.PARTIAL
+
+
 def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     成功任务的视图准备：渲染 HTML、统计各阶段文本字数。
@@ -890,17 +916,37 @@ def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
             except Exception as exc:
                 logger.error(f"计算总结文本字数失败: {exc}")
 
-        # 4. 读取校准质量统计
-        processed_file = cache_dir_path / "llm_processed.json"
-        if processed_file.exists():
+        # 4. 读取校准质量统计（诚实状态模型）
+        # 优先读 llm_status.json：两条校对路径（纯文本/结构化）都会写这份文件，
+        # 统一提供 calibration_status + calibration_stats，模板据此渲染警告条。
+        # 旧任务（早于本功能上线，没有 llm_status.json）回退读 llm_processed.json——
+        # 但那只有结构化路径才有，且没有 calibration_status 字段，需要按同样的
+        # full/partial/none 口径现算一次，保证旧缓存的警告条不会突然消失。
+        status_file = cache_dir_path / "llm_status.json"
+        if status_file.exists():
             try:
-                with open(processed_file, "r", encoding="utf-8") as f:
-                    processed_data = json.load(f)
-                cal_stats = processed_data.get("calibration_stats")
+                with open(status_file, "r", encoding="utf-8") as f:
+                    status_data = json.load(f)
+                stats["calibration_status"] = status_data.get("calibration_status")
+                cal_stats = status_data.get("calibration_stats")
                 if cal_stats:
                     stats["calibration_stats"] = cal_stats
             except Exception as exc:
-                logger.error(f"读取校准统计失败: {exc}")
+                logger.error(f"读取 llm_status.json 失败: {exc}")
+        else:
+            processed_file = cache_dir_path / "llm_processed.json"
+            if processed_file.exists():
+                try:
+                    with open(processed_file, "r", encoding="utf-8") as f:
+                        processed_data = json.load(f)
+                    cal_stats = processed_data.get("calibration_stats")
+                    if cal_stats:
+                        stats["calibration_stats"] = cal_stats
+                        stats["calibration_status"] = cal_stats.get(
+                            "calibration_status"
+                        ) or _derive_legacy_calibration_status(cal_stats)
+                except Exception as exc:
+                    logger.error(f"读取校准统计失败: {exc}")
 
     # 简化渲染逻辑：直接调用 render_with_cache_analysis
     view_data["calibrated_html"] = render_calibrated_content_smart(cache_dir)
