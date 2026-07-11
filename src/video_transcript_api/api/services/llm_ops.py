@@ -546,8 +546,16 @@ def _save_llm_results(
         if not (calibrate_only and not summary_backfill) and not summarize_requested:
             summary_status = None if summary_exists_before else SummaryStatus.DISABLED
 
-        # 保存校对文本
-        if calibrate_success and not suppress_calibration:
+        # 保存校对文本：即便校对全降级为 NONE（诚实状态模型里"尝试但完全失败"），
+        # 处理器返回的 calibrated_text 仍是一份可用的兜底产物（分段/分块降级后的
+        # 格式化原文，见 plain_text_processor/speaker_aware_processor 的 fallback
+        # 分支），必须落盘——此前 calibrate_success=False 时整段跳过保存，导致
+        # 查看页只能 str() 原始 dict 展示，且相同请求会因为"缓存里没有
+        # llm_calibrated.txt"反复重跑 LLM（codex-review R4 #2）。calibration_status
+        # 仍如实记为 NONE（下面 save_llm_status 那行不变）——"产物已落盘"和
+        # "校对未成功"是两件事，不再互相矛盾。
+        calibrated_saved = not suppress_calibration
+        if calibrated_saved:
             cache_manager.save_llm_result(
                 platform=platform,
                 media_id=media_id,
@@ -555,16 +563,18 @@ def _save_llm_results(
                 llm_type="calibrated",
                 content=calibrated_text,
             )
-            logger.info(f"校对文本已保存到缓存: {task_id}")
-        elif suppress_calibration:
-            logger.info(f"校对层已存在且本轮未请求重新校对，跳过覆盖: {task_id}")
+            if calibrate_success:
+                logger.info(f"校对文本已保存到缓存: {task_id}")
+            else:
+                logger.warning(f"校对全部降级为原文，仍落盘兜底格式化文本: {task_id}")
         else:
-            logger.warning(f"校对失败，跳过保存校对文件: {task_id}")
+            logger.info(f"校对层已存在且本轮未请求重新校对，跳过覆盖: {task_id}")
 
         # 保存总结文本：按 summary_status 三态（+DISABLED/保留）分支（不再用
         # skip_summary/summary_success 二元判定——旧逻辑里 skip_summary 与
         # summary_success 永远互补，导致"文本过短"分支实际不可达，"生成失败"
         # 被悄悄吞掉，既不落盘校对文本兜底也不报错）
+        summary_saved = False
         if calibrate_only and not summary_backfill:
             logger.info(f"仅校对模式，保留原有总结文件: {task_id}")
         elif summary_status == SummaryStatus.GENERATED:
@@ -577,18 +587,23 @@ def _save_llm_results(
                     llm_type="summary",
                     content=summary_text,
                 )
+                summary_saved = True
             else:
                 logger.warning(f"总结状态为 generated 但文本为空，跳过保存: {task_id}")
         elif summary_status == SummaryStatus.SKIPPED_SHORT:
-            if calibrate_success:
-                logger.info(f"文本过短，保存校对文本作为总结: {task_id}")
-                cache_manager.save_llm_result(
-                    platform=platform,
-                    media_id=media_id,
-                    use_speaker_recognition=use_speaker_recognition,
-                    llm_type="summary",
-                    content=calibrated_text,
-                )
+            # 文本过短、用校对文本作为总结的兜底展示：与上面 calibrated_saved 同理，
+            # 即便校对全降级为 NONE，calibrated_text 也是可用的兜底格式化文本，
+            # 不再要求 calibrate_success——否则该组合下 llm_summary.txt 永久缺失，
+            # 复现同一类"产物缺失导致反复重跑"的问题（codex-review R4 #2 的自洽延伸）。
+            logger.info(f"文本过短，保存校对文本作为总结: {task_id}")
+            cache_manager.save_llm_result(
+                platform=platform,
+                media_id=media_id,
+                use_speaker_recognition=use_speaker_recognition,
+                llm_type="summary",
+                content=calibrated_text,
+            )
+            summary_saved = True
         elif summary_status == SummaryStatus.FAILED:
             # 关键修复：总结失败不再把校对文本复制成总结文件，避免"生成失败"被
             # 伪装成"文本过短"的正常路径（诚实状态模型的核心诉求）
@@ -601,6 +616,11 @@ def _save_llm_results(
             logger.warning(f"总结状态未知或仍在处理中({summary_status})，跳过保存总结文件: {task_id}")
 
         # 保存结构化数据（同样受校对层抑制保护，避免覆盖已有的真实说话人校对结果）。
+        # 不再要求 calibrate_success：校对全降级为 NONE 时，speaker_aware_processor
+        # 依然会返回一份 dict（chunk 级 fallback 把原文合并回 dialogs，见该处理器的
+        # _apply_structured_fallback），是与 calibrated_text 同等地位的兜底产物，
+        # 理应一并落盘（codex-review R4 #2），而不是随 calibrate_success=False 被
+        # 整体跳过。
         # structured_data 只有内容按"对话列表"路径（speaker_aware_processor）真实处理
         # 时才是 dict——一旦本轮走了纯文本路由（_prepare_llm_content 在
         # transcription_data 缺失/类型异常时会回退纯文本，例如 calibrate_only=True
@@ -612,7 +632,6 @@ def _save_llm_results(
         # "清空旧产物"）。
         if (
             use_speaker_recognition
-            and calibrate_success
             and not suppress_calibration
             and "structured_data" in result_dict
         ):
@@ -652,7 +671,10 @@ def _save_llm_results(
             summary_status=summary_status,
         )
 
-    if calibrate_success or summary_success:
+    # calibrated_saved 覆盖了"即便 calibrate_success=False（NONE 全降级）仍落盘
+    # 兜底文本"的新语义（codex-review R4 #2）——不能再单纯用 calibrate_success
+    # 判断"是否保存了任何文件"，否则 NONE 场景会被误报为"未保存任何结果文件"。
+    if calibrated_saved or summary_saved:
         logger.info(f"LLM结果已保存到缓存: {platform}/{media_id}")
     else:
         logger.warning(f"LLM处理全部失败，未保存任何结果文件: {task_id}")

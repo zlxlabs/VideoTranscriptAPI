@@ -550,10 +550,19 @@ def process_transcription(
             # 已完成的校对结果直接返回。summary 层没有这个问题：disabled/failed
             # 都不落盘 llm_summary.txt（见 llm_ops._save_llm_results），因此文件
             # 存在即代表该层已有确定性产物（generated 或 skipped_short）。
+            #
+            # NONE 与 disabled 同理需要排除（codex-review R4 #2）：全降级 NONE 现在
+            # 也会落盘一份兜底格式化文本（见 llm_ops._save_llm_results 的
+            # calibrated_saved），但那是"尝试但完全失败"的产物，不是真正完成的
+            # 校对结果——必须允许后续请求（或 /api/recalibrate）把它当作"缺失"
+            # 触发真实重试，而不是被当成已满足的层直接短路返回，否则一次失败会
+            # 永久锁死在失败状态。
             cached_llm_status = cache_data.get("llm_status") or {}
             cached_calibration_status = cached_llm_status.get("calibration_status")
             calibrated_layer_satisfied = (
-                has_llm_calibrated and cached_calibration_status != CalibrationStatus.DISABLED
+                has_llm_calibrated
+                and cached_calibration_status != CalibrationStatus.DISABLED
+                and cached_calibration_status != CalibrationStatus.NONE
             )
             need_calibrated = processing_options.get("calibrate", True) and not calibrated_layer_satisfied
             need_summary = processing_options.get("summarize", True) and not has_llm_summary
