@@ -192,12 +192,36 @@ def _handle_llm_task(llm_task: dict):
                     # _build_result_dict() 产出中恒定存在，这里用 setdefault 只是
                     # 防御测试/未来调用方传入不含 stats 键的精简 result_dict。
                     result_stats = result_dict.setdefault("stats", {})
-                    result_stats["calibration_status"] = effective_status.get(
-                        "calibration_status"
-                    )
-                    result_stats["summary_status"] = effective_status.get(
-                        "summary_status"
-                    )
+                    calibration_status = effective_status.get("calibration_status")
+                    summary_status = effective_status.get("summary_status")
+
+                    # effective_status 里某一层为 None 表示"本轮未触碰该层，
+                    # llm_status.json 按合并语义原样保留旧值"（见 _save_llm_results
+                    # 文档）——但 task_status 表这一行是本次请求刚创建的全新任务行
+                    # （create_task 建表时 calibration_status/summary_status 即为
+                    # NULL），不像 llm_status.json 那样有"旧值"可保留：直接把 None
+                    # 传给 update_task_status 只会被它自身的 `is not None` 判断
+                    # 跳过更新，导致该列永久留空，与缓存里的真实状态不符（历史 API
+                    # 因此会返回 calibration_status: null）。
+                    # 修复：某一层为 None 时，从刚写盘的 llm_status.json（本轮
+                    # _save_llm_results 内部已调用 save_llm_status 完成合并）里
+                    # 把"未触碰层"的合并后真实状态读回来，保证任务行与缓存一致。
+                    if (
+                        (calibration_status is None or summary_status is None)
+                        and platform and media_id
+                    ):
+                        merged_snapshot = cache_manager.get_cache(
+                            platform, media_id,
+                            use_speaker_recognition=use_speaker_recognition,
+                        )
+                        merged_llm_status = (merged_snapshot or {}).get("llm_status") or {}
+                        if calibration_status is None:
+                            calibration_status = merged_llm_status.get("calibration_status")
+                        if summary_status is None:
+                            summary_status = merged_llm_status.get("summary_status")
+
+                    result_stats["calibration_status"] = calibration_status
+                    result_stats["summary_status"] = summary_status
 
                 # 发送通知（多渠道）
                 if not calibrate_only:
