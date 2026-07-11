@@ -120,6 +120,55 @@ class TestLLMConfigFromDict:
         assert config.concurrent_workers == 10
 
 
+class TestLLMConfigSpeakerInference:
+    """Test speaker_inference sub-config parsing (per-speaker sampling + confidence gate)."""
+
+    def test_defaults_when_section_missing(self):
+        """No speaker_inference section -> falls back to documented defaults."""
+        config_dict = {
+            "llm": {
+                "api_key": "k", "base_url": "u",
+                "calibrate_model": "m", "summary_model": "s",
+            }
+        }
+        config = LLMConfig.from_dict(config_dict)
+        assert config.speaker_samples_per_speaker == 3
+        assert config.speaker_max_chars_per_speaker == 400
+        assert config.speaker_context_dialogs == 2
+        assert config.speaker_confidence_threshold == 0.6
+
+    def test_explicit_overrides_are_parsed(self):
+        """Explicit speaker_inference values in config dict must override defaults."""
+        config_dict = {
+            "llm": {
+                "api_key": "k", "base_url": "u",
+                "calibrate_model": "m", "summary_model": "s",
+                "speaker_inference": {
+                    "samples_per_speaker": 5,
+                    "max_chars_per_speaker": 600,
+                    "context_dialogs": 4,
+                    "confidence_threshold": 0.75,
+                },
+            }
+        }
+        config = LLMConfig.from_dict(config_dict)
+        assert config.speaker_samples_per_speaker == 5
+        assert config.speaker_max_chars_per_speaker == 600
+        assert config.speaker_context_dialogs == 4
+        assert config.speaker_confidence_threshold == 0.75
+
+    def test_dataclass_defaults_match_from_dict_defaults(self):
+        """Constructing LLMConfig directly (no from_dict) must use the same defaults."""
+        config = LLMConfig(
+            api_key="k", base_url="u",
+            calibrate_model="m", summary_model="s",
+        )
+        assert config.speaker_samples_per_speaker == 3
+        assert config.speaker_max_chars_per_speaker == 400
+        assert config.speaker_context_dialogs == 2
+        assert config.speaker_confidence_threshold == 0.6
+
+
 class TestLLMConfigGetModels:
     """Test get_models method."""
 
