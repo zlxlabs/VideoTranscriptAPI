@@ -406,6 +406,25 @@ class TestHistoryEndpoint:
         assert item["calibration_status"] is None
         assert item["summary_status"] is None
 
+    def test_disabled_status_values_pass_through_without_error(self, history_client):
+        """The per-task processing-depth feature introduces a new 'disabled'
+        value for both columns (user explicitly turned off calibrate/summarize).
+        The history endpoint must surface it as a plain string like any other
+        status, not choke on an unrecognized value."""
+        client, setup = history_client
+        al = setup["audit_logger"]
+        insert = setup["insert_task"]
+
+        _log(al, "task-disabled")
+        insert("task-disabled", "vt-disabled", calibration_status="disabled",
+               summary_status="disabled")
+
+        resp = client.get("/api/audit/history")
+        assert resp.status_code == 200
+        item = next(i for i in resp.json()["data"]["items"] if i["task_id"] == "task-disabled")
+        assert item["calibration_status"] == "disabled"
+        assert item["summary_status"] == "disabled"
+
     def test_api_key_masked_in_response(self, history_client):
         """Response data should include api_key_masked for localStorage key construction."""
         client, setup = history_client

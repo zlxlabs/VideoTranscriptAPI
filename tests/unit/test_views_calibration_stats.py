@@ -86,6 +86,29 @@ class TestPrepareSuccessViewCalibrationStatus:
         assert stats["calibration_stats"]["total_chunks"] == 4
         assert stats["calibration_status"] == CalibrationStatus.PARTIAL
 
+    def test_reads_disabled_calibration_status_from_llm_status_json(self, tmp_path):
+        """calibration_status=disabled (processing_options.calibrate=False) must
+        pass through like any other status value -- the warning banner template
+        branch treats it specially, but the data-sourcing layer here is agnostic."""
+        (tmp_path / "transcript_capswriter.txt").write_text("original text", encoding="utf-8")
+        (tmp_path / "llm_calibrated.txt").write_text("formatted passthrough text", encoding="utf-8")
+        (tmp_path / "llm_status.json").write_text(
+            json.dumps({
+                "calibration_status": "disabled",
+                "calibration_stats": {
+                    "total_segments": 0, "calibrated_segments": 0,
+                    "fallback_segments": 0, "low_quality_segments": 0,
+                },
+                "summary_status": "disabled",
+                "updated_at": "2026-01-01 00:00:00",
+            }),
+            encoding="utf-8",
+        )
+
+        stats = _prepare_success_view({"cache_dir": str(tmp_path), "summary": None})
+
+        assert stats["calibration_status"] == CalibrationStatus.DISABLED
+
     def test_no_status_files_at_all_omits_calibration_status(self, tmp_path):
         """Very old plain-text caches with neither file: no crash, no fabricated warning."""
         (tmp_path / "transcript_capswriter.txt").write_text("original text", encoding="utf-8")
