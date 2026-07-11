@@ -716,3 +716,52 @@ class TestSaveLLMResultsLayeredCacheSuppression:
 
         mock_cm.get_cache.assert_not_called()
         assert len(self._calibrated_calls(mock_cm)) == 1
+
+    def test_structured_data_none_does_not_crash_when_not_suppressed(self, monkeypatch):
+        """codex-review R4 #1: structured_data can legitimately be None when
+        this round routes through the plain-text path (_prepare_llm_content
+        falls back to str whenever transcription_data is missing/malformed,
+        e.g. calibrate_only=True recalibrate on a funasr task whose cached
+        transcript_data isn't the expected dict/list shape) while
+        use_speaker_recognition stays True and suppress_calibration is False
+        (calibrate_only always defaults processing_options to calibrate=True,
+        which unconditionally bypasses suppression -- see
+        test_recalibrate_bypasses_suppression_even_if_layer_exists above).
+        The old code did `structured_data["calibration_stats"] = ...`
+        unconditionally whenever the "structured_data" key was present,
+        crashing with TypeError on None and marking an otherwise-successful
+        task as failed. Must instead skip the structured-data save (leaving
+        whatever already exists in the cache untouched) without raising."""
+        mock_cm = self._patch_cache_manager(monkeypatch)
+
+        result = _save_llm_results(
+            task_id="t7",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=True,
+            result_dict={
+                "校对文本": "calibrated body from the plain-text fallback route",
+                "内容总结": "fresh summary",
+                "skip_summary": False,
+                "summary_status": SummaryStatus.GENERATED,
+                "stats": {
+                    "calibration_status": CalibrationStatus.DISABLED,
+                    "calibration_stats": {"total_segments": 0},
+                },
+                "models_used": {},
+                "calibrate_success": True,
+                "summary_success": True,
+                "structured_data": None,
+            },
+            calibrate_only=True,
+            summary_backfill=True,
+            # processing_options omitted -> defaults to calibrate=True,
+            # matching the real recalibrate call site (suppression bypassed).
+        )
+
+        structured_calls = [
+            c for c in mock_cm.save_llm_result.call_args_list
+            if c.kwargs.get("llm_type") == "structured"
+        ]
+        assert structured_calls == []
+        assert result["calibration_status"] == CalibrationStatus.DISABLED
