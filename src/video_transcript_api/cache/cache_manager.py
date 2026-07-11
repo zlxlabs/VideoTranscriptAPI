@@ -677,11 +677,58 @@ class CacheManager:
                 deleted_count = len(records_to_delete)
                 logger.info(f"清理了 {deleted_count} 条旧缓存记录")
                 return deleted_count
-                
+
         except Exception as e:
             logger.error(f"清理缓存失败: {e}")
             return 0
-            
+
+    def cleanup_task_status(self, retention_days: int) -> int:
+        """
+        清理过期的终态任务状态记录（task_status 表）
+
+        仅删除已进入终态（success/failed）且完成时间早于保留期的记录；
+        非终态任务（queued/processing/calibrating）一律保留，避免误删仍在
+        处理中、或崩溃后等待启动恢复扫描（recover_orphaned_tasks）的任务。
+
+        时间比较基准优先取 completed_at，若为历史遗留的 NULL（理论上
+        update_task_status/recover_orphaned_tasks 在把状态写为终态的同一
+        条 UPDATE 里必定同步写 completed_at = CURRENT_TIMESTAMP，此处仅作
+        防御性兜底）则回退 created_at，避免这类边缘记录永远无法被回收。
+        task_status 的 created_at/completed_at 均由 SQLite 的
+        `CURRENT_TIMESTAMP` 写入，固定为 UTC、无时区后缀的
+        "YYYY-MM-DD HH:MM:SS" 格式；这里用同样格式生成 cutoff 字符串参与
+        比较，避免依赖 sqlite3 模块的隐式 datetime adapter（该 adapter 从
+        Python 3.12 起已弃用），做法与 AuditLogger.cleanup_old_logs 一致。
+
+        Args:
+            retention_days: 保留天数，早于 (当前 UTC 时间 - retention_days) 的
+                终态记录会被删除
+
+        Returns:
+            int: 实际删除的记录数
+        """
+        try:
+            cutoff = (
+                datetime.datetime.now(datetime.timezone.utc)
+                - datetime.timedelta(days=retention_days)
+            ).strftime('%Y-%m-%d %H:%M:%S')
+
+            with self._get_cursor() as cursor:
+                cursor.execute('''
+                    DELETE FROM task_status
+                    WHERE status IN (?, ?)
+                      AND COALESCE(completed_at, created_at) < ?
+                ''', (TaskStatus.SUCCESS, TaskStatus.FAILED, cutoff))
+
+                deleted_count = cursor.rowcount
+
+            logger.info(f"清理了 {deleted_count} 条超过 {retention_days} 天的终态任务状态记录")
+            return deleted_count
+
+        except Exception as e:
+            logger.error(f"清理任务状态记录失败: {e}")
+            return 0
+
     def close(self):
         """关闭数据库连接"""
         if hasattr(self._local, 'connection'):
