@@ -56,7 +56,7 @@ class TestMediaLockPoolLifecycle:
         c_may_exit = threading.Event()
 
         def thread_a():
-            with cm._media_lock(key_platform, key_media_id):
+            with cm.media_lock(key_platform, key_media_id):
                 a_holds.set()
                 assert a_may_release.wait(timeout=2), "test setup timed out waiting to release A"
             a_released.set()
@@ -64,16 +64,16 @@ class TestMediaLockPoolLifecycle:
         def thread_b():
             # Signal readiness right before entering the context manager so
             # the main thread knows B is about to hit the (blocking, since A
-            # still holds the lock) acquire() call inside _media_lock().
+            # still holds the lock) acquire() call inside media_lock().
             b_ready.set()
-            with cm._media_lock(key_platform, key_media_id):
+            with cm.media_lock(key_platform, key_media_id):
                 log("B_enter")
                 assert b_may_exit.wait(timeout=2), "test setup timed out waiting to release B"
                 log("B_exit")
 
         def thread_c():
             assert c_may_start.wait(timeout=2), "C never got the start signal"
-            with cm._media_lock(key_platform, key_media_id):
+            with cm.media_lock(key_platform, key_media_id):
                 log("C_enter")
                 assert c_may_exit.wait(timeout=2), "test setup timed out waiting to release C"
                 log("C_exit")
@@ -88,7 +88,7 @@ class TestMediaLockPoolLifecycle:
         t_b.start()
         assert b_ready.wait(timeout=2), "B never started"
         # Generous margin for B to reach the blocking acquire() call inside
-        # _media_lock() while A still holds the lock (A has not released yet).
+        # media_lock() while A still holds the lock (A has not released yet).
         time.sleep(0.05)
 
         # Let A release and run its pop-check. This is the exact window the
@@ -139,7 +139,7 @@ class TestMediaLockPoolLifecycle:
         be removed (no unbounded growth as media keys accumulate)."""
         key_platform, key_media_id = "youtube", "vidCleanup"
 
-        with cm._media_lock(key_platform, key_media_id):
+        with cm.media_lock(key_platform, key_media_id):
             pass
 
         key = f"{key_platform}:{key_media_id}"
