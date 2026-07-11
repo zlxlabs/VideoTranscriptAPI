@@ -7,6 +7,7 @@ from video_transcript_api.llm.processors.speaker_aware_processor import (
 )
 from video_transcript_api.llm.core.config import LLMConfig
 from video_transcript_api.llm.core.key_info_extractor import KeyInfo
+from video_transcript_api.utils.llm_status import CalibrationStatus
 
 
 def _make_chunk(n_dialogs=3):
@@ -92,6 +93,7 @@ class TestCalibrationStats(unittest.TestCase):
         self.assertEqual(cal_stats["success_count"], 2)
         self.assertEqual(cal_stats["fallback_count"], 0)
         self.assertEqual(cal_stats["failed_count"], 0)
+        self.assertEqual(cal_stats["calibration_status"], CalibrationStatus.FULL)
 
     def test_all_chunks_fail(self):
         """When LLM raises exception for all chunks, stats show all failed."""
@@ -122,6 +124,7 @@ class TestCalibrationStats(unittest.TestCase):
         self.assertEqual(cal_stats["total_chunks"], 3)
         self.assertEqual(cal_stats["success_count"], 0)
         self.assertEqual(cal_stats["failed_count"], 3)
+        self.assertEqual(cal_stats["calibration_status"], CalibrationStatus.NONE)
 
     def test_mixed_success_and_failure(self):
         """Some chunks succeed, some fail."""
@@ -161,6 +164,7 @@ class TestCalibrationStats(unittest.TestCase):
         self.assertEqual(cal_stats["total_chunks"], 2)
         self.assertEqual(cal_stats["success_count"], 1)
         self.assertEqual(cal_stats["failed_count"], 1)
+        self.assertEqual(cal_stats["calibration_status"], CalibrationStatus.PARTIAL)
 
     def test_partial_coverage_keeps_applied_corrections(self):
         """REGRESSION: when the LLM returns corrections for only some ids,
@@ -205,6 +209,13 @@ class TestCalibrationStats(unittest.TestCase):
         self.assertEqual(texts[1], "dialog 1")
         self.assertEqual(cal_stats["dialog_counts"]["applied"], 1)
         self.assertEqual(cal_stats["dialog_counts"]["kept_original"], 2)
+        # calibration_status formula only looks at failed_count/fallback_count;
+        # partial_count alone (low coverage but still applied, not discarded)
+        # does NOT disqualify from FULL, since every chunk kept real LLM output.
+        self.assertEqual(cal_stats["partial_count"], 1)
+        self.assertEqual(cal_stats["fallback_count"], 0)
+        self.assertEqual(cal_stats["failed_count"], 0)
+        self.assertEqual(cal_stats["calibration_status"], CalibrationStatus.FULL)
 
 
 if __name__ == "__main__":

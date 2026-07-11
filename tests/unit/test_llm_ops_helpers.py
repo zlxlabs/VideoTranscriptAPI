@@ -12,12 +12,16 @@ All console output must be in English only (no emoji, no Chinese).
 """
 
 import pytest
+from unittest.mock import MagicMock
+
 from video_transcript_api.api.services.llm_ops import (
     _prepare_llm_content,
     _build_result_dict,
     _build_calibration_warning,
     _should_backfill_summary,
+    _save_llm_results,
 )
+from video_transcript_api.utils.llm_status import CalibrationStatus, SummaryStatus
 
 
 class TestPrepareLLMContent:
@@ -110,6 +114,41 @@ class TestBuildResultDict:
         result = _build_result_dict(coordinator_result)
         assert result["structured_data"] == {"key": "value"}
 
+    def test_calibration_status_none_marks_calibrate_failure(self):
+        """calibrate_success is now derived from calibration_status: when the
+        whole calibration degraded to raw fallback (NONE), it must be False
+        instead of the old hardcoded True."""
+        coordinator_result = {
+            "calibrated_text": "raw fallback text",
+            "summary_text": "summary",
+            "stats": {"calibration_status": CalibrationStatus.NONE},
+            "models_used": {},
+        }
+        result = _build_result_dict(coordinator_result)
+        assert result["calibrate_success"] is False
+
+    def test_calibration_status_partial_still_counts_as_success(self):
+        """PARTIAL still means some real calibration happened -> calibrate_success stays True."""
+        coordinator_result = {
+            "calibrated_text": "partially calibrated text",
+            "summary_text": "summary",
+            "stats": {"calibration_status": CalibrationStatus.PARTIAL},
+            "models_used": {},
+        }
+        result = _build_result_dict(coordinator_result)
+        assert result["calibrate_success"] is True
+
+    def test_summary_status_passed_through(self):
+        """summary_status from coordinator stats must be surfaced on the result dict."""
+        coordinator_result = {
+            "calibrated_text": "cal",
+            "summary_text": None,
+            "stats": {"summary_status": SummaryStatus.FAILED},
+            "models_used": {},
+        }
+        result = _build_result_dict(coordinator_result)
+        assert result["summary_status"] == SummaryStatus.FAILED
+
 
 class TestBuildCalibrationWarning:
     """Test _build_calibration_warning."""
@@ -157,6 +196,47 @@ class TestBuildCalibrationWarning:
         assert "3/5" in warning
         assert "1" in warning  # fallback count
 
+    def test_plain_text_shape_all_success(self):
+        """Plain-text (segment-shaped) stats: all calibrated -> no warning."""
+        stats = {
+            "calibration_stats": {
+                "total_segments": 4,
+                "calibrated_segments": 4,
+                "fallback_segments": 0,
+                "low_quality_segments": 0,
+            }
+        }
+        assert _build_calibration_warning(stats) == ""
+
+    def test_plain_text_shape_total_failure(self):
+        """Plain-text shape: every segment fell back to raw original -> total failure warning."""
+        stats = {
+            "calibration_stats": {
+                "total_segments": 3,
+                "calibrated_segments": 0,
+                "fallback_segments": 3,
+                "low_quality_segments": 0,
+            }
+        }
+        warning = _build_calibration_warning(stats)
+        assert "完全失败" in warning
+
+    def test_plain_text_shape_partial_with_low_quality(self):
+        """Plain-text shape: a low_quality segment must still surface a warning
+        (this is exactly the visibility gap the honest status model fixes --
+        the plain-text path used to have NO calibration_stats at all)."""
+        stats = {
+            "calibration_stats": {
+                "total_segments": 4,
+                "calibrated_segments": 4,
+                "fallback_segments": 0,
+                "low_quality_segments": 1,
+            }
+        }
+        warning = _build_calibration_warning(stats)
+        assert warning != ""
+        assert "4/4" in warning
+
 
 class TestShouldBackfillSummary:
     """Test _should_backfill_summary helper.
@@ -193,3 +273,205 @@ class TestShouldBackfillSummary:
         """Cache data without file_path cannot be inspected; be conservative."""
         assert _should_backfill_summary({}, calibrate_only=True) is False
         assert _should_backfill_summary({"file_path": None}, calibrate_only=True) is False
+
+
+class TestSaveLLMResultsSummaryStatus:
+    """Test _save_llm_results branching on the new summary_status three-state model.
+
+    Regression coverage for the root-cause bug: the old code derived
+    skip_summary and summary_success as exact complements of each other
+    (both from `summary_text is None`), so the "text too short -> save
+    calibrated text as a stand-in summary" branch was dead code in every real
+    coordinator-driven call (skip_summary=True always implied
+    summary_success=False, so the `elif summary_success:` gate never let
+    execution reach it). That's the actual mechanism behind the permanent
+    "总结处理中..." placeholder: llm_summary.txt was simply never written for
+    short texts.
+    """
+
+    def _patch_cache_manager(self, monkeypatch):
+        from video_transcript_api.api.services import llm_ops
+
+        mock_cm = MagicMock()
+        monkeypatch.setattr(llm_ops, "cache_manager", mock_cm)
+        return mock_cm
+
+    def _summary_calls(self, mock_cm):
+        return [
+            c for c in mock_cm.save_llm_result.call_args_list
+            if c.kwargs.get("llm_type") == "summary"
+        ]
+
+    def test_legacy_skip_summary_flag_saves_calibrated_text_as_summary(self, monkeypatch):
+        """Regression test for the dead-code bug: a legacy caller (no
+        summary_status key) with skip_summary=True/summary_success=False must
+        still write the calibrated text as a stand-in summary."""
+        mock_cm = self._patch_cache_manager(monkeypatch)
+
+        _save_llm_results(
+            task_id="legacy1",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict={
+                "校对文本": "calibrated body",
+                "内容总结": None,
+                "skip_summary": True,
+                "stats": {},
+                "models_used": {},
+                "calibrate_success": True,
+                "summary_success": False,
+            },
+            calibrate_only=False,
+            summary_backfill=False,
+        )
+
+        summary_calls = self._summary_calls(mock_cm)
+        assert len(summary_calls) == 1
+        assert summary_calls[0].kwargs["content"] == "calibrated body"
+
+    def test_summary_status_failed_does_not_copy_calibrated_text(self, monkeypatch):
+        """status=failed must NOT fabricate a summary file from the calibrated
+        text -- that's exactly the honesty violation being fixed."""
+        mock_cm = self._patch_cache_manager(monkeypatch)
+
+        _save_llm_results(
+            task_id="fail1",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict={
+                "校对文本": "calibrated body",
+                "内容总结": None,
+                "skip_summary": True,
+                "summary_status": SummaryStatus.FAILED,
+                "stats": {},
+                "models_used": {},
+                "calibrate_success": True,
+                "summary_success": False,
+            },
+            calibrate_only=False,
+            summary_backfill=False,
+        )
+
+        assert self._summary_calls(mock_cm) == []
+
+    def test_summary_status_skipped_short_saves_calibrated_text(self, monkeypatch):
+        """status=skipped_short keeps the existing behavior: calibrated text
+        stands in for the summary."""
+        mock_cm = self._patch_cache_manager(monkeypatch)
+
+        _save_llm_results(
+            task_id="skip1",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict={
+                "校对文本": "calibrated body",
+                "内容总结": None,
+                "skip_summary": True,
+                "summary_status": SummaryStatus.SKIPPED_SHORT,
+                "stats": {},
+                "models_used": {},
+                "calibrate_success": True,
+                "summary_success": False,
+            },
+            calibrate_only=False,
+            summary_backfill=False,
+        )
+
+        summary_calls = self._summary_calls(mock_cm)
+        assert len(summary_calls) == 1
+        assert summary_calls[0].kwargs["content"] == "calibrated body"
+
+    def test_summary_status_generated_saves_real_summary(self, monkeypatch):
+        mock_cm = self._patch_cache_manager(monkeypatch)
+
+        _save_llm_results(
+            task_id="gen1",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict={
+                "校对文本": "calibrated body",
+                "内容总结": "a real summary",
+                "skip_summary": False,
+                "summary_status": SummaryStatus.GENERATED,
+                "stats": {},
+                "models_used": {},
+                "calibrate_success": True,
+                "summary_success": True,
+            },
+            calibrate_only=False,
+            summary_backfill=False,
+        )
+
+        summary_calls = self._summary_calls(mock_cm)
+        assert len(summary_calls) == 1
+        assert summary_calls[0].kwargs["content"] == "a real summary"
+
+    def test_writes_llm_status_json_via_save_llm_status(self, monkeypatch):
+        """_save_llm_results must call cache_manager.save_llm_status with the
+        calibration/summary status extracted from stats, on every save (both
+        processing paths)."""
+        mock_cm = self._patch_cache_manager(monkeypatch)
+
+        _save_llm_results(
+            task_id="status1",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict={
+                "校对文本": "calibrated body",
+                "内容总结": "a real summary",
+                "skip_summary": False,
+                "summary_status": SummaryStatus.GENERATED,
+                "stats": {
+                    "calibration_status": CalibrationStatus.FULL,
+                    "calibration_stats": {"total_segments": 2},
+                },
+                "models_used": {},
+                "calibrate_success": True,
+                "summary_success": True,
+            },
+            calibrate_only=False,
+            summary_backfill=False,
+        )
+
+        mock_cm.save_llm_status.assert_called_once()
+        call_kwargs = mock_cm.save_llm_status.call_args.kwargs
+        assert call_kwargs["calibration_status"] == CalibrationStatus.FULL
+        assert call_kwargs["calibration_stats"] == {"total_segments": 2}
+        assert call_kwargs["summary_status"] == SummaryStatus.GENERATED
+
+    def test_calibrate_only_no_backfill_passes_none_summary_status_to_preserve(self, monkeypatch):
+        """When calibrate_only=True and no backfill, the coordinator's
+        summary_status is None ("not attempted this round"). That None must
+        reach save_llm_status unchanged so its merge semantics preserve the
+        prior summary_status instead of erasing it."""
+        mock_cm = self._patch_cache_manager(monkeypatch)
+
+        _save_llm_results(
+            task_id="preserve1",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict={
+                "校对文本": "recalibrated body",
+                "内容总结": None,
+                "skip_summary": True,
+                "summary_status": None,  # explicit: coordinator did not attempt summary
+                "stats": {"calibration_status": CalibrationStatus.FULL},
+                "models_used": {},
+                "calibrate_success": True,
+                "summary_success": False,
+            },
+            calibrate_only=True,
+            summary_backfill=False,
+        )
+
+        # Calibrate-only, no backfill: summary file itself is untouched...
+        assert self._summary_calls(mock_cm) == []
+        # ...and the status file write must pass summary_status=None (preserve, not erase).
+        mock_cm.save_llm_status.assert_called_once()
+        assert mock_cm.save_llm_status.call_args.kwargs["summary_status"] is None

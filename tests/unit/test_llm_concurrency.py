@@ -44,6 +44,19 @@ class _DummyCacheManager:
     def update_task_llm_config(self, task_id, models_used):
         pass
 
+    def save_llm_status(self, *, platform, media_id, use_speaker_recognition,
+                         calibration_status=None, calibration_stats=None,
+                         summary_status=None):
+        """No-op stand-in for the honest-status-model llm_status.json writer.
+
+        Intentionally does NOT append to self.saved (that list is asserted
+        against as "2 tasks x 2 results each" -- calibrated + summary text).
+        """
+        return True
+
+    def update_task_status(self, task_id, status, **kwargs):
+        pass
+
 
 class _DummyNotifier:
     def __init__(self, webhook=None):
@@ -109,7 +122,13 @@ def test_llm_tasks_run_concurrently(monkeypatch, patched_llm_environment):
         return {
             "calibrated_text": f"calibrated-{task_title}",
             "summary_text": f"summary-{task_title}",
-            "stats": {"original_length": 10, "calibrated_length": 8, "summary_length": 5},
+            # summary_status must mirror the fact that a real summary_text was
+            # produced -- this mock stands in for LLMCoordinator.process(),
+            # which always sets stats.summary_status alongside summary_text.
+            "stats": {
+                "original_length": 10, "calibrated_length": 8, "summary_length": 5,
+                "calibration_status": "full", "summary_status": "generated",
+            },
             "models_used": {},
         }
 

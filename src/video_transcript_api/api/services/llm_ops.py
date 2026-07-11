@@ -32,6 +32,7 @@ from ...utils.notifications.channel import _clean_url, _apply_risk_control_safe
 from ...utils.rendering import get_base_url
 from ...utils.perf_tracker import PerfTracker
 from ...utils.task_status import TaskStatus
+from ...utils.llm_status import CalibrationStatus, SummaryStatus
 
 logger = get_logger()
 config = get_config()
@@ -180,7 +181,9 @@ def _handle_llm_task(llm_task: dict):
 
                 # LLM 阶段拥有终态：产物已通过 _save_llm_results 落盘，此时才置 success
                 # （对所有任务生效，不再仅限 calibrate_only；终态由本阶段统一写回）
+                # 同时把诚实状态模型镜像写入 task_status 表两列，供 /api/audit/history 查询消费。
                 done_message = "重新校对完成" if calibrate_only else "校对完成"
+                final_stats = result_dict.get("stats", {})
                 cache_manager.update_task_status(
                     task_id,
                     TaskStatus.SUCCESS,
@@ -188,6 +191,8 @@ def _handle_llm_task(llm_task: dict):
                     media_id=media_id,
                     title=video_title,
                     author=llm_task.get("author", ""),
+                    calibration_status=final_stats.get("calibration_status"),
+                    summary_status=final_stats.get("summary_status"),
                 )
                 logger.info(f"任务状态已更新为 success: {task_id} ({done_message})")
 
@@ -307,15 +312,25 @@ def _build_result_dict(coordinator_result: dict) -> dict:
     calibrated_text = coordinator_result.get("calibrated_text", "")
     summary_text = coordinator_result.get("summary_text")
     should_skip_summary = summary_text is None
+    stats = coordinator_result.get("stats", {})
+
+    # calibrate_success 改为派生值（不再硬编码 True）：只有当校对"诚实状态"为
+    # NONE（全部内容都降级为原文，LLM 校对完全失败）时才视为失败。
+    # calibration_status 缺失（旧/未接入的调用方）时保守视为成功，保持历史行为。
+    calibration_status = stats.get("calibration_status")
+    calibrate_success = calibration_status != CalibrationStatus.NONE
 
     result_dict = {
         "校对文本": calibrated_text,
         "内容总结": summary_text,
         "skip_summary": should_skip_summary,
-        "stats": coordinator_result.get("stats", {}),
+        "stats": stats,
         "models_used": coordinator_result.get("models_used", {}),
-        "calibrate_success": True,
+        "calibrate_success": calibrate_success,
         "summary_success": summary_text is not None,
+        # summary_status 为 None 表示协调器本轮未尝试生成总结（calibrate_only 且
+        # 未触发 backfill），_save_llm_results 会据此保留上一轮已落盘的状态，不误覆盖。
+        "summary_status": stats.get("summary_status"),
     }
 
     if "structured_data" in coordinator_result:
@@ -383,6 +398,23 @@ def _save_llm_results(
     calibrate_success = result_dict.get("calibrate_success", True)
     summary_success = result_dict.get("summary_success", True)
 
+    # summary_status："诚实状态模型"三态 + None（"本轮未尝试"）。
+    # 用 sentinel 区分"调用方没传这个键"（旧/手工构造的 result_dict，例如
+    # test_recalibrate.py 里手工拼的 dict）和"调用方传了 None"（协调器在
+    # calibrate_only 且未 backfill 时显式给出的"本轮未尝试生成总结"信号）——
+    # 二者语义完全不同，前者要从旧的 skip_summary/summary_success 派生等价状态
+    # 以保持向后兼容；后者必须原样保留 None，交给下面的 save_llm_status 走
+    # "不覆盖旧值"的合并语义，否则会把已有的 GENERATED 状态误伪装成新状态。
+    _MISSING = object()
+    summary_status = result_dict.get("summary_status", _MISSING)
+    if summary_status is _MISSING:
+        if skip_summary:
+            summary_status = SummaryStatus.SKIPPED_SHORT
+        elif summary_success:
+            summary_status = SummaryStatus.GENERATED
+        else:
+            summary_status = SummaryStatus.FAILED
+
     # 保存 LLM 模型配置到数据库
     if models_used:
         cache_manager.update_task_llm_config(task_id, models_used)
@@ -406,34 +438,39 @@ def _save_llm_results(
     else:
         logger.warning(f"校对失败，跳过保存校对文件: {task_id}")
 
-    # 保存总结文本
+    # 保存总结文本：按 summary_status 三态分支（不再用 skip_summary/summary_success
+    # 二元判定——旧逻辑里 skip_summary 与 summary_success 永远互补，导致"文本过短"
+    # 分支实际不可达，"生成失败"被悄悄吞掉，既不落盘校对文本兜底也不报错）
     if calibrate_only and not summary_backfill:
         logger.info(f"仅校对模式，保留原有总结文件: {task_id}")
-    elif summary_success:
-        if skip_summary:
-            if calibrate_success:
-                logger.info(f"文本过短，保存校对文本作为总结: {task_id}")
-                cache_manager.save_llm_result(
-                    platform=platform,
-                    media_id=media_id,
-                    use_speaker_recognition=use_speaker_recognition,
-                    llm_type="summary",
-                    content=calibrated_text,
-                )
+    elif summary_status == SummaryStatus.GENERATED:
+        if summary_text is not None:
+            logger.info(f"保存LLM总结到缓存: {task_id}")
+            cache_manager.save_llm_result(
+                platform=platform,
+                media_id=media_id,
+                use_speaker_recognition=use_speaker_recognition,
+                llm_type="summary",
+                content=summary_text,
+            )
         else:
-            if summary_text is not None:
-                logger.info(f"保存LLM总结到缓存: {task_id}")
-                cache_manager.save_llm_result(
-                    platform=platform,
-                    media_id=media_id,
-                    use_speaker_recognition=use_speaker_recognition,
-                    llm_type="summary",
-                    content=summary_text,
-                )
-            else:
-                logger.warning(f"总结生成失败，跳过保存: {task_id}")
+            logger.warning(f"总结状态为 generated 但文本为空，跳过保存: {task_id}")
+    elif summary_status == SummaryStatus.SKIPPED_SHORT:
+        if calibrate_success:
+            logger.info(f"文本过短，保存校对文本作为总结: {task_id}")
+            cache_manager.save_llm_result(
+                platform=platform,
+                media_id=media_id,
+                use_speaker_recognition=use_speaker_recognition,
+                llm_type="summary",
+                content=calibrated_text,
+            )
+    elif summary_status == SummaryStatus.FAILED:
+        # 关键修复：总结失败不再把校对文本复制成总结文件，避免"生成失败"被
+        # 伪装成"文本过短"的正常路径（诚实状态模型的核心诉求）
+        logger.warning(f"总结生成失败，不落盘复制校对文本: {task_id}")
     else:
-        logger.warning(f"总结失败，跳过保存总结文件: {task_id}")
+        logger.warning(f"总结状态未知或仍在处理中({summary_status})，跳过保存总结文件: {task_id}")
 
     # 保存结构化数据
     if use_speaker_recognition and calibrate_success and "structured_data" in result_dict:
@@ -452,6 +489,18 @@ def _save_llm_results(
             logger.info(f"结构化数据已保存到缓存: {platform}/{media_id}/llm_processed.json")
         else:
             logger.warning(f"结构化数据保存失败: {task_id}")
+
+    # 写入统一的诚实状态落盘文件 llm_status.json（两条路径都写）。
+    # summary_status 为 None 时（本轮未尝试生成总结）传 None 给 save_llm_status，
+    # 其合并语义会保留旧值，不会把已有的 summary 状态误覆盖。
+    cache_manager.save_llm_status(
+        platform=platform,
+        media_id=media_id,
+        use_speaker_recognition=use_speaker_recognition,
+        calibration_status=stats.get("calibration_status"),
+        calibration_stats=stats.get("calibration_stats"),
+        summary_status=summary_status,
+    )
 
     if calibrate_success or summary_success:
         logger.info(f"LLM结果已保存到缓存: {platform}/{media_id}")
@@ -504,6 +553,12 @@ def _send_notification(
     speaker_info = "（含说话人识别）" if use_speaker_recognition else ""
     model_config_text = format_llm_config_markdown(models_used)
 
+    # 通知里的总结状态文案：failed 时明确写"生成失败"，避免和"文本过短未生成"
+    # 这种正常路径混为一谈（诚实状态模型的一部分）。缺失 summary_status 时
+    # （legacy 调用方）保持历史文案"未生成"不变。
+    summary_status = stats.get("summary_status")
+    summary_status_label = "生成失败" if summary_status == SummaryStatus.FAILED else "未生成"
+
     # 校对文本超过此阈值时，不发送全文到通知渠道（避免刷屏）
     NOTIFICATION_TEXT_THRESHOLD = 5000
 
@@ -514,20 +569,20 @@ def _send_notification(
 📄 直接获取：{view_url}?raw=calibrated
 
 ## 转录统计
-原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 未生成{calibration_warning}
+原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_status_label}{calibration_warning}
 
 {model_config_text}
 
 ## 校对文本{speaker_info}
 {calibrated_text}"""
-            logger.info(f"发送校对文本（总结未生成，文本较短直接发送）: {task_id}")
+            logger.info(f"发送校对文本（总结{summary_status_label}，文本较短直接发送）: {task_id}")
         else:
             full_message = f"""## 总结和校对
 🌐 网页查看：{view_url}
 📄 直接获取：{view_url}?raw=calibrated
 
 ## 转录统计
-原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 未生成{calibration_warning}
+原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_status_label}{calibration_warning}
 
 {model_config_text}
 
@@ -582,8 +637,15 @@ def _send_notification(
 def _build_calibration_warning(stats: dict) -> str:
     """构建校准质量警告文本
 
+    两条校对路径统计口径不同：结构化路径（说话人识别）按 chunk 计数
+    （total_chunks/success_count/fallback_count/failed_count），纯文本路径按
+    segment 计数（total_segments/calibrated_segments/fallback_segments/
+    low_quality_segments）。这里按 cal_stats 里出现的字段名分辨路径，
+    分别生成对应的详情文案，保证纯文本路径的降级也能像结构化路径一样出警告。
+
     Args:
-        stats: 统计信息字典
+        stats: 统计信息字典（coordinator.process() 返回的 stats，
+            stats["calibration_stats"] 为 None 或缺失时视为无统计可用）
 
     Returns:
         str: 警告文本（空字符串表示无警告）
@@ -592,23 +654,47 @@ def _build_calibration_warning(stats: dict) -> str:
     if not cal_stats:
         return ""
 
-    failed = cal_stats.get("failed_count", 0)
-    fallback = cal_stats.get("fallback_count", 0)
-    total = cal_stats.get("total_chunks", 0)
-    success = cal_stats.get("success_count", 0)
+    if "total_chunks" in cal_stats:
+        # 结构化路径（说话人识别）：chunk 口径
+        failed = cal_stats.get("failed_count", 0)
+        fallback = cal_stats.get("fallback_count", 0)
+        total = cal_stats.get("total_chunks", 0)
+        success = cal_stats.get("success_count", 0)
 
-    if failed == total and total > 0:
-        return (
-            "\n⚠️ **校准完全失败**：LLM API 超时，"
-            "当前显示为未校准的原始语音识别文本，质量较低。"
-            "建议稍后重新提交。"
-        )
-    elif failed > 0 or fallback > 0:
-        return (
-            f"\n⚠️ **校准部分异常**：{success}/{total} 段校准成功，"
-            f"{fallback} 段降级，{failed} 段失败。"
-            "部分内容为未校准文本。"
-        )
+        if failed == total and total > 0:
+            return (
+                "\n⚠️ **校准完全失败**：LLM API 超时，"
+                "当前显示为未校准的原始语音识别文本，质量较低。"
+                "建议稍后重新提交。"
+            )
+        if failed > 0 or fallback > 0:
+            return (
+                f"\n⚠️ **校准部分异常**：{success}/{total} 段校准成功，"
+                f"{fallback} 段降级，{failed} 段失败。"
+                "部分内容为未校准文本。"
+            )
+        return ""
+
+    if "total_segments" in cal_stats:
+        # 纯文本路径：segment 口径
+        total = cal_stats.get("total_segments", 0)
+        calibrated = cal_stats.get("calibrated_segments", 0)
+        fallback = cal_stats.get("fallback_segments", 0)
+        low_quality = cal_stats.get("low_quality_segments", 0)
+
+        if calibrated == 0 and total > 0:
+            return (
+                "\n⚠️ **校准完全失败**：LLM API 超时，"
+                "当前显示为未校准的原始语音识别文本，质量较低。"
+                "建议稍后重新提交。"
+            )
+        if fallback > 0 or low_quality > 0:
+            detail = f"{calibrated}/{total} 段校准成功，{fallback} 段降级为原文"
+            if low_quality:
+                detail += f"，其中 {low_quality} 段质量存疑"
+            return f"\n⚠️ **校准部分异常**：{detail}。部分内容为未校准文本。"
+        return ""
+
     return ""
 
 

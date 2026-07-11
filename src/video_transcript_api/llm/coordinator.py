@@ -3,6 +3,7 @@
 from typing import Dict, List, Optional, Any, Union
 
 from ..utils.logging import setup_logger
+from ..utils.llm_status import SummaryStatus
 from .core.config import LLMConfig
 from .core.llm_client import LLMClient
 from .core.cache_manager import CacheManager
@@ -12,7 +13,7 @@ from .core.usage_context import set_context
 from .validators.unified_quality_validator import UnifiedQualityValidator
 from .processors.plain_text_processor import PlainTextProcessor
 from .processors.speaker_aware_processor import SpeakerAwareProcessor
-from .processors.summary_processor import SummaryProcessor
+from .processors.summary_processor import SummaryProcessor, SummaryResult
 
 logger = setup_logger(__name__)
 
@@ -156,13 +157,17 @@ class LLMCoordinator:
         speaker_count = self._extract_speaker_count(content, calibration_result)
 
         # 步骤 3: 总结生成（基于校对文本，可跳过）
+        # summary_status 为 None 表示"本轮未尝试生成"（仅 calibrate_only 重新校对场景，
+        # 不补跑 summary 时出现）；下游（llm_ops/cache_manager）据此保留上一轮的 summary_status，
+        # 不会用 None 误覆盖已有的 GENERATED/FAILED 等状态。
         summary_text = None
+        summary_status: Optional[SummaryStatus] = None
         if skip_summary:
             logger.info("Step 2/2: Summary generation SKIPPED (skip_summary=True)")
         else:
             logger.info("Step 2/2: Summary generation")
             with set_context(stage="summary"):
-                summary_text = self._generate_summary_if_needed(
+                summary_result = self._generate_summary_if_needed(
                     text=calibrated_text,
                     title=title,
                     author=author,
@@ -171,15 +176,41 @@ class LLMCoordinator:
                     transcription_data=self._extract_transcription_data(content),
                     selected_models=selected_models,
                 )
+            summary_text = summary_result.text
+            summary_status = summary_result.status
 
         # 步骤 4: 合并结果
+        # calibration_status/calibration_stats 统一提升到 stats 顶层：
+        # - 纯文本路径：calibration_status 与统计字段(total_segments 等)本来就在 stats 顶层
+        # - 结构化路径：calibration_status 与统计字段都嵌在 stats["calibration_stats"] 里
+        # 这里做一次归一化，让下游（llm_ops/cache_manager/模板）只需读 stats["calibration_status"]
+        # 和 stats["calibration_stats"] 两个统一位置，不用关心是哪条路径产出的。
+        calibration_stats_raw = calibration_result.get("stats", {})
+        calibration_status = calibration_stats_raw.get("calibration_status")
+        calibration_stats_detail = calibration_stats_raw.get("calibration_stats")
+        if calibration_status is None and calibration_stats_detail:
+            calibration_status = calibration_stats_detail.get("calibration_status")
+
+        if calibration_stats_detail is None and "total_segments" in calibration_stats_raw:
+            # 纯文本路径的统计字段是扁平的，这里合成一份 nested 视图，
+            # 使 llm_status.json / 通知警告 / 模板渲染可以统一从 calibration_stats 读取
+            calibration_stats_detail = {
+                "total_segments": calibration_stats_raw.get("total_segments"),
+                "calibrated_segments": calibration_stats_raw.get("calibrated_segments"),
+                "fallback_segments": calibration_stats_raw.get("fallback_segments"),
+                "low_quality_segments": calibration_stats_raw.get("low_quality_segments"),
+            }
+
         return {
             "calibrated_text": calibrated_text,
             "summary_text": summary_text,
             "key_info": calibration_result.get("key_info"),
             "stats": {
-                **calibration_result.get("stats", {}),
+                **calibration_stats_raw,
                 "summary_length": len(summary_text) if summary_text else 0,
+                "calibration_status": calibration_status,
+                "calibration_stats": calibration_stats_detail,
+                "summary_status": summary_status,
             },
             "structured_data": calibration_result.get("structured_data"),
             "models_used": selected_models,
@@ -314,7 +345,7 @@ class LLMCoordinator:
         speaker_count: int,
         transcription_data: Optional[Dict],
         selected_models: Dict,
-    ) -> Optional[str]:
+    ) -> SummaryResult:
         """生成总结（如果需要）
 
         Args:
@@ -327,20 +358,26 @@ class LLMCoordinator:
             selected_models: 选定的模型
 
         Returns:
-            总结文本，如果文本过短则返回 None
+            SummaryResult: text 为 None 时通过 status 区分是"文本过短跳过"
+            还是"生成失败"，不再用裸 None 二义（详见 SummaryResult 定义）。
+
+        Note:
+            这里的长度预检是对 SummaryProcessor 内部同一检查的前置优化
+            （避免不必要的函数调用/日志），SummaryProcessor.process() 本身
+            仍保留完整检查作为独立调用时的兜底，两者判定口径一致。
         """
-        # 检查长度阈值
+        # 检查长度阈值（与 SummaryProcessor.process() 内部检查口径一致）
         if len(text) < self.config.min_summary_threshold:
             logger.info(
                 f"Text too short for summary: {len(text)} < {self.config.min_summary_threshold}"
             )
-            return None
+            return SummaryResult(text=None, status=SummaryStatus.SKIPPED_SHORT)
 
         # 调用总结处理器
         logger.info(f"Generating summary (text length: {len(text)}, speaker_count: {speaker_count})")
 
         try:
-            summary = self.summary_processor.process(
+            result = self.summary_processor.process(
                 text=text,
                 title=title,
                 author=author,
@@ -350,13 +387,13 @@ class LLMCoordinator:
                 selected_models=selected_models,
             )
 
-            if summary:
-                logger.info(f"Summary generated successfully (length: {len(summary)})")
+            if result.text:
+                logger.info(f"Summary generated successfully (length: {len(result.text)})")
             else:
-                logger.warning("Summary generation returned None")
+                logger.warning(f"Summary generation did not produce text (status={result.status})")
 
-            return summary
+            return result
 
         except Exception as e:
             logger.error(f"Summary generation failed: {e}", exc_info=True)
-            return None
+            return SummaryResult(text=None, status=SummaryStatus.FAILED)

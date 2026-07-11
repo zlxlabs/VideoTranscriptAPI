@@ -10,6 +10,7 @@ from contextlib import contextmanager
 import threading
 from ..utils.logging import setup_logger
 from ..utils.task_status import TaskStatus
+from ..utils.llm_status import SummaryStatus
 
 logger = setup_logger("cache_manager")
 
@@ -167,7 +168,22 @@ class CacheManager:
                     logger.info("添加 error_message 字段到 task_status 表...")
                     cursor.execute("ALTER TABLE task_status ADD COLUMN error_message TEXT")
                     logger.info("error_message 字段添加成功")
-                else:
+
+                # 迁移5: 添加 calibration_status / summary_status 字段（诚实状态模型）
+                cursor.execute("PRAGMA table_info(task_status)")
+                columns = [col[1] for col in cursor.fetchall()]
+
+                if 'calibration_status' not in columns:
+                    logger.info("添加 calibration_status 字段到 task_status 表...")
+                    cursor.execute("ALTER TABLE task_status ADD COLUMN calibration_status TEXT")
+                    logger.info("calibration_status 字段添加成功")
+
+                if 'summary_status' not in columns:
+                    logger.info("添加 summary_status 字段到 task_status 表...")
+                    cursor.execute("ALTER TABLE task_status ADD COLUMN summary_status TEXT")
+                    logger.info("summary_status 字段添加成功")
+
+                if all(c in columns for c in ('calibration_status', 'summary_status', 'error_message')):
                     logger.debug("数据库结构正常，无需迁移")
 
         except Exception as e:
@@ -435,6 +451,15 @@ class CacheManager:
                 if llm_summary.exists():
                     with open(llm_summary, 'r', encoding='utf-8') as f:
                         cache_data['llm_summary'] = f.read()
+
+                # 读取诚实状态模型落盘文件（可能不存在：历史任务或校对未完成）
+                llm_status_file = file_path / "llm_status.json"
+                if llm_status_file.exists():
+                    try:
+                        with open(llm_status_file, 'r', encoding='utf-8') as f:
+                            cache_data['llm_status'] = json.load(f)
+                    except (OSError, json.JSONDecodeError) as status_exc:
+                        logger.warning(f"读取 llm_status.json 失败，忽略: {status_exc}")
                         
                 cache_data['file_path'] = str(file_path)
                 
@@ -518,8 +543,76 @@ class CacheManager:
         except Exception as e:
             logger.error(f"保存 LLM 结果失败: {e}")
             return False
-            
-    def list_cache(self, 
+
+    def save_llm_status(
+        self,
+        platform: str,
+        media_id: str,
+        use_speaker_recognition: bool,
+        calibration_status: Optional[str] = None,
+        calibration_stats: Optional[Dict[str, Any]] = None,
+        summary_status: Optional[str] = None,
+    ) -> bool:
+        """写入/合并 llm_status.json（"诚实状态模型"统一落盘文件）。
+
+        读-改-写、按字段合并语义：只覆盖本次传入的非 None 字段，未传入的字段
+        保留旧值不变。这是关键设计——recalibrate（calibrate_only=True 且未补跑
+        summary）场景下，本次调用只知道新的 calibration_status，若整份覆盖会把
+        已有的 summary_status（如 generated）静默抹掉，退回到"看起来总结缺失"
+        的旧 bug。
+
+        Args:
+            platform: 平台名称
+            media_id: 媒体ID
+            use_speaker_recognition: 是否使用了说话人识别（用于定位缓存目录）
+            calibration_status: CalibrationStatus 取值（full/partial/none），None 表示不更新
+            calibration_stats: 校对统计详情（分段/分块数据，结构随处理器而异），None 表示不更新
+            summary_status: SummaryStatus 取值（generated/skipped_short/failed/pending），
+                None 表示不更新（保留旧值，见上方合并语义说明）
+
+        Returns:
+            bool: 是否保存成功（找不到对应缓存记录时返回 False）
+        """
+        try:
+            cache_data = self.get_cache(platform, media_id, use_speaker_recognition=use_speaker_recognition)
+            if not cache_data:
+                logger.warning(f"未找到缓存记录，无法写入 llm_status.json: {platform}/{media_id}")
+                return False
+
+            file_path = Path(cache_data['file_path'])
+            status_file = file_path / "llm_status.json"
+
+            # 读取已有内容作为合并基础（不存在或损坏则视为空）
+            existing: Dict[str, Any] = {}
+            if status_file.exists():
+                try:
+                    with open(status_file, 'r', encoding='utf-8') as f:
+                        existing = json.load(f)
+                except (OSError, json.JSONDecodeError) as read_exc:
+                    logger.warning(f"读取旧 llm_status.json 失败，将整份重写: {read_exc}")
+                    existing = {}
+
+            if calibration_status is not None:
+                existing['calibration_status'] = calibration_status
+            if calibration_stats is not None:
+                existing['calibration_stats'] = calibration_stats
+            if summary_status is not None:
+                existing['summary_status'] = summary_status
+            existing['updated_at'] = datetime.datetime.now(datetime.timezone.utc).strftime(
+                '%Y-%m-%d %H:%M:%S'
+            )
+
+            with open(status_file, 'w', encoding='utf-8') as f:
+                json.dump(existing, f, ensure_ascii=False, indent=2)
+
+            logger.info(f"llm_status.json 已更新: {platform}/{media_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"保存 llm_status.json 失败: {e}")
+            return False
+
+    def list_cache(self,
                    platform: str = None,
                    limit: int = 100,
                    offset: int = 0) -> List[Dict[str, Any]]:
@@ -810,7 +903,8 @@ class CacheManager:
     def update_task_status(self, task_id: str, status: str, platform: str = None,
                           media_id: str = None, title: str = None, author: str = None,
                           cache_id: int = None, download_url: str = None,
-                          force: bool = False, error_message: str = None):
+                          force: bool = False, error_message: str = None,
+                          calibration_status: str = None, summary_status: str = None):
         """
         更新任务状态
 
@@ -828,6 +922,11 @@ class CacheManager:
             cache_id: 关联的缓存ID
             download_url: 实际下载地址
             force: 是否绕过终态黏性保护(recalibrate 显式重置时为 True)
+            calibration_status: CalibrationStatus 取值(full/partial/none)，
+                "诚实状态模型"落盘到 task_status 表，供 /api/audit/history 等查询消费。
+                None 表示不更新该列。
+            summary_status: SummaryStatus 取值(generated/skipped_short/failed/pending)，
+                None 表示不更新该列。
         """
         try:
             # 将空字符串转换为 None，避免存储无意义的空字符串
@@ -860,6 +959,12 @@ class CacheManager:
                 if error_message is not None:
                     update_fields.append("error_message = ?")
                     params.append(error_message)
+                if calibration_status is not None:
+                    update_fields.append("calibration_status = ?")
+                    params.append(calibration_status)
+                if summary_status is not None:
+                    update_fields.append("summary_status = ?")
+                    params.append(summary_status)
 
                 if status in ['success', 'failed']:
                     update_fields.append("completed_at = CURRENT_TIMESTAMP")
@@ -985,13 +1090,55 @@ class CacheManager:
             logger.error(f"根据view_token获取任务信息失败: {e}")
             return None
     
+    def _resolve_summary_state(
+        self, task_info: Dict[str, Any], cache_data: Dict[str, Any]
+    ) -> tuple:
+        """解析总结的展示状态与展示文本（"诚实状态模型"，修复"总结处理中..."永久占位符 bug）。
+
+        来源优先级：task_status.summary_status 列 > llm_status.json 里的
+        summary_status（两者本应一致，列是 JSON 的镜像，任一缺失时互为兜底）
+        > 历史兼容推断（两者都没有的旧任务，按 llm_summary.txt 是否存在推断）。
+
+        Args:
+            task_info: get_task_by_view_token 返回的任务行（dict，含 summary_status 列）
+            cache_data: get_cache 返回的缓存数据（含 llm_summary / llm_status 字段）
+
+        Returns:
+            (summary_state, summary_text) 元组：
+            - summary_state: SummaryStatus 取值之一，前端据此渲染四种文案
+            - summary_text: GENERATED 时为真实总结文本，其余状态一律为 None
+              （不再返回"总结处理中..."之类的占位字符串，占位交给前端按 state 渲染）
+        """
+        summary_status = task_info.get('summary_status')
+        if not summary_status:
+            llm_status = cache_data.get('llm_status') or {}
+            summary_status = llm_status.get('summary_status')
+
+        raw_summary = cache_data.get('llm_summary')
+        if raw_summary is not None and not isinstance(raw_summary, str):
+            raw_summary = str(raw_summary)
+        has_summary_text = bool(raw_summary)
+
+        if summary_status:
+            if summary_status == SummaryStatus.GENERATED:
+                return SummaryStatus.GENERATED, (raw_summary if has_summary_text else None)
+            # skipped_short / failed / pending：一律不展示占位文本，交给前端按状态渲染
+            return summary_status, None
+
+        # 历史兼容：既没有 task_status 列也没有 llm_status.json 的旧任务
+        # （早于本功能上线）——按是否存在 llm_summary.txt 推断，
+        # 无法进一步区分"文本过短"与"生成失败"，保守归入 skipped_short（非错误态）。
+        if has_summary_text:
+            return SummaryStatus.GENERATED, raw_summary
+        return SummaryStatus.SKIPPED_SHORT, None
+
     def get_view_data_by_token(self, view_token: str) -> Optional[Dict[str, Any]]:
         """
         根据view_token获取查看页面数据
-        
+
         Args:
             view_token: 查看token
-            
+
         Returns:
             Dict: 页面数据
         """
@@ -1031,10 +1178,10 @@ class CacheManager:
                 
                 if cache_data:
                     # 缓存存在，返回完整数据
-                    # 确保返回的是字符串类型
-                    summary = cache_data.get('llm_summary', '总结处理中...')
-                    if not isinstance(summary, str):
-                        summary = str(summary) if summary is not None else '总结处理中...'
+                    # summary_state：诚实状态模型，取代过去"文件缺失=处理中"的无条件占位符
+                    # （旧 bug：cache_data.get('llm_summary', '总结处理中...') 把文件缺失、
+                    # 总结过短跳过、总结生成失败三种完全不同的情况全部误判为"处理中"）
+                    summary_state, summary = self._resolve_summary_state(task_info, cache_data)
 
                     transcript = cache_data.get('llm_calibrated') or cache_data.get('transcript_data', '转录文本获取中...')
                     if not isinstance(transcript, str):
@@ -1054,6 +1201,7 @@ class CacheManager:
                         'description': cache_data.get('description', ''),
                         'url': display_url,
                         'summary': summary,
+                        'summary_state': summary_state,
                         'transcript': transcript,
                         'use_speaker_recognition': cache_data.get('use_speaker_recognition', False),
                         'created_at': task_info['created_at'],
