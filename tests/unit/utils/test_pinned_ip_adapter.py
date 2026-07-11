@@ -119,6 +119,95 @@ class TestSendPinsConnectionToValidatedIP:
         mock_send.assert_not_called()
 
 
+class TestHostHeaderPortHandling:
+    """codex-review R6 #3: the Host header must reflect the *original*
+    request's port, not just the bare hostname. A previous version always
+    wrote `Host: <hostname>` with no port at all, so a non-default-port
+    request (e.g. `https://host:8443/...`) lost its port on the wire --
+    Host+port-routed origins/reverse-proxies could misroute or reject it.
+    Per RFC 7230 3.2.2, the default port for the scheme should be omitted;
+    any other port must be included. IPv6 literal hosts must be
+    bracketed."""
+
+    def test_https_default_port_443_is_omitted(self):
+        adapter = PinnedIPHTTPAdapter(
+            hostname="public.example.com", pinned_ip="93.184.216.34", is_https=True
+        )
+        req = _prepared_request("GET", "https://public.example.com:443/x")
+
+        with patch(BASE_SEND_PATH) as mock_send:
+            mock_send.return_value = MagicMock()
+            adapter.send(req)
+
+        sent_request = mock_send.call_args[0][0]
+        assert sent_request.headers["Host"] == "public.example.com"
+
+    def test_http_default_port_80_is_omitted(self):
+        adapter = PinnedIPHTTPAdapter(
+            hostname="public.example.com", pinned_ip="93.184.216.34", is_https=False
+        )
+        req = _prepared_request("GET", "http://public.example.com:80/x")
+
+        with patch(BASE_SEND_PATH) as mock_send:
+            mock_send.return_value = MagicMock()
+            adapter.send(req)
+
+        sent_request = mock_send.call_args[0][0]
+        assert sent_request.headers["Host"] == "public.example.com"
+
+    def test_non_default_port_8443_is_included(self):
+        adapter = PinnedIPHTTPAdapter(
+            hostname="public.example.com", pinned_ip="93.184.216.34", is_https=True
+        )
+        req = _prepared_request("GET", "https://public.example.com:8443/x")
+
+        with patch(BASE_SEND_PATH) as mock_send:
+            mock_send.return_value = MagicMock()
+            adapter.send(req)
+
+        sent_request = mock_send.call_args[0][0]
+        assert sent_request.headers["Host"] == "public.example.com:8443"
+
+    def test_custom_http_port_is_included(self):
+        adapter = PinnedIPHTTPAdapter(
+            hostname="public.example.com", pinned_ip="93.184.216.34", is_https=False
+        )
+        req = _prepared_request("GET", "http://public.example.com:9000/x")
+
+        with patch(BASE_SEND_PATH) as mock_send:
+            mock_send.return_value = MagicMock()
+            adapter.send(req)
+
+        sent_request = mock_send.call_args[0][0]
+        assert sent_request.headers["Host"] == "public.example.com:9000"
+
+    def test_ipv6_host_header_is_bracketed_without_port(self):
+        adapter = PinnedIPHTTPAdapter(
+            hostname="2001:db8::1", pinned_ip="93.184.216.34", is_https=True
+        )
+        req = _prepared_request("GET", "https://[2001:db8::1]/x")
+
+        with patch(BASE_SEND_PATH) as mock_send:
+            mock_send.return_value = MagicMock()
+            adapter.send(req)
+
+        sent_request = mock_send.call_args[0][0]
+        assert sent_request.headers["Host"] == "[2001:db8::1]"
+
+    def test_ipv6_host_header_is_bracketed_with_port(self):
+        adapter = PinnedIPHTTPAdapter(
+            hostname="2001:db8::1", pinned_ip="93.184.216.34", is_https=True
+        )
+        req = _prepared_request("GET", "https://[2001:db8::1]:8443/x")
+
+        with patch(BASE_SEND_PATH) as mock_send:
+            mock_send.return_value = MagicMock()
+            adapter.send(req)
+
+        sent_request = mock_send.call_args[0][0]
+        assert sent_request.headers["Host"] == "[2001:db8::1]:8443"
+
+
 class TestCertificateHostnameValidationStillApplies:
     """Pinning the TCP connection to an IP must not silently disable or
     misdirect HTTPS certificate hostname verification / SNI."""

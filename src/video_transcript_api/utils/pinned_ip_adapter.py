@@ -90,11 +90,37 @@ class PinnedIPHTTPAdapter(HTTPAdapter):
     def send(self, request, **kwargs):
         """
         发送请求前，把请求 URL 的主机部分重写为已钉定的 IP，并强制设置
-        Host 头为原始域名，随后交给父类完成实际发送。
+        Host 头为原始域名（按原始 URL 的端口决定是否显式带端口），随后
+        交给父类完成实际发送。
         """
-        request.url = self._pin_to_ip(request.url)
-        request.headers["Host"] = self._hostname
+        original_url = request.url
+        request.url = self._pin_to_ip(original_url)
+        request.headers["Host"] = self._build_host_header(original_url)
         return super().send(request, **kwargs)
+
+    def _build_host_header(self, url: str) -> str:
+        """
+        按 RFC 7230/3986 构造 Host 请求头：
+        - 非默认端口（http 非 80 / https 非 443）显式带上 `host:port`；
+          默认端口省略端口（原实现固定写裸 hostname，非默认端口的请求会
+          丢端口，按 Host+端口路由的源站/反代可能因此错路由或直接拒绝）。
+        - hostname 为 IPv6 字面量时用方括号包裹（`[addr]` / `[addr]:port`）
+          ——self._hostname 来自 urlparse().hostname，IPv6 场景下已经是去
+          掉方括号的裸地址（如 "2001:db8::1"），这里按 RFC 3986 补回来。
+
+        用 urllib.parse 解析端口而不是手写字符串拼接，避免遗漏 IPv6 或
+        端口边界情况。
+
+        参数:
+            url: 原始请求 URL（重写为钉定 IP 之前的那个，端口信息取自此处）
+        """
+        port = urlparse(url).port
+        default_port = 443 if self._is_https else 80
+
+        host = f"[{self._hostname}]" if ":" in self._hostname else self._hostname
+        if port is None or port == default_port:
+            return host
+        return f"{host}:{port}"
 
     def _pin_to_ip(self, url: str) -> str:
         """
