@@ -972,3 +972,153 @@ class TestCalibrateOnlyBackfillPreservesExistingSummaryNotification:
             assert call_kwargs["is_summary"] is True
         finally:
             real_cm.close()
+
+
+class TestCalibrateOnlyBackfillDoesNotMisreportSkippedShortAsSummary:
+    """codex-review R9 P2: a cache whose llm_summary.txt is actually the
+    SKIPPED_SHORT honest-state fallback (the full calibrated text saved
+    verbatim as a stand-in, per the honest-state model -- see
+    _save_llm_results' SKIPPED_SHORT branch) must NOT be mistaken for a real
+    generated summary by _restore_cached_summary_for_notification() just
+    because the file exists on disk.
+
+    Same "只补校对" (calibrate=True, summarize=False) shape as the sibling
+    R8 #1 test above, but the seeded cache carries summary_status=
+    SKIPPED_SHORT instead of GENERATED. Before the R9 fix, the restore
+    helper only checked file existence/non-emptiness, so it would copy the
+    stale fallback text into result_dict["内容总结"] and flip
+    skip_summary=False -- which both mislabels the notification as "总结"
+    and skips the skip_summary branch's 5000-char NOTIFICATION_TEXT_THRESHOLD
+    truncation (the summary branch has no length cap at all).
+    """
+
+    def test_calibrate_backfill_with_skipped_short_cache_keeps_not_generated_wording(
+        self, tmp_path
+    ):
+        real_cm = CacheManager(cache_dir=str(tmp_path / "cache"))
+        try:
+            # ---- Seed a prior run whose text was too short to summarize:
+            # llm_summary.txt holds the SKIPPED_SHORT fallback -- the
+            # calibrated text saved verbatim as a stand-in, NOT a real
+            # summary. summary_status is SKIPPED_SHORT, not GENERATED.
+            real_cm.save_cache(
+                platform="youtube",
+                url="https://www.youtube.com/watch?v=short1",
+                media_id="short1",
+                use_speaker_recognition=False,
+                transcript_data="RAW short transcript",
+                transcript_type="capswriter",
+                title="cached title",
+                author="cached author",
+                description="cached desc",
+            )
+            real_cm.save_llm_result(
+                platform="youtube", media_id="short1", use_speaker_recognition=False,
+                llm_type="calibrated",
+                content="RAW short transcript (locally formatted)",
+            )
+            real_cm.save_llm_result(
+                platform="youtube", media_id="short1", use_speaker_recognition=False,
+                llm_type="summary",
+                content="STALE calibrated-as-summary fallback text (should not leak as real summary)",
+            )
+            real_cm.save_llm_status(
+                platform="youtube", media_id="short1", use_speaker_recognition=False,
+                calibration_status=CalibrationStatus.DISABLED,
+                summary_status=SummaryStatus.SKIPPED_SHORT,
+            )
+
+            task_id = real_cm.create_task(
+                url="https://www.youtube.com/watch?v=short1",
+                use_speaker_recognition=False,
+                platform="youtube",
+                media_id="short1",
+            )["task_id"]
+            real_cm.update_task_status(task_id, TaskStatus.CALIBRATING)
+
+            # ---- "只补校对" request: calibrate=True (real calibration
+            # requested), summarize=False (llm_summary.txt already exists,
+            # even if it's only the SKIPPED_SHORT fallback).
+            llm_task = {
+                "task_id": task_id,
+                "url": "https://www.youtube.com/watch?v=short1",
+                "display_url": "https://www.youtube.com/watch?v=short1",
+                "platform": "youtube",
+                "media_id": "short1",
+                "video_title": "cached title",
+                "author": "cached author",
+                "description": "cached desc",
+                "transcript": "RAW short transcript",
+                "use_speaker_recognition": False,
+                "transcription_data": None,
+                "is_generic": False,
+                "wechat_webhook": None,
+                "notification_channel": None,
+                "notification_webhooks": {},
+                "processing_options": {"calibrate": True, "summarize": False},
+            }
+
+            coordinator = MagicMock()
+            coordinator.process.return_value = {
+                "calibrated_text": "REAL calibrated text from this round",
+                "summary_text": None,
+                "stats": {
+                    "calibration_status": CalibrationStatus.FULL,
+                    "calibration_stats": {
+                        "total_segments": 1, "calibrated_segments": 1,
+                        "fallback_segments": 0, "low_quality_segments": 0,
+                    },
+                    "summary_status": None,
+                },
+                "models_used": {},
+                "structured_data": None,
+            }
+
+            notification_router = MagicMock()
+            notification_router.send_long_text = MagicMock()
+            notification_router.send_text = MagicMock()
+
+            ctxs = [
+                patch.object(llm_ops, "cache_manager", real_cm),
+                patch.object(llm_ops, "llm_coordinator", coordinator),
+                patch.object(llm_ops, "llm_task_queue", MagicMock()),
+                patch.object(llm_ops, "get_notification_router", lambda: notification_router),
+                patch.object(llm_ops, "_generate_title_if_needed", lambda t, title, tr: title),
+            ]
+            for c in ctxs:
+                c.start()
+            try:
+                llm_ops._handle_llm_task(llm_task)
+            finally:
+                for c in ctxs:
+                    c.stop()
+
+            # ---- Task row and cache: SKIPPED_SHORT must be preserved as-is
+            # (not silently promoted to GENERATED by the notification path).
+            row = real_cm.get_task_by_id(task_id)
+            assert row["status"] == "success"
+            assert row["calibration_status"] == CalibrationStatus.FULL
+            assert row["summary_status"] == SummaryStatus.SKIPPED_SHORT
+
+            cache_data = real_cm.get_cache(
+                "youtube", "short1", use_speaker_recognition=False
+            )
+            assert cache_data["llm_calibrated"] == "REAL calibrated text from this round"
+            assert cache_data["llm_status"]["calibration_status"] == CalibrationStatus.FULL
+            assert cache_data["llm_status"]["summary_status"] == SummaryStatus.SKIPPED_SHORT
+
+            # ---- Notification: must take the skip_summary branch (fresh
+            # calibrated text, "未生成" wording, 5000-char threshold logic
+            # in play) and must NOT leak the stale SKIPPED_SHORT fallback
+            # content as if it were a real "总结" -- this is the
+            # codex-review R9 P2 regression this test locks down.
+            assert notification_router.send_long_text.called
+            call_kwargs = notification_router.send_long_text.call_args.kwargs
+            sent_text = call_kwargs["text"]
+            assert "## 校对文本" in sent_text
+            assert "REAL calibrated text from this round" in sent_text
+            assert "STALE calibrated-as-summary fallback text" not in sent_text
+            assert "总结 未生成" in sent_text
+            assert call_kwargs["is_summary"] is False
+        finally:
+            real_cm.close()

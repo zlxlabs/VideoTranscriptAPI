@@ -20,6 +20,7 @@ from video_transcript_api.api.services.llm_ops import (
     _build_calibration_warning,
     _should_backfill_summary,
     _save_llm_results,
+    _restore_cached_summary_for_notification,
 )
 from video_transcript_api.utils.llm_status import CalibrationStatus, SummaryStatus
 
@@ -922,3 +923,109 @@ class TestSaveLLMResultsCalibrationNoneStillPersists:
         )
 
         assert self._calibrated_calls(mock_cm) == []
+
+
+class TestRestoreCachedSummaryForNotification:
+    """codex-review R9 P2: _restore_cached_summary_for_notification() must
+    only copy the cached llm_summary.txt content into the notification
+    result_dict when the MERGED (post-write) summary_status is actually
+    GENERATED. The file existing on disk is not sufficient proof -- under
+    the honest-state model, SKIPPED_SHORT also writes a non-empty
+    llm_summary.txt, but its content is the full calibrated text saved as a
+    fallback stand-in, not a real summary (see _save_llm_results'
+    SKIPPED_SHORT branch). Restoring it unconditionally would mislabel a
+    "只补校对" notification as a real summary and skip the calibrated-text
+    branch's 5000-char truncation.
+    """
+
+    def _result_dict(self):
+        # Mirrors _build_result_dict()'s output when the coordinator skipped
+        # summary this round (processing_options.summarize=False): no
+        # summary text produced this round, skip_summary=True.
+        return {
+            "校对文本": "this round's real calibrated text",
+            "内容总结": None,
+            "skip_summary": True,
+            "stats": {},
+        }
+
+    def test_generated_status_restores_cached_summary(self):
+        """The GENERATED case (the original R8 #1 scenario) must still
+        restore -- this is the regression guard for the pre-existing
+        behavior the R9 fix must not break."""
+        result_dict = self._result_dict()
+        merged_snapshot = {
+            "llm_summary": "a real cached summary",
+            "llm_status": {"summary_status": SummaryStatus.GENERATED},
+        }
+
+        _restore_cached_summary_for_notification(result_dict, merged_snapshot)
+
+        assert result_dict["内容总结"] == "a real cached summary"
+        assert result_dict["skip_summary"] is False
+        assert result_dict["stats"]["summary_length"] == len("a real cached summary")
+
+    @pytest.mark.parametrize(
+        "summary_status",
+        [
+            SummaryStatus.SKIPPED_SHORT,
+            SummaryStatus.FAILED,
+            SummaryStatus.DISABLED,
+            SummaryStatus.PENDING,
+            None,
+        ],
+    )
+    def test_non_generated_status_does_not_restore(self, summary_status):
+        """SKIPPED_SHORT (the main R9 P2 bug case) and every other
+        non-GENERATED status must leave result_dict untouched -- the file
+        existing on disk with non-empty content is not enough."""
+        result_dict = self._result_dict()
+        merged_snapshot = {
+            # For SKIPPED_SHORT this is realistically the fallback text
+            # (== calibrated text), not a real summary.
+            "llm_summary": "cached fallback text, not a real summary",
+            "llm_status": {"summary_status": summary_status},
+        }
+
+        _restore_cached_summary_for_notification(result_dict, merged_snapshot)
+
+        assert result_dict["内容总结"] is None
+        assert result_dict["skip_summary"] is True
+        assert "summary_length" not in result_dict["stats"]
+
+    def test_missing_llm_status_key_does_not_restore(self):
+        """merged_snapshot without an 'llm_status' key at all (defensive:
+        should not happen in practice, but must not crash or restore)."""
+        result_dict = self._result_dict()
+        merged_snapshot = {"llm_summary": "cached fallback text"}
+
+        _restore_cached_summary_for_notification(result_dict, merged_snapshot)
+
+        assert result_dict["内容总结"] is None
+        assert result_dict["skip_summary"] is True
+
+    def test_already_has_summary_this_round_is_a_noop(self):
+        """If this round DID produce a real summary, the cached value must
+        never overwrite it, regardless of the cached status."""
+        result_dict = {
+            "校对文本": "calibrated",
+            "内容总结": "fresh summary from this round",
+            "skip_summary": False,
+            "stats": {},
+        }
+        merged_snapshot = {
+            "llm_summary": "a different cached summary",
+            "llm_status": {"summary_status": SummaryStatus.GENERATED},
+        }
+
+        _restore_cached_summary_for_notification(result_dict, merged_snapshot)
+
+        assert result_dict["内容总结"] == "fresh summary from this round"
+
+    def test_no_cache_hit_is_a_noop(self):
+        result_dict = self._result_dict()
+
+        _restore_cached_summary_for_notification(result_dict, None)
+
+        assert result_dict["内容总结"] is None
+        assert result_dict["skip_summary"] is True
