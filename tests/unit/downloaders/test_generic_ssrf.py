@@ -445,21 +445,33 @@ class TestCertificateHostnamePinningWiredCorrectly:
 
 
 # ---------------------------------------------------------------------------
-# 8. Dispatch must merge deployment environment settings (HTTP(S)_PROXY,
-#    NO_PROXY, REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE) instead of silently
-#    ignoring them (codex-review R6 #2).
+# 8. Dispatch must merge CA-bundle deployment environment settings
+#    (REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE) but must NEVER forward an
+#    HTTP(S)_PROXY environment setting to the adapter's send() call
+#    (ci-gate review, third round).
 #
-# Before the fix, _dispatch_pinned_request built a PinnedIPHTTPAdapter and
-# called its .send() directly, bypassing requests.Session.send() and
-# Session.merge_environment_settings() entirely -- so an operator's
-# HTTPS_PROXY / REQUESTS_CA_BUNDLE env vars had no effect on this code
-# path: requests silently fell back to a direct connection and the
-# default CA bundle, even though every other requests call in the process
-# honored them. The fix constructs a per-request Session purely to merge
-# these settings and look up the mounted adapter (Session.get_adapter),
-# then dispatches through that adapter's send() directly -- still skipping
-# Session.send()'s own redirect/cookie/hook bookkeeping, which
-# _safe_request's manual per-hop loop already replaces.
+# History:
+# - codex-review R6 #2: _dispatch_pinned_request originally built a
+#   PinnedIPHTTPAdapter and called its .send() directly, bypassing
+#   requests.Session.send() and Session.merge_environment_settings()
+#   entirely -- so an operator's HTTPS_PROXY / REQUESTS_CA_BUNDLE env vars
+#   had no effect on this code path. Fixed by constructing a per-request
+#   Session purely to merge these settings and look up the mounted adapter
+#   (Session.get_adapter), then dispatching through that adapter's send()
+#   directly.
+# - ci-gate review (2nd round): a configured proxy caused IP pinning to be
+#   skipped entirely, reviving the DNS-rebinding SSRF bypass on the proxy
+#   path. Fixed by pinning even when a proxy is configured.
+# - ci-gate review (3rd round, this file's current behavior): pinning while
+#   still forwarding `proxies` to send() turned out to be a *correctness*
+#   regression -- requests routes proxied HTTPS through a separate
+#   ProxyManager connection pool, and PinnedIPHTTPAdapter's
+#   server_hostname/assert_hostname (injected in init_poolmanager()) never
+#   reaches that pool, so TLS SNI/certificate-hostname checks use the wrong
+#   host and legitimate HTTPS requests fail. GenericDownloader now ignores
+#   environment proxy settings entirely and always connects directly to the
+#   pinned IP -- CA-bundle merging (verify/cert) is unaffected and still
+#   applied.
 # ---------------------------------------------------------------------------
 
 
@@ -471,34 +483,23 @@ def _clear_proxy_env(monkeypatch):
 
 
 class TestEnvironmentSettingsMergedThroughSession:
-    def test_https_proxy_env_var_reaches_the_dispatched_send(self, monkeypatch):
-        _clear_proxy_env(monkeypatch)
-        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.internal:3128")
-        downloader = GenericDownloader()
-        url = "https://public.example.com/audio.mp3"
+    def test_proxy_env_var_present_but_ignored_stays_pinned_direct(self, monkeypatch):
+        """ci-gate review (3rd round): pinning while still forwarding the
+        merged `proxies` setting to send() routed the request through
+        requests' ProxyManager connection pool, which never sees the
+        server_hostname/assert_hostname PinnedIPHTTPAdapter injects into the
+        direct-connection PoolManager -- so proxied HTTPS requests would use
+        the wrong TLS SNI/certificate hostname and legitimate domains would
+        fail (a real functional regression), even though the security gap
+        from the 2nd round's review was already closed.
 
-        with patch(GETADDRINFO_PATH, side_effect=_public_addrinfo), patch(
-            BASE_SEND_PATH, return_value=_ok_response()
-        ) as mock_send:
-            downloader._safe_request("get", url, timeout=5)
-
-        sent_kwargs = mock_send.call_args.kwargs
-        assert sent_kwargs["proxies"]["https"] == "http://proxy.internal:3128"
-
-    def test_proxy_present_still_pins_ip_and_forwards_proxies_kwarg(self, monkeypatch):
-        """ci-gate review: the old behavior skipped IP pinning entirely
-        whenever a proxy was configured, dispatching the raw hostname URL
-        through the default adapter. That left SSRF protection dead on the
-        proxy path -- an attacker-controlled domain could resolve a public
-        IP for our own validation and a private/metadata IP for the proxy's
-        independent resolution (classic DNS-rebinding bypass), since the
-        pinned IP was never wired into the request at all.
-
-        The fix: a configured proxy no longer disables pinning. The
-        dispatched request must still be rewritten to the validated pinned
-        IP (Host header restored to the original hostname) AND the merged
-        `proxies` setting must still reach the adapter's send() call --
-        proxy and pinning are no longer mutually exclusive."""
+        The fix: GenericDownloader no longer uses environment proxy config
+        at all. Even with HTTPS_PROXY set, the dispatched request must:
+        - never carry a `proxies` kwarg reaching send() (or carry an empty
+          one), and
+        - still be rewritten to the validated pinned IP with the Host
+          header restored to the original hostname -- i.e. stay on the
+          direct, pinned path exactly as if no proxy were configured."""
         _clear_proxy_env(monkeypatch)
         monkeypatch.setenv("HTTPS_PROXY", "http://proxy.internal:3128")
         downloader = GenericDownloader()
@@ -514,7 +515,7 @@ class TestEnvironmentSettingsMergedThroughSession:
         assert sent_request.headers["Host"] == "public.example.com"
 
         sent_kwargs = mock_send.call_args.kwargs
-        assert sent_kwargs["proxies"]["https"] == "http://proxy.internal:3128"
+        assert not sent_kwargs.get("proxies")
 
     def test_requests_ca_bundle_env_var_is_merged_into_verify(self, monkeypatch, tmp_path):
         _clear_proxy_env(monkeypatch)
@@ -551,6 +552,41 @@ class TestEnvironmentSettingsMergedThroughSession:
         sent_request = mock_send.call_args[0][0]
         assert sent_request.url == "https://93.184.216.34/audio.mp3"
         assert sent_request.headers["Host"] == "public.example.com"
+
+    def test_https_proxy_env_var_does_not_break_sni_pinning(self, monkeypatch):
+        """Indirect proof that the 3rd-round ProxyManager/SNI correctness
+        bug (see this class's module comment) cannot recur: with HTTPS_PROXY
+        set, PinnedIPHTTPAdapter must still be constructed with the real
+        hostname (not the pinned IP, not anything proxy-related), because
+        there is no proxy code path left to divert it through a different
+        connection pool -- the request always goes out via the same direct
+        PoolManager whose server_hostname/assert_hostname
+        PinnedIPHTTPAdapter.init_poolmanager() sets."""
+        _clear_proxy_env(monkeypatch)
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.internal:3128")
+        downloader = GenericDownloader()
+        url = "https://public.example.com/audio.mp3"
+
+        captured = {}
+
+        class _SpyAdapter(PinnedIPHTTPAdapter):
+            def __init__(self, hostname, pinned_ip, is_https, **kwargs):
+                captured["hostname"] = hostname
+                captured["pinned_ip"] = pinned_ip
+                captured["is_https"] = is_https
+                super().__init__(hostname, pinned_ip, is_https, **kwargs)
+
+        with patch(GETADDRINFO_PATH, side_effect=_public_addrinfo), patch(
+            "video_transcript_api.downloaders.generic.PinnedIPHTTPAdapter", _SpyAdapter
+        ), patch(BASE_SEND_PATH, return_value=_ok_response()) as mock_send:
+            downloader._safe_request("get", url, timeout=5)
+
+        assert captured["hostname"] == "public.example.com"
+        assert captured["pinned_ip"] == "93.184.216.34"
+        assert captured["is_https"] is True
+
+        sent_kwargs = mock_send.call_args.kwargs
+        assert not sent_kwargs.get("proxies")
 
 
 # ---------------------------------------------------------------------------
