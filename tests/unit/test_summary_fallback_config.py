@@ -37,24 +37,10 @@ class TestContentFallbacksConfig:
         assert "deepseek-v4-pro" in fallbacks
         assert "deepseek-v4-flash" in fallbacks["deepseek-v4-pro"]
 
-    def test_config_has_deepseek_v4_pro_fallback(self):
-        """config.jsonc should have deepseek-v4-pro fallback with deepseek-v4-flash first."""
-        config = self._load_config_jsonc("config/config.jsonc")
-        llm = config["llm"]
-        fallbacks = llm["content_fallbacks"]
-        assert "deepseek-v4-pro" in fallbacks
-        # deepseek-v4-flash should be the first fallback (same provider, fastest)
-        assert fallbacks["deepseek-v4-pro"][0] == "deepseek-v4-flash"
-
-    def test_total_timeout_sufficient_for_fallback(self):
-        """total_timeout should be >= 300s to leave room for fallback after primary timeout."""
-        config = self._load_config_jsonc("config/config.jsonc")
-        llm = config["llm"]
-        total_timeout = llm.get("total_timeout", 180)
-        assert total_timeout >= 300, (
-            f"total_timeout={total_timeout}s is too short for fallback execution. "
-            f"Primary model may consume ~180s, leaving no time for fallbacks."
-        )
+    # NOTE: checks against the real, gitignored config/config.jsonc (not the
+    # example) live in tests/manual/test_summary_fallback_config_real.py --
+    # CI runners / clean checkouts have no config.jsonc, so they can't be part
+    # of default discovery.
 
     def test_llmconfig_from_dict_loads_content_fallbacks(self):
         """LLMConfig.from_dict should correctly load content_fallbacks."""
