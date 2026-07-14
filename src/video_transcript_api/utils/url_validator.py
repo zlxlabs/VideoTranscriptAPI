@@ -321,12 +321,30 @@ def _check_resolved_ip(hostname: str) -> Optional[list]:
         return None
 
 
+# RFC 6598 运营商级 NAT 共享地址空间（Carrier-Grade NAT / Shared Address
+# Space，100.64.0.0/10）。历史遗留问题（codex-review R10）：CPython 的
+# ipaddress.IPv4Address.is_private / is_reserved 在这个网段上不生效——
+# 实测项目实际运行的 Python（3.11.15 虚拟环境、系统 3.12.3 均如此）：
+# ip_address("100.64.0.1").is_private == False、.is_reserved == False，
+# 甚至 .is_global 也是 False（即 Python 自己认为它不可公网路由，却没有
+# 归进 is_private/is_reserved 这两个既有判定里）。不能依赖某个 Python
+# 版本才有的 is_private 行为，必须显式判断，避免同类"版本敏感"的判定
+# 缺口。该网段常被云厂商 NAT 网关、容器编排网络、运营商内网路由使用，
+# 落在 SSRF 防护的私网语义下应当拦截。
+#
+# 仅 IPv4 有该网段——IPv6 地址空间充裕，RFC 6598 没有对应的 IPv6"共享
+# 地址空间"，不存在同类判定缺口，因此不需要为 IPv6 追加规则。
+_CGNAT_IPV4_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+
+
 def _is_private_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """
     检查 IP 地址是否为私有/保留地址
 
     覆盖范围：
     - RFC 1918 私有地址（10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16）
+    - RFC 6598 运营商级 NAT 共享地址空间（100.64.0.0/10）——显式判断，
+      不依赖 is_private/is_reserved（见上方 _CGNAT_IPV4_NETWORK 注释）
     - 环回地址（127.0.0.0/8, ::1）
     - 链路本地地址（169.254.0.0/16, fe80::/10）
     - 多播地址
@@ -338,6 +356,8 @@ def _is_private_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     Returns:
         bool: True 表示是私有/保留地址，不安全
     """
+    if ip.version == 4 and ip in _CGNAT_IPV4_NETWORK:
+        return True
     return (
         ip.is_private
         or ip.is_loopback
