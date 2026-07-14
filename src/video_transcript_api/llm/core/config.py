@@ -31,6 +31,9 @@ class LLMConfig:
     speaker_max_chars_per_speaker: int = 400   # 每个说话人采样文本的总字符上限
     speaker_context_dialogs: int = 2           # 首次出场前，采集他人发言作为上下文的条数
     speaker_confidence_threshold: float = 0.6  # 置信度阈值，低于此值不采用推断姓名
+    # 所有说话人采样文本合计的全局字符上限，防止 diarization 切分错误产生大量
+    # 虚假说话人标签时，单人上限仍因人数膨胀导致 prompt 总量失控
+    speaker_max_total_sample_chars: int = 8000
 
     # 质量验证模型
     validator_model: Optional[str] = None  # 默认使用 calibrate_model
@@ -182,6 +185,9 @@ class LLMConfig:
             speaker_context_dialogs=speaker_inference_config.get("context_dialogs", 2),
             speaker_confidence_threshold=speaker_inference_config.get(
                 "confidence_threshold", 0.6
+            ),
+            speaker_max_total_sample_chars=speaker_inference_config.get(
+                "max_total_sample_chars", 8000
             ),
 
             # 质量验证模型
