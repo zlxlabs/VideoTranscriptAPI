@@ -123,6 +123,94 @@ class TestSamplingCaps(unittest.TestCase):
         self.assertEqual(len(samples["A"]["own_samples"][0]), 120)
 
 
+class TestGlobalSampleCharBudget(unittest.TestCase):
+    """A global char budget guards against runaway prompt size when diarization
+    produces many (possibly spurious) speaker labels -- P2 codex-review R12."""
+
+    def test_many_speakers_total_sample_chars_capped(self):
+        """50+ speakers, each with plenty of dialog, must not blow past the
+        configured global character budget."""
+        num_speakers = 60
+        speakers = [f"Speaker{i}" for i in range(num_speakers)]
+        dialogs = []
+        t = 0.0
+        for speaker in speakers:
+            # 4 lines x 100 chars each so every speaker can fill its full
+            # 400-char per-speaker quota (mirrors a real multi-turn transcript).
+            for _ in range(4):
+                dialogs.append(_make_dialog(speaker, "x" * 100, start_time=t))
+                t += 1.0
+
+        inferencer = _make_inferencer(
+            samples_per_speaker=3, max_chars_per_speaker=400, max_total_sample_chars=8000
+        )
+        samples = inferencer._extract_sample_dialogs(dialogs, speakers)
+
+        total_chars = sum(len(s) for info in samples.values() for s in info["own_samples"])
+        self.assertLessEqual(total_chars, 8000)
+        # With 60 speakers and 400 chars/speaker (~24000 raw), the cap must
+        # actually have dropped some speakers, not just silently no-op.
+        self.assertLess(len(samples), num_speakers)
+
+    def test_normal_scenario_unaffected_by_global_budget(self):
+        """A handful of speakers, well within the global budget, must behave
+        identically to the pre-cap behavior: everyone gets their full quota."""
+        inferencer = _make_inferencer(
+            samples_per_speaker=3, max_chars_per_speaker=400, max_total_sample_chars=8000
+        )
+        speakers = ["Speaker1", "Speaker2", "Speaker3"]
+        dialogs = []
+        for i, speaker in enumerate(speakers):
+            for j in range(3):
+                dialogs.append(
+                    _make_dialog(
+                        speaker, f"{speaker} says something #{j}", start_time=float(i * 3 + j)
+                    )
+                )
+
+        samples = inferencer._extract_sample_dialogs(dialogs, speakers)
+
+        for speaker in speakers:
+            self.assertIn(speaker, samples)
+            self.assertEqual(len(samples[speaker]["own_samples"]), 3)
+
+    def test_budget_is_configurable_and_triggers_earlier_when_smaller(self):
+        """Shrinking the budget must cause later-appearing speakers to be
+        dropped sooner (an acceptable degradation: latest arrivals lose out)."""
+        speakers = [f"Speaker{i}" for i in range(10)]
+        dialogs = [
+            _make_dialog(speaker, "x" * 100, start_time=float(i))
+            for i, speaker in enumerate(speakers)
+        ]
+
+        inferencer = _make_inferencer(
+            samples_per_speaker=1, max_chars_per_speaker=100, max_total_sample_chars=250
+        )
+        samples = inferencer._extract_sample_dialogs(dialogs, speakers)
+
+        # Budget fits exactly 2 full speakers (100 + 100 <= 250, +1 more would
+        # exceed it), so the earliest-appearing speakers survive and the rest
+        # are excluded via the existing "no samples" fallback path.
+        self.assertIn("Speaker0", samples)
+        self.assertIn("Speaker1", samples)
+        self.assertNotIn("Speaker9", samples)
+
+    def test_late_appearing_speaker_still_sampled_when_budget_not_exhausted(self):
+        """Regression guard for the P1b fix: as long as the global budget has
+        room, a late-appearing speaker must still get its own samples."""
+        inferencer = _make_inferencer(samples_per_speaker=3, context_dialogs=2)
+
+        dialogs = []
+        for i in range(15):
+            dialogs.append(_make_dialog("Speaker1", f"Speaker1 line {i}", start_time=float(i)))
+        dialogs.append(_make_dialog("Speaker2", "大家好我是王老师", start_time=15.0))
+
+        samples = inferencer._extract_sample_dialogs(dialogs, ["Speaker1", "Speaker2"])
+
+        self.assertIn("Speaker2", samples)
+        self.assertTrue(samples["Speaker2"]["own_samples"])
+
+
 class TestPromptGroupRendering(unittest.TestCase):
     """Sample groups must render sorted by first-appearance order with clear structure."""
 

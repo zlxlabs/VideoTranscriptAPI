@@ -39,6 +39,7 @@ class SpeakerInferencer:
         max_chars_per_speaker: int = 400,
         context_dialogs: int = 2,
         confidence_threshold: float = 0.6,
+        max_total_sample_chars: int = 8000,
     ):
         """初始化说话人推断器
 
@@ -51,6 +52,9 @@ class SpeakerInferencer:
             max_chars_per_speaker: 每个说话人采样文本的总字符上限（默认 400）
             context_dialogs: 说话人首次出场前，采集他人发言作为上下文的条数（默认 2）
             confidence_threshold: 置信度阈值，低于此值不采用推断姓名（默认 0.6）
+            max_total_sample_chars: 所有说话人采样文本合计的全局字符上限（默认 8000）。
+                防止 diarization 切分错误产生大量虚假说话人标签时，
+                单人 max_chars_per_speaker 上限仍因人数膨胀导致 prompt 总量失控
         """
         self.llm_client = llm_client
         self.cache_manager = cache_manager
@@ -60,6 +64,7 @@ class SpeakerInferencer:
         self.max_chars_per_speaker = max_chars_per_speaker
         self.context_dialogs = context_dialogs
         self.confidence_threshold = confidence_threshold
+        self.max_total_sample_chars = max_total_sample_chars
 
     def infer(
         self,
@@ -185,6 +190,9 @@ class SpeakerInferencer:
         - 采集其首次发言前的 context_dialogs 条「其他人」的发言作为上下文
           （谁称呼/提及了这个人，是最强的身份信号）
 
+        最后按 max_total_sample_chars 对所有说话人的采样总量施加全局上限
+        （见 _apply_global_sample_budget），防止说话人数量异常多时 prompt 失控。
+
         Args:
             dialogs: 完整对话列表（按时间顺序）
             speakers: 需要采样的说话人列表
@@ -229,7 +237,52 @@ class SpeakerInferencer:
                 "context_before": context_before.get(speaker, []),
             }
 
-        return sample_groups
+        return self._apply_global_sample_budget(sample_groups)
+
+    def _apply_global_sample_budget(self, sample_groups: Dict[str, Dict]) -> Dict[str, Dict]:
+        """对采样总字符数施加全局上限，防止说话人数量异常多时 prompt 失控
+
+        背景：diarization 切分错误可能产生几十个虚假说话人标签，若每人都
+        累加到 max_chars_per_speaker 上限，总量会随说话人数线性膨胀，导致
+        prompt 达到数十万字符（上下文超限或 token 成本失控）。
+
+        裁剪策略保持简单：按「说话人首次出现时间」顺序遍历（与
+        _format_sample_dialogs 的排序一致），逐个说话人累加其采样字符数；
+        一旦加入某说话人会超出全局预算，该说话人及之后（更晚出场）的说话人
+        全部停止采样——不做部分截断，也不做跨说话人的动态再分配。
+
+        取舍：这意味着预算耗尽时最晚出场的说话人最先被裁掉，是刻意接受的
+        简单降级。被裁掉的说话人不在返回结果中，调用方（_extract_sample_dialogs
+        的既有兜底路径）会将其视为"无采样样本"，从 prompt 中剔除该说话人，
+        交由 LLM 依赖其余上下文推断或保留原始标签——复用 P1b 已有逻辑，
+        不新造一套裁剪后的展示方式。
+
+        Args:
+            sample_groups: 裁剪前的按说话人采样结果（键为 speaker，值同
+                _extract_sample_dialogs 返回结构）
+
+        Returns:
+            裁剪后的采样结果，总 own_samples 字符数不超过 max_total_sample_chars
+        """
+        ordered = sorted(
+            sample_groups.items(), key=lambda kv: kv[1].get("first_seen_index", 0)
+        )
+
+        kept: Dict[str, Dict] = {}
+        total_chars = 0
+        for speaker, info in ordered:
+            speaker_chars = sum(len(text) for text in info.get("own_samples") or [])
+            if total_chars + speaker_chars > self.max_total_sample_chars:
+                logger.warning(
+                    f"Global sample char budget ({self.max_total_sample_chars}) exhausted "
+                    f"at speaker '{speaker}'; dropping it and all later-appearing speakers "
+                    f"from sampling ({len(ordered) - len(kept)} speaker(s) affected)"
+                )
+                break
+            kept[speaker] = info
+            total_chars += speaker_chars
+
+        return kept
 
     def _collect_context_before(
         self, dialogs: List[Dict[str, str]], first_index: int, speaker: str
