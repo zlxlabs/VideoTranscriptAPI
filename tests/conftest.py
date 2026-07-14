@@ -8,6 +8,8 @@ pytest 全局配置文件
 
 import os
 import sys
+from pathlib import Path
+
 import pytest
 
 # 添加src目录到Python路径
@@ -88,22 +90,71 @@ def _seed_config_cache_for_missing_config_jsonc() -> None:
 # 执行。所以只能在模块顶层、用 pytest 启动时就已经写好的 sys.argv 做判断，
 # 不能依赖 pytest 自己的 hook 生命周期。
 # ---------------------------------------------------------------------------
-def _pytest_targets_tests_manual() -> bool:
-    """检测本次 pytest 调用的命令行参数里是否显式包含 tests/manual 路径。
+# 注意：判断逻辑必须基于路径解析，不能用字符串子串匹配——子串匹配有两个真实
+# 的绕过/误判场景（均已被 codex review 抓到并在这里补了单元测试，见
+# tests/unit/test_conftest_manual_detection.py）：
+#   1. 误判：`pytest --ignore=tests/manual -s` 本意是"排除 manual、跑默认
+#      套件"，但命令行字符串里含 "tests/manual" 子串，字符串匹配会误判成
+#      "目标是 manual" 从而跳过预热，导致默认套件读取真实配置。
+#   2. 漏判：`cd tests/manual && pytest test_x.py` 用相对路径调用，命令行
+#      参数字符串里根本不含 "tests/manual"，字符串匹配会漏判，预热仍会
+#      介入，掩盖手动测试本该看到的"缺真实配置"状态。
+# 因此改为：跳过所有以 "-" 开头的选项参数，只看剩下的位置参数（测试路径），
+# 去掉 "::" node-id 后缀后按调用时的 cwd 解析成绝对路径并规范化，再用
+# pathlib 的路径语义（而不是裸字符串 startswith）判断是否落在 tests/manual
+# 目录内，避免 "tests/manual_backup" 这类前缀相似但不是子目录的路径被
+# 误判。
+# ---------------------------------------------------------------------------
+def _pytest_targets_tests_manual(argv, cwd, manual_dir) -> bool:
+    """纯函数：判断给定的 pytest 命令行参数是否显式指向 tests/manual。
 
-    只做简单的字符串包含判断（同时兼容 POSIX 的 `tests/manual` 和 Windows
-    的 `tests\\manual` 路径分隔符），不追求覆盖所有可能的调用形式（例如
-    `-k` 表达式里恰好出现这个子串这种极端情况不特殊处理），足够满足
-    "显式手动运行 tests/manual 下测试" 这个场景即可，避免过度设计。
+    不直接读取全局的 sys.argv / os.getcwd()，方便单元测试用构造好的参数
+    独立验证，不必真的启动一次 pytest 子进程。
+
+    参数:
+        argv: 命令行参数列表，不含程序名（即 sys.argv[1:]）。
+        cwd: 本次 pytest 调用时的当前工作目录，用于把相对路径解析为绝对
+             路径（必须用调用时的 cwd，而不是本文件/仓库根目录，否则从
+             tests/manual 内部用相对路径调用时会解析错位置）。
+        manual_dir: tests/manual 目录的路径（可以是相对路径，内部会
+                    resolve 成绝对路径再比较）。
+
+    返回:
+        True 表示本次调用的位置参数里，至少有一个解析后落在 manual_dir
+        目录本身或其子路径下；否则为 False（含没有任何位置参数的裸
+        `pytest` / `pytest -q` 场景，走默认套件发现，不算 manual）。
     """
-    for _arg in sys.argv[1:]:
-        _normalized_arg = _arg.replace("\\", "/")
-        if "tests/manual" in _normalized_arg:
+    _manual_dir_resolved = Path(manual_dir).resolve()
+
+    for _arg in argv:
+        if _arg.startswith("-"):
+            continue  # pytest 选项标志（--ignore=、-k、-s、-q 等），不是测试路径
+
+        _path_part = _arg.split("::", 1)[0]  # 去掉 node-id 后缀，只留文件系统路径部分
+        if not _path_part:
+            continue
+
+        _candidate = Path(_path_part)
+        if not _candidate.is_absolute():
+            _candidate = Path(cwd) / _candidate
+
+        try:
+            _candidate = _candidate.resolve()
+        except OSError:
+            continue  # 路径无法解析时跳过而不是崩溃，交由 pytest 自身报错
+
+        # is_relative_to 同时覆盖"等于 manual_dir"和"是 manual_dir 子路径"
+        # 两种情况，且是按路径分段比较，不会被 tests/manual_backup 这种
+        # 前缀相似的目录误判命中。
+        if _candidate.is_relative_to(_manual_dir_resolved):
             return True
+
     return False
 
 
-if not _pytest_targets_tests_manual():
+_TESTS_MANUAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "manual")
+
+if not _pytest_targets_tests_manual(sys.argv[1:], os.getcwd(), _TESTS_MANUAL_DIR):
     _seed_config_cache_for_missing_config_jsonc()
 
 from video_transcript_api.utils.notifications import (
