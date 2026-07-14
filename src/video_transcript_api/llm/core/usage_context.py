@@ -173,3 +173,31 @@ def pop_chat_result_usage() -> Optional[ChatUsageSnapshot]:
     value = _last_chat_usage.get()
     _last_chat_usage.set(None)
     return value
+
+
+# ============================================================
+# 3. 测试专用：重置本模块的 contextvar 状态
+# ============================================================
+
+
+def reset_context_for_testing() -> None:
+    """仅供测试使用：把本模块的两个 ContextVar 重置回默认状态。
+
+    生产代码不需要调用本函数——`bind_task_id`（线程池 worker 入口每次覆盖）
+    和 `set_context`（with 块内 token/reset 严格配对）已经保证生产环境下
+    不会有跨调用的状态泄漏，详见二者各自的 docstring。
+
+    但部分集成测试（如 `tests/integration/test_llm_stage_terminal_state.py`、
+    `test_layered_cache.py`、`test_llm_ops_status_backfill.py`）会直接同步
+    调用生产入口函数 `api/services/llm_ops.py::_handle_llm_task()`，而不是
+    真的经过 `ThreadPoolExecutor` worker 线程。该函数内部对 `bind_task_id()`
+    的调用会把真实 task_id 一次性写入 `_call_context`，且按设计没有配对的
+    reset。pytest 默认在同一进程/主线程里顺序执行所有用例，这个残留值会
+    一直保留到后面执行到的、期望"默认干净上下文"的测试用例（例如
+    `test_usage_context_propagation.py`），造成跨测试污染。
+
+    调用方：`tests/conftest.py` 里的 autouse fixture，在每个测试前后调用，
+    避免这种污染以任何测试收集顺序都能稳定复现。
+    """
+    _call_context.set(dict(_DEFAULT_CALL_CONTEXT))
+    _last_chat_usage.set(None)

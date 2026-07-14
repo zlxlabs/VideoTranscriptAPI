@@ -110,6 +110,7 @@ from video_transcript_api.utils.notifications import (
     init_all_notifiers,
     shutdown_all_notifiers,
 )
+from video_transcript_api.llm.core import usage_context
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -121,3 +122,29 @@ def setup_global_notifiers():
     init_all_notifiers()
     yield
     shutdown_all_notifiers()
+
+
+@pytest.fixture(autouse=True)
+def _reset_usage_context():
+    """
+    Reset video_transcript_api.llm.core.usage_context's contextvar state
+    before and after every test.
+
+    Why this is needed: usage_context.bind_task_id() is a one-shot bind by
+    design (no paired reset -- see its docstring), which is correct in
+    production because ThreadPoolExecutor worker threads re-call it at every
+    task entry point, overwriting any leftover value. Several integration
+    tests (test_llm_stage_terminal_state.py, test_layered_cache.py,
+    test_llm_ops_status_backfill.py) call the production entry point
+    llm_ops._handle_llm_task() directly and synchronously in the pytest main
+    thread rather than through a real worker thread. That leaves a real
+    task_id sitting in the contextvar after those tests finish, which then
+    leaks into whichever test pytest happens to run next in the same
+    process/thread (e.g. test_usage_context_propagation.py expecting a
+    pristine 'unknown' default) -- a collection-order-dependent flake, not a
+    genuine test failure. Resetting here removes the dependency on test
+    ordering entirely.
+    """
+    usage_context.reset_context_for_testing()
+    yield
+    usage_context.reset_context_for_testing()

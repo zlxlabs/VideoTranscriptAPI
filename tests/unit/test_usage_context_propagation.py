@@ -19,17 +19,16 @@ All console output must be in English only (no emoji, no Chinese).
 import contextvars
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import pytest
-
 from video_transcript_api.llm.core import usage_context
 
-
-@pytest.fixture(autouse=True)
-def _clean_context():
-    """Each test starts from a pristine default context."""
-    yield
-    # best-effort cleanup: nothing to reset explicitly since ContextVar defaults
-    # apply per-thread/per-Context and tests run in the main thread each time.
+# NOTE: context reset between tests is handled by the global autouse fixture
+# `_reset_usage_context` in tests/conftest.py (calls
+# usage_context.reset_context_for_testing() before/after every test). This
+# file used to carry its own no-op local fixture here, but its "nothing to
+# reset explicitly" assumption was exactly the bug: usage_context.bind_task_id()
+# writes a real, persistent value into a module-level ContextVar, and some
+# integration tests call it synchronously in the pytest main thread -- see
+# tests/conftest.py for the full explanation.
 
 
 class TestSetContextGetContext:
