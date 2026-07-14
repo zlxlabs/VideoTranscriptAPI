@@ -6,18 +6,52 @@
 """
 
 import os
+import socket
 import sys
 import json
+from unittest.mock import patch
 
 # 添加项目根目录到Python路径
 
 from video_transcript_api.downloaders import create_downloader
 
+# 除带识别扩展名的 mp3/mp4 等 URL（GenericDownloader._is_media_url 靠路径扩展名
+# 直接判定，不发请求）外，"https://www.example.com/" 没有扩展名，会触发一次真实
+# HEAD 探测（GenericDownloader._safe_request -> 钉定 IP 的 HTTPAdapter.send）。
+# 这里 mock 掉这一次网络 I/O，避免测试依赖外部网络可用性；做法沿用
+# tests/unit/test_generic_downloader_retry.py 中记录的既有约定：
+# 1) 伪造 socket.getaddrinfo 返回一个公网 IP，绕过 SSRF 校验阶段的真实 DNS 解析；
+# 2) 在最终发请求的适配器层（requests.adapters.HTTPAdapter.send）返回一个
+#    Content-Type 为 text/html 的假响应，还原"非媒体文件"的预期路径。
+GETADDRINFO_PATH = "video_transcript_api.utils.url_validator.socket.getaddrinfo"
+BASE_SEND_PATH = "requests.adapters.HTTPAdapter.send"
+
+
+def _public_addrinfo(*args, **kwargs):
+    """伪造 socket.getaddrinfo，返回一个可通过 SSRF 校验的公网 IPv4 地址"""
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+
+class _FakeHeadResponse:
+    """伪造 HEAD 响应：非重定向 + Content-Type 为网页而非媒体文件"""
+    is_redirect = False
+    headers = {"Content-Type": "text/html; charset=utf-8"}
+
+
 def test_generic_downloader():
     """测试通用URL下载器"""
-    
+
+    with patch(GETADDRINFO_PATH, side_effect=_public_addrinfo), patch(
+        BASE_SEND_PATH, return_value=_FakeHeadResponse()
+    ):
+        return _run_generic_downloader_cases()
+
+
+def _run_generic_downloader_cases():
+    """实际执行下载器分发与信息获取断言（拆出来是为了让上面的 with 语境包住整个流程）"""
+
     print("测试通用URL下载器功能\n")
-    
+
     # 测试URL列表
     test_cases = [
         {
