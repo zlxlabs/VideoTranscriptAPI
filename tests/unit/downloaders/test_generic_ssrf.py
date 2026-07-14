@@ -485,12 +485,20 @@ class TestEnvironmentSettingsMergedThroughSession:
         sent_kwargs = mock_send.call_args.kwargs
         assert sent_kwargs["proxies"]["https"] == "http://proxy.internal:3128"
 
-    def test_proxy_present_skips_ip_pinning_keeps_original_hostname_url(self, monkeypatch):
-        """Connecting through a proxy is the proxy's job: pinning our own
-        resolved IP into the request is meaningless (the proxy has its own
-        DNS view) and can break hostname-based proxy ACLs, so with a proxy
-        configured the dispatched request must NOT be rewritten to the
-        pinned IP."""
+    def test_proxy_present_still_pins_ip_and_forwards_proxies_kwarg(self, monkeypatch):
+        """ci-gate review: the old behavior skipped IP pinning entirely
+        whenever a proxy was configured, dispatching the raw hostname URL
+        through the default adapter. That left SSRF protection dead on the
+        proxy path -- an attacker-controlled domain could resolve a public
+        IP for our own validation and a private/metadata IP for the proxy's
+        independent resolution (classic DNS-rebinding bypass), since the
+        pinned IP was never wired into the request at all.
+
+        The fix: a configured proxy no longer disables pinning. The
+        dispatched request must still be rewritten to the validated pinned
+        IP (Host header restored to the original hostname) AND the merged
+        `proxies` setting must still reach the adapter's send() call --
+        proxy and pinning are no longer mutually exclusive."""
         _clear_proxy_env(monkeypatch)
         monkeypatch.setenv("HTTPS_PROXY", "http://proxy.internal:3128")
         downloader = GenericDownloader()
@@ -502,7 +510,11 @@ class TestEnvironmentSettingsMergedThroughSession:
             downloader._safe_request("get", url, timeout=5)
 
         sent_request = mock_send.call_args[0][0]
-        assert sent_request.url == url
+        assert sent_request.url == "https://93.184.216.34/audio.mp3"
+        assert sent_request.headers["Host"] == "public.example.com"
+
+        sent_kwargs = mock_send.call_args.kwargs
+        assert sent_kwargs["proxies"]["https"] == "http://proxy.internal:3128"
 
     def test_requests_ca_bundle_env_var_is_merged_into_verify(self, monkeypatch, tmp_path):
         _clear_proxy_env(monkeypatch)

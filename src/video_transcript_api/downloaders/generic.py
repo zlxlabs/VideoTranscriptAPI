@@ -159,16 +159,19 @@ class GenericDownloader(BaseDownloader):
            选中并已合并好环境设置的适配器后，直接调用它的 send()，只借用
            Session 做配置合并与适配器挂载查找，不借用它的响应后处理逻辑。
 
-        代理场景（codex-review R6 #2）：如果这次请求命中了 HTTP(S)_PROXY /
-        显式配置的代理，真正的 TCP/TLS 连接由代理服务器建立，我方解析并
-        钉住的 IP 对代理没有意义——代理有自己独立的 DNS/网络视角，很多代理
-        的访问控制还是按主机名而非 IP 生效的，继续钉 IP 反而可能打破代理
-        路由或绕开代理自身的访问控制。此时改为不挂载 PinnedIPHTTPAdapter，
-        让 Session 用默认适配器按原始域名正常经代理请求——前面的
-        validate_url_safe_with_ips 校验依然生效，只是"钉住连接到同一个 IP"
-        这一层被代理的存在天然打破了；代理链路下的 DNS rebinding 风险由
-        代理自身的 DNS 解析和网络策略决定，运维一旦选择接入代理，就已经把
-        这段信任交给了代理，这里视为可接受的边界。
+        代理场景（codex-review R6 #2，后被 ci-gate review 指出安全问题并在
+        本版本修正）：曾经的实现是——如果这次请求命中了 HTTP(S)_PROXY /
+        显式配置的代理，就整段跳过 IP 钉定，让 Session 用默认适配器按原始
+        域名经代理请求，理由是"代理有自己独立的 DNS 视角，钉 IP 对它没有
+        意义"。但代理环境在服务端部署很常见，这条"跳过"分支等于让 SSRF
+        防护在代理路径上形同虚设：攻击者控制的域名完全可以让本地校验解析
+        出公网 IP、但代理侧独立解析出内网/云元数据地址，经典 DNS
+        rebinding 绕过就此复活。现在改为：代理与 IP 钉定不再互斥，直接
+        进入下面的候选钉定循环，proxies 配置随 send_kwargs 一起透传给
+        target_adapter.send()——效果是请求确实经代理转发，但代理连接的
+        目标就是本地校验通过的那个 IP（HTTP 场景发给代理的是钉定 IP 的
+        绝对形式 URI，HTTPS 场景发给代理的 CONNECT 目标同样是钉定 IP），
+        代理自身的 DNS 视角不再有可乘之机。
 
         多候选 IP 钉定重试（codex-review R8 #2）：双栈/多节点域名解析出的
         多个公网候选地址里，第一条（常见 AAAA 优先）在当前网络恰好不可达
@@ -270,16 +273,25 @@ class GenericDownloader(BaseDownloader):
             send_kwargs.update(settings)
 
             if scheme_has_proxy:
-                logger.info(
-                    f"检测到 {parsed_url.scheme} 代理配置，连接由代理建立，"
-                    f"跳过 IP 钉定，按原始域名经代理请求（校验仍已通过）: {url}"
+                # 之前这里会整段跳过下面的钉定循环、直接用未钉定的原始域名
+                # URL 经代理发送——代理环境在服务端部署很常见，这会让"域名
+                # 校验时解析出公网 IP、代理侧真正连接时解析出内网/云元数据
+                # IP"的经典 DNS rebinding 绕过在代理路径上完全不设防
+                # （ci-gate review 指出的安全问题）。
+                #
+                # 修复：不再单独分支，直接落入下面的候选循环——send_kwargs
+                # 里已经带着 merge_environment_settings 合并出的 proxies/
+                # verify/cert，PinnedIPHTTPAdapter.send() 只重写了请求 URL
+                # 的 host 部分和 Host 头，随后仍调用父类 HTTPAdapter.send()，
+                # 对 proxies kwarg 的处理与未钉定时完全一致（HTTP 场景下代理
+                # 收到的是钉定 IP 的绝对形式 URI；HTTPS 场景下代理收到的
+                # CONNECT 目标同样是钉定 IP）——代理设置和 IP 钉定因此同时
+                # 生效：请求确实经过代理转发，但代理连接的目标就是本地校验
+                # 通过的那个 IP，代理自身的 DNS 视角不再有可乘之机。
+                logger.debug(
+                    f"检测到 {parsed_url.scheme} 代理配置，代理设置将随钉定"
+                    f"请求一并生效（不再跳过 IP 钉定）: {url}"
                 )
-                # 未挂载 PinnedIPHTTPAdapter，session.get_adapter() 返回
-                # Session 默认适配器，按原始域名正常经代理请求；代理场景下
-                # 换址没有意义（代理有自己独立的网络视角），不进入下面的
-                # 多候选重试循环。
-                target_adapter = session.get_adapter(prepared.url)
-                return target_adapter.send(prepared, **send_kwargs)
 
             for candidate_index, candidate_ip in enumerate(pinned_ips):
                 prepared.url = original_prepared_url
