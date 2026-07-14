@@ -4,7 +4,7 @@ This test requires:
 1. Valid config file with API credentials
 2. Real LLM API access
 
-Run manually: uv run pytest tests/llm/test_summary_e2e_simple.py -v -s
+Run manually: uv run pytest tests/manual/test_summary_e2e_simple.py -v -s
 """
 
 import unittest
