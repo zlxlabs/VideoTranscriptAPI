@@ -443,6 +443,16 @@ def _restore_cached_summary_for_notification(result_dict: dict, merged_snapshot:
     把"本轮真实尝试但失败"（FAILED，缓存不会有 llm_summary.txt）误伪装成
     成功。
 
+    修复（codex-review R9 P2）：仅"llm_summary.txt 存在"不足以证明它是一份
+    真正的总结——诚实状态模型里 summary_status=SKIPPED_SHORT 时，
+    llm_summary.txt 存的是"文本过短，保存校对文本作为总结"的兜底内容（完整
+    校对文本，不是真总结，见 _save_llm_results 的 SKIPPED_SHORT 分支）。
+    若不区分，只补校对的请求会把这份兜底内容当"内容总结"回填进通知，既误导
+    用户，又绕开了校对文本通知路径自身的 5000 字截断（"总结"分支不做长度
+    截断）。因此这里额外核实合并后（llm_status.json）的 summary_status
+    必须是 GENERATED 才回填；SKIPPED_SHORT/FAILED/DISABLED/PENDING 均维持
+    "未生成"语义不变，交由 _send_notification 按各自既有文案处理。
+
     Args:
         result_dict: _build_result_dict() 的输出，原地修改（补回总结文本、
             skip_summary 与 stats.summary_length）
@@ -452,6 +462,10 @@ def _restore_cached_summary_for_notification(result_dict: dict, merged_snapshot:
     if result_dict.get("内容总结") is not None:
         return
     if not merged_snapshot or "llm_summary" not in merged_snapshot:
+        return
+
+    merged_llm_status = merged_snapshot.get("llm_status") or {}
+    if merged_llm_status.get("summary_status") != SummaryStatus.GENERATED:
         return
 
     cached_summary_text = merged_snapshot.get("llm_summary") or ""
