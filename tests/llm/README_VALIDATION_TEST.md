@@ -7,7 +7,7 @@
 ## 测试文件
 
 - `test_quality_validation_scoring.py` - 主测试脚本
-- `run_validation_scoring_test.py` - 便捷运行脚本
+- `../manual/run_validation_scoring_test.py` - 便捷运行脚本（位于 `tests/manual/`，依赖真实 LLM API，需显式手动运行）
 - `validation_scoring_results.json` - 测试结果输出文件
 
 ## 运行测试
@@ -23,13 +23,13 @@ python tests/llm/test_quality_validation_scoring.py
 
 ```bash
 # 默认测试（30个片段）
-python tests/llm/run_validation_scoring_test.py
+python tests/manual/run_validation_scoring_test.py
 
 # 指定片段数量
-python tests/llm/run_validation_scoring_test.py --segments 50
+python tests/manual/run_validation_scoring_test.py --segments 50
 
 # 使用串行执行（默认）
-python tests/llm/run_validation_scoring_test.py --serial
+python tests/manual/run_validation_scoring_test.py --serial
 ```
 
 ## 测试配置

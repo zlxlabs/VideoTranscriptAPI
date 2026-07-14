@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src'))
 
 # ---------------------------------------------------------------------------
-# 在导入 video_transcript_api 之前，为缺失 config/config.jsonc 的场景兜底。
+# 在导入 video_transcript_api 之前，为默认测试套件强制注入脱敏占位配置。
 #
 # video_transcript_api 在“导入时”就会立即加载配置：
 # utils/logging/__init__.py -> audit_logger.py 在模块级别调用
@@ -29,7 +29,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src
 # `_config_cache` 全局变量，再注册进 sys.modules。这样后续包内的
 # `from .logger import ...` 会复用这个已经"预热"过缓存的模块对象，
 # load_config() 命中缓存分支，不再触碰磁盘上的 config.jsonc。
-# 若本机确实存在真实 config.jsonc（本地开发场景），则完全不介入，走原有逻辑。
+#
+# 重要：默认测试套件永远注入占位配置，不再检查磁盘上是否存在真实
+# config.jsonc。原先"本机已有真实配置就跳过预热"的分支已删除——那样会让
+# 默认套件的行为随开发机是否有真实配置而漂移（覆盖不同代码分支、结果不可
+# 复现），且真实凭据路径下个别测试打印的 API key 前缀等信息存在通过
+# `pytest -s` 或失败日志泄露的风险。真正需要读取真实配置的场景，只保留给
+# `tests/manual/` 下显式手动运行的测试（见下方 _pytest_targets_tests_manual）。
 #
 # 注意：部分测试文件用 `from src.video_transcript_api...` 而不是
 # `from video_transcript_api...` 导入（两种写法在 sys.path 上都能解析到，
@@ -39,10 +45,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src
 # ---------------------------------------------------------------------------
 def _seed_config_cache_for_missing_config_jsonc() -> None:
     _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    _real_config = os.path.join(_project_root, "config", "config.jsonc")
-    if os.path.exists(_real_config):
-        return  # 本地已有真实配置，交给生产代码原有逻辑加载
-
     _example_config = os.path.join(_project_root, "config", "config.example.jsonc")
     _logger_py = os.path.join(
         _project_root, "src", "video_transcript_api", "utils", "logging", "logger.py"
@@ -69,7 +71,40 @@ def _seed_config_cache_for_missing_config_jsonc() -> None:
         sys.modules[_module_name] = _logger_module
 
 
-_seed_config_cache_for_missing_config_jsonc()
+# ---------------------------------------------------------------------------
+# tests/manual/ 下的用例是"显式手动运行、依赖真实配置"的测试，预热逻辑不能
+# 介入它们：介入会导致这些测试用占位 API key 真的发起网络请求，而不是按
+# 生产代码原有逻辑在缺配置时干净地报错/跳过。
+#
+# 判断时机为什么必须用 sys.argv，而不是 pytest 的 pytest_configure hook：
+# 已用一个最小 conftest.py 探针实测验证（在 conftest.py 顶层与
+# pytest_configure 钩子里分别打印时间戳/顺序标记，执行
+# `pytest tests/manual/test_probe.py -q -s` 观察 stdout 顺序），结论是
+# conftest.py 模块顶层代码一定先于 pytest_configure hook 执行——pytest 必须
+# 先完整导入 conftest.py 模块（执行完所有顶层语句）才能拿到其中定义的
+# pytest_configure 函数并注册、调用它。而本文件里真正会触发
+# load_config() 崩溃的 `from video_transcript_api.utils.notifications
+# import (...)` 就是一条顶层语句，一定会在 pytest_configure 有机会运行之前
+# 执行。所以只能在模块顶层、用 pytest 启动时就已经写好的 sys.argv 做判断，
+# 不能依赖 pytest 自己的 hook 生命周期。
+# ---------------------------------------------------------------------------
+def _pytest_targets_tests_manual() -> bool:
+    """检测本次 pytest 调用的命令行参数里是否显式包含 tests/manual 路径。
+
+    只做简单的字符串包含判断（同时兼容 POSIX 的 `tests/manual` 和 Windows
+    的 `tests\\manual` 路径分隔符），不追求覆盖所有可能的调用形式（例如
+    `-k` 表达式里恰好出现这个子串这种极端情况不特殊处理），足够满足
+    "显式手动运行 tests/manual 下测试" 这个场景即可，避免过度设计。
+    """
+    for _arg in sys.argv[1:]:
+        _normalized_arg = _arg.replace("\\", "/")
+        if "tests/manual" in _normalized_arg:
+            return True
+    return False
+
+
+if not _pytest_targets_tests_manual():
+    _seed_config_cache_for_missing_config_jsonc()
 
 from video_transcript_api.utils.notifications import (
     init_all_notifiers,
