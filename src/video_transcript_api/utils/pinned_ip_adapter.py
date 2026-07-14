@@ -55,6 +55,17 @@ class PinnedIPHTTPAdapter(HTTPAdapter):
     3. HTTPS 场景下，init_poolmanager() 把 server_hostname（SNI）和
        assert_hostname（证书主机名校验目标）都固定为原始 hostname，让
        urllib3 在"物理连接 IP"的同时，仍然按真实域名做 SNI 和证书校验。
+       这条只覆盖直连场景使用的 PoolManager。
+    4. 代理场景（HTTP(S)_PROXY 配置存在时）走的是另一套连接池
+       ——urllib3.ProxyManager，requests.adapters.HTTPAdapter 通过
+       proxy_manager_for() 创建/缓存它，不会自动继承 init_poolmanager()
+       给 PoolManager 注入的参数。proxy_manager_for() 在本类中被覆写，
+       与 init_poolmanager() 做对称处理：同样按 is_https 注入
+       server_hostname/assert_hostname，确保 HTTPS 代理隧道
+       （CONNECT）内部实际连接目标的 HTTPSConnectionPool 也钉住真实
+       域名做 SNI/证书校验，同时 send() 已把请求 URL 钉成 pinned_ip，
+       所以代理收到的 CONNECT 目标本身就是已校验 IP，钉定语义与直连
+       路径完全一致。
     """
 
     def __init__(self, hostname: str, pinned_ip: str, is_https: bool, **kwargs):
@@ -86,6 +97,48 @@ class PinnedIPHTTPAdapter(HTTPAdapter):
             kwargs["server_hostname"] = self._hostname
             kwargs["assert_hostname"] = self._hostname
         return super().init_poolmanager(*args, **kwargs)
+
+    def proxy_manager_for(self, proxy, **proxy_kwargs):
+        """
+        返回用于经由 `proxy` 连接目标的 urllib3 ProxyManager（HTTPS 场景下
+        走 CONNECT 隧道），与 init_poolmanager() 对称的另一半 TLS 参数注入
+        （ci-gate review 第四轮修复）。
+
+        背景：requests 对"直连"和"走代理"使用两套完全独立的连接池实现
+        ——PoolManager（本类 init_poolmanager() 已经把 server_hostname/
+        assert_hostname 写进它的 connection_pool_kw）和 ProxyManager。
+        HTTPAdapter.get_connection_with_tls_context() 调用本方法时不会
+        传入任何 TLS 相关参数（当前 requests 版本的调用是
+        `self.proxy_manager_for(proxy)`，不带 kwargs），所以 ProxyManager
+        默认拿不到这两个参数，必须在这里主动补上。
+
+        传递链路（已对照本项目锁定的 requests/urllib3 版本源码逐层验证）：
+        本方法把 server_hostname/assert_hostname 塞进 proxy_kwargs 后交给
+        super().proxy_manager_for()，requests 的实现会把这些 kwargs 原样
+        透传给 urllib3.proxy_from_url() -> ProxyManager.__init__()。
+        ProxyManager.__init__ 只认领它自己命名的几个参数（proxy_headers/
+        proxy_ssl_context/use_forwarding_for_https/proxy_assert_hostname/
+        proxy_assert_fingerprint），其余（含 server_hostname/
+        assert_hostname）作为 **connection_pool_kw 转交给父类
+        PoolManager.__init__，存成 self.connection_pool_kw。当请求 scheme
+        为 https 时，ProxyManager.connection_from_host() 会把这次调用委托
+        给 PoolManager.connection_from_host()，后者用
+        `_merge_pool_kwargs()` 把 self.connection_pool_kw 并入新建连接池
+        （即 CONNECT 隧道内部实际连接目标用的 HTTPSConnectionPool）的构造
+        参数——这条链路和直连场景下 init_poolmanager() 注入
+        PoolManager.connection_pool_kw 的机制完全对称，唯一区别是多绕了
+        ProxyManager 这一层。
+
+        HTTP（非 HTTPS）场景不注入：没有 TLS 握手，ProxyManager 会把请求
+        直接转发给代理（request.url 已被 send() 钉成 pinned IP 的绝对
+        形式），不涉及 SNI/证书主机名校验，注入这两个 TLS 专属 kwarg 对
+        非 TLS 转发没有意义（对齐 init_poolmanager() 现有的同款 is_https
+        条件判断，避免无意义的参数污染代理连接池的构造参数）。
+        """
+        if self._is_https:
+            proxy_kwargs.setdefault("server_hostname", self._hostname)
+            proxy_kwargs.setdefault("assert_hostname", self._hostname)
+        return super().proxy_manager_for(proxy, **proxy_kwargs)
 
     def send(self, request, **kwargs):
         """

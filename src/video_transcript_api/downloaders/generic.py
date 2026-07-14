@@ -147,21 +147,21 @@ class GenericDownloader(BaseDownloader):
         每次调用构造一个新的 requests.Session（而非复用单例）：Session 本身
         不是线程安全的，本方法可能被并发的下载任务同时调用，per-request 新建
         开销很小，换来无需操心跨线程共享状态。用这个 Session 只为两件事：
-        1) 通过 Session.merge_environment_settings 合并 verify/cert 相关的
-           部署环境配置（REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE 自定义 CA 证书
-           ——见下方"环境代理"说明，merge 结果里的 proxies 会被显式丢弃、
-           不使用），2) 作为 PinnedIPHTTPAdapter 的挂载点，通过
-           Session.get_adapter 按 URL 前缀取出实际发送请求的适配器。不调用
-           Session.send()/Session.request()：那条路径即使传
-           allow_redirects=False，内部仍会在响应上预取一次下一跳信息用于
+        1) 通过 Session.merge_environment_settings 合并部署环境配置
+           ——REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE 自定义 CA 证书（verify/
+           cert）以及 HTTP(S)_PROXY / NO_PROXY 环境代理（proxies，见下方
+           "环境代理"说明，现在会正常透传），2) 作为 PinnedIPHTTPAdapter
+           的挂载点，通过 Session.get_adapter 按 URL 前缀取出实际发送请求
+           的适配器。不调用 Session.send()/Session.request()：那条路径即使
+           传 allow_redirects=False，内部仍会在响应上预取一次下一跳信息用于
            Response.next()（读 Location、抽取 Cookie、重建 auth），这属于
            _safe_request 自己实现的逐跳重定向校验不需要、也不应该由 Session
            重复处理的"自动重定向/Cookie/Hook 流水线"；这里改为拿到 Session
            选中并已合并好环境设置的适配器后，直接调用它的 send()，只借用
            Session 做配置合并与适配器挂载查找，不借用它的响应后处理逻辑。
 
-        环境代理（codex-review R6 #2 引入、经两轮问题排查后于本版本定案为
-        "始终忽略"）——这里的演变分三步：
+        环境代理（codex-review R6 #2 引入，经四轮问题排查后于本版本定案为
+        "代理 + 钉定 IP + 正确 SNI 三者共存"）——这里的演变分四步：
         1) 最初实现：命中 HTTP(S)_PROXY 时整段跳过 IP 钉定，让 Session 用
            默认适配器按原始域名经代理请求，理由是"代理有自己独立的 DNS
            视角，钉 IP 对它没有意义"。但代理环境在服务端部署很常见，这条
@@ -178,15 +178,26 @@ class GenericDownloader(BaseDownloader):
            下 CONNECT 目标虽然是钉定 IP，TLS SNI/证书主机名校验用的参数却
            不对，正常的 HTTPS 域名会因为按错误主机名做证书校验而请求失败
            ——真实的功能回归。
-        3) 现在的做法：不再尝试在代理路径里做"正确的 SNI 钉定"（需要覆盖
-           urllib3 HTTPAdapter.proxy_manager_for() 之类的内部机制，复杂度
-           与收益不成比例——GenericDownloader 是个人自用项目的兜底下载器，
-           走企业代理本就是边缘场景）。改为 GenericDownloader 完全不使用
-           环境代理配置，始终直连钉定 IP：下面构造 send_kwargs 时显式丢弃
-           merge_environment_settings 合并出的 proxies 键，只保留 verify/
-           cert（以及未受影响的 stream）。副作用是同时解决了 1) 和 2) 两个
-           问题——没有代理路径了，SSRF 钉定始终生效，也不存在 SNI/
-           ProxyManager 传播问题。
+        3) 一度改为"GenericDownloader 完全不使用环境代理配置，始终直连钉定
+           IP"（显式丢弃 merge_environment_settings 合并出的 proxies 键），
+           理由是"在代理路径里做正确的 SNI 钉定需要覆盖 urllib3
+           HTTPAdapter.proxy_manager_for() 之类的内部机制，复杂度与收益不
+           成比例"。这个判断站不住：本 PR 的意图是补 SSRF 防护，不应该
+           静默移除 requests 标准的环境代理能力——依赖企业代理/容器出网
+           代理访问外部媒体的部署会全部失效，属于真实的功能回归（ci-gate
+           review 第四轮打回）。
+        4) 现在的做法：正面解决 2) 遗留的 SNI/ProxyManager 传播问题，而不
+           是绕开代理。PinnedIPHTTPAdapter 新增 proxy_manager_for() 覆写
+           （见 utils/pinned_ip_adapter.py），在 super().proxy_manager_for()
+           构造/返回 ProxyManager 前注入与 init_poolmanager() 同样的
+           server_hostname/assert_hostname——这两个参数经
+           ProxyManager.__init__ 的 **connection_pool_kw 一路传到 CONNECT
+           隧道内部实际连接目标的 HTTPSConnectionPool，与直连场景的传递
+           路径完全对称。下面重新把 merge_environment_settings 合并出的
+           完整 settings（含 proxies）合并进 send_kwargs，代理配置正常
+           传给 adapter.send()：代理存在时请求经代理转发，CONNECT/转发目标
+           是已校验的钉定 IP（SSRF 钉定语义不变），TLS SNI 和证书主机名
+           校验仍按真实 hostname 进行（功能正确性也不再回归）。
 
         多候选 IP 钉定重试（codex-review R8 #2）：双栈/多节点域名解析出的
         多个公网候选地址里，第一条（常见 AAAA 优先）在当前网络恰好不可达
@@ -300,18 +311,16 @@ class GenericDownloader(BaseDownloader):
                 kwargs.get("cert"),
             )
 
-            # GenericDownloader 不使用环境代理配置（HTTP(S)_PROXY/NO_PROXY）
-            # ——见上方 docstring"环境代理"一节：正确处理"代理内钉 IP + 正确
-            # SNI"需要覆盖 urllib3 ProxyManager 相关内部机制，复杂度与收益
-            # 不成比例，且曾在代理路径上分别引发过安全问题（跳过钉 IP）和
-            # 正确性问题（SNI/证书主机名不传播）。这里始终直连已校验 IP，
-            # 显式丢弃 merge 出来的 proxies 键，只保留 verify/cert。
-            env_proxy = settings.pop("proxies", {}).get(parsed_url.scheme)
+            # 环境代理（HTTP(S)_PROXY/NO_PROXY）正常生效——见上方 docstring
+            # "环境代理"一节演进步骤 4)：PinnedIPHTTPAdapter.
+            # proxy_manager_for() 已经把 server_hostname/assert_hostname
+            # 正确注入到代理路径使用的 ProxyManager，代理与钉定 IP、正确
+            # SNI 三者可以正常共存，不再需要丢弃 merge 出来的 proxies 键。
+            env_proxy = settings.get("proxies", {}).get(parsed_url.scheme)
             if env_proxy:
                 logger.debug(
-                    f"检测到环境代理配置 {parsed_url.scheme}={env_proxy}，但"
-                    f"GenericDownloader 固定直连已校验 IP，本次请求已忽略该"
-                    f"代理: {url}"
+                    f"检测到环境代理配置 {parsed_url.scheme}={env_proxy}，"
+                    f"本次请求经该代理转发，CONNECT/转发目标为已校验钉定 IP: {url}"
                 )
 
             send_kwargs = dict(kwargs)
