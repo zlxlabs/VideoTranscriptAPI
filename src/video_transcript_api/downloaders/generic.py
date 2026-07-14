@@ -147,11 +147,12 @@ class GenericDownloader(BaseDownloader):
         每次调用构造一个新的 requests.Session（而非复用单例）：Session 本身
         不是线程安全的，本方法可能被并发的下载任务同时调用，per-request 新建
         开销很小，换来无需操心跨线程共享状态。用这个 Session 只为两件事：
-        1) 通过 Session.merge_environment_settings 合并部署环境配置
-           （HTTP(S)_PROXY / NO_PROXY / REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE
-           等——见下方 codex-review R6 #2 说明），2) 作为 PinnedIPHTTPAdapter
-           的挂载点，通过 Session.get_adapter 按 URL 前缀取出实际发送请求的
-           适配器。不调用 Session.send()/Session.request()：那条路径即使传
+        1) 通过 Session.merge_environment_settings 合并 verify/cert 相关的
+           部署环境配置（REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE 自定义 CA 证书
+           ——见下方"环境代理"说明，merge 结果里的 proxies 会被显式丢弃、
+           不使用），2) 作为 PinnedIPHTTPAdapter 的挂载点，通过
+           Session.get_adapter 按 URL 前缀取出实际发送请求的适配器。不调用
+           Session.send()/Session.request()：那条路径即使传
            allow_redirects=False，内部仍会在响应上预取一次下一跳信息用于
            Response.next()（读 Location、抽取 Cookie、重建 auth），这属于
            _safe_request 自己实现的逐跳重定向校验不需要、也不应该由 Session
@@ -159,19 +160,33 @@ class GenericDownloader(BaseDownloader):
            选中并已合并好环境设置的适配器后，直接调用它的 send()，只借用
            Session 做配置合并与适配器挂载查找，不借用它的响应后处理逻辑。
 
-        代理场景（codex-review R6 #2，后被 ci-gate review 指出安全问题并在
-        本版本修正）：曾经的实现是——如果这次请求命中了 HTTP(S)_PROXY /
-        显式配置的代理，就整段跳过 IP 钉定，让 Session 用默认适配器按原始
-        域名经代理请求，理由是"代理有自己独立的 DNS 视角，钉 IP 对它没有
-        意义"。但代理环境在服务端部署很常见，这条"跳过"分支等于让 SSRF
-        防护在代理路径上形同虚设：攻击者控制的域名完全可以让本地校验解析
-        出公网 IP、但代理侧独立解析出内网/云元数据地址，经典 DNS
-        rebinding 绕过就此复活。现在改为：代理与 IP 钉定不再互斥，直接
-        进入下面的候选钉定循环，proxies 配置随 send_kwargs 一起透传给
-        target_adapter.send()——效果是请求确实经代理转发，但代理连接的
-        目标就是本地校验通过的那个 IP（HTTP 场景发给代理的是钉定 IP 的
-        绝对形式 URI，HTTPS 场景发给代理的 CONNECT 目标同样是钉定 IP），
-        代理自身的 DNS 视角不再有可乘之机。
+        环境代理（codex-review R6 #2 引入、经两轮问题排查后于本版本定案为
+        "始终忽略"）——这里的演变分三步：
+        1) 最初实现：命中 HTTP(S)_PROXY 时整段跳过 IP 钉定，让 Session 用
+           默认适配器按原始域名经代理请求，理由是"代理有自己独立的 DNS
+           视角，钉 IP 对它没有意义"。但代理环境在服务端部署很常见，这条
+           "跳过"分支等于让 SSRF 防护在代理路径上形同虚设（ci-gate review
+           指出的安全问题：攻击者控制的域名可以让本地校验解析出公网 IP、
+           代理侧独立解析出内网/云元数据地址，经典 DNS rebinding 绕过）。
+        2) 修正为"代理与钉 IP 不互斥"：把 merge 出来的 proxies 连同钉定 IP
+           一起透传给 target_adapter.send()，代理收到的 CONNECT/请求目标
+           就是钉定 IP。这堵上了安全窟窿，但引入了新的正确性问题（ci-gate
+           review 第三轮指出）：requests 对"直连"和"走代理"走的是两套连接
+           池实现——PoolManager vs ProxyManager；PinnedIPHTTPAdapter.
+           init_poolmanager() 里注入的 server_hostname/assert_hostname 只
+           作用于直连 PoolManager，不会传播到 ProxyManager。结果是代理路径
+           下 CONNECT 目标虽然是钉定 IP，TLS SNI/证书主机名校验用的参数却
+           不对，正常的 HTTPS 域名会因为按错误主机名做证书校验而请求失败
+           ——真实的功能回归。
+        3) 现在的做法：不再尝试在代理路径里做"正确的 SNI 钉定"（需要覆盖
+           urllib3 HTTPAdapter.proxy_manager_for() 之类的内部机制，复杂度
+           与收益不成比例——GenericDownloader 是个人自用项目的兜底下载器，
+           走企业代理本就是边缘场景）。改为 GenericDownloader 完全不使用
+           环境代理配置，始终直连钉定 IP：下面构造 send_kwargs 时显式丢弃
+           merge_environment_settings 合并出的 proxies 键，只保留 verify/
+           cert（以及未受影响的 stream）。副作用是同时解决了 1) 和 2) 两个
+           问题——没有代理路径了，SSRF 钉定始终生效，也不存在 SNI/
+           ProxyManager 传播问题。
 
         多候选 IP 钉定重试（codex-review R8 #2）：双栈/多节点域名解析出的
         多个公网候选地址里，第一条（常见 AAAA 优先）在当前网络恰好不可达
@@ -255,11 +270,10 @@ class GenericDownloader(BaseDownloader):
             # hostname）而拒绝发送。
             original_prepared_url = prepared.url
 
-            # 合并部署环境配置：HTTP(S)_PROXY/NO_PROXY 决定的代理，以及
-            # REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE 决定的自定义 CA 证书。
-            # merge_environment_settings 是 Session.request() 内部用来做
-            # 这件事的同一个方法，这里显式调用以便在不经过 Session.send()
-            # 的情况下也能拿到同样的合并结果。
+            # 合并部署环境配置：REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE 决定的
+            # 自定义 CA 证书（verify/cert）。merge_environment_settings 是
+            # Session.request() 内部用来做这件事的同一个方法，这里显式调用
+            # 以便在不经过 Session.send() 的情况下也能拿到同样的合并结果。
             settings = session.merge_environment_settings(
                 prepared.url,
                 {},
@@ -267,31 +281,23 @@ class GenericDownloader(BaseDownloader):
                 kwargs.get("verify"),
                 kwargs.get("cert"),
             )
-            scheme_has_proxy = bool(settings["proxies"].get(parsed_url.scheme))
+
+            # GenericDownloader 不使用环境代理配置（HTTP(S)_PROXY/NO_PROXY）
+            # ——见上方 docstring"环境代理"一节：正确处理"代理内钉 IP + 正确
+            # SNI"需要覆盖 urllib3 ProxyManager 相关内部机制，复杂度与收益
+            # 不成比例，且曾在代理路径上分别引发过安全问题（跳过钉 IP）和
+            # 正确性问题（SNI/证书主机名不传播）。这里始终直连已校验 IP，
+            # 显式丢弃 merge 出来的 proxies 键，只保留 verify/cert。
+            env_proxy = settings.pop("proxies", {}).get(parsed_url.scheme)
+            if env_proxy:
+                logger.debug(
+                    f"检测到环境代理配置 {parsed_url.scheme}={env_proxy}，但"
+                    f"GenericDownloader 固定直连已校验 IP，本次请求已忽略该"
+                    f"代理: {url}"
+                )
 
             send_kwargs = dict(kwargs)
             send_kwargs.update(settings)
-
-            if scheme_has_proxy:
-                # 之前这里会整段跳过下面的钉定循环、直接用未钉定的原始域名
-                # URL 经代理发送——代理环境在服务端部署很常见，这会让"域名
-                # 校验时解析出公网 IP、代理侧真正连接时解析出内网/云元数据
-                # IP"的经典 DNS rebinding 绕过在代理路径上完全不设防
-                # （ci-gate review 指出的安全问题）。
-                #
-                # 修复：不再单独分支，直接落入下面的候选循环——send_kwargs
-                # 里已经带着 merge_environment_settings 合并出的 proxies/
-                # verify/cert，PinnedIPHTTPAdapter.send() 只重写了请求 URL
-                # 的 host 部分和 Host 头，随后仍调用父类 HTTPAdapter.send()，
-                # 对 proxies kwarg 的处理与未钉定时完全一致（HTTP 场景下代理
-                # 收到的是钉定 IP 的绝对形式 URI；HTTPS 场景下代理收到的
-                # CONNECT 目标同样是钉定 IP）——代理设置和 IP 钉定因此同时
-                # 生效：请求确实经过代理转发，但代理连接的目标就是本地校验
-                # 通过的那个 IP，代理自身的 DNS 视角不再有可乘之机。
-                logger.debug(
-                    f"检测到 {parsed_url.scheme} 代理配置，代理设置将随钉定"
-                    f"请求一并生效（不再跳过 IP 钉定）: {url}"
-                )
 
             for candidate_index, candidate_ip in enumerate(pinned_ips):
                 prepared.url = original_prepared_url
