@@ -270,6 +270,24 @@ class GenericDownloader(BaseDownloader):
             # hostname）而拒绝发送。
             original_prepared_url = prepared.url
 
+            # IDN（国际化域名）规范化（ci-gate review 发现的 P2 回归）：
+            # session.prepare_request() 内部会把非 ASCII 主机名做 IDNA 编码，
+            # 规范化为 punycode/A-label 形式（如 "bücher.example" ->
+            # "xn--bcher-kva.example"），original_prepared_url 已经是这个
+            # 规范化后的形式。但下面构造 PinnedIPHTTPAdapter 时如果继续用
+            # parsed_url.hostname（对原始、未规范化的 url 变量做 urlparse，
+            # IDN 场景下仍是 Unicode 形式）传入，就会跟 PinnedIPHTTPAdapter.
+            # send() 内部拿 prepared.url（punycode）解析出的 hostname 对不
+            # 上——_pin_to_ip() 的一致性检查会直接抛 ValueError 拒绝发送，
+            # 导致所有 IDN 域名请求在发起前就失败（requests 原生直连本来会
+            # 自动做这层规范化，钉 IP 改造把这一步和后续比较拆开后引入的
+            # 真实功能回归）。这里统一改为从已规范化的 original_prepared_url
+            # 取 hostname，让整条链路（DNS 解析校验用的是原始 hostname，
+            # socket.getaddrinfo 对 Unicode 主机名有内置的 IDNA 处理，结果
+            # 一致，无需改动）到 PinnedIPHTTPAdapter 构造、到 send() 内部
+            # 比较，全程只使用这一种（punycode）形式，不再中途切换编码。
+            normalized_hostname = urlparse(original_prepared_url).hostname
+
             # 合并部署环境配置：REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE 决定的
             # 自定义 CA 证书（verify/cert）。merge_environment_settings 是
             # Session.request() 内部用来做这件事的同一个方法，这里显式调用
@@ -303,7 +321,7 @@ class GenericDownloader(BaseDownloader):
                 prepared.url = original_prepared_url
 
                 adapter = PinnedIPHTTPAdapter(
-                    hostname=parsed_url.hostname,
+                    hostname=normalized_hostname,
                     pinned_ip=candidate_ip,
                     is_https=(parsed_url.scheme == "https"),
                 )

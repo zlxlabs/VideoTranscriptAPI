@@ -445,10 +445,86 @@ class TestCertificateHostnamePinningWiredCorrectly:
 
 
 # ---------------------------------------------------------------------------
-# 8. Dispatch must merge CA-bundle deployment environment settings
-#    (REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE) but must NEVER forward an
-#    HTTP(S)_PROXY environment setting to the adapter's send() call
-#    (ci-gate review, third round).
+# 7b. Internationalized domain names (IDN) must dispatch successfully
+#     (ci-gate review, P2 regression).
+#
+# generic.py used to build PinnedIPHTTPAdapter's hostname from
+# urlparse(url).hostname on the RAW, un-normalized input URL -- for an IDN
+# domain like "https://bücher.example/..." that is the Unicode form
+# ("bücher.example"). But requests.Session.prepare_request() normalizes
+# the URL it actually dispatches to punycode/A-label form
+# ("xn--bcher-kva.example") via IDNA encoding. PinnedIPHTTPAdapter.send()'s
+# _pin_to_ip() then compares prepared.url's (punycode) hostname against the
+# hostname the adapter was constructed with (Unicode) and raises ValueError
+# on any mismatch -- so every IDN domain request was rejected before ever
+# reaching the network, a real functional regression introduced by the IP
+# pinning fix (plain, unpinned requests.get()/head() handled this
+# transparently before, since requests does the IDNA normalization
+# internally). Fix: derive the hostname passed to PinnedIPHTTPAdapter from
+# the already-normalized prepared URL instead of re-parsing the raw input.
+# ---------------------------------------------------------------------------
+
+
+class TestIDNHostnameNormalizedToPunycode:
+    def test_idn_url_dispatches_without_raising(self):
+        downloader = GenericDownloader()
+        url = "https://bücher.example/audio.mp3"  # -> xn--bcher-kva.example
+
+        with patch(GETADDRINFO_PATH, side_effect=_public_addrinfo), patch(
+            BASE_SEND_PATH, return_value=_ok_response()
+        ) as mock_send:
+            response = downloader._safe_request("get", url, timeout=5)
+
+        assert response.status_code == 200
+        sent_request = mock_send.call_args[0][0]
+        # Pinned to the resolved IP; Host header carries the punycode
+        # (A-label) form, matching what requests' own prepare_request()
+        # normalized the dispatched URL to -- correct per RFC 7230/3986.
+        assert sent_request.url == "https://93.184.216.34/audio.mp3"
+        assert sent_request.headers["Host"] == "xn--bcher-kva.example"
+
+    def test_idn_adapter_hostname_matches_prepared_url_hostname(self):
+        """The hostname handed to PinnedIPHTTPAdapter must be the same
+        punycode form prepared.url carries -- otherwise _pin_to_ip()'s own
+        consistency check (parsed.hostname != self._hostname) rejects the
+        request outright."""
+        downloader = GenericDownloader()
+        url = "https://bücher.example/audio.mp3"
+
+        captured = {}
+
+        class _SpyAdapter(PinnedIPHTTPAdapter):
+            def __init__(self, hostname, pinned_ip, is_https, **kwargs):
+                captured["hostname"] = hostname
+                super().__init__(hostname, pinned_ip, is_https, **kwargs)
+
+        with patch(GETADDRINFO_PATH, side_effect=_public_addrinfo), patch(
+            "video_transcript_api.downloaders.generic.PinnedIPHTTPAdapter", _SpyAdapter
+        ), patch(BASE_SEND_PATH, return_value=_ok_response()):
+            downloader._safe_request("get", url, timeout=5)
+
+        assert captured["hostname"] == "xn--bcher-kva.example"
+
+    def test_ascii_hostname_unaffected(self):
+        """Sanity check: existing ASCII-only-hostname behavior must not
+        change (the common case, exercised extensively elsewhere in this
+        file -- this test locks the Host header specifically)."""
+        downloader = GenericDownloader()
+        url = "https://public.example.com/audio.mp3"
+
+        with patch(GETADDRINFO_PATH, side_effect=_public_addrinfo), patch(
+            BASE_SEND_PATH, return_value=_ok_response()
+        ) as mock_send:
+            downloader._safe_request("get", url, timeout=5)
+
+        sent_request = mock_send.call_args[0][0]
+        assert sent_request.headers["Host"] == "public.example.com"
+
+
+# ---------------------------------------------------------------------------
+# 8. Dispatch must merge deployment environment settings (HTTP(S)_PROXY,
+#    NO_PROXY, REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE) instead of silently
+#    ignoring them (codex-review R6 #2).
 #
 # History:
 # - codex-review R6 #2: _dispatch_pinned_request originally built a
