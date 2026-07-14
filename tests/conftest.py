@@ -8,7 +8,6 @@ pytest 全局配置文件
 
 import os
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -37,7 +36,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src
 # 默认套件的行为随开发机是否有真实配置而漂移（覆盖不同代码分支、结果不可
 # 复现），且真实凭据路径下个别测试打印的 API key 前缀等信息存在通过
 # `pytest -s` 或失败日志泄露的风险。真正需要读取真实配置的场景，只保留给
-# `tests/manual/` 下显式手动运行的测试（见下方 _pytest_targets_tests_manual）。
+# `tests/manual/` 下显式手动运行的测试（见下方 _tests_manual_env_enabled）。
 #
 # 注意：部分测试文件用 `from src.video_transcript_api...` 而不是
 # `from video_transcript_api...` 导入（两种写法在 sys.path 上都能解析到，
@@ -78,83 +77,33 @@ def _seed_config_cache_for_missing_config_jsonc() -> None:
 # 介入它们：介入会导致这些测试用占位 API key 真的发起网络请求，而不是按
 # 生产代码原有逻辑在缺配置时干净地报错/跳过。
 #
-# 判断时机为什么必须用 sys.argv，而不是 pytest 的 pytest_configure hook：
-# 已用一个最小 conftest.py 探针实测验证（在 conftest.py 顶层与
-# pytest_configure 钩子里分别打印时间戳/顺序标记，执行
-# `pytest tests/manual/test_probe.py -q -s` 观察 stdout 顺序），结论是
-# conftest.py 模块顶层代码一定先于 pytest_configure hook 执行——pytest 必须
-# 先完整导入 conftest.py 模块（执行完所有顶层语句）才能拿到其中定义的
-# pytest_configure 函数并注册、调用它。而本文件里真正会触发
-# load_config() 崩溃的 `from video_transcript_api.utils.notifications
-# import (...)` 就是一条顶层语句，一定会在 pytest_configure 有机会运行之前
-# 执行。所以只能在模块顶层、用 pytest 启动时就已经写好的 sys.argv 做判断，
-# 不能依赖 pytest 自己的 hook 生命周期。
+# 判断依据为什么用环境变量，而不是解析 sys.argv：
+# 早期实现试图从命令行参数猜测"本次调用是不是显式针对 tests/manual"（区分
+# 选项标志和位置参数、解析相对/绝对路径），先后被 codex review 抓出两轮真实
+# 边角案例（字符串子串误判、相对路径漏判、`--ignore=tests/manual` 与
+# `--ignore tests/manual` 空格分隔等价写法处理不一致——pytest 有一长串会
+# 消耗下一个 argv 元素作为值的选项，如 `--ignore`、`--ignore-glob`、
+# `--deselect`、`-k`、`-m`、`--confcutdir`、`-p`、`-c`、`-o` 等）。要在不
+# 依赖 pytest 自己的参数解析器的前提下（pytest_configure 等 hook 时机太晚，
+# 来不及在 conftest.py 顶层 import 之前生效，已用探针验证过）手工正确处理
+# 全部情况，本质是在重新实现一个不完整、会持续冒出新边角案例的 argparse——
+# 不值得继续投入。
+#
+# 因此改为显式环境变量门禁：手动运行 tests/manual 下测试的人一定知道自己在
+# 做什么，让其显式设置 `VTAPI_TESTS_MANUAL=1`（已在下方各手动测试文件的
+# 运行示例中体现）即可，不存在任何猜测和边角案例——命令行里出现多少次
+# "tests/manual" 字样、以什么形式出现，都不影响判断结果。
 # ---------------------------------------------------------------------------
-# 注意：判断逻辑必须基于路径解析，不能用字符串子串匹配——子串匹配有两个真实
-# 的绕过/误判场景（均已被 codex review 抓到并在这里补了单元测试，见
-# tests/unit/test_conftest_manual_detection.py）：
-#   1. 误判：`pytest --ignore=tests/manual -s` 本意是"排除 manual、跑默认
-#      套件"，但命令行字符串里含 "tests/manual" 子串，字符串匹配会误判成
-#      "目标是 manual" 从而跳过预热，导致默认套件读取真实配置。
-#   2. 漏判：`cd tests/manual && pytest test_x.py` 用相对路径调用，命令行
-#      参数字符串里根本不含 "tests/manual"，字符串匹配会漏判，预热仍会
-#      介入，掩盖手动测试本该看到的"缺真实配置"状态。
-# 因此改为：跳过所有以 "-" 开头的选项参数，只看剩下的位置参数（测试路径），
-# 去掉 "::" node-id 后缀后按调用时的 cwd 解析成绝对路径并规范化，再用
-# pathlib 的路径语义（而不是裸字符串 startswith）判断是否落在 tests/manual
-# 目录内，避免 "tests/manual_backup" 这类前缀相似但不是子目录的路径被
-# 误判。
-# ---------------------------------------------------------------------------
-def _pytest_targets_tests_manual(argv, cwd, manual_dir) -> bool:
-    """纯函数：判断给定的 pytest 命令行参数是否显式指向 tests/manual。
+def _tests_manual_env_enabled() -> bool:
+    """判断环境变量 VTAPI_TESTS_MANUAL 是否被显式设置为真值。
 
-    不直接读取全局的 sys.argv / os.getcwd()，方便单元测试用构造好的参数
-    独立验证，不必真的启动一次 pytest 子进程。
-
-    参数:
-        argv: 命令行参数列表，不含程序名（即 sys.argv[1:]）。
-        cwd: 本次 pytest 调用时的当前工作目录，用于把相对路径解析为绝对
-             路径（必须用调用时的 cwd，而不是本文件/仓库根目录，否则从
-             tests/manual 内部用相对路径调用时会解析错位置）。
-        manual_dir: tests/manual 目录的路径（可以是相对路径，内部会
-                    resolve 成绝对路径再比较）。
-
-    返回:
-        True 表示本次调用的位置参数里，至少有一个解析后落在 manual_dir
-        目录本身或其子路径下；否则为 False（含没有任何位置参数的裸
-        `pytest` / `pytest -q` 场景，走默认套件发现，不算 manual）。
+    宽容大小写和常见写法（"1"/"true"/"True"/"yes"），未设置或设置为其他
+    值一律视为假，走默认套件的占位配置预热路径。
     """
-    _manual_dir_resolved = Path(manual_dir).resolve()
-
-    for _arg in argv:
-        if _arg.startswith("-"):
-            continue  # pytest 选项标志（--ignore=、-k、-s、-q 等），不是测试路径
-
-        _path_part = _arg.split("::", 1)[0]  # 去掉 node-id 后缀，只留文件系统路径部分
-        if not _path_part:
-            continue
-
-        _candidate = Path(_path_part)
-        if not _candidate.is_absolute():
-            _candidate = Path(cwd) / _candidate
-
-        try:
-            _candidate = _candidate.resolve()
-        except OSError:
-            continue  # 路径无法解析时跳过而不是崩溃，交由 pytest 自身报错
-
-        # is_relative_to 同时覆盖"等于 manual_dir"和"是 manual_dir 子路径"
-        # 两种情况，且是按路径分段比较，不会被 tests/manual_backup 这种
-        # 前缀相似的目录误判命中。
-        if _candidate.is_relative_to(_manual_dir_resolved):
-            return True
-
-    return False
+    return os.environ.get("VTAPI_TESTS_MANUAL", "").strip() in ("1", "true", "True", "yes")
 
 
-_TESTS_MANUAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "manual")
-
-if not _pytest_targets_tests_manual(sys.argv[1:], os.getcwd(), _TESTS_MANUAL_DIR):
+if not _tests_manual_env_enabled():
     _seed_config_cache_for_missing_config_jsonc()
 
 from video_transcript_api.utils.notifications import (

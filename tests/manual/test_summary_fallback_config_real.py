@@ -8,6 +8,8 @@ they only make sense to run manually against a real local deployment config.
 They must not run in the default `pytest -q` discovery (no config.jsonc on
 CI runners / clean checkouts).
 
+Run: VTAPI_TESTS_MANUAL=1 uv run pytest tests/manual/test_summary_fallback_config_real.py -v
+
 All console output must be in English only (no emoji, no Chinese).
 """
 
