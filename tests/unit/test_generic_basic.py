@@ -9,6 +9,7 @@ import os
 import socket
 import sys
 import json
+import requests
 from unittest.mock import patch
 
 # 添加项目根目录到Python路径
@@ -32,19 +33,39 @@ def _public_addrinfo(*args, **kwargs):
     return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
 
 
-class _FakeHeadResponse:
-    """伪造 HEAD 响应：非重定向 + Content-Type 为网页而非媒体文件"""
-    is_redirect = False
-    headers = {"Content-Type": "text/html; charset=utf-8"}
+def _fake_head_response():
+    """伪造 HEAD 响应：非重定向 + Content-Type 为网页而非媒体文件。
+
+    用真正的 requests.Response（而非裸 class）构造，让 Session.send() 后续
+    访问的 .history/.raw/.content 等属性行为正确（is_redirect 是 Response
+    的真实 property，靠 status_code + Location 头判定，不需要手动伪造）；
+    _content 显式置空字节串，跳过 Response.content 对 .raw 的真实读取。
+    """
+    resp = requests.Response()
+    resp.status_code = 200
+    resp.headers = requests.structures.CaseInsensitiveDict(
+        {"Content-Type": "text/html; charset=utf-8"}
+    )
+    resp._content = b""
+    return resp
+
+
+def _run_with_mocked_network():
+    """mock 掉网络 I/O 后跑一遍用例，返回是否全部通过（bool）。
+
+    供 test_generic_downloader()（assert 结果供 pytest 判定）和 __main__
+    脚本入口（需要一个 bool 来算 sys.exit 退出码）共用，避免两处重复
+    with patch(...) 语境。
+    """
+    with patch(GETADDRINFO_PATH, side_effect=_public_addrinfo), patch(
+        BASE_SEND_PATH, return_value=_fake_head_response()
+    ):
+        return _run_generic_downloader_cases()
 
 
 def test_generic_downloader():
     """测试通用URL下载器"""
-
-    with patch(GETADDRINFO_PATH, side_effect=_public_addrinfo), patch(
-        BASE_SEND_PATH, return_value=_FakeHeadResponse()
-    ):
-        return _run_generic_downloader_cases()
+    assert _run_with_mocked_network()
 
 
 def _run_generic_downloader_cases():
@@ -149,5 +170,5 @@ def _run_generic_downloader_cases():
 
 
 if __name__ == "__main__":
-    success = test_generic_downloader()
+    success = _run_with_mocked_network()
     sys.exit(0 if success else 1)
