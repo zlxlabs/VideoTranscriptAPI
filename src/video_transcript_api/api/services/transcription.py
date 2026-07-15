@@ -47,7 +47,7 @@ from ...utils.notifications.channel import _clean_url
 from ...utils.rendering import get_base_url
 from ...utils.perf_tracker import PerfTracker
 from ...utils.task_status import TaskStatus
-from ...utils.llm_status import CalibrationStatus
+from ...utils.llm_status import CalibrationStatus, SummaryStatus
 
 logger = get_logger()
 config = get_config()
@@ -634,6 +634,19 @@ def process_transcription(
                     summary_text = calibrated_text
                     skip_summary = True
 
+                # 通知里的总结状态文案：与 llm_ops._send_notification 保持一致的
+                # 三态区分（failed/disabled/其他一律"未生成"）——这条"缓存全命中"
+                # 路径此前硬编码"未生成"，不区分 summary_status，导致用户主动
+                # 关闭总结（disabled）时通知误报成"未生成"，与诚实状态模型的
+                # 承诺不符（ci-gate review，云端 CI 发现）。
+                cached_summary_status = cached_llm_status.get("summary_status")
+                if cached_summary_status == SummaryStatus.FAILED:
+                    summary_status_label = "生成失败"
+                elif cached_summary_status == SummaryStatus.DISABLED:
+                    summary_status_label = "未启用"
+                else:
+                    summary_status_label = "未生成"
+
                 # 构建完整的消息格式
                 speaker_info = "（含说话人识别）" if has_speaker_recognition else ""
                 # 这条"缓存全命中"路径独立拼接消息，不经过 llm_ops._send_notification/
@@ -651,17 +664,17 @@ def process_transcription(
                     else ""
                 )
                 if skip_summary:
-                    # 短文本，未生成总结
+                    # 短文本/未启用/失败，均展示校对文本兜底
                     full_message = f"""## 总结和校对
 🌐 网页查看：{view_url}
 📄 直接获取：{view_url}?raw=calibrated
 
 ## 转录统计
-原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 未生成{calibration_warning}
+原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_status_label}{calibration_warning}
 
 ## 校对文本{speaker_info}
 {summary_text}"""
-                    logger.info("缓存模式 - 发送校对文本（未总结）")
+                    logger.info(f"缓存模式 - 发送校对文本（总结{summary_status_label}）")
                 else:
                     # 长文本，有总结
                     summary_length = len(summary_text)

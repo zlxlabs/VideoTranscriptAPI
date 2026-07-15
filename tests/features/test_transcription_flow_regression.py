@@ -222,6 +222,62 @@ def test_flow_cache_hit_with_disabled_calibration_notifies_disclaimer(monkeypatc
     assert "未启用" in sent_text
 
 
+def test_flow_cache_hit_with_summary_disabled_shows_not_enabled_label(monkeypatch, patch_runtime):
+    """ci-gate review (cloud CI): a full cache hit whose summary layer was
+    disabled by a prior summarize=False request must say "未启用" in the
+    notification, not the generic "未生成" -- otherwise the honest status
+    model this PR introduces (SummaryStatus.DISABLED distinct from
+    SKIPPED_SHORT/FAILED) is meaningless on this notification path, since it
+    doesn't consume summary_status at all and hardcodes "未生成" for every
+    reason a summary might be missing."""
+    cache_data = {
+        "platform": "youtube",
+        "media_id": "abc123",
+        "title": "cached title",
+        "author": "cached author",
+        "description": "cached desc",
+        "transcript_type": "capswriter",
+        "transcript_data": "cached transcript",
+        "use_speaker_recognition": False,
+        "llm_calibrated": "calibrated",
+        # summarize=False never writes llm_summary.txt -- no "llm_summary" key.
+        "llm_status": {
+            "calibration_status": CalibrationStatus.FULL,
+            "summary_status": "disabled",
+        },
+    }
+    cache_manager = DummyCacheManager(cache_data=cache_data)
+    monkeypatch.setattr(transcription, "cache_manager", cache_manager)
+
+    def fail_create_downloader(url):
+        raise AssertionError("create_downloader should not be called on cache hit")
+
+    monkeypatch.setattr(transcription, "create_downloader", fail_create_downloader)
+
+    notification_router = MagicMock()
+    notification_router.send_long_text = MagicMock()
+    notification_router.send_text = MagicMock()
+    monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)
+
+    result = transcription.process_transcription(
+        task_id="task_cache_hit_summary_disabled",
+        url="https://www.youtube.com/watch?v=abc123",
+        use_speaker_recognition=False,
+        wechat_webhook=None,
+        download_url=None,
+        metadata_override=None,
+        processing_options={"calibrate": True, "summarize": False},
+    )
+
+    assert result["status"] == "success"
+    assert result["data"]["cached"] is True
+
+    assert notification_router.send_long_text.called
+    sent_text = notification_router.send_long_text.call_args.kwargs["text"]
+    assert "未启用" in sent_text
+    assert "未生成" not in sent_text
+
+
 def test_flow_cache_hit_with_full_calibration_has_no_disclaimer(monkeypatch, patch_runtime):
     """Sanity check: a normal, real calibration cache hit must NOT show the
     'calibration disabled' disclaimer."""
