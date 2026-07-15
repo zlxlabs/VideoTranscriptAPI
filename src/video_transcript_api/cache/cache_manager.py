@@ -644,16 +644,36 @@ class CacheManager:
     def cleanup_old_cache(self, days: int = 30) -> int:
         """
         清理旧缓存
-        
+
         Args:
             days: 保留最近几天的缓存
-            
+
         Returns:
             int: 删除的记录数
+
+        时钟基准（codex-review P2）：video_cache.updated_at 由 SQLite 的
+        `CURRENT_TIMESTAMP` 写入，固定为 UTC、无时区后缀的
+        "YYYY-MM-DD HH:MM:SS" 格式。cutoff 必须以同样的 UTC 基准计算，否则
+        会跟 cleanup_task_status() 的 UTC cutoff 出现时钟偏差：此前这里用
+        的是不带时区的本地 `datetime.datetime.now()`，运行环境若在 UTC
+        以西时区，本地时间比 UTC 慢，算出的字符串形式 cutoff 会比真实 UTC
+        cutoff 更"早"（变相缩短保留期）；以东时区则相反（变相延长保留
+        期）。这个偏差还会破坏"task_status 保留期钳制到 cache_retention_
+        days"这条不变式的前提——二者本应共用同一把时钟量出的 cutoff，否
+        则会在两次清理之间开出一个窗口：task_status 行已按 UTC 基准被删
+        （对应 view_token 立即失效），但底层缓存因本地时间偏移还没到这
+        里算出的 cutoff、仍然存活（或反过来）。这里改为与
+        cleanup_task_status()、AuditLogger.cleanup_old_logs() 一致的写
+        法：取带时区的 UTC now 计算 cutoff，再格式化为不带时区后缀的字符
+        串参与比较，不依赖 sqlite3 模块的隐式 datetime adapter（该
+        adapter 自 Python 3.12 起已弃用）。
         """
         try:
-            cutoff_date = datetime.datetime.now() - datetime.timedelta(days=days)
-            
+            cutoff_date = (
+                datetime.datetime.now(datetime.timezone.utc)
+                - datetime.timedelta(days=days)
+            ).strftime('%Y-%m-%d %H:%M:%S')
+
             with self._get_cursor() as cursor:
                 # 获取要删除的记录
                 cursor.execute("""
