@@ -53,6 +53,16 @@ class TestProcessingOptionsSchema:
         with pytest.raises(Exception):
             ProcessingOptions(calibrate="not-a-bool-and-not-coercible")
 
+    def test_loosely_coercible_string_is_rejected_not_silently_coerced(self):
+        """ci-gate review: plain Pydantic `bool` would silently coerce
+        "yes"/"1"/"no"/"0" into True/False, contradicting the API's documented
+        JSON-boolean contract -- a caller's string typo could unknowingly
+        toggle a real, cost-bearing LLM stage on/off. StrictBool must reject
+        these instead of coercing them."""
+        for loose_value in ("yes", "no", "1", "0", "true", "false"):
+            with pytest.raises(Exception):
+                ProcessingOptions(calibrate=loose_value)
+
     def test_transcribe_request_defaults_processing_options_to_none(self):
         req = TranscribeRequest(url="https://example.com/v1")
         assert req.processing_options is None
@@ -220,3 +230,18 @@ class TestTranscribeTaskDictProcessingOptions:
             },
         )
         assert resp.status_code == 422
+
+    def test_loosely_coercible_boolean_string_returns_422(self, client):
+        """ci-gate review: "yes"/"1" etc. are NOT rejected by plain bool's
+        lenient coercion (they'd silently become True/False) -- unlike the
+        already-covered "yes-please" case above, which fails even lenient
+        coercion. This is the actual gap StrictBool closes."""
+        for loose_value in ("yes", "1", "0", "true"):
+            resp = client.post(
+                "/api/transcribe",
+                json={
+                    "url": "https://www.youtube.com/watch?v=abc123",
+                    "processing_options": {"calibrate": loose_value},
+                },
+            )
+            assert resp.status_code == 422, f"value {loose_value!r} should be rejected"

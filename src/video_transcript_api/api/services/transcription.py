@@ -6,7 +6,7 @@ import time
 from typing import Optional, Dict, Any
 
 from fastapi import HTTPException, Header, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictBool, field_validator
 
 from ..context import (
     get_audit_logger,
@@ -91,10 +91,16 @@ class ProcessingOptions(BaseModel):
     summarize=True 且 calibrate=False 是合法组合——总结会基于未经 LLM 校对的
     原始转录文本生成，其质量可能受 ASR 识别噪声（错别字、断句错误等）影响，
     但仍然可用；系统不做硬性拦截，由调用方自行权衡。
+
+    用 StrictBool 而非普通 bool（ci-gate review）：Pydantic 的宽松 bool 会
+    静默把 "yes"/"1"/"no"/"0" 等字符串转换成布尔值，与本 API 文档声明的
+    JSON boolean 类型不符——请求方一个拼写习惯的差异（比如误传字符串
+    "false" 而不是布尔 false）就可能意外触发/关闭有真实 token 成本的 LLM
+    阶段而不自知。StrictBool 只接受真正的 JSON boolean，其余一律 422。
     """
 
-    calibrate: bool = Field(True, description="是否执行 LLM 校对")
-    summarize: bool = Field(
+    calibrate: StrictBool = Field(True, description="是否执行 LLM 校对")
+    summarize: StrictBool = Field(
         True,
         description=(
             "是否生成内容总结。若 calibrate=False，总结将基于未经校对的原始转录"
