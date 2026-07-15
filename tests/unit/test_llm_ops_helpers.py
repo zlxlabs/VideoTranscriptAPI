@@ -238,6 +238,44 @@ class TestBuildCalibrationWarning:
         assert warning != ""
         assert "4/4" in warning
 
+    def test_calibration_disabled_by_processing_options_surfaces_notice(self):
+        """calibrate=False (processing_options) leaves no chunk/segment stats
+        at all -- but the notification must still say so, otherwise a
+        calibrate:false, summarize:true task silently ships a summary built
+        from unedited ASR text with zero indication to the user (ci-gate
+        review: this case was invisible because the function only inspected
+        calibration_stats, never calibration_status)."""
+        stats = {
+            "calibration_status": CalibrationStatus.DISABLED,
+            "calibration_stats": None,
+        }
+        warning = _build_calibration_warning(stats)
+        assert "未启用" in warning
+
+    def test_calibration_disabled_takes_priority_over_absent_stats_shortcut(self):
+        """Sanity check: DISABLED must be detected even when calibration_stats
+        key is entirely missing (not just None), matching how it's actually
+        populated by the disabled code path."""
+        stats = {"calibration_status": CalibrationStatus.DISABLED}
+        warning = _build_calibration_warning(stats)
+        assert warning != ""
+
+    def test_calibration_full_status_does_not_trigger_disabled_notice(self):
+        """Regression guard: a normal, successful calibration (status=full)
+        must not accidentally show the 'disabled' notice."""
+        stats = {
+            "calibration_status": CalibrationStatus.FULL,
+            "calibration_stats": {
+                "total_chunks": 5,
+                "success_count": 5,
+                "failed_count": 0,
+                "fallback_count": 0,
+            },
+        }
+        warning = _build_calibration_warning(stats)
+        assert "未启用" not in warning
+        assert warning == ""
+
 
 class TestShouldBackfillSummary:
     """Test _should_backfill_summary helper.

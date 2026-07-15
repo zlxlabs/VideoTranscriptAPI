@@ -892,9 +892,18 @@ def _send_notification(
 def _build_calibration_warning(stats: dict) -> str:
     """构建校准质量警告文本
 
-    两条校对路径统计口径不同：结构化路径（说话人识别）按 chunk 计数
-    （total_chunks/success_count/fallback_count/failed_count），纯文本路径按
-    segment 计数（total_segments/calibrated_segments/fallback_segments/
+    优先判断 calibration_status == DISABLED（用户通过 processing_options
+    主动关闭校对）：这种情况下根本不会产生 chunk/segment 级别的详细统计，
+    但通知里如果对此毫无提示，用户会把"未经 AI 校对的原始语音识别文本"
+    误当成已校对结果查看——尤其是 calibrate=False 但 summarize=True 时，
+    总结本身是基于这份未校对原文生成的，缺了这条提示用户完全无从得知
+    （ci-gate review：只处理了 summary_status 维度，漏了 calibration_status
+    维度，与 docs/guides/notification.md 里"关闭校对或总结都会体现真实
+    状态"的承诺不符）。
+
+    其余情况下，两条校对路径统计口径不同：结构化路径（说话人识别）按 chunk
+    计数（total_chunks/success_count/fallback_count/failed_count），纯文本
+    路径按 segment 计数（total_segments/calibrated_segments/fallback_segments/
     low_quality_segments）。这里按 cal_stats 里出现的字段名分辨路径，
     分别生成对应的详情文案，保证纯文本路径的降级也能像结构化路径一样出警告。
 
@@ -905,6 +914,12 @@ def _build_calibration_warning(stats: dict) -> str:
     Returns:
         str: 警告文本（空字符串表示无警告）
     """
+    if stats.get("calibration_status") == CalibrationStatus.DISABLED:
+        return (
+            "\n⚠️ **AI 校对未启用**：当前显示为未经校对的原始语音识别文本"
+            "（可能含错别字、断句错误）。"
+        )
+
     cal_stats = stats.get("calibration_stats")
     if not cal_stats:
         return ""

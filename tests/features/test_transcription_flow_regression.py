@@ -1,9 +1,11 @@
 import types
+from unittest.mock import MagicMock
 
 import pytest
 
 import video_transcript_api.api.services.transcription as transcription
 from video_transcript_api.downloaders.models import VideoMetadata, DownloadInfo
+from video_transcript_api.utils.llm_status import CalibrationStatus
 
 
 class DummyQueue:
@@ -159,6 +161,112 @@ def test_flow_cache_hit(monkeypatch, patch_runtime):
     assert result["status"] == "success"
     assert result["data"]["cached"] is True
     assert len(patch_runtime.items) == 0
+
+
+def test_flow_cache_hit_with_disabled_calibration_notifies_disclaimer(monkeypatch, patch_runtime):
+    """ci-gate review: a full cache hit whose calibration layer was produced
+    by a prior calibrate=False run (locally-formatted placeholder text, not
+    real LLM calibration) must disclose this in the notification -- otherwise
+    a user who requested calibrate=False & summarize=True the first time,
+    then triggers this exact "everything's cached" branch on a later
+    request, silently receives a summary/"calibrated" text built from
+    unedited ASR output with zero indication of that fact."""
+    cache_data = {
+        "platform": "youtube",
+        "media_id": "abc123",
+        "title": "cached title",
+        "author": "cached author",
+        "description": "cached desc",
+        "transcript_type": "capswriter",
+        "transcript_data": "cached transcript",
+        "use_speaker_recognition": False,
+        "llm_calibrated": "locally formatted placeholder (never LLM-calibrated)",
+        "llm_summary": "summary built from that placeholder",
+        "llm_status": {
+            "calibration_status": CalibrationStatus.DISABLED,
+            "summary_status": "generated",
+        },
+    }
+    cache_manager = DummyCacheManager(cache_data=cache_data)
+    monkeypatch.setattr(transcription, "cache_manager", cache_manager)
+
+    def fail_create_downloader(url):
+        raise AssertionError("create_downloader should not be called on cache hit")
+
+    monkeypatch.setattr(transcription, "create_downloader", fail_create_downloader)
+
+    notification_router = MagicMock()
+    notification_router.send_long_text = MagicMock()
+    notification_router.send_text = MagicMock()
+    monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)
+
+    result = transcription.process_transcription(
+        task_id="task_cache_hit_disabled_calibration",
+        url="https://www.youtube.com/watch?v=abc123",
+        use_speaker_recognition=False,
+        wechat_webhook=None,
+        download_url=None,
+        metadata_override=None,
+        # 必须显式传 calibrate=False，与本次请求一致，才能让分层缓存命中判定
+        # 走到"全命中"分支——calibrate_requested 默认(None)按 True 兜底，
+        # 会误判成"要求真校对但缓存里没有"，转而重新排队补校对，根本不会
+        # 触碰到这里要验证的通知拼接代码。
+        processing_options={"calibrate": False, "summarize": True},
+    )
+
+    assert result["status"] == "success"
+    assert result["data"]["cached"] is True
+
+    assert notification_router.send_long_text.called
+    sent_text = notification_router.send_long_text.call_args.kwargs["text"]
+    assert "未启用" in sent_text
+
+
+def test_flow_cache_hit_with_full_calibration_has_no_disclaimer(monkeypatch, patch_runtime):
+    """Sanity check: a normal, real calibration cache hit must NOT show the
+    'calibration disabled' disclaimer."""
+    cache_data = {
+        "platform": "youtube",
+        "media_id": "abc123",
+        "title": "cached title",
+        "author": "cached author",
+        "description": "cached desc",
+        "transcript_type": "capswriter",
+        "transcript_data": "cached transcript",
+        "use_speaker_recognition": False,
+        "llm_calibrated": "calibrated",
+        "llm_summary": "summary",
+        "llm_status": {
+            "calibration_status": CalibrationStatus.FULL,
+            "summary_status": "generated",
+        },
+    }
+    cache_manager = DummyCacheManager(cache_data=cache_data)
+    monkeypatch.setattr(transcription, "cache_manager", cache_manager)
+    monkeypatch.setattr(
+        transcription, "create_downloader",
+        lambda url: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+
+    notification_router = MagicMock()
+    notification_router.send_long_text = MagicMock()
+    notification_router.send_text = MagicMock()
+    monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)
+
+    result = transcription.process_transcription(
+        task_id="task_cache_hit_full_calibration",
+        url="https://www.youtube.com/watch?v=abc123",
+        use_speaker_recognition=False,
+        wechat_webhook=None,
+        download_url=None,
+        metadata_override=None,
+        processing_options={"calibrate": True, "summarize": True},
+    )
+
+    assert result["status"] == "success"
+    assert notification_router.send_long_text.called
+    sent_text = notification_router.send_long_text.call_args.kwargs["text"]
+    assert "未启用" not in sent_text
 
 
 def test_flow_subtitle_preferred(monkeypatch, patch_runtime):

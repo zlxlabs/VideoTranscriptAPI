@@ -627,6 +627,20 @@ def process_transcription(
 
                 # 构建完整的消息格式
                 speaker_info = "（含说话人识别）" if has_speaker_recognition else ""
+                # 这条"缓存全命中"路径独立拼接消息，不经过 llm_ops._send_notification/
+                # _build_calibration_warning，之前完全没有消费 calibration_status——
+                # 但触发这条分支不代表本轮真的做过 LLM 校对：calibrate_requested=False
+                # 时即便历史上跑过一轮 disabled（本地格式化占位文本落盘），
+                # calibrated_layer_satisfied 仍会因 cached_calibration_status==DISABLED
+                # 而判定"层未满足"，need_calibrated 却因 calibrate_requested=False 恒为
+                # False，两者结合会让这条分支把"未经 LLM 校对的占位文本"当作
+                # calibrated_text/summary_text 发出，且不带任何提示（ci-gate review）。
+                calibration_warning = (
+                    "\n⚠️ **AI 校对未启用**：当前显示为未经校对的原始语音识别文本"
+                    "（可能含错别字、断句错误）。"
+                    if cached_calibration_status == CalibrationStatus.DISABLED
+                    else ""
+                )
                 if skip_summary:
                     # 短文本，未生成总结
                     full_message = f"""## 总结和校对
@@ -634,7 +648,7 @@ def process_transcription(
 📄 直接获取：{view_url}?raw=calibrated
 
 ## 转录统计
-原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 未生成
+原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 未生成{calibration_warning}
 
 ## 校对文本{speaker_info}
 {summary_text}"""
@@ -647,7 +661,7 @@ def process_transcription(
 📄 直接获取：{view_url}?raw=calibrated
 
 ## 转录统计
-原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_length:,} 字
+原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_length:,} 字{calibration_warning}
 
 ## 总结{speaker_info}
 {summary_text}"""
