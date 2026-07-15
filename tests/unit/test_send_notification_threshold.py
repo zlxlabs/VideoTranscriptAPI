@@ -111,6 +111,79 @@ class TestSendNotificationSummaryStatusLabel:
         assert "未启用" not in call_kwargs["text"]
 
 
+class TestSendNotificationCalibrationDisabledDisclosure:
+    """ci-gate review: calibrate=False, summarize=True combination must
+    disclose that the summary was built from uncalibrated ASR text, not
+    just report the summary status. Full end-to-end through
+    _send_notification() (not just the _build_calibration_warning() helper
+    in isolation) to lock down the real assembled notification text."""
+
+    def test_calibration_disabled_with_summary_generated_discloses_in_text(
+        self, mock_dependencies
+    ):
+        result_dict = {
+            "校对文本": "raw ASR text, never LLM-calibrated",
+            "内容总结": "a summary built from that raw text",
+            "skip_summary": False,
+            "stats": {
+                "original_length": 100,
+                "calibrated_length": 100,
+                "summary_length": 40,
+                "summary_status": "generated",
+                "calibration_status": "disabled",
+                "calibration_stats": None,
+            },
+            "models_used": {},
+        }
+
+        _send_notification(
+            task_id="task_calibration_disabled",
+            video_title="Calibration Disabled Video",
+            display_url="https://example.com/video-calib-disabled",
+            use_speaker_recognition=False,
+            result_dict=result_dict,
+        )
+
+        router = mock_dependencies["router"]
+        call_kwargs = router.send_long_text.call_args[1]
+        assert "未启用" in call_kwargs["text"]
+
+    def test_normal_calibration_does_not_show_disabled_disclosure(
+        self, mock_dependencies
+    ):
+        """Regression guard: a genuinely successful calibration must not
+        show the 'calibration disabled' disclosure."""
+        result_dict = {
+            "校对文本": "properly calibrated text",
+            "内容总结": "a real summary",
+            "skip_summary": False,
+            "stats": {
+                "original_length": 100,
+                "calibrated_length": 100,
+                "summary_length": 20,
+                "summary_status": "generated",
+                "calibration_status": "full",
+                "calibration_stats": {
+                    "total_chunks": 2, "success_count": 2,
+                    "failed_count": 0, "fallback_count": 0,
+                },
+            },
+            "models_used": {},
+        }
+
+        _send_notification(
+            task_id="task_calibration_full",
+            video_title="Normal Calibration Video",
+            display_url="https://example.com/video-calib-full",
+            use_speaker_recognition=False,
+            result_dict=result_dict,
+        )
+
+        router = mock_dependencies["router"]
+        call_kwargs = router.send_long_text.call_args[1]
+        assert "未启用" not in call_kwargs["text"]
+
+
 class TestSendNotificationThreshold:
     """Test notification text length threshold when summary is skipped."""
 

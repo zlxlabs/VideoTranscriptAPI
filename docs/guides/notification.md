@@ -135,6 +135,8 @@ config.wechat/feishu.webhook     (全局配置)
 
 校对质量异常（`partial`/`none`）时，通知正文会额外附带一段 `⚠️ 校准部分异常` / `⚠️ 校准完全失败` 警告文案（`api/services/llm_ops.py::_build_calibration_warning()`）。
 
+校对被 `processing_options.calibrate=False` 主动关闭（`calibration_status=disabled`）时同样会附带提示：`⚠️ AI 校对未启用：当前显示为未经校对的原始语音识别文本（可能含错别字、断句错误）`——避免 `calibrate=False, summarize=True` 场景下用户把"基于未校对原文生成的总结"误当成正常校对结果查看。首次处理与"缓存全命中，直接复用历史结果"两条通知路径都会带上这条提示（后者见 `api/services/transcription.py` 中缓存命中分支）。
+
 ## 相关文件
 
 | 文件 | 说明 |
