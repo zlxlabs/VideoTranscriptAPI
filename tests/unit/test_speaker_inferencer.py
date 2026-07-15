@@ -445,6 +445,42 @@ class TestCacheCoverageValidation(unittest.TestCase):
         inferencer.llm_client.call.assert_not_called()
         self.assertEqual(result["mapping"], {"Speaker1": "张三", "Speaker2": "李四"})
 
+    def test_cache_hit_reapplies_current_confidence_threshold(self):
+        """ci-gate review: cached mapping/applied was gated at write time
+        using whatever confidence_threshold was active then. Changing the
+        threshold afterward must retroactively affect already-cached
+        results too -- not just future inferences -- since meta already
+        stores the raw confidence per speaker."""
+        cache_manager = MagicMock()
+        cache_manager.get_speaker_mapping.return_value = {
+            "mapping": {"Speaker1": "张三", "Speaker2": "李四"},
+            "meta": {
+                # Written when confidence_threshold was low enough that 0.7
+                # passed; Speaker1 is comfortably confident either way.
+                "Speaker1": {"name": "张三", "confidence": 0.95, "applied": True},
+                "Speaker2": {"name": "李四", "confidence": 0.7, "applied": True},
+            },
+            "low_confidence": [],
+        }
+        # Threshold has since been raised past Speaker2's cached confidence.
+        inferencer = _make_inferencer(cache_manager=cache_manager, confidence_threshold=0.8)
+
+        result = inferencer.infer(
+            speakers=["Speaker1", "Speaker2"],
+            dialogs=[_make_dialog("Speaker1", "hi", 0.0)],
+            title="t",
+            platform="p",
+            media_id="m",
+        )
+
+        inferencer.llm_client.call.assert_not_called()
+        self.assertEqual(result["mapping"]["Speaker1"], "张三")
+        # Speaker2's cached 0.7 confidence no longer clears the raised 0.8
+        # threshold -- must be downgraded now, not stuck on the stale verdict.
+        self.assertNotEqual(result["mapping"]["Speaker2"], "李四")
+        self.assertIn("Speaker2", result["low_confidence"])
+        self.assertFalse(result["meta"]["Speaker2"]["applied"])
+
     def test_cache_miss_when_missing_a_speaker_triggers_reinference(self):
         cache_manager = MagicMock()
         # Legacy flat-dict cache only covers Speaker1; Speaker2 is new this run.

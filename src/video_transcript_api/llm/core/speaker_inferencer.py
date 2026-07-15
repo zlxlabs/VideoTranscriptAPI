@@ -109,7 +109,24 @@ class SpeakerInferencer:
                 normalized_cache = self._normalize_cached_result(cached)
                 if normalized_cache and set(normalized_cache["mapping"].keys()) >= set(speakers):
                     logger.info(f"Retrieved speaker_mapping from cache: {platform}/{media_id}")
-                    return normalized_cache
+                    # ci-gate review：缓存里的 mapping 是写入时那次调用的
+                    # confidence_threshold 门控结果；用户之后调高/调低阈值
+                    # 配置不该被已缓存内容悄悄绕过。meta 里存了每个 speaker
+                    # 的原始 name/confidence，用当前（可能已变化的）阈值重跑
+                    # 一遍既有的 _apply_confidence_gate，不发起任何新的 LLM
+                    # 调用，纯本地重新判定。
+                    cached_meta = normalized_cache["meta"]
+                    raw_mapping = {
+                        speaker: cached_meta[speaker]["name"] for speaker in speakers
+                    }
+                    confidence_by_speaker = {
+                        speaker: cached_meta[speaker]["confidence"] for speaker in speakers
+                    }
+                    return self._apply_confidence_gate(
+                        speakers=speakers,
+                        raw_mapping=raw_mapping,
+                        confidence_by_speaker=confidence_by_speaker,
+                    )
                 logger.info(
                     f"Cached speaker_mapping does not cover current speakers "
                     f"({platform}/{media_id}), ignoring stale cache and re-inferring"
