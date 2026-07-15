@@ -11,11 +11,14 @@ Covers the "per-speaker sampling + confidence downgrade" refactor:
   real confidence data; legacy (flat dict, pre-confidence-gating) cache
   format is treated as unusable and forces re-inference (ci-gate review).
 - Prompt sample groups are ordered by first-appearance time.
+- The prompt's raw speaker-label list ("original_speakers") is cropped to
+  the speakers that survive the global sample budget, so it can't blow up
+  the prompt on its own when diarization produces thousands of labels.
 """
 
 import time
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from video_transcript_api.llm.core.speaker_inferencer import SpeakerInferencer
 
@@ -425,6 +428,100 @@ class TestGlobalSampleCharBudget(unittest.TestCase):
             f"extraction + rendering took {elapsed:.3f}s for {num_speakers} "
             f"speakers, which suggests non-linear (e.g. O(n^2)) behavior",
         )
+
+
+class TestPromptSpeakerListRespectsBudget(unittest.TestCase):
+    """The speaker-label list embedded in the prompt ("original_speakers") must
+    be cropped to the budget-surviving speaker set, not the full raw
+    `speakers` list -- ci-gate review (5th round). _apply_global_sample_budget
+    already caps the sample-snippet section, but if infer() still hands the
+    prompt builder the UNCROPPED speakers list, that label list alone
+    (joined with ", ") can add tens of thousands of characters when
+    diarization produces thousands of spurious labels, defeating the budget
+    entirely even though the snippet section stayed capped."""
+
+    def test_original_speakers_passed_to_prompt_builder_is_budget_cropped(self):
+        num_speakers = 2000
+        speakers = [f"Speaker{i}" for i in range(num_speakers)]
+        dialogs = [
+            _make_dialog(speaker, "hi", start_time=float(i))
+            for i, speaker in enumerate(speakers)
+        ]
+
+        inferencer = _make_inferencer(
+            samples_per_speaker=1,
+            max_chars_per_speaker=400,
+            context_dialogs=0,
+            max_total_sample_chars=8000,
+        )
+        inferencer.llm_client.call = MagicMock(
+            return_value=_mock_llm_response(
+                speaker_mapping={s: s for s in speakers}, confidence=1.0
+            )
+        )
+
+        captured = {}
+
+        def fake_prompt_builder(**kwargs):
+            captured.update(kwargs)
+            return "fake prompt"
+
+        with patch(
+            "video_transcript_api.llm.core.speaker_inferencer."
+            "build_speaker_inference_user_prompt",
+            side_effect=fake_prompt_builder,
+        ):
+            inferencer.infer(speakers=speakers, dialogs=dialogs, title="t")
+
+        self.assertIn("original_speakers", captured)
+        passed_speakers = captured["original_speakers"]
+
+        # Pre-fix behaviour passes the FULL, uncropped speakers list
+        # (num_speakers entries) here; the fix must narrow it to only the
+        # speakers that survived the global sample budget.
+        self.assertLess(len(passed_speakers), num_speakers)
+        self.assertGreater(len(passed_speakers), 0)
+
+        # The label list itself, rendered exactly as the real prompt builder
+        # does (", ".join(...)), must not reintroduce an unbounded prompt.
+        label_list_chars = len(", ".join(passed_speakers))
+        self.assertLess(label_list_chars, 8000)
+
+        # Order must still follow first-appearance order (same as the
+        # sample-snippet section), not be scrambled by an unordered set/dict.
+        self.assertEqual(passed_speakers, sorted(passed_speakers, key=speakers.index))
+
+    def test_small_speaker_set_prompt_speaker_list_matches_full_set(self):
+        """Sanity check: when the budget never triggers, the prompt's speaker
+        list must still equal the full original speaker set (no accidental
+        narrowing in the normal, unclipped case)."""
+        speakers = ["Speaker1", "Speaker2"]
+        dialogs = [
+            _make_dialog("Speaker1", "hello there", start_time=0.0),
+            _make_dialog("Speaker2", "hi back", start_time=1.0),
+        ]
+
+        inferencer = _make_inferencer()
+        inferencer.llm_client.call = MagicMock(
+            return_value=_mock_llm_response(
+                speaker_mapping={"Speaker1": "张三", "Speaker2": "李四"}, confidence=1.0
+            )
+        )
+
+        captured = {}
+
+        def fake_prompt_builder(**kwargs):
+            captured.update(kwargs)
+            return "fake prompt"
+
+        with patch(
+            "video_transcript_api.llm.core.speaker_inferencer."
+            "build_speaker_inference_user_prompt",
+            side_effect=fake_prompt_builder,
+        ):
+            inferencer.infer(speakers=speakers, dialogs=dialogs, title="t")
+
+        self.assertEqual(captured["original_speakers"], ["Speaker1", "Speaker2"])
 
 
 class TestPromptGroupRendering(unittest.TestCase):

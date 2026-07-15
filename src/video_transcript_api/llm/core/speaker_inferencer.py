@@ -143,9 +143,21 @@ class SpeakerInferencer:
 
         context_snippets = self._format_sample_dialogs(sample_groups)
 
+        # ci-gate review（第5轮）：这里必须用 sample_groups 的 key（预算裁剪后
+        # 保留的说话人），而不是原始完整的 speakers 列表。_apply_global_sample_budget
+        # 已经把采样片段区控制在预算内，但如果标签列表本身仍塞入全部 speakers，
+        # 光是 ', '.join() 这一行在虚假说话人成百上千时也能贡献上万字符，
+        # 预算形同虚设。被裁掉的说话人在采样区没有任何文本，让 LLM 对着一个
+        # 完全没有上下文的陌生标签猜真名没有意义。sample_groups 在
+        # _apply_global_sample_budget 内部已按「首次出场时间」顺序写入，
+        # 直接取其 key 顺序即可，无需重新排序。
+        #
+        # 注意：_apply_confidence_gate 仍遍历完整 speakers 列表组装最终结果，
+        # 这一处不受影响——被预算裁掉的说话人依旧会出现在 mapping/meta/
+        # low_confidence 里，走「无采样样本」的既有兜底路径。
         user_prompt = build_speaker_inference_user_prompt(
             context_snippets=context_snippets,
-            original_speakers=speakers,
+            original_speakers=list(sample_groups.keys()),
             video_title=title,
             author=author,
             description=description,
