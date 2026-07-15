@@ -1,31 +1,11 @@
-"""
-说话人映射 JSON Schema
+"""说话人映射 JSON Schema —— 向后兼容的 re-export
 
-用于 llm_enhanced.py 中的说话人名称推断输出格式定义。
+规范定义唯一在 ``llm.prompts.schemas.speaker_mapping``（实际被
+SpeakerInferencer 消费的版本）。本模块只做 re-export，不重复定义，避免
+两份 schema 漂移不同步；保留这条旧导入路径是为了不破坏可能存在的既有
+调用方（ci-gate review）。
 """
 
-SPEAKER_MAPPING_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "speaker_mapping": {
-            "type": "object",
-            "description": "说话人标识到真实姓名的映射",
-            "additionalProperties": {
-                "type": "string"
-            }
-        },
-        "confidence": {
-            "type": "object",
-            "description": "每个映射的置信度 (0-1)",
-            "additionalProperties": {
-                "type": "number"
-            }
-        },
-        "reasoning": {
-            "type": "string",
-            "description": "推断依据说明"
-        }
-    },
-    "required": ["speaker_mapping", "confidence", "reasoning"],
-    "additionalProperties": False
-}
+from ..prompts.schemas.speaker_mapping import SPEAKER_MAPPING_SCHEMA
+
+__all__ = ["SPEAKER_MAPPING_SCHEMA"]

@@ -26,6 +26,15 @@ class LLMConfig:
     speaker_model: Optional[str] = None  # 默认使用 calibrate_model
     speaker_reasoning_effort: Optional[str] = None
 
+    # 说话人推断采样配置（按说话人采样，而非全局前 N 字符截断）
+    speaker_samples_per_speaker: int = 3       # 每个说话人采样的发言条数上限
+    speaker_max_chars_per_speaker: int = 400   # 每个说话人采样文本的总字符上限
+    speaker_context_dialogs: int = 2           # 首次出场前，采集他人发言作为上下文的条数
+    speaker_confidence_threshold: float = 0.6  # 置信度阈值，低于此值不采用推断姓名
+    # 所有说话人采样文本合计的全局字符上限，防止 diarization 切分错误产生大量
+    # 虚假说话人标签时，单人上限仍因人数膨胀导致 prompt 总量失控
+    speaker_max_total_sample_chars: int = 8000
+
     # 质量验证模型
     validator_model: Optional[str] = None  # 默认使用 calibrate_model
     validator_reasoning_effort: Optional[str] = None
@@ -100,6 +109,7 @@ class LLMConfig:
         llm_config = config_dict.get("llm", {})
         segmentation_config = llm_config.get("segmentation", {})
         calibration_config = llm_config.get("structured_calibration", {})
+        speaker_inference_config = llm_config.get("speaker_inference", {})
         quality_validation_config = llm_config.get("quality_validation", {})
         quality_config = quality_validation_config.get(
             "quality_threshold", calibration_config.get("quality_threshold", {})
@@ -165,6 +175,19 @@ class LLMConfig:
             speaker_model=llm_config.get("speaker_model", llm_config["calibrate_model"]),
             speaker_reasoning_effort=normalize_reasoning_effort(
                 llm_config.get("speaker_reasoning_effort")
+            ),
+
+            # 说话人推断采样配置
+            speaker_samples_per_speaker=speaker_inference_config.get("samples_per_speaker", 3),
+            speaker_max_chars_per_speaker=speaker_inference_config.get(
+                "max_chars_per_speaker", 400
+            ),
+            speaker_context_dialogs=speaker_inference_config.get("context_dialogs", 2),
+            speaker_confidence_threshold=speaker_inference_config.get(
+                "confidence_threshold", 0.6
+            ),
+            speaker_max_total_sample_chars=speaker_inference_config.get(
+                "max_total_sample_chars", 8000
             ),
 
             # 质量验证模型

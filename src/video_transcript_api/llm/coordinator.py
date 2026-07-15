@@ -58,6 +58,11 @@ class LLMCoordinator:
             cache_manager=self.cache_manager,
             model=self.config.speaker_model or self.config.calibrate_model,
             reasoning_effort=self.config.speaker_reasoning_effort,
+            samples_per_speaker=self.config.speaker_samples_per_speaker,
+            max_chars_per_speaker=self.config.speaker_max_chars_per_speaker,
+            context_dialogs=self.config.speaker_context_dialogs,
+            confidence_threshold=self.config.speaker_confidence_threshold,
+            max_total_sample_chars=self.config.speaker_max_total_sample_chars,
         )
 
         self.quality_validator = UnifiedQualityValidator(

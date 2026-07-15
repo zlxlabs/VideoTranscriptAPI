@@ -79,9 +79,11 @@ from .llm import (
 from .schemas import (
     CALIBRATION_RESULT_SCHEMA,
     VALIDATION_RESULT_SCHEMA,
-    SPEAKER_MAPPING_SCHEMA,
     UNIFIED_VALIDATION_SCHEMA,
 )
+# SPEAKER_MAPPING_SCHEMA 唯一定义在 prompts.schemas；llm.schemas 里的同名
+# 导出是对它的 re-export（保留旧导入路径兼容），不是另一份定义
+from .prompts.schemas import SPEAKER_MAPPING_SCHEMA
 from .prompts import (
     # System prompts
     CALIBRATE_SYSTEM_PROMPT,

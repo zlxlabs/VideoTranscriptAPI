@@ -17,7 +17,8 @@ import pytest
 # Schema imports
 # ============================================================
 from src.video_transcript_api.llm.schemas.calibration import CALIBRATION_RESULT_SCHEMA
-from src.video_transcript_api.llm.schemas.speaker_mapping import SPEAKER_MAPPING_SCHEMA
+# SPEAKER_MAPPING_SCHEMA 唯一定义在 prompts.schemas（llm.schemas 中的重复定义已删除）
+from src.video_transcript_api.llm.prompts.schemas.speaker_mapping import SPEAKER_MAPPING_SCHEMA
 from src.video_transcript_api.llm.schemas.validation import VALIDATION_RESULT_SCHEMA
 from src.video_transcript_api.llm.schemas.unified_validation import UNIFIED_VALIDATION_SCHEMA
 from src.video_transcript_api.llm.prompts.schemas.key_info import (
@@ -742,17 +743,47 @@ class TestPromptsSchemaReExports:
         assert UNIFIED_VALIDATION_SCHEMA["additionalProperties"] is False
 
     def test_prompts_schemas_match_llm_schemas(self):
-        """prompts.schemas and llm.schemas should export identical objects."""
+        """prompts.schemas and llm.schemas should export identical objects.
+
+        SPEAKER_MAPPING_SCHEMA is no longer duplicated: it is defined once in
+        prompts.schemas and re-exported (not redefined) by llm package __init__,
+        so there is nothing left to cross-check here for it.
+        """
         from src.video_transcript_api.llm.prompts.schemas import (
-            SPEAKER_MAPPING_SCHEMA as PS_SM,
             VALIDATION_RESULT_SCHEMA as PS_VR,
             UNIFIED_VALIDATION_SCHEMA as PS_UV,
         )
-        from src.video_transcript_api.llm.schemas.speaker_mapping import SPEAKER_MAPPING_SCHEMA as LS_SM
         from src.video_transcript_api.llm.schemas.validation import VALIDATION_RESULT_SCHEMA as LS_VR
         from src.video_transcript_api.llm.schemas.unified_validation import UNIFIED_VALIDATION_SCHEMA as LS_UV
 
         # These should be the exact same dict objects (both modules define them identically)
-        assert PS_SM == LS_SM
         assert PS_VR == LS_VR
         assert PS_UV == LS_UV
+
+    def test_speaker_mapping_schema_reexported_not_duplicated(self):
+        """llm.SPEAKER_MAPPING_SCHEMA must be the same object as prompts.schemas' (single source of truth)."""
+        from src.video_transcript_api.llm import SPEAKER_MAPPING_SCHEMA as LLM_SM
+        from src.video_transcript_api.llm.prompts.schemas import SPEAKER_MAPPING_SCHEMA as PS_SM
+
+        assert LLM_SM is PS_SM
+
+    def test_legacy_schemas_module_import_paths_still_work(self):
+        """ci-gate review: llm.schemas.speaker_mapping was briefly deleted as
+        "dead code" during the per-speaker-sampling refactor, but an
+        independent review flagged it as a public-API compatibility break
+        (any code still importing the old path would hit ImportError).
+        Restored as a thin re-export -- both legacy import forms must keep
+        working and must resolve to the exact same schema object as the
+        canonical source (not a second, potentially-drifting definition)."""
+        from src.video_transcript_api.llm.schemas.speaker_mapping import (
+            SPEAKER_MAPPING_SCHEMA as MODULE_PATH_SM,
+        )
+        from src.video_transcript_api.llm.schemas import (
+            SPEAKER_MAPPING_SCHEMA as PACKAGE_PATH_SM,
+        )
+        from src.video_transcript_api.llm.prompts.schemas import (
+            SPEAKER_MAPPING_SCHEMA as CANONICAL_SM,
+        )
+
+        assert MODULE_PATH_SM is CANONICAL_SM
+        assert PACKAGE_PATH_SM is CANONICAL_SM

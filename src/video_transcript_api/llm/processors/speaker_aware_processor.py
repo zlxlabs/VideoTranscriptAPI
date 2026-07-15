@@ -101,7 +101,7 @@ class SpeakerAwareProcessor:
                 d.get("speaker", "") for d in base_dialogs if d.get("speaker")
             )
         )
-        speaker_mapping = self.speaker_inferencer.infer(
+        speaker_inference_result = self.speaker_inferencer.infer(
             speakers=speakers,
             dialogs=base_dialogs,
             title=title,
@@ -111,6 +111,8 @@ class SpeakerAwareProcessor:
             platform=platform,
             media_id=media_id,
         )
+        speaker_mapping = speaker_inference_result.get("mapping", {})
+        speaker_inference_meta = speaker_inference_result.get("meta", {})
 
         # 结构化标准化（应用映射 + 合并连续同说话人 + 时间字段规范化）
         normalized_dialogs = self._normalize_and_merge_dialogs(
@@ -160,6 +162,7 @@ class SpeakerAwareProcessor:
                 "dialog_count": len(normalized_dialogs),
                 "chunk_count": len(chunks),
                 "calibration_stats": calibration_stats,
+                "speaker_inference": speaker_inference_meta,
             }
         }
 
