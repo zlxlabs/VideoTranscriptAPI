@@ -5,7 +5,8 @@ Covers:
 - set_context()/get_context() basic nesting and restore-on-exit semantics.
 - bind_task_id() one-shot thread-entry binding (used by llm_ops._handle_llm_task).
 - ChatResult usage bridge (record_chat_result_usage/pop_chat_result_usage):
-  write-then-read-once, and "never called" -> None.
+  append-then-read-all-once (Self-Correction retries all preserved, not just
+  the last write), and "never called" -> empty tuple.
 - ThreadPoolExecutor propagation: contextvars do NOT automatically cross into
   worker threads (naive executor.submit control case), and DO propagate when
   the submitting code explicitly captures contextvars.copy_context() and runs
@@ -76,14 +77,16 @@ class TestBindTaskId:
 
 
 class TestChatResultUsageBridge:
-    def test_pop_without_record_returns_none(self):
-        assert usage_context.pop_chat_result_usage() is None
+    def test_pop_without_record_returns_empty(self):
+        assert usage_context.pop_chat_result_usage() == ()
 
     def test_record_then_pop_returns_snapshot(self):
         usage_context.record_chat_result_usage(
             model="m1", usage=_FakeUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
         )
-        snapshot = usage_context.pop_chat_result_usage()
+        snapshots = usage_context.pop_chat_result_usage()
+        assert len(snapshots) == 1
+        snapshot = snapshots[0]
         assert snapshot.model == "m1"
         assert snapshot.prompt_tokens == 10
         assert snapshot.completion_tokens == 5
@@ -95,26 +98,35 @@ class TestChatResultUsageBridge:
             model="m1", usage=_FakeUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2)
         )
         usage_context.pop_chat_result_usage()
-        assert usage_context.pop_chat_result_usage() is None
+        assert usage_context.pop_chat_result_usage() == ()
 
     def test_record_with_none_usage_flags_missing(self):
         usage_context.record_chat_result_usage(model="m2", usage=None)
-        snapshot = usage_context.pop_chat_result_usage()
+        snapshots = usage_context.pop_chat_result_usage()
+        assert len(snapshots) == 1
+        snapshot = snapshots[0]
         assert snapshot.usage_missing is True
         assert snapshot.prompt_tokens is None
         assert snapshot.completion_tokens is None
         assert snapshot.total_tokens is None
 
-    def test_last_write_wins_across_multiple_records(self):
+    def test_multiple_records_are_all_preserved_in_order(self):
+        """Regression guard: the bridge used to be "last write wins", which
+        silently dropped the token cost of earlier Self-Correction retry
+        attempts from the audit trail. It must now accumulate every attempt
+        so the caller (LLMClient._record_usage) can sum the real total."""
         usage_context.record_chat_result_usage(
             model="attempt-1", usage=_FakeUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2)
         )
         usage_context.record_chat_result_usage(
             model="attempt-2", usage=_FakeUsage(prompt_tokens=9, completion_tokens=9, total_tokens=18)
         )
-        snapshot = usage_context.pop_chat_result_usage()
-        assert snapshot.model == "attempt-2"
-        assert snapshot.total_tokens == 18
+        snapshots = usage_context.pop_chat_result_usage()
+        assert len(snapshots) == 2
+        assert snapshots[0].model == "attempt-1"
+        assert snapshots[0].total_tokens == 2
+        assert snapshots[1].model == "attempt-2"
+        assert snapshots[1].total_tokens == 18
 
 
 class _FakeUsage:

@@ -108,13 +108,21 @@ class LLMClient:
             self._record_usage(model=model, duration_ms=duration_ms)
 
     def _record_usage(self, *, model: str, duration_ms: int) -> None:
-        """将 call_llm_api() 内部桥接的 ChatResult usage 快照落审计库。
+        """将 call_llm_api() 内部桥接的 ChatResult usage 快照聚合落审计库。
 
         usage 快照由 `llm/llm.py` 的三个调用辅助函数在拿到 llm-compat
-        ChatResult 后写入 `usage_context` 的桥接槽（同线程、调用完立即读出，
-        详见 `usage_context.py` 模块文档）。task_id/stage 从当前调用上下文
-        读取（由 `llm_ops._handle_llm_task` 与 `coordinator.py`/processors
-        通过 contextvars 设置，跨 ThreadPoolExecutor 需显式 copy_context 传播）。
+        ChatResult 后按顺序追加写入 `usage_context` 的桥接槽（同线程、调用完
+        一次性读出，详见 `usage_context.py` 模块文档）。task_id/stage 从当前
+        调用上下文读取（由 `llm_ops._handle_llm_task` 与 `coordinator.py`/
+        processors 通过 contextvars 设置，跨 ThreadPoolExecutor 需显式
+        copy_context 传播）。
+
+        json_object 模式的 Self-Correction 可能让一次 call() 内触发多次真实
+        API 往返（多个快照），这里对全部快照的 token 求和落一行——而不是只取
+        最后一次，否则失败重试同样消耗的真实 token 会从审计记录里静默消失
+        （ci-gate review）。仍然只落一行（不按尝试拆多行），因为 duration_ms
+        本就是整次 call() 的耗时，无法精确拆分到每次尝试；model 取最后一次
+        快照（即最终生效结果对应的那次尝试）。
 
         本方法自身也包一层 try/except：即便 usage_context/UsageRecorder 出现
         非预期异常，也绝不能影响 call() 的返回值或已经在传播的异常
@@ -125,10 +133,10 @@ class LLMClient:
             duration_ms: 本次 call() 调用耗时（毫秒，含内部重试/Self-Correction）
         """
         try:
-            snapshot = pop_chat_result_usage()
+            snapshots = pop_chat_result_usage()
             context = get_context()
 
-            if snapshot is None:
+            if not snapshots:
                 # call_llm_api() 从未走到任何真实 API 往返（如参数构建阶段就失败），
                 # 仍记一行，flag usage_missing，避免静默丢弃这次调用尝试。
                 get_usage_recorder().record(
@@ -143,15 +151,29 @@ class LLMClient:
                 )
                 return
 
+            known = [s for s in snapshots if not s.usage_missing]
+            final_model = snapshots[-1].model or model
+
+            if known:
+                prompt_tokens = sum(s.prompt_tokens or 0 for s in known)
+                completion_tokens = sum(s.completion_tokens or 0 for s in known)
+                total_tokens = sum(s.total_tokens or 0 for s in known)
+                usage_missing = False
+            else:
+                # 全部尝试的 provider 都没回报 usage（单次调用场景与此前行为
+                # 一致；理论上也覆盖"重试多次但每次都不回报"的边界情况）。
+                prompt_tokens = completion_tokens = total_tokens = None
+                usage_missing = True
+
             get_usage_recorder().record(
                 task_id=context.get("task_id"),
                 stage=context.get("stage"),
-                model=snapshot.model or model,
-                prompt_tokens=snapshot.prompt_tokens,
-                completion_tokens=snapshot.completion_tokens,
-                total_tokens=snapshot.total_tokens,
+                model=final_model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
                 duration_ms=duration_ms,
-                usage_missing=snapshot.usage_missing,
+                usage_missing=usage_missing,
             )
         except Exception as exc:
             logger.warning(f"LLM usage 记录钩子异常（不影响 LLM 调用主流程）: {exc}")

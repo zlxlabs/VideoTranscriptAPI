@@ -243,7 +243,7 @@ class TestRecordingFailOpen:
 class TestStaleUsageSlotNotMisattributed:
     """Regression coverage for codex-review R1 item 4.
 
-    The usage bridge slot (usage_context._last_chat_usage) is written by
+    The usage bridge slot (usage_context._chat_usage_log) is written by
     llm/llm.py's internal call helpers whenever they get a real ChatResult
     back from llm-compat, and is only ever POPPED by LLMClient.call()'s
     finally block. Call sites that invoke call_llm_api() directly -- bypassing
@@ -323,3 +323,90 @@ class TestStaleUsageSlotNotMisattributed:
             row = cursor.fetchone()
 
         assert row == ("actual-model", 10, 5, 15, 0)
+
+
+class TestSelfCorrectionRetryUsageAggregation:
+    """Regression coverage: json_object mode's Self-Correction can trigger
+    multiple real client.chat() round trips within a single call_llm_api()
+    invocation (see llm.py::_call_with_json_object_mode). Each round trip
+    consumes real, billable tokens. The bridge used to keep only the LAST
+    snapshot ("last write wins"), silently dropping earlier failed attempts'
+    token cost from the audit trail. It must now sum every attempt recorded
+    during this call() into the one audit row."""
+
+    def test_two_attempts_within_one_call_are_summed_not_last_write_wins(
+        self, client, recorder
+    ):
+        def fake_call_llm_api(**kwargs):
+            # Simulate _call_with_json_object_mode: first attempt fails JSON
+            # parsing (but still consumed real tokens), second attempt
+            # succeeds. Both call record_chat_result_usage(), exactly like
+            # the real retry loop does on every client.chat() round trip.
+            usage_context.record_chat_result_usage(
+                model="attempt-1-model",
+                usage=TokenUsage(prompt_tokens=100, completion_tokens=20, total_tokens=120),
+            )
+            usage_context.record_chat_result_usage(
+                model="attempt-2-model",
+                usage=TokenUsage(prompt_tokens=100, completion_tokens=30, total_tokens=130),
+            )
+            return "final result text"
+
+        with patch(
+            "video_transcript_api.llm.core.llm_client.call_llm_api",
+            side_effect=fake_call_llm_api,
+        ), patch(
+            "video_transcript_api.llm.core.llm_client.get_usage_recorder",
+            return_value=recorder,
+        ):
+            result = client.call(model="requested-model", system_prompt="s", user_prompt="u")
+
+        assert result.text == "final result text"
+
+        with recorder._audit_logger._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT model, prompt_tokens, completion_tokens, total_tokens, usage_missing "
+                "FROM llm_usage"
+            )
+            row = cursor.fetchone()
+
+        # Exactly ONE audit row for this ONE call(), but its token counts are
+        # the SUM of both real API round trips (100+100=200, 20+30=50,
+        # 120+130=250) -- not just the last attempt's 100/30/130. Pre-fix,
+        # this would have recorded ("attempt-2-model", 100, 30, 130, 0),
+        # silently losing attempt 1's 120 tokens from the audit trail.
+        assert row == ("attempt-2-model", 200, 50, 250, 0)
+
+    def test_retry_where_only_first_attempt_reports_usage_is_not_dropped(
+        self, client, recorder
+    ):
+        """A provider that omits usage on the (eventually superseded) first
+        attempt but reports it on the successful retry must still have the
+        retry's real tokens counted -- not zeroed out just because one of
+        the attempts was missing."""
+
+        def fake_call_llm_api(**kwargs):
+            usage_context.record_chat_result_usage(model="attempt-1-model", usage=None)
+            usage_context.record_chat_result_usage(
+                model="attempt-2-model",
+                usage=TokenUsage(prompt_tokens=50, completion_tokens=10, total_tokens=60),
+            )
+            return "final result text"
+
+        with patch(
+            "video_transcript_api.llm.core.llm_client.call_llm_api",
+            side_effect=fake_call_llm_api,
+        ), patch(
+            "video_transcript_api.llm.core.llm_client.get_usage_recorder",
+            return_value=recorder,
+        ):
+            client.call(model="requested-model", system_prompt="s", user_prompt="u")
+
+        with recorder._audit_logger._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT model, prompt_tokens, completion_tokens, total_tokens, usage_missing "
+                "FROM llm_usage"
+            )
+            row = cursor.fetchone()
+
+        assert row == ("attempt-2-model", 50, 10, 60, 0)

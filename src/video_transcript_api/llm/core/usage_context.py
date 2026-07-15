@@ -15,18 +15,23 @@
    再通过 `executor.submit(ctx.run, fn, ...)` 传播给 worker 线程，否则 worker
    线程内读到的会是该线程的默认值（'unknown'/'unknown'）。
 
-2. **最近一次 ChatResult usage 桥接**
+2. **ChatResult usage 桥接（按次追加，非覆盖）**
    `llm/llm.py` 内部的 `_call_with_text_output` / `_call_with_json_schema_mode`
    / `_call_with_json_object_mode` 在拿到 llm-compat 返回的 `ChatResult` 后，
-   会把其中的 `usage`/`model` 写入这里；`llm/core/llm_client.py::LLMClient.call()`
-   在同一线程内紧接着调用完 `call_llm_api()` 后立即读出并清空。
+   会把其中的 `usage`/`model` 追加写入这里；`llm/core/llm_client.py::LLMClient.call()`
+   在同一线程内紧接着调用完 `call_llm_api()` 后一次性读出全部快照并清空。
 
    之所以需要这层桥接：`call_llm_api()` 对外的公开返回类型是 `str`
    （纯文本模式）或 `StructuredResult`（结构化模式），两者均不携带
    `ChatResult.usage`，且这两个返回类型已被多处调用方直接使用，不能随意
    变更签名。桥接是在不破坏现有公开契约的前提下，把 usage 元数据带到
    审计记录点的最小侵入方案。桥接槽只在同一线程、同一次 `call_llm_api()`
-   调用内"写入 -> 立即读出并清空"，不存在跨线程/跨调用污染的风险。
+   调用内"写入 -> 一次性读出并清空"，不存在跨线程/跨调用污染的风险。
+
+   `call_llm_api()` 内部可能因 json_object 模式的 Self-Correction 重试
+   触发多次真实 `client.chat()` 往返，每次都各自消耗真实 token——桥接槽
+   按顺序累积全部快照（而非只保留最后一次），交由 `LLMClient._record_usage()`
+   对全部快照求和落一行审计记录，避免失败重试消耗的 token 被静默丢弃。
 """
 
 from __future__ import annotations
@@ -121,19 +126,25 @@ class ChatUsageSnapshot:
     usage_missing: bool
 
 
-_last_chat_usage: contextvars.ContextVar[Optional[ChatUsageSnapshot]] = (
-    contextvars.ContextVar("llm_last_chat_usage", default=None)
+# 累积同一次 call_llm_api() 调用内的全部真实 API 往返快照（而非只保留最后
+# 一次）：json_object 模式的 Self-Correction 最多会触发 max_retries+1 次真实
+# client.chat() 调用，早前失败重试消耗的 token 同样是真实计费成本，不能因为
+# 只保留最后一次而从审计表里静默消失（ci-gate review）。default 用空 tuple
+# （不可变）而非 [] ——record_chat_result_usage 每次都 .set() 一个新 tuple，
+# 从不原地 mutate，天然避免"跨 context 共享同一个可变默认值"的经典坑。
+_chat_usage_log: contextvars.ContextVar[tuple] = contextvars.ContextVar(
+    "llm_chat_usage_log", default=()
 )
 
 
 def record_chat_result_usage(*, model: str, usage: Any) -> None:
-    """记录一次 llm-compat ChatResult 的 usage，供上层 llm_client.call() 读取。
+    """追加记录一次 llm-compat ChatResult 的 usage，供上层 llm_client.call() 读取。
 
     由 `llm/llm.py` 内部三个调用辅助函数在拿到 `client.chat()` 返回的
     `ChatResult` 后调用。同一次 `call_llm_api()` 调用内可能因 Self-Correction
-    重试触发多次真实 API 调用，此处采用"最后一次写入生效"的策略 —— 即
-    最终记录到审计表的是本次 `call_llm_api()` 调用中最后一次真实 API
-    往返的 token 用量（通常也是决定最终结果的那一次）。
+    重试触发多次真实 API 调用，每次都会各自消耗 token 并产生真实费用——本函数
+    按调用顺序追加快照（而不是覆盖），由 `pop_chat_result_usage()` 的调用方
+    决定如何聚合（当前是 `LLMClient._record_usage()` 对全部快照求和落一行）。
 
     Args:
         model: 实际使用的模型名（优先用 ChatResult.model，因其能反映内容
@@ -141,37 +152,36 @@ def record_chat_result_usage(*, model: str, usage: Any) -> None:
         usage: llm-compat 的 `TokenUsage` 对象，部分 provider 不回报时为 None
     """
     if usage is None:
-        _last_chat_usage.set(
-            ChatUsageSnapshot(
-                model=model,
-                prompt_tokens=None,
-                completion_tokens=None,
-                total_tokens=None,
-                usage_missing=True,
-            )
+        snapshot = ChatUsageSnapshot(
+            model=model,
+            prompt_tokens=None,
+            completion_tokens=None,
+            total_tokens=None,
+            usage_missing=True,
         )
-        return
-
-    _last_chat_usage.set(
-        ChatUsageSnapshot(
+    else:
+        snapshot = ChatUsageSnapshot(
             model=model,
             prompt_tokens=getattr(usage, "prompt_tokens", None),
             completion_tokens=getattr(usage, "completion_tokens", None),
             total_tokens=getattr(usage, "total_tokens", None),
             usage_missing=False,
         )
-    )
+
+    _chat_usage_log.set(_chat_usage_log.get() + (snapshot,))
 
 
-def pop_chat_result_usage() -> Optional[ChatUsageSnapshot]:
-    """读取并清空最近一次记录的 usage 快照。
+def pop_chat_result_usage() -> tuple:
+    """读取并清空本次 call_llm_api() 调用内累积的全部 usage 快照。
 
-    由 `LLMClient.call()` 在 `call_llm_api()` 返回后立即调用一次。返回
-    `None` 表示本次调用从未走到任何真实 API 往返（如请求构建阶段就失败），
-    此时调用方应按 usage 完全缺失处理。
+    由 `LLMClient.call()` 在 `call_llm_api()` 返回后立即调用一次。按记录
+    顺序返回一个 `ChatUsageSnapshot` 元组；返回空 tuple 表示本次调用从未
+    走到任何真实 API 往返（如请求构建阶段就失败），此时调用方应按 usage
+    完全缺失处理。多于一个元素表示触发过 Self-Correction 重试，调用方需
+    自行决定聚合方式（求和/只取最后一次等）。
     """
-    value = _last_chat_usage.get()
-    _last_chat_usage.set(None)
+    value = _chat_usage_log.get()
+    _chat_usage_log.set(())
     return value
 
 
@@ -200,4 +210,4 @@ def reset_context_for_testing() -> None:
     避免这种污染以任何测试收集顺序都能稳定复现。
     """
     _call_context.set(dict(_DEFAULT_CALL_CONTEXT))
-    _last_chat_usage.set(None)
+    _chat_usage_log.set(())
