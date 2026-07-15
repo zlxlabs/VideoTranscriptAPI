@@ -192,3 +192,76 @@ class TestYoutubeApiFailurePersistsFailed:
         task = cm.get_task_by_id(task_id)
         assert task["status"] == "failed"
         assert "unexpected error" in (task.get("error_message") or "")
+
+
+class TestOpaqueUrlSchemeSkipsMetadataProbe:
+    """Regression for prod incident: an opaque, non-http(s) url (e.g. an
+    external recorder system's recorder://... identifier) submitted together
+    with a valid download_url and a metadata_override must not die in the
+    "metadata acquisition" stage.
+
+    Before the fix, process_transcription always issued a metadata request
+    against `url` itself. For a non-http(s) scheme, that request is doomed:
+    GenericDownloader._validate_or_raise rejects it as "Unsupported URL
+    scheme" and raises InvalidURLError, which is a _TERMINAL_RESOLVER_ERRORS
+    member re-raised straight to the caller -- even though the existing
+    metadata_override fallback path (a few lines below) could have handled
+    it fine. The fix skips the metadata probe entirely when url's scheme is
+    not http/https, falling through to the metadata_override fallback.
+    """
+
+    def test_recorder_url_metadata_probe_is_skipped(self, env, cm, monkeypatch):
+        task_id = cm.create_task(url=RECORDER_URL)["task_id"]
+
+        # Spy on create_downloader (the entry point into the SSRF-guarded
+        # metadata path) to prove it is never invoked with the opaque url.
+        create_downloader_calls = []
+        real_create_downloader = svc.create_downloader
+
+        def spy_create_downloader(u):
+            create_downloader_calls.append(u)
+            return real_create_downloader(u)
+
+        monkeypatch.setattr(svc, "create_downloader", spy_create_downloader)
+
+        # Download stage is unrelated to this regression; stub it out so the
+        # run reaches a stable terminal state without real network I/O.
+        monkeypatch.setattr(
+            "video_transcript_api.downloaders.generic.GenericDownloader.download_file",
+            lambda self, url, filename=None: None,
+        )
+
+        # Capture notifier calls (a fresh MagicMock per get_notification_router()
+        # call otherwise, so pin it to one shared instance for inspection).
+        notifier = MagicMock()
+        monkeypatch.setattr(svc, "get_notification_router", lambda: notifier)
+
+        result = svc.process_transcription(
+            task_id=task_id,
+            url=RECORDER_URL,
+            download_url=DOWNLOAD_URL,
+            metadata_override={"title": "Test Recording", "author": "Test Author"},
+        )
+
+        # The opaque url must never reach the SSRF-guarded metadata path.
+        assert RECORDER_URL not in create_downloader_calls
+
+        # Must NOT terminate for the InvalidURLError/SSRF reason. It should
+        # reach the (unrelated, stubbed) download-stage failure instead,
+        # proving the metadata stage was skipped cleanly rather than raising.
+        assert result["status"] == "failed"
+        task = cm.get_task_by_id(task_id)
+        assert task["status"] == "failed"
+        error_message = task.get("error_message") or ""
+        assert "Unsupported URL scheme" not in error_message
+        assert "URL 指向内部网络地址" not in error_message
+        assert "下载文件失败" in error_message
+
+        # metadata_override's title must have been used as the fallback
+        # (parsed_metadata stayed None), proving the else-branch fallback ran.
+        notified_titles = [
+            call.kwargs.get("title")
+            for call in notifier.notify_task_status.call_args_list
+            if call.kwargs.get("title")
+        ]
+        assert "Test Recording" in notified_titles

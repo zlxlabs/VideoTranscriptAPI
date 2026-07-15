@@ -891,36 +891,53 @@ def process_transcription(
             download_info_obj = None
             parse_url = url
 
-            with tracker.track("metadata"):
-                try:
-                    logger.info(f"[元数据获取] 创建下载器实例: {parse_url}")
-                    metadata_downloader = create_downloader(parse_url)
-                    logger.info(
-                        f"[元数据获取] 下载器类型: {metadata_downloader.__class__.__name__}"
-                    )
+            # url 可能是外部系统提供的不透明标识符（如 recorder://...），并非真实
+            # 可访问的 http/https 地址。这种情况下对 url 发起元数据请求必然会被
+            # GenericDownloader 的 SSRF 校验以 "Unsupported URL scheme" 拒绝并抛出
+            # InvalidURLError（属于 _TERMINAL_RESOLVER_ERRORS，会被下方 except 直接
+            # 透传给用户），导致任务终态失败——即使下方已有 metadata_override 兜底
+            # 路径可用。因此在真正发起请求前先判断 url 的 scheme：非 http/https 时
+            # 直接跳过元数据探测，让 parsed_metadata 保持 None，自然落入下面的
+            # metadata_override（或默认值）兜底分支。
+            from urllib.parse import urlparse
+            url_scheme = urlparse(url).scheme.lower()
 
-                    metadata_obj = metadata_downloader.get_metadata(parse_url)
-                    parsed_metadata = {
-                        "video_id": metadata_obj.video_id,
-                        "video_title": metadata_obj.title,
-                        "title": metadata_obj.title,
-                        "author": metadata_obj.author,
-                        "description": metadata_obj.description,
-                        "platform": metadata_obj.platform,
-                    }
+            with tracker.track("metadata"):
+                if url_scheme not in ("http", "https"):
                     logger.info(
-                        f"[元数据获取] 成功: platform={metadata_obj.platform}, "
-                        f"video_id={metadata_obj.video_id}, "
-                        f"title={metadata_obj.title[:50]}"
+                        f"[元数据获取] URL scheme 非 http/https（{url_scheme or '空'}），"
+                        f"跳过元数据探测，直接使用 metadata_override 兜底: {parse_url}"
                     )
-                except _TERMINAL_RESOLVER_ERRORS:
-                    # P0-1：解析终态异常直达用户，不走默认失败路径
-                    logger.error("[元数据获取] 解析终态异常，向用户透传")
-                    raise
-                except Exception as e:
-                    logger.warning(f"[元数据获取] 失败: {e}")
-                    parsed_metadata = None
-                    metadata_obj = None
+                else:
+                    try:
+                        logger.info(f"[元数据获取] 创建下载器实例: {parse_url}")
+                        metadata_downloader = create_downloader(parse_url)
+                        logger.info(
+                            f"[元数据获取] 下载器类型: {metadata_downloader.__class__.__name__}"
+                        )
+
+                        metadata_obj = metadata_downloader.get_metadata(parse_url)
+                        parsed_metadata = {
+                            "video_id": metadata_obj.video_id,
+                            "video_title": metadata_obj.title,
+                            "title": metadata_obj.title,
+                            "author": metadata_obj.author,
+                            "description": metadata_obj.description,
+                            "platform": metadata_obj.platform,
+                        }
+                        logger.info(
+                            f"[元数据获取] 成功: platform={metadata_obj.platform}, "
+                            f"video_id={metadata_obj.video_id}, "
+                            f"title={metadata_obj.title[:50]}"
+                        )
+                    except _TERMINAL_RESOLVER_ERRORS:
+                        # P0-1：解析终态异常直达用户，不走默认失败路径
+                        logger.error("[元数据获取] 解析终态异常，向用户透传")
+                        raise
+                    except Exception as e:
+                        logger.warning(f"[元数据获取] 失败: {e}")
+                        parsed_metadata = None
+                        metadata_obj = None
 
             # 合并元数据（metadata_override 作为补充或覆盖）
             if parsed_metadata:
