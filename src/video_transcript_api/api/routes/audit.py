@@ -79,12 +79,24 @@ async def get_audit_calls(
 ):
     try:
         user_id = user_info.get("user_id")
+        # audit_logger.get_recent_calls() 把 user_id 缺失设计成"查询全部
+        # 用户的调用记录"（供未来管理员/CLI 场景使用），但这个 HTTP 端点是
+        # 面向最终用户"查看自己的调用记录"的，绝不能因为调用方配置不完整
+        # （多用户配置缺 user_id 字段，validate_token() 仍会签发该 token，
+        # 见 user_manager.py::_load_users_config）就意外触发这个"全量"语义，
+        # 把所有租户的 URL/IP/User-Agent/task_id 泄露给它——同一类 user_id
+        # 缺失越权，在本轮 /summary 修复后本地 codex review 追加发现。
+        if not user_id:
+            logger.error("audit calls: caller has no user_id, denying access (fail-closed)")
+            raise HTTPException(status_code=401, detail="无法确定调用方身份")
         recent_calls = await asyncio.to_thread(audit_logger.get_recent_calls, user_id, limit)
         return TranscribeResponse(
             code=200,
             message="获取调用记录成功",
             data={"calls": recent_calls, "user_id": user_id, "limit": limit},
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("获取审计调用记录异常: %s", exc)
         raise HTTPException(status_code=500, detail=f"获取调用记录失败: {exc}")
