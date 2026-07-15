@@ -262,7 +262,9 @@ class SpeakerInferencer:
                 _extract_sample_dialogs 返回结构）
 
         Returns:
-            裁剪后的采样结果，总 own_samples 字符数不超过 max_total_sample_chars
+            裁剪后的采样结果，总字符数（own_samples + context_before，两者
+            都会被 _format_sample_dialogs 写入最终 prompt）不超过
+            max_total_sample_chars
         """
         ordered = sorted(
             sample_groups.items(), key=lambda kv: kv[1].get("first_seen_index", 0)
@@ -271,7 +273,16 @@ class SpeakerInferencer:
         kept: Dict[str, Dict] = {}
         total_chars = 0
         for speaker, info in ordered:
-            speaker_chars = sum(len(text) for text in info.get("own_samples") or [])
+            # own_samples 是该说话人自己的发言样本；context_before 是首次
+            # 出场前的其他说话人发言（用于辅助 LLM 推断称呼）——两者都会被
+            # _format_sample_dialogs 完整写入 prompt，预算必须覆盖两者之和，
+            # 否则说话人数量多、context_dialogs 配置较大时，即使 own_samples
+            # 总量未超限，实际 prompt 仍可能远超 max_total_sample_chars。
+            own_chars = sum(len(text) for text in info.get("own_samples") or [])
+            context_chars = sum(
+                len(text) for _, text in info.get("context_before") or []
+            )
+            speaker_chars = own_chars + context_chars
             if total_chars + speaker_chars > self.max_total_sample_chars:
                 logger.warning(
                     f"Global sample char budget ({self.max_total_sample_chars}) exhausted "

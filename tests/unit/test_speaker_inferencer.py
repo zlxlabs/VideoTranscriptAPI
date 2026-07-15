@@ -176,7 +176,13 @@ class TestGlobalSampleCharBudget(unittest.TestCase):
 
     def test_budget_is_configurable_and_triggers_earlier_when_smaller(self):
         """Shrinking the budget must cause later-appearing speakers to be
-        dropped sooner (an acceptable degradation: latest arrivals lose out)."""
+        dropped sooner (an acceptable degradation: latest arrivals lose out).
+
+        context_dialogs=0 isolates this test to own_samples accounting only
+        (each dialog line here is from a different speaker, so with the
+        default context_dialogs=2 every speaker's context_before would pull
+        in the preceding speaker's line too -- exercised separately and
+        deliberately in test_context_before_counts_toward_global_budget)."""
         speakers = [f"Speaker{i}" for i in range(10)]
         dialogs = [
             _make_dialog(speaker, "x" * 100, start_time=float(i))
@@ -184,7 +190,10 @@ class TestGlobalSampleCharBudget(unittest.TestCase):
         ]
 
         inferencer = _make_inferencer(
-            samples_per_speaker=1, max_chars_per_speaker=100, max_total_sample_chars=250
+            samples_per_speaker=1,
+            max_chars_per_speaker=100,
+            max_total_sample_chars=250,
+            context_dialogs=0,
         )
         samples = inferencer._extract_sample_dialogs(dialogs, speakers)
 
@@ -209,6 +218,52 @@ class TestGlobalSampleCharBudget(unittest.TestCase):
 
         self.assertIn("Speaker2", samples)
         self.assertTrue(samples["Speaker2"]["own_samples"])
+
+    def test_context_before_counts_toward_global_budget(self):
+        """ci-gate review: the global budget only summed own_samples, but
+        _format_sample_dialogs also writes each speaker's context_before
+        (the preceding turns used to help the LLM infer a name) into the
+        prompt. A speaker whose own_samples are tiny but whose context is
+        large must still be counted correctly, and the true (own + context)
+        total must never exceed max_total_sample_chars."""
+        num_speakers = 20
+        speakers = [f"Speaker{i}" for i in range(num_speakers)]
+        dialogs = []
+        t = 0.0
+        for speaker in speakers:
+            # 2 long context lines from a "host" immediately before this
+            # speaker's own (short) first line -- context_dialogs=2 pulls
+            # both into context_before.
+            dialogs.append(_make_dialog("Host", "x" * 150, start_time=t))
+            t += 1.0
+            dialogs.append(_make_dialog("Host", "x" * 150, start_time=t))
+            t += 1.0
+            # Own sample is deliberately tiny so pre-fix (own-only) budget
+            # accounting would never trigger, while the true total
+            # (own + context, ~300 chars/speaker) blows past a small cap.
+            dialogs.append(_make_dialog(speaker, "hi", start_time=t))
+            t += 1.0
+
+        inferencer = _make_inferencer(
+            samples_per_speaker=3,
+            max_chars_per_speaker=400,
+            context_dialogs=2,
+            max_total_sample_chars=1500,
+        )
+        samples = inferencer._extract_sample_dialogs(dialogs, ["Host"] + speakers)
+
+        true_total = sum(
+            len(s) for info in samples.values() for s in info.get("own_samples") or []
+        ) + sum(
+            len(text)
+            for info in samples.values()
+            for _, text in info.get("context_before") or []
+        )
+        self.assertLessEqual(true_total, 1500)
+        # 20 speakers x ~300 chars (2x150 context + "hi") would total ~6000
+        # raw -- well past the 1500 cap, so some speakers must have been
+        # dropped for this assertion to be meaningful (not a vacuous pass).
+        self.assertLess(len(samples), num_speakers)
 
 
 class TestPromptGroupRendering(unittest.TestCase):
