@@ -176,3 +176,80 @@ class TestCleanupClockBasisConsistency:
         assert _cache_row_exists(cm, cache_before) == _task_row_exists(cm, task_before)
         assert _cache_row_exists(cm, cache_at) == _task_row_exists(cm, task_at)
         assert _cache_row_exists(cm, cache_within) == _task_row_exists(cm, task_within)
+
+
+class TestCleanupSharedNowParameter:
+    """codex-review R10 #1: within a single _periodic_maintenance pass,
+    cleanup_old_cache() walks and deletes files (can take seconds or
+    longer), so if cleanup_task_status() is then called and independently
+    reads now() again, the two cutoffs drift apart and open a race window:
+    a record whose timestamp falls between the two cutoffs is judged "not
+    yet expired" by one cleanup and "expired" by the other, breaking the
+    "task_status lives at least as long as cache" invariant even though
+    both functions already agree on the UTC clock basis (the case covered
+    by TestCleanupClockBasisConsistency above, which is about *which*
+    clock, not *when* it's read).
+
+    The fix: both functions accept an optional `now` (tz-aware UTC
+    datetime); the caller computes it once and passes the identical value
+    to both, removing the window entirely. These tests lock two things:
+    passing `now=` is honored verbatim (not merely used as a hint), and
+    omitting it keeps reading the real clock as before (backward
+    compatibility for existing callers/tests, including the frozen-clock
+    test above and tests/cache/test_task_status_cleanup.py)."""
+
+    def test_shared_now_produces_identical_verdict_without_touching_the_real_clock(self, cm):
+        """A deliberately stale `now` (weeks before the actual wall clock)
+        is passed to both functions; if either ignored it and read the
+        real clock instead, the boundary rows below would land on the
+        wrong side of the cutoff and this test would fail."""
+        shared_now = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
+        retention_days = 30
+        cutoff = shared_now - timedelta(days=retention_days)
+
+        one_second_before = (cutoff - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+        exactly_at_cutoff = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+
+        cache_before = _insert_cache_row(cm, one_second_before)
+        cache_at = _insert_cache_row(cm, exactly_at_cutoff)
+        task_before = _insert_task_row(cm, TaskStatus.SUCCESS, one_second_before, one_second_before)
+        task_at = _insert_task_row(cm, TaskStatus.SUCCESS, exactly_at_cutoff, exactly_at_cutoff)
+
+        cache_deleted = cm.cleanup_old_cache(days=retention_days, now=shared_now)
+        task_deleted = cm.cleanup_task_status(retention_days=retention_days, now=shared_now)
+
+        assert cache_deleted == 1, "only the row older than the injected now's cutoff should be reclaimed"
+        assert task_deleted == 1, "only the row older than the injected now's cutoff should be reclaimed"
+
+        assert not _cache_row_exists(cm, cache_before), "video_cache: row older than injected cutoff must be deleted"
+        assert _cache_row_exists(cm, cache_at), "video_cache: row exactly at cutoff must be kept (strict <)"
+        assert not _task_row_exists(cm, task_before), "task_status: row older than injected cutoff must be deleted"
+        assert _task_row_exists(cm, task_at), "task_status: row exactly at cutoff must be kept (strict <)"
+
+    def test_omitting_now_keeps_reading_the_real_clock(self, cm, monkeypatch):
+        """Callers that do not pass now= (legacy callers/tests) must get the
+        exact pre-fix behavior: the function reads
+        datetime.datetime.now(timezone.utc) internally itself. Verified the
+        same way as test_boundary_exact_cutoff_kept_one_second_earlier_deleted
+        in test_task_status_cleanup.py: freeze the module clock and confirm
+        it is still consulted when now= is omitted."""
+        frozen_now = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+        class _FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return frozen_now if tz is not None else frozen_now.replace(tzinfo=None)
+
+        monkeypatch.setattr(cache_manager_module.datetime, "datetime", _FrozenDateTime)
+
+        retention_days = 30
+        cutoff = frozen_now - timedelta(days=retention_days)
+        one_second_before = (cutoff - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+
+        cache_row = _insert_cache_row(cm, one_second_before)
+        task_row = _insert_task_row(cm, TaskStatus.SUCCESS, one_second_before, one_second_before)
+
+        assert cm.cleanup_old_cache(days=retention_days) == 1
+        assert cm.cleanup_task_status(retention_days=retention_days) == 1
+        assert not _cache_row_exists(cm, cache_row)
+        assert not _task_row_exists(cm, task_row)

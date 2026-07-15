@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import threading
 
 from fastapi import FastAPI, Request
@@ -33,6 +34,13 @@ async def _periodic_maintenance(config: dict) -> None:
       cleanup_task_status 会按缓存保留期执行（钳制并记 warning），缓存
       永久保留（0）时任务状态清理会被跳过
     - storage.audit_log_retention_days：审计日志保留天数，0 表示永久保留
+
+    同一次维护周期内，cleanup_old_cache 与 cleanup_task_status 共用同一个
+    UTC now（本函数每轮循环只调用一次 datetime.now），避免两次清理各自独
+    立调用 now() 之间出现竞态窗口：cleanup_old_cache 遍历删除文件可能耗时
+    数秒甚至更久，若 cleanup_task_status 随后再独立取一次更晚的 now，两者
+    cutoff 不一致，落在窗口内的记录会出现"缓存判定保留、任务判定删除"，
+    打破"task_status 至少活得跟 cache 一样久"的不变式（codex-review R10 #1）。
     """
     logger = get_logger()
     storage = config.get("storage", {})
@@ -50,8 +58,14 @@ async def _periodic_maintenance(config: dict) -> None:
     )
     while True:
         try:
+            # 本轮维护周期共用的 UTC 时间基准：只调用一次 now()，同时传给
+            # cleanup_old_cache 和 cleanup_task_status，避免二者各自独立
+            # 调用 now() 之间开出竞态窗口（codex-review R10 #1）。
+            now = datetime.datetime.now(datetime.timezone.utc)
             if cache_days > 0:
-                deleted = await asyncio.to_thread(get_cache_manager().cleanup_old_cache, cache_days)
+                deleted = await asyncio.to_thread(
+                    get_cache_manager().cleanup_old_cache, cache_days, now=now
+                )
                 if deleted:
                     logger.info(f"定期清理：删除 {deleted} 条超过 {cache_days} 天的缓存记录")
             if task_status_days > 0:
@@ -59,7 +73,10 @@ async def _periodic_maintenance(config: dict) -> None:
                 # 保留期倒挂（task < cache）时由 cleanup_task_status 钳制为缓存
                 # 保留期，避免缓存尚在、/view 链接已死（codex-review R3 #3）。
                 deleted = await asyncio.to_thread(
-                    get_cache_manager().cleanup_task_status, task_status_days, cache_days
+                    get_cache_manager().cleanup_task_status,
+                    task_status_days,
+                    cache_days,
+                    now=now,
                 )
                 if deleted:
                     logger.info(f"定期清理：删除 {deleted} 条超过 {task_status_days} 天的终态任务状态记录")

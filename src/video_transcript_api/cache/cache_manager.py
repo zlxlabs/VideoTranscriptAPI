@@ -641,12 +641,26 @@ class CacheManager:
             logger.error(f"验证缓存完整性失败: {e}")
             return 0
 
-    def cleanup_old_cache(self, days: int = 30) -> int:
+    def cleanup_old_cache(self, days: int = 30, now: Optional[datetime.datetime] = None) -> int:
         """
         清理旧缓存
 
         Args:
             days: 保留最近几天的缓存
+            now: 计算 cutoff 所用的 UTC 时间基准（tz-aware）。不传（None）时
+                内部自行调用 `datetime.datetime.now(datetime.timezone.utc)`，
+                向后兼容旧调用方/单元测试。
+
+                codex-review R10 #1：cleanup_old_cache 遍历并删除文件可能耗
+                时数秒甚至更久，若调用方随后再独立调用一次
+                cleanup_task_status()（其内部再各自调用一次 now()），两次
+                cutoff 会因为耗时而不一致，在其间开出一个竞态窗口——某条
+                缓存记录的 updated_at 恰好落在窗口内时，缓存清理判定"未到
+                cutoff、保留"，但稍晚计算的任务清理 cutoff 已经越过它，判定
+                "删除"，从而打破"task_status 至少活得跟 cache 一样久"的不
+                变式。调用方（_periodic_maintenance）在同一次维护周期内应
+                只计算一次 now，显式传给 cleanup_old_cache 和
+                cleanup_task_status 两者共用。
 
         Returns:
             int: 删除的记录数
@@ -669,9 +683,9 @@ class CacheManager:
         adapter 自 Python 3.12 起已弃用）。
         """
         try:
+            effective_now = now if now is not None else datetime.datetime.now(datetime.timezone.utc)
             cutoff_date = (
-                datetime.datetime.now(datetime.timezone.utc)
-                - datetime.timedelta(days=days)
+                effective_now - datetime.timedelta(days=days)
             ).strftime('%Y-%m-%d %H:%M:%S')
 
             with self._get_cursor() as cursor:
@@ -703,7 +717,10 @@ class CacheManager:
             return 0
 
     def cleanup_task_status(
-        self, retention_days: int, cache_retention_days: Optional[int] = None
+        self,
+        retention_days: int,
+        cache_retention_days: Optional[int] = None,
+        now: Optional[datetime.datetime] = None,
     ) -> int:
         """
         清理过期的终态任务状态记录（task_status 表）
@@ -741,6 +758,11 @@ class CacheManager:
             cache_retention_days: 缓存（转录产物）保留天数配置，用于上述
                 view_token 保护钳制；None 表示调用方未提供、不钳制，
                 0 或负数表示缓存永久保留、跳过清理
+            now: 计算 cutoff 所用的 UTC 时间基准（tz-aware）。不传（None）
+                时内部自行调用 `datetime.datetime.now(datetime.timezone.utc)`，
+                向后兼容旧调用方/单元测试；调用方需要与 cleanup_old_cache()
+                共用同一个 cutoff 时显式传入（见 cleanup_old_cache 的 now
+                参数说明，codex-review R10 #1）
 
         Returns:
             int: 实际删除的记录数
@@ -763,9 +785,9 @@ class CacheManager:
                     )
                     retention_days = cache_retention_days
 
+            effective_now = now if now is not None else datetime.datetime.now(datetime.timezone.utc)
             cutoff = (
-                datetime.datetime.now(datetime.timezone.utc)
-                - datetime.timedelta(days=retention_days)
+                effective_now - datetime.timedelta(days=retention_days)
             ).strftime('%Y-%m-%d %H:%M:%S')
 
             with self._get_cursor() as cursor:
