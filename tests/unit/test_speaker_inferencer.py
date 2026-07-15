@@ -771,6 +771,68 @@ class TestUnsampledSpeakerIdentityFallback(unittest.TestCase):
         self.assertFalse(result["meta"]["gamma"]["sampled"])
         self.assertIn("gamma", result["low_confidence"])
 
+    def test_speaker_with_no_valid_dialog_keeps_original_label_alongside_sampled_peers(self):
+        """Exclusion from sampling isn't only caused by the global budget --
+        a speaker with no valid (non-empty) dialog text at all is excluded
+        from sample_groups the same way, even while OTHER speakers in the
+        same call get sampled and sent to the LLM normally. That speaker
+        must also keep its original label, not a fabricated placeholder."""
+        inferencer = _make_inferencer(confidence_threshold=0.6)
+        inferencer.llm_client.call = MagicMock(
+            return_value=_mock_llm_response(
+                speaker_mapping={"alpha": "张三"},
+                confidence={"alpha": 0.9},
+            )
+        )
+        dialogs = [
+            _make_dialog("alpha", "hello there", start_time=0.0),
+            _make_dialog("beta", "", start_time=1.0),  # empty text -> no sample at all
+        ]
+
+        result = inferencer.infer(speakers=["alpha", "beta"], dialogs=dialogs, title="t")
+
+        self.assertEqual(result["mapping"]["alpha"], "张三")
+        self.assertTrue(result["meta"]["alpha"]["sampled"])
+        self.assertEqual(result["mapping"]["beta"], "beta")
+        self.assertFalse(result["meta"]["beta"]["sampled"])
+        self.assertFalse(result["meta"]["beta"]["applied"])
+        self.assertIn("beta", result["low_confidence"])
+
+    def test_fresh_inference_persists_sampled_flag_for_excluded_speaker(self):
+        """The sampled=False marker must be written into the cache payload
+        at fresh-inference time, not just correctly replayed when it's
+        already present in a hand-crafted cache fixture (covered by
+        test_cache_replay_preserves_unsampled_identity_across_threshold_changes).
+        Otherwise a real first-time inference would cache a payload without
+        the flag, and the very next cache-hit would default gamma back to
+        sampled=True and misapply the confidence gate to it."""
+        cache_manager = MagicMock()
+        cache_manager.get_speaker_mapping.return_value = None
+        inferencer = _make_inferencer(cache_manager=cache_manager, confidence_threshold=0.6)
+        inferencer.llm_client.call = MagicMock(
+            return_value=_mock_llm_response(
+                speaker_mapping={"alpha": "张三"},
+                confidence={"alpha": 0.9},
+            )
+        )
+        dialogs = [
+            _make_dialog("alpha", "hello there", start_time=0.0),
+            _make_dialog("beta", "", start_time=1.0),
+        ]
+
+        inferencer.infer(
+            speakers=["alpha", "beta"],
+            dialogs=dialogs,
+            title="t",
+            platform="p",
+            media_id="m",
+        )
+
+        cache_manager.save_speaker_mapping.assert_called_once()
+        saved_payload = cache_manager.save_speaker_mapping.call_args[0][2]
+        self.assertFalse(saved_payload["meta"]["beta"]["sampled"])
+        self.assertTrue(saved_payload["meta"]["alpha"]["sampled"])
+
     def test_cache_replay_preserves_unsampled_identity_across_threshold_changes(self):
         """A cached meta entry marked sampled=False (never sent to the LLM in
         the original inference) must stay identity-mapped on cache replay

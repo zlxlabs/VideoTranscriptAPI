@@ -93,9 +93,13 @@ class SpeakerInferencer:
             推断结果字典：
             {
                 "mapping": {label: 展示名},          # 实际应用的映射，低置信度已降级为"说话人N"
-                "meta": {label: {"name", "confidence", "applied"}},  # 每个 label 的推断细节
-                "low_confidence": [label, ...],       # 被降级的 label 列表
+                "meta": {label: {"name", "confidence", "applied", "sampled"}},  # 每个 label 的推断细节
+                "low_confidence": [label, ...],       # 被降级/未采样的 label 列表
             }
+            meta 中 "sampled" 标记该 label 是否被实际采样并送入 LLM 判断过：
+            False 表示预算裁剪或无有效发言，从未获得任何推断依据，"name"
+            即原始标签本身；True 表示送入过 LLM，"applied"/"confidence"
+            才反映真实的置信度门控结果。
         """
         if not speakers:
             logger.warning("Speaker list is empty, skipping inference")
