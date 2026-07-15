@@ -39,7 +39,7 @@ from __future__ import annotations
 import contextvars
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, Optional, Tuple
 
 # ============================================================
 # 1. 调用上下文：task_id / stage
@@ -132,7 +132,7 @@ class ChatUsageSnapshot:
 # 只保留最后一次而从审计表里静默消失（ci-gate review）。default 用空 tuple
 # （不可变）而非 [] ——record_chat_result_usage 每次都 .set() 一个新 tuple，
 # 从不原地 mutate，天然避免"跨 context 共享同一个可变默认值"的经典坑。
-_chat_usage_log: contextvars.ContextVar[tuple] = contextvars.ContextVar(
+_chat_usage_log: contextvars.ContextVar[Tuple[ChatUsageSnapshot, ...]] = contextvars.ContextVar(
     "llm_chat_usage_log", default=()
 )
 
@@ -171,7 +171,7 @@ def record_chat_result_usage(*, model: str, usage: Any) -> None:
     _chat_usage_log.set(_chat_usage_log.get() + (snapshot,))
 
 
-def pop_chat_result_usage() -> tuple:
+def pop_chat_result_usage() -> Tuple[ChatUsageSnapshot, ...]:
     """读取并清空本次 call_llm_api() 调用内累积的全部 usage 快照。
 
     由 `LLMClient.call()` 在 `call_llm_api()` 返回后立即调用一次。按记录

@@ -377,7 +377,7 @@ class TestSelfCorrectionRetryUsageAggregation:
         # silently losing attempt 1's 120 tokens from the audit trail.
         assert row == ("attempt-2-model", 200, 50, 250, 0)
 
-    def test_retry_where_only_first_attempt_reports_usage_is_not_dropped(
+    def test_retry_with_partially_missing_usage_still_counts_reported_attempt(
         self, client, recorder
     ):
         """A provider that omits usage on the (eventually superseded) first
