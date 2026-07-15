@@ -138,6 +138,9 @@ class UserManager:
             if user_info.get("user_id") == user_id:
                 result = user_info.copy()
                 result["api_key"] = api_key
+                # 与 validate_token() 同一致性加固：is_legacy 只能由下方的
+                # 单 token 回退分支赋予，不能被多用户配置里同名字段透传。
+                result["is_legacy"] = False
                 return result
         
         # 检查是否是回退模式用户

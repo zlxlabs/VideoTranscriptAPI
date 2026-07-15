@@ -173,7 +173,34 @@ class TestMultiUser(unittest.TestCase):
         self.assertIsNotNone(user_info)
         self.assertEqual(user_info["user_id"], "legacy_user")
         self.assertTrue(user_info["is_legacy"])
-    
+
+    def test_get_user_by_id_also_cannot_forge_is_legacy(self):
+        """同 test_multi_user_config_cannot_forge_is_legacy，但覆盖
+        get_user_by_id() 这条平行路径——它和 validate_token() 一样会
+        .copy() 多用户配置项，同样的伪造字段风险，加固应保持一致。"""
+        forged_config_path = os.path.join(self.temp_dir, "forged_users_by_id.json")
+        forged_config = {
+            "users": {
+                "sk-forged-attempt-key2": {
+                    "user_id": "ordinary_tenant_2",
+                    "name": "Ordinary Tenant 2",
+                    "enabled": True,
+                    "is_legacy": True,
+                }
+            }
+        }
+        with open(forged_config_path, "w", encoding="utf-8") as f:
+            json.dump(forged_config, f)
+
+        user_manager = UserManager(
+            users_config_path=forged_config_path,
+            fallback_config=self.fallback_config,
+        )
+
+        user_info = user_manager.get_user_by_id("ordinary_tenant_2")
+        self.assertIsNotNone(user_info)
+        self.assertFalse(user_info["is_legacy"])
+
     def test_get_user_webhook(self):
         """测试获取用户webhook"""
         user_manager = UserManager(
