@@ -61,10 +61,12 @@ class LLMClient:
             RetryableError: llm-compat 重试耗尽后的错误
         """
         # 发起调用前先清空桥接槽（读出即丢弃），防止 finally 里的 _record_usage
-        # 读到本次调用之前遗留的陈旧快照。桥接槽设计上"写入 -> 立即读出并清空"
-        # 只在同一次 call_llm_api() 调用内成立（见 usage_context.py 模块文档），
-        # 但有调用方（如 llm_ops._generate_title_if_needed）绕过 LLMClient.call()
-        # 直接调 call_llm_api()，写槽后没有对应的 pop。若本次调用在拿到真实
+        # 读到本次调用之前遗留的陈旧快照。桥接槽设计上"写入 -> 一次性读出并
+        # 清空"只在同一次 call_llm_api() 调用内成立（见 usage_context.py 模块
+        # 文档）——理论上仍可能有调用方绕过 LLMClient.call() 直接调
+        # call_llm_api()，写槽后没有对应的 pop（llm_ops._generate_title_if_needed
+        # 目前已改走 llm_client.call()，不再是这类调用方，但保留这段防御性
+        # 清理以覆盖未来可能出现的类似调用方）。若本次调用在拿到真实
         # ChatResult 之前就失败（record_chat_result_usage 未被再次调用），
         # finally 会把那份陈旧快照错记到当前 task_id/stage 上。清空后，若本次
         # 确实产生了真实 API 往返，call_llm_api() 内部会同步写入新快照，不受影响。
