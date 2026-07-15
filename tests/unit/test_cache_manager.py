@@ -12,6 +12,7 @@ import pytest
 
 import src.video_transcript_api.cache.cache_manager as cache_manager_module
 from src.video_transcript_api.cache.cache_manager import CacheManager
+from src.video_transcript_api.utils.task_status import TaskStatus
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +490,96 @@ class TestLLMConfigFallback:
         view_data = cm.get_view_data_by_token(cache_hit["view_token"])
         assert view_data is not None
         assert view_data.get("llm_config") is None
+
+
+# ---------------------------------------------------------------------------
+# get_task_by_view_token 排序优先级
+# ---------------------------------------------------------------------------
+
+class TestGetTaskByViewToken:
+    """回归测试：get_task_by_view_token 的三段式排序（success 最高 / failed 垫底 / 其余按最新）。
+
+    生产事故复现：某 URL 先失败留下一条 status='failed' 记录，后来同一 URL
+    重新提交并进入 status='calibrating'（LLM 校对/总结中）。旧的 SQL 用
+    CASE status WHEN ... 穷举分支，未列出 'calibrating'，导致它落入 ELSE
+    分支、优先级比 'failed' 还低，页面因此展示了过时的失败记录。
+    """
+
+    def _create_task_at_time(self, cm, url, status, timestamp, media_id="vid1", platform="youtube"):
+        """Helper: create a task with a specific status at a specific timestamp.
+
+        同一 url 重复调用会复用同一个 view_token（不同 task_id），
+        用于模拟同一任务多次提交在不同状态下留下的多条记录。
+        """
+        task_info = cm.create_task(url=url, platform=platform, media_id=media_id)
+        task_id = task_info["task_id"]
+        cm.update_task_status(task_id, status, platform=platform, media_id=media_id)
+        # Force a specific created_at to control ordering
+        with cm._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE task_status SET created_at = ? WHERE task_id = ?",
+                (timestamp, task_id),
+            )
+        return task_info
+
+    def test_calibrating_beats_earlier_failed(self, cm):
+        """核心回归场景：更晚的 calibrating 记录应该战胜更早的 failed 记录。"""
+        url = "https://example.com/vid1"
+        failed_task = self._create_task_at_time(
+            cm, url, "failed", "2026-01-01 00:00:00"
+        )
+        calibrating_task = self._create_task_at_time(
+            cm, url, TaskStatus.CALIBRATING, "2026-01-01 01:00:00"
+        )
+
+        result = cm.get_task_by_view_token(failed_task["view_token"])
+        assert result is not None
+        assert result["task_id"] == calibrating_task["task_id"]
+        assert result["task_id"] != failed_task["task_id"]
+
+    def test_success_beats_earlier_failed(self, cm):
+        """success 优先级仍然高于 failed（既有语义不变）。"""
+        url = "https://example.com/vid1"
+        failed_task = self._create_task_at_time(
+            cm, url, "failed", "2026-01-01 00:00:00"
+        )
+        success_task = self._create_task_at_time(
+            cm, url, TaskStatus.SUCCESS, "2026-01-01 01:00:00"
+        )
+
+        result = cm.get_task_by_view_token(failed_task["view_token"])
+        assert result is not None
+        assert result["task_id"] == success_task["task_id"]
+
+    def test_success_beats_later_non_terminal(self, cm):
+        """success 优先级仍然最高，不会被 created_at 更晚的非终态任务反超。"""
+        url = "https://example.com/vid1"
+        success_task = self._create_task_at_time(
+            cm, url, TaskStatus.SUCCESS, "2026-01-01 00:00:00"
+        )
+        processing_task = self._create_task_at_time(
+            cm, url, TaskStatus.PROCESSING, "2026-01-01 01:00:00"
+        )
+
+        result = cm.get_task_by_view_token(success_task["view_token"])
+        assert result is not None
+        assert result["task_id"] == success_task["task_id"]
+        assert result["task_id"] != processing_task["task_id"]
+
+    def test_non_terminal_group_returns_latest(self, cm):
+        """多条非终态记录（无 success/failed）时，返回 created_at 最新的一条。"""
+        url = "https://example.com/vid1"
+        queued_task = self._create_task_at_time(
+            cm, url, TaskStatus.QUEUED, "2026-01-01 00:00:00"
+        )
+        calibrating_task = self._create_task_at_time(
+            cm, url, TaskStatus.CALIBRATING, "2026-01-01 01:00:00"
+        )
+
+        result = cm.get_task_by_view_token(queued_task["view_token"])
+        assert result is not None
+        assert result["task_id"] == calibrating_task["task_id"]
+        assert result["task_id"] != queued_task["task_id"]
 
 
 # ---------------------------------------------------------------------------

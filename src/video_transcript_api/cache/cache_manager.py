@@ -1274,7 +1274,12 @@ class CacheManager:
         """
         根据view_token获取任务信息
 
-        优先返回成功状态的任务，如果有多个任务则返回最新的
+        排序策略分三段，不穷举具体状态值，避免状态机演进（新增状态）时腐化：
+        - success 永远最高优先级（优先返回成功状态的任务）
+        - failed 永远垫底，避免旧的失败记录掩盖同一 view_token 下更新的、
+          仍在处理中（queued/processing/calibrating 等）或已成功的任务
+        - 其余任何状态（不管是当前已知的还是未来新增的）统一排在中间优先级，
+          组内按 created_at DESC 排序，返回最新的一条
 
         Args:
             view_token: 查看token
@@ -1284,17 +1289,15 @@ class CacheManager:
         """
         try:
             with self._get_cursor() as cursor:
-                # 优先返回成功状态的任务，其次返回最新的任务
+                # success 最高优先级；failed 垫底；其余状态居中按最新排序
                 cursor.execute("""
                     SELECT * FROM task_status
                     WHERE view_token = ?
                     ORDER BY
-                        CASE status
-                            WHEN 'success' THEN 1
-                            WHEN 'processing' THEN 2
-                            WHEN 'queued' THEN 3
-                            WHEN 'failed' THEN 4
-                            ELSE 5
+                        CASE
+                            WHEN status = 'success' THEN 0
+                            WHEN status = 'failed' THEN 2
+                            ELSE 1
                         END,
                         created_at DESC
                     LIMIT 1
