@@ -74,7 +74,7 @@ async def get_audit_stats(days: int = 30, user_info: dict = Depends(verify_token
 
 @router.get("/calls")
 async def get_audit_calls(
-    limit: int = 100,
+    limit: int = Query(100, ge=1, le=10000, description="返回记录数量限制"),
     user_info: dict = Depends(verify_token),
 ):
     try:
