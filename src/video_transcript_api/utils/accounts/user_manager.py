@@ -85,15 +85,25 @@ class UserManager:
         # 首先检查多用户配置
         if self._users_data and token in self._users_data:
             user_info = self._users_data[token].copy()
-            
+
             # 检查用户是否启用
             if not user_info.get("enabled", True):
                 logger.warning(f"用户已禁用: {user_info.get('user_id', 'unknown')}")
                 return None
-            
+
             # 添加API密钥到用户信息中
             user_info["api_key"] = token
-            
+
+            # is_legacy 是内部保留字段，只能由本函数下方的单 token 回退分支
+            # 显式赋予 True，代表"系统所有者"这个特殊身份（如
+            # /api/audit/stats 用它判定是否可以查看全局 token 用量聚合）。
+            # 多用户配置来自外部可编辑的 users.json/config.jsonc，若某个
+            # 租户的配置项恰好也写了这个字段名（历史遗留或误操作），上面
+            # 的 .copy() 会原样透传，让一个普通租户意外获得所有者视角的
+            # 权限——强制覆盖为 False，确保这个字段的语义只能由代码本身
+            # 赋予，不受外部配置内容左右（ci-gate review）。
+            user_info["is_legacy"] = False
+
             logger.debug(f"多用户模式验证成功: {user_info.get('user_id')}")
             return user_info
         

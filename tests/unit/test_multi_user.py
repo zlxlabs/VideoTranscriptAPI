@@ -110,11 +110,40 @@ class TestMultiUser(unittest.TestCase):
             users_config_path=self.users_config_path,
             fallback_config=self.fallback_config
         )
-        
+
         # 测试已禁用用户
         user_info = user_manager.validate_token("sk-test003-uvwxyz1234")
         self.assertIsNone(user_info)
-    
+
+    def test_multi_user_config_cannot_forge_is_legacy(self):
+        """ci-gate review: is_legacy 是内部保留字段(用于 /api/audit/stats
+        判定谁能看到全局 token 用量聚合)，只能由单 token 回退分支赋予。
+        若某个多用户配置项的 JSON 里恰好也写了这个字段名（历史遗留或
+        误操作），validate_token() 必须强制覆盖为 False，不能让配置内容
+        原样透传，否则一个普通租户会意外获得"系统所有者"视角的权限。"""
+        forged_config_path = os.path.join(self.temp_dir, "forged_users.json")
+        forged_config = {
+            "users": {
+                "sk-forged-attempt-key": {
+                    "user_id": "ordinary_tenant",
+                    "name": "Ordinary Tenant",
+                    "enabled": True,
+                    "is_legacy": True,  # forged/leftover field, must be stripped
+                }
+            }
+        }
+        with open(forged_config_path, "w", encoding="utf-8") as f:
+            json.dump(forged_config, f)
+
+        user_manager = UserManager(
+            users_config_path=forged_config_path,
+            fallback_config=self.fallback_config,
+        )
+
+        user_info = user_manager.validate_token("sk-forged-attempt-key")
+        self.assertIsNotNone(user_info)
+        self.assertFalse(user_info["is_legacy"])
+
     def test_invalid_token_authentication(self):
         """测试无效令牌认证"""
         user_manager = UserManager(
