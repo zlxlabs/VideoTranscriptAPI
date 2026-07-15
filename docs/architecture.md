@@ -41,7 +41,8 @@
 | **抖音** | DouyinDownloader | TikHub API 获取无水印流 |
 | **小红书** | XiaohongshuDownloader | TikHub v3 接口 |
 | **小宇宙播客** | XiaoyuzhouDownloader | 网页爬虫解析 |
-| **通用链接** | GenericDownloader | 直接流式下载、断点续传 |
+| **Apple Podcast** | ApplePodcastDownloader | 网页解析获取音频直链 |
+| **通用链接** | GenericDownloader | 直接流式下载、断点续传（SSRF 校验 + 重定向逐跳校验） |
 
 **工厂模式实现**：
 
@@ -129,9 +130,38 @@ LLMCoordinator.process(content, title, ...)
 ### 校对流程（4 步）
 
 1. **提取关键信息** — 从视频元数据提取人名、术语、品牌（KeyInfoExtractor）
-2. **说话人推断**（仅对话流）— 结合上下文推断真实姓名（SpeakerInferencer）
+2. **说话人推断**（仅对话流）— 按说话人采样发言样本 + 首次出场上下文，结合关键信息推断真实姓名，置信度低于阈值时降级为"说话人N"占位符（SpeakerInferencer，详见下方"说话人推断"）
 3. **智能分段 + 分段校对** — 并发处理，质量验证（TextSegmenter / DialogSegmenter）
 4. **质量验证** — 长度检查 + 可选 LLM 打分（QualityValidator）
+
+### 说话人推断
+
+`SpeakerInferencer`（`llm/core/speaker_inferencer.py`）按说话人采样而非全局前 N 字符截断，确保晚出场的说话人也能拿到足够样本：
+
+- 每个说话人取前 `samples_per_speaker` 条发言（默认 3 条，每条截断 120 字符），总字符数不超过 `max_chars_per_speaker`（默认 400）
+- 首次出场前额外采集 `context_dialogs` 条他人发言作为上下文（默认 2 条，用于捕捉"XX你好"之类的称呼线索）
+- LLM 推断结果携带 confidence；低于 `confidence_threshold`（默认 0.6）的映射不采用推断姓名，而是降级为"说话人N"占位符（N 优先取原始标签数字序号，否则按出场顺序编号），避免把低置信度的猜测当作确定结论展示给用户
+- 四个参数均可在 `config.jsonc` 的 `llm.speaker_inference` 段配置，见下方"配置参数"
+
+### 诚实状态模型
+
+校对（`CalibrationStatus`）与总结（`SummaryStatus`）状态定义在 `utils/llm_status.py`，贯穿 processor → coordinator → llm_ops → cache_manager → 前端这条链路，取代早期"用 None 兼表示跳过和失败"导致的二义性（如"总结处理中..."永久占位符 bug）：
+
+| 状态类 | 取值 | 含义 |
+|---|---|---|
+| `CalibrationStatus` | `full` | 全部内容成功由 LLM 校对，没有任何原文兜底 |
+| | `partial` | 部分内容降级为原文或低质量输出 |
+| | `none` | 全部内容降级为原文（LLM 校对完全失败） |
+| | `disabled` | 用户通过 `processing_options.calibrate=false` 主动关闭校对（区别于 `none`：`none` 是"尝试了但失败"，`disabled` 是"根本没尝试"） |
+| `SummaryStatus` | `generated` | 总结成功生成 |
+| | `skipped_short` | 原文过短，未触发总结生成（正常路径，非失败） |
+| | `failed` | 触发了生成但失败（LLM 异常或输出过短/为空） |
+| | `pending` | 总结阶段尚未执行完成 |
+| | `disabled` | 用户通过 `processing_options.summarize=false` 主动关闭总结 |
+
+落盘载体：缓存目录下的 `llm_status.json`（读-改-写按字段合并，未传字段保留旧值）+ `task_status` 表的 `calibration_status`/`summary_status` 两列（作为 JSON 的镜像，供 `/api/audit/history` 查询消费而不必逐个打开缓存文件）。`/api/audit/summary` 据此只在 `summary_status == generated` 时返回真实文本，其余状态一律返回 `null`，不再用占位字符串掩盖失败。
+
+处理深度开关（`processing_options`）与分层缓存复用的完整语义，见 [处理深度开关功能文档](features/processing_options.md)。
 
 ### 核心组件
 
@@ -160,6 +190,12 @@ LLMCoordinator.process(content, title, ...)
 - 整体评分：`overall_score`（默认 8.0）
 - 单项评分：`minimum_single_score`（默认 7.0）
 
+**说话人推断采样**（`llm.speaker_inference`）：
+- 每人采样条数：`samples_per_speaker`（默认 3）
+- 每人采样字符上限：`max_chars_per_speaker`（默认 400）
+- 首次出场前上下文条数：`context_dialogs`（默认 2）
+- 置信度阈值：`confidence_threshold`（默认 0.6，低于此值降级为"说话人N"）
+
 ---
 
 ## 缓存系统
@@ -168,8 +204,8 @@ LLMCoordinator.process(content, title, ...)
 
 - **SQLite 数据库**（`data/cache/cache.db`）：
   - `video_cache` 表：联合主键 `(platform, media_id, use_speaker_recognition)`
-  - `task_status` 表：任务状态追踪（queued → processing → success/failed）
-- **文件系统**：存储实际内容（转录文本、LLM 校对/总结、结构化 JSON）
+  - `task_status` 表：任务状态追踪（queued → processing → success/failed），另有 `calibration_status`/`summary_status` 两列镜像诚实状态（见"诚实状态模型"），终态记录按 `storage.task_status_retention_days`（默认 180 天）周期清理
+- **文件系统**：存储实际内容（转录文本、LLM 校对/总结、结构化 JSON、`llm_status.json` 诚实状态文件）
 
 ### 目录结构
 
@@ -184,6 +220,7 @@ data/cache/
                 ├── llm_calibrated.txt
                 ├── llm_summary.txt
                 ├── llm_processed.json
+                ├── llm_status.json     # 诚实状态模型：calibration_status/summary_status
                 ├── key_info.json
                 └── speaker_mapping.json
 ```
@@ -236,7 +273,9 @@ data/temp/
 ### 审计日志
 
 - 记录 API 端点、请求/响应时间、处理耗时、状态码、用户信息
-- 查询接口：`GET /api/audit/stats`、`GET /api/audit/calls`
+- **LLM token 用量审计**（`audit.db` schema v3，`llm_usage` 表）：每次 `LLMClient.call()` 调用记一行，含 `task_id`/`stage`（calibration/summary/speaker_inference/validation 等）/`model`/prompt·completion·total tokens/耗时；provider 未回报用量时仍写入一行并标记 `usage_missing`，避免静默丢弃。json_object 模式的 Self-Correction 重试触发多次真实 API 往返时，桥接槽按顺序累积全部快照并对 token 求和落一行（而非只记最后一次）；只要有任一次尝试缺失 usage，该行仍会标记 `usage_missing=True`，已知部分求和仅作为下界参考，不会被误标为完整数据。标题生成（通用下载器场景）已改走 `LLMClient.call()`，计入用量统计
+- `llm_usage` 全局聚合（按 stage/总计）不区分调用方用户；多用户模式下仅系统所有者视角（单 token 回退模式，或多用户模式下的 legacy fallback token）可见，避免跨租户泄露调用规模/成本信息，见 `GET /api/audit/stats`
+- 查询接口：`GET /api/audit/stats`（含 `llm_usage` 按 stage 聚合 + 总计）、`GET /api/audit/calls`、`GET /api/audit/history`（含状态字段）
 
 ### 多渠道通知
 
@@ -257,6 +296,8 @@ data/temp/
 
 ## Web 界面
 
+三个页面（`add_task_by_web`、`transcript.html`、`history.html`）共享统一站内导航（`site-nav`），`history.html` 已适配移动端响应式布局。
+
 ### 任务提交
 
 访问 `GET /add_task_by_web`，图形化提交转录任务。
@@ -268,9 +309,11 @@ data/temp/
 | 状态 | 模板 |
 |------|------|
 | `processing` | `processing.html` |
-| `success` | `transcript.html`（含总结、校对文本、浮动目录） |
+| `success` | `transcript.html`（含总结、校对文本、浮动目录、正文"复制内容"按钮） |
 | `failed` | `error.html` |
 | `file_cleaned` | `cleaned.html` |
+
+`transcript.html` 按诚实状态模型渲染：校对区在 `calibration_status` 为 `partial`/`none` 时展示质量警告条，为 `disabled` 时展示"未启用 AI 校对"提示；总结区按 `summary_status` 展示四态文案（`pending`→处理中、`skipped_short`→文本过短未生成、`failed`→生成失败、`disabled`→未启用）。
 
 ### 导出模式
 
@@ -294,8 +337,9 @@ data/temp/
 | `notification_config` | object | 否 | 通知配置：`{channel: "feishu", webhook: "..."}` |
 | `download_url` | string | 否 | 实际下载地址（跳过平台下载器） |
 | `metadata_override` | object | 否 | 元数据覆盖（title/description/author） |
+| `processing_options` | object | 否 | 处理深度开关：`{calibrate: bool=true, summarize: bool=true}`，`null` 等价于全部启用 |
 
-详见 [Download URL 与 Metadata Override 功能文档](features/source_url_and_metadata_override.md)。
+详见 [Download URL 与 Metadata Override 功能文档](features/source_url_and_metadata_override.md)、[处理深度开关功能文档](features/processing_options.md)。
 
 ---
 

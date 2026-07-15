@@ -22,6 +22,33 @@ from llm_compat.providers import (
     detect_provider,
 )
 
+# 注意：不能在模块顶层 `from .core.usage_context import ...`——
+# `llm/__init__.py` 先加载 `.llm`（本模块）再加载 `.core`，而
+# `llm/core/__init__.py` 会连带加载 `llm_client.py`，其内部又
+# `from ..llm import call_llm_api, ...`，若本模块顶层提前触发
+# `.core` 包初始化会形成循环导入（此时 call_llm_api 还未定义）。
+# 因此 usage 记录钩子改为在函数体内按需延迟导入，详见 `_record_chat_usage`。
+
+
+def _record_chat_usage(model: str, result: Any) -> None:
+    """记录一次 llm-compat ChatResult 的 usage 快照，供 llm_client.call() 读取。
+
+    延迟导入 `usage_context` 是为了避免与 `llm/core` 包之间的模块级循环导入
+    （见上方注释）；调用发生在运行时（远早于任何循环导入窗口），此时
+    `video_transcript_api.llm.llm` 已完全初始化，延迟导入是安全的。
+
+    Args:
+        model: 本次请求使用的模型名（未 fallback 时的原始值）
+        result: llm-compat 返回的 ChatResult（用 getattr 兜底读取，兼容测试用的
+            轻量 fake ChatResult / 未来 llm-compat 版本可能缺失某些字段的情况）
+    """
+    from .core.usage_context import record_chat_result_usage
+
+    record_chat_result_usage(
+        model=getattr(result, "model", None) or model,
+        usage=getattr(result, "usage", None),
+    )
+
 
 # ============================================================
 # 全局默认配置 + SyncLLMClient 生命周期
@@ -374,6 +401,8 @@ def _call_with_text_output(
     logger.info(f"[{task_type.upper()}] Model: {model} | text mode")
 
     result = client.chat(model, messages, reasoning_effort=reasoning_effort, stream=False)
+    # 记录 usage 快照供 llm_client.call() 落审计库（token 用量审计，参见 usage_context.py）
+    _record_chat_usage(model, result)
     content = str(result)
     duration = time.time() - start_time
 
@@ -422,6 +451,8 @@ def _call_with_json_schema_mode(
             response_format=response_format,
             stream=False,
         )
+        # 记录 usage 快照供 llm_client.call() 落审计库（token 用量审计，参见 usage_context.py）
+        _record_chat_usage(model, result)
 
         if result.fallback_from:
             logger.warning(
@@ -484,6 +515,8 @@ def _call_with_json_object_mode(
                 response_format={"type": "json_object"},
                 stream=False,
             )
+            # 记录 usage 快照供 llm_client.call() 落审计库（token 用量审计，参见 usage_context.py）
+            _record_chat_usage(model, result)
 
             if result.fallback_from:
                 logger.warning(

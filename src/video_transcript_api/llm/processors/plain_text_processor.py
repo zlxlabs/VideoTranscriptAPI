@@ -1,14 +1,17 @@
 """无说话人文本处理器"""
 
+import contextvars
 from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor
 import concurrent.futures
 import re
 
 from ...utils.logging import setup_logger
+from ...utils.llm_status import CalibrationStatus
 from ..core.config import LLMConfig
 from ..core.llm_client import LLMClient
 from ..core.key_info_extractor import KeyInfoExtractor, KeyInfo
+from ..core.usage_context import set_context
 from ..validators.unified_quality_validator import UnifiedQualityValidator
 from ..segmenters.text_segmenter import TextSegmenter
 from ..prompts import (
@@ -54,6 +57,7 @@ class PlainTextProcessor:
         platform: str = "",
         media_id: str = "",
         selected_models: Optional[Dict] = None,
+        skip_calibration: bool = False,
     ) -> Dict:
         """处理无说话人文本
 
@@ -65,11 +69,40 @@ class PlainTextProcessor:
             platform: 平台标识
             media_id: 媒体 ID
             selected_models: 选定的模型（可选）
+            skip_calibration: 是否跳过 LLM 校对（processing_options.calibrate=False 时为 True）。
+                跳过时不发起任何 LLM 调用，仅复用 _format_plain_text 做本地格式化，
+                calibration_status 标记为 DISABLED（区别于"尝试但失败"的 NONE）。
 
         Returns:
             处理结果字典
         """
-        logger.info(f"Start processing plain text: {title}, length: {len(text)}")
+        logger.info(
+            f"Start processing plain text: {title}, length: {len(text)}, "
+            f"skip_calibration={skip_calibration}"
+        )
+
+        if skip_calibration:
+            # 校对已禁用：不提取关键信息、不分段、不调用 LLM，直接本地格式化原文。
+            # calibrated_text 即为该格式化文本，供下游（校对文件/总结输入）复用。
+            formatted_text = self._format_plain_text(text)
+            logger.info(
+                f"Calibration disabled by request, produced formatted passthrough "
+                f"text (length: {len(formatted_text)})"
+            )
+            return {
+                "calibrated_text": formatted_text,
+                "key_info": KeyInfo([], [], [], [], [], [], []).to_dict(),
+                "stats": {
+                    "original_length": len(text),
+                    "calibrated_length": len(formatted_text),
+                    "segment_count": 0,
+                    "total_segments": 0,
+                    "calibrated_segments": 0,
+                    "fallback_segments": 0,
+                    "low_quality_segments": 0,
+                    "calibration_status": CalibrationStatus.DISABLED,
+                },
+            }
 
         # 步骤0: 检测语言
         detected_language = detect_language(text)
@@ -95,7 +128,7 @@ class PlainTextProcessor:
             logger.debug("Text length below threshold, no segmentation")
 
         # 步骤3: 分段校对
-        calibrated_segments = self._calibrate_segments(
+        calibrated_segments, segment_statuses = self._calibrate_segments(
             segments=segments,
             key_info=key_info,
             title=title,
@@ -112,6 +145,23 @@ class PlainTextProcessor:
             f"original length {len(text)}, calibrated length {len(calibrated_text)}"
         )
 
+        # 统计"诚实状态"：区分干净通过(success) / 采用了LLM输出但质量存疑(low_quality) /
+        # 完全降级为原文格式化(fallback)三类，避免把 low_quality 段谎报为成功。
+        total_segments = len(segment_statuses)
+        fallback_segments = segment_statuses.count("fallback")
+        low_quality_segments = segment_statuses.count("low_quality")
+        # calibrated_segments：采用了 LLM 输出的段数（success + low_quality），
+        # 与本方法名 _calibrate_segments 呼应，但注意这里是统计字段，不要与
+        # 上面局部变量 calibrated_segments（校对后文本列表）混淆——此处在赋值前先读取计数。
+        calibrated_segment_count = total_segments - fallback_segments
+
+        if fallback_segments == 0 and low_quality_segments == 0:
+            calibration_status = CalibrationStatus.FULL
+        elif calibrated_segment_count == 0:
+            calibration_status = CalibrationStatus.NONE
+        else:
+            calibration_status = CalibrationStatus.PARTIAL
+
         return {
             "calibrated_text": calibrated_text,
             "key_info": key_info.to_dict(),
@@ -119,6 +169,11 @@ class PlainTextProcessor:
                 "original_length": len(text),
                 "calibrated_length": len(calibrated_text),
                 "segment_count": len(segments),
+                "total_segments": total_segments,
+                "calibrated_segments": calibrated_segment_count,
+                "fallback_segments": fallback_segments,
+                "low_quality_segments": low_quality_segments,
+                "calibration_status": calibration_status,
             }
         }
 
@@ -130,7 +185,7 @@ class PlainTextProcessor:
         description: str,
         selected_models: Optional[Dict],
         language: str = "zh",
-    ) -> List[str]:
+    ) -> tuple:
         """校对分段文本（并发处理）
 
         Args:
@@ -142,7 +197,12 @@ class PlainTextProcessor:
             language: 检测到的语言（"zh" 或 "en"）
 
         Returns:
-            校对后的分段列表
+            (calibrated_segments, segment_statuses) 元组:
+            - calibrated_segments: 校对后的分段文本列表
+            - segment_statuses: 每段的状态列表，取值 "success"/"low_quality"/"fallback"
+              ("success": 干净通过 pass_ratio 或验证；"low_quality": 走了降级分支但最终
+              仍采用 LLM 候选文本；"fallback": 最终采用了原文格式化，即
+              _fallback_plain_text 或异常兜底路径返回了 _format_plain_text(original))
         """
         model = selected_models["calibrate_model"] if selected_models else self.config.calibrate_model
         reasoning_effort = selected_models.get("calibrate_reasoning_effort") if selected_models else self.config.calibrate_reasoning_effort
@@ -167,6 +227,8 @@ class PlainTextProcessor:
         system_prompt = CALIBRATE_SYSTEM_PROMPT_EN if language == "en" else CALIBRATE_SYSTEM_PROMPT
 
         calibrated_segments = [None] * len(segments)
+        # 与 calibrated_segments 一一对应的状态标记，供 process() 汇总诚实状态统计
+        segment_statuses = [None] * len(segments)
 
         def calibrate_single_segment(index: int, segment: str):
             """校对单个分段（含长度检查 + 质量验证 + 二次校对）"""
@@ -203,6 +265,7 @@ class PlainTextProcessor:
                 # 绿灯区：直接通过
                 if ratio >= pass_ratio:
                     calibrated_segments[index] = calibrated_text
+                    segment_statuses[index] = "success"
                     logger.debug(
                         f"Segment {index + 1} passed length ratio: "
                         f"{ratio:.2f} >= {pass_ratio}"
@@ -251,6 +314,7 @@ class PlainTextProcessor:
 
                     if retry_ratio >= pass_ratio:
                         calibrated_segments[index] = calibrated_text_retry
+                        segment_statuses[index] = "success"
                         logger.info(
                             f"Segment {index + 1} retry passed length ratio: "
                             f"{retry_ratio:.2f} >= {pass_ratio}"
@@ -259,84 +323,138 @@ class PlainTextProcessor:
 
                     if retry_ratio < force_retry_ratio:
                         # 仍在红灯区
-                        calibrated_segments[index] = self._fallback_plain_text(
+                        fallback_text = self._fallback_plain_text(
                             segment,
                             calibrated_text,
                             calibrated_text_retry,
                             fallback_strategy,
                         )
+                        calibrated_segments[index] = fallback_text
+                        segment_statuses[index] = self._classify_fallback_result(
+                            segment, fallback_text
+                        )
                         logger.warning(
                             f"Segment {index + 1} retry still too short: "
-                            f"{retry_ratio:.2f} < {force_retry_ratio}, fallback={fallback_strategy}"
+                            f"{retry_ratio:.2f} < {force_retry_ratio}, fallback={fallback_strategy}, "
+                            f"status={segment_statuses[index]}"
                         )
                         return
 
                     # 黄灯区：进入质量验证或直接接受
                     candidate = calibrated_text_retry
                     if self.config.segmentation_validation_enabled:
-                        validation_result = self.quality_validator.validate(
-                            original=segment,
-                            calibrated=candidate,
-                            context={"title": title, "author": "", "description": description},
-                            selected_models=selected_models,
-                        )
+                        # 细化 stage=validation，仅覆盖本次质量验证调用的审计标签，
+                        # 退出 with 块后自动恢复为外层的 calibration
+                        with set_context(stage="validation"):
+                            validation_result = self.quality_validator.validate(
+                                original=segment,
+                                calibrated=candidate,
+                                context={"title": title, "author": "", "description": description},
+                                selected_models=selected_models,
+                            )
                         if validation_result.get("passed"):
                             calibrated_segments[index] = candidate
+                            segment_statuses[index] = "success"
                             return
 
-                        calibrated_segments[index] = self._fallback_plain_text(
+                        fallback_text = self._fallback_plain_text(
                             segment,
                             calibrated_text,
                             candidate,
                             fallback_strategy,
                             validation_result,
                         )
+                        calibrated_segments[index] = fallback_text
+                        segment_statuses[index] = self._classify_fallback_result(
+                            segment, fallback_text
+                        )
                         return
 
                     calibrated_segments[index] = candidate
+                    segment_statuses[index] = "success"
                     return
 
                 # 黄灯区：触发质量验证（或直接通过）
                 if self.config.segmentation_validation_enabled:
-                    validation_result = self.quality_validator.validate(
-                        original=segment,
-                        calibrated=calibrated_text,
-                        context={"title": title, "author": "", "description": description},
-                        selected_models=selected_models,
-                    )
+                    # 细化 stage=validation，仅覆盖本次质量验证调用的审计标签，
+                    # 退出 with 块后自动恢复为外层的 calibration
+                    with set_context(stage="validation"):
+                        validation_result = self.quality_validator.validate(
+                            original=segment,
+                            calibrated=calibrated_text,
+                            context={"title": title, "author": "", "description": description},
+                            selected_models=selected_models,
+                        )
                     if validation_result.get("passed"):
                         calibrated_segments[index] = calibrated_text
+                        segment_statuses[index] = "success"
                         return
 
-                    calibrated_segments[index] = self._fallback_plain_text(
+                    fallback_text = self._fallback_plain_text(
                         segment,
                         calibrated_text,
                         None,
                         fallback_strategy,
                         validation_result,
                     )
+                    calibrated_segments[index] = fallback_text
+                    segment_statuses[index] = self._classify_fallback_result(
+                        segment, fallback_text
+                    )
                     return
 
                 calibrated_segments[index] = calibrated_text
+                segment_statuses[index] = "success"
 
             except Exception as e:
                 logger.error(f"Segment {index + 1} calibration failed: {e}")
-                # 降级到原文（格式化处理）
+                # 降级到原文（格式化处理）——异常兜底路径必然使用原文格式化，直接记为 fallback
                 formatted_segment = self._format_plain_text(segment)
                 calibrated_segments[index] = formatted_segment
+                segment_statuses[index] = "fallback"
 
         # 并发处理
+        # 注意：ThreadPoolExecutor worker 线程不会自动继承主线程的 contextvars
+        # （task_id/stage 审计上下文），必须显式 contextvars.copy_context().run
+        # 传播，否则 worker 线程内的 LLM 调用会被记成 task_id='unknown'
         max_workers = min(len(segments), self.config.concurrent_workers)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
-                executor.submit(calibrate_single_segment, i, seg)
+                executor.submit(
+                    contextvars.copy_context().run, calibrate_single_segment, i, seg
+                )
                 for i, seg in enumerate(segments)
             ]
 
             for future in concurrent.futures.as_completed(futures):
                 future.result()  # 等待完成
 
-        return calibrated_segments
+        return calibrated_segments, segment_statuses
+
+    def _classify_fallback_result(self, original_segment: str, final_text: str) -> str:
+        """判定一次降级处理的最终产物是"低质量但仍是LLM输出"还是"彻底原文格式化"。
+
+        只在 _fallback_plain_text 的返回值处调用（另一个判定点是异常兜底路径，
+        那里不需要调用本方法，因为异常路径必然是 fallback）。
+
+        判定依据：将最终文本与 _format_plain_text(original_segment) 逐字比较——
+        _fallback_plain_text 内部所有分支要么直接返回 _format_plain_text(original)
+        （strategy=formatted_original 或无可用 LLM 候选时的兜底），要么返回某个
+        LLM 候选文本（strategy=second_attempt / best_quality 选中的候选）。
+        二者只要不完全相等，就说明最终展示的是 LLM 产出（哪怕质量存疑），
+        应计为 low_quality 而不是谎报为 fallback（完全没有 LLM 贡献）。
+
+        Args:
+            original_segment: 该段原始文本
+            final_text: _fallback_plain_text 的返回值
+
+        Returns:
+            "fallback": 最终文本等于原文格式化结果，没有 LLM 内容留存
+            "low_quality": 最终文本是某个 LLM 候选（未清晰通过质量门槛，但保留了校对内容）
+        """
+        if final_text == self._format_plain_text(original_segment):
+            return "fallback"
+        return "low_quality"
 
     def _fallback_plain_text(
         self,

@@ -203,10 +203,43 @@ class TestAuditCalls:
         assert resp.status_code == 200
         mock_audit_logger.get_recent_calls.assert_called_once_with("test-user", 10)
 
+    @pytest.mark.parametrize("bad_limit", [0, -1, 10001])
+    def test_get_calls_rejects_out_of_range_limit(self, client, bad_limit):
+        """ci-gate review: limit was previously unbounded (plain int), so
+        limit=0/negative/huge values would reach the DB query unchecked --
+        aligned with /history's existing Query(ge=1, le=10000) bound."""
+        resp = client.get(f"/api/audit/calls?limit={bad_limit}")
+        assert resp.status_code == 422
+
     def test_get_calls_error_returns_500(self, client, mock_audit_logger):
         mock_audit_logger.get_recent_calls.side_effect = RuntimeError("db error")
         resp = client.get("/api/audit/calls")
         assert resp.status_code == 500
+
+    def test_get_calls_missing_user_id_denied_not_leaked_globally(
+        self, mock_audit_logger, mock_user_manager, mock_cache_manager,
+        mock_task_queue, mock_send_notification, mock_base_url,
+    ):
+        """ci-gate review (local, follow-up on the /summary user_id-missing
+        finding): audit_logger.get_recent_calls() treats user_id=None as
+        "return every user's calls" (a deliberate admin/CLI escape hatch) --
+        but this HTTP endpoint must never let a caller with a misconfigured
+        (missing) user_id trigger that global view and read every tenant's
+        URL/IP/User-Agent/task_id. Must be denied outright, not silently
+        fall through to the global query."""
+        async def _fake_verify_token_missing_user_id():
+            return {"api_key": "misconfigured-key", "wechat_webhook": None}
+
+        from video_transcript_api.api.services.transcription import verify_token
+
+        app = _build_test_app()
+        app.dependency_overrides[verify_token] = _fake_verify_token_missing_user_id
+        client = TestClient(app)
+
+        resp = client.get("/api/audit/calls")
+
+        assert resp.status_code == 401
+        mock_audit_logger.get_recent_calls.assert_not_called()
 
 
 # ===========================================================================

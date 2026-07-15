@@ -12,9 +12,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..context import get_audit_logger, get_cache_manager, get_logger
 from ..services.transcription import TranscribeResponse, verify_token
+from ...utils.logging.usage_recorder import get_usage_recorder
+from ...utils.llm_status import SummaryStatus
 
 logger = get_logger()
 audit_logger = get_audit_logger()
+usage_recorder = get_usage_recorder()
 
 # 延迟导入，避免循环依赖；同时保持模块级引用供测试 mock 使用
 from ..context import get_user_manager as _get_user_manager
@@ -25,15 +28,41 @@ router = APIRouter(prefix="/api/audit", tags=["audit"])
 
 @router.get("/stats")
 async def get_audit_stats(days: int = 30, user_info: dict = Depends(verify_token)):
+    """获取 API 调用统计与 LLM token 用量统计（按 days 时间窗口）。
+
+    user_stats 已按 user_id 过滤，天然只反映调用方自己的数据。llm_usage
+    则不同：llm_usage 表没有 user_id 列（token 用量按任务/阶段审计，不是
+    按用户维度设计的），usage_recorder.get_stats() 聚合的是全库所有调用方
+    的用量总和。多用户模式下，若不加区分地把这份全局聚合返回给任意认证
+    通过的用户，会把其他租户的调用规模/成本信息泄露给彼此（ci-gate
+    review）——因此只对能代表"系统所有者"视角的调用方暴露：
+    - 单用户模式（未配置多用户表，只用 fallback token 登录）：压根不存在
+      "其他用户"，全局聚合等价于当前唯一用户自己的用量，暴露没有隐私问题。
+    - 多用户模式下，只有仍用 legacy fallback token（is_legacy=True，通常是
+      部署者留给自己的运维入口）登录才能看到；_users_data 里配置的具体
+      租户用户看不到，llm_usage 返回 None。
+    """
     try:
         user_id = user_info.get("user_id")
         # SQLite 查询为同步阻塞调用，放到线程池避免阻塞事件循环
         user_stats = await asyncio.to_thread(audit_logger.get_user_stats, user_id, days)
+
+        can_view_global_llm_usage = (
+            not user_manager.is_multi_user_mode() or user_info.get("is_legacy", False)
+        )
+        llm_usage = None
+        if can_view_global_llm_usage:
+            # LLM token 用量统计（按 stage 聚合 + 总计），查询失败时
+            # usage_recorder 内部已 fail-open 返回全零结构，不会导致整个
+            # /stats 接口 500
+            llm_usage = await asyncio.to_thread(usage_recorder.get_stats, days)
+
         return TranscribeResponse(
             code=200,
             message="获取统计信息成功",
             data={
                 "user_stats": user_stats,
+                "llm_usage": llm_usage,
                 "is_multi_user_mode": user_manager.is_multi_user_mode(),
                 "total_users": user_manager.get_user_count(),
             },
@@ -45,17 +74,29 @@ async def get_audit_stats(days: int = 30, user_info: dict = Depends(verify_token
 
 @router.get("/calls")
 async def get_audit_calls(
-    limit: int = 100,
+    limit: int = Query(100, ge=1, le=10000, description="返回记录数量限制"),
     user_info: dict = Depends(verify_token),
 ):
     try:
         user_id = user_info.get("user_id")
+        # audit_logger.get_recent_calls() 把 user_id 缺失设计成"查询全部
+        # 用户的调用记录"（供未来管理员/CLI 场景使用），但这个 HTTP 端点是
+        # 面向最终用户"查看自己的调用记录"的，绝不能因为调用方配置不完整
+        # （多用户配置缺 user_id 字段，validate_token() 仍会签发该 token，
+        # 见 user_manager.py::_load_users_config）就意外触发这个"全量"语义，
+        # 把所有租户的 URL/IP/User-Agent/task_id 泄露给它——同一类 user_id
+        # 缺失越权，在本轮 /summary 修复后本地 codex review 追加发现。
+        if not user_id:
+            logger.error("audit calls: caller has no user_id, denying access (fail-closed)")
+            raise HTTPException(status_code=401, detail="无法确定调用方身份")
         recent_calls = await asyncio.to_thread(audit_logger.get_recent_calls, user_id, limit)
         return TranscribeResponse(
             code=200,
             message="获取调用记录成功",
             data={"calls": recent_calls, "user_id": user_id, "limit": limit},
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("获取审计调用记录异常: %s", exc)
         raise HTTPException(status_code=500, detail=f"获取调用记录失败: {exc}")
@@ -81,12 +122,17 @@ async def get_history(
     """
     api_key = user_info.get("api_key", "")
     api_key_masked = audit_logger._mask_api_key(api_key)
+    user_id = user_info.get("user_id")
     cache_manager = get_cache_manager()
     cache_db_path = str(cache_manager.db_path)
 
-    # 构建 WHERE 条件
-    conditions = ["a.api_key_masked = ?"]
-    params: list = [api_key_masked]
+    # 租户边界用 user_id 精确匹配，而非截断后的 api_key_masked（只保留前
+    # 4/后 4 位，不同 key 长度相同时可能碰撞，会让 A 看到 B 的历史记录——
+    # api_key_masked 保留在下面的 SELECT/响应体里纯粹是展示字段，不再充当
+    # 鉴权边界，见 api_audit_logs 表已有的 user_id 列+索引（云端 CI codex
+    # gate 发现）。
+    conditions = ["a.user_id = ?"]
+    params: list = [user_id]
 
     if webhook:
         conditions.append("a.wechat_webhook = ?")
@@ -144,7 +190,9 @@ async def get_history(
             t.title,
             t.author,
             t.platform,
-            t.status
+            t.status,
+            t.calibration_status,
+            t.summary_status
         FROM api_audit_logs a
         LEFT JOIN cache.task_status t ON a.task_id = t.task_id
         WHERE {where_clause}
@@ -186,6 +234,9 @@ async def get_history(
                     "author": row[7],
                     "platform": row[8],
                     "status": row[9] or "unknown",
+                    # 诚实状态模型字段：前端本次不强制消费，供后续 UI 迭代使用
+                    "calibration_status": row[10],
+                    "summary_status": row[11],
                 })
             return total, items
         finally:
@@ -229,8 +280,7 @@ async def get_filter_options(user_info: dict = Depends(verify_token)):
     获取当前 API Key 下历史出现的所有 webhook、平台、频道名称，用于前端过滤下拉框。
     各选项按出现频次倒序，最多返回 50 条。
     """
-    api_key = user_info.get("api_key", "")
-    api_key_masked = audit_logger._mask_api_key(api_key)
+    user_id = user_info.get("user_id")
     cache_manager = get_cache_manager()
     cache_db_path = str(cache_manager.db_path)
 
@@ -242,15 +292,16 @@ async def get_filter_options(user_info: dict = Depends(verify_token)):
             conn.execute("PRAGMA cache.query_only = 1")
             cur = conn.cursor()
 
+            # 租户边界用 user_id，不用可能碰撞的 api_key_masked（云端 CI codex gate）
             # 历史 webhook 列表（按频次倒序）
             cur.execute("""
                 SELECT wechat_webhook, COUNT(*) as cnt
                 FROM api_audit_logs
-                WHERE api_key_masked = ? AND wechat_webhook IS NOT NULL
+                WHERE user_id = ? AND wechat_webhook IS NOT NULL
                 GROUP BY wechat_webhook
                 ORDER BY cnt DESC
                 LIMIT 50
-            """, (api_key_masked,))
+            """, (user_id,))
             webhooks = [row[0] for row in cur.fetchall()]
 
             # 历史平台列表
@@ -258,10 +309,10 @@ async def get_filter_options(user_info: dict = Depends(verify_token)):
                 SELECT t.platform, COUNT(*) as cnt
                 FROM api_audit_logs a
                 LEFT JOIN cache.task_status t ON a.task_id = t.task_id
-                WHERE a.api_key_masked = ? AND t.platform IS NOT NULL
+                WHERE a.user_id = ? AND t.platform IS NOT NULL
                 GROUP BY t.platform
                 ORDER BY cnt DESC
-            """, (api_key_masked,))
+            """, (user_id,))
             platforms = [row[0] for row in cur.fetchall()]
 
             # 历史频道/作者列表（按频次倒序）
@@ -269,11 +320,11 @@ async def get_filter_options(user_info: dict = Depends(verify_token)):
                 SELECT t.author, COUNT(*) as cnt
                 FROM api_audit_logs a
                 LEFT JOIN cache.task_status t ON a.task_id = t.task_id
-                WHERE a.api_key_masked = ? AND t.author IS NOT NULL AND t.author != ''
+                WHERE a.user_id = ? AND t.author IS NOT NULL AND t.author != ''
                 GROUP BY t.author
                 ORDER BY cnt DESC
                 LIMIT 50
-            """, (api_key_masked,))
+            """, (user_id,))
             authors = [row[0] for row in cur.fetchall()]
 
             return webhooks, platforms, authors
@@ -317,8 +368,7 @@ async def get_task_summary(
     获取任务摘要预览（前 300 字），用于历史页面 hover 展示。
     校验 view_token 归属当前 API Key，防止跨用户读取。
     """
-    api_key = user_info.get("api_key", "")
-    api_key_masked = audit_logger._mask_api_key(api_key)
+    user_id = user_info.get("user_id")
     cache_manager = get_cache_manager()
 
     # 通过 view_token 查任务信息（同步 SQLite 调用，线程池执行）
@@ -326,18 +376,32 @@ async def get_task_summary(
     if not task_info:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    # 校验归属：task_info 中暂无 api_key_masked，通过 audit_log 反查
-    # 若无法查到关联记录，允许访问（兼容旧数据）
+    # 校验归属：task_info 中暂无 user_id，通过 audit_log 反查（租户边界用
+    # user_id，不用可能碰撞的 api_key_masked，见云端 CI codex gate）。
+    # 若查不到任何关联审计记录，允许访问（兼容早期未落审计日志的旧任务）；
+    # 但查询本身抛异常（数据库锁/连接问题等）时，绝不能等同于"允许访问"——
+    # 之前的 fail-open 会让任何认证用户在审计库异常时读到不属于自己的摘要，
+    # 这里改为 fail-closed，异常时拒绝访问并返回 503（云端 CI codex gate）。
+    #
+    # 注意：条件只看 task_id，不再要求 user_id 非空（本地 codex review 追加
+    # 发现）——多用户配置里缺失 user_id 字段时，_load_users_config() 只记
+    # warning、并不拒绝该配置项，validate_token() 依然会正常签发这个
+    # user_info（user_id 为 None）。若这里保留 "and user_id"，配置不完整
+    # 的租户会被直接跳过整段归属校验，等同于对任何 view_token 都放行。
+    # user_id=None 传入下面的参数化查询会被 SQLite 翻译成 SQL NULL，
+    # "user_id = NULL" 语义上不匹配任何行（即使目标行的 user_id 也是
+    # NULL），因此天然会落到"有记录但不属于当前调用方"的拒绝分支，行为
+    # 仍是安全的 fail-closed，不需要特殊分支。
     task_id = task_info.get("task_id")
-    if task_id and api_key_masked:
+    if task_id:
         def _check_ownership() -> bool:
             with audit_logger._get_cursor() as cursor:
                 cursor.execute(
-                    "SELECT 1 FROM api_audit_logs WHERE task_id = ? AND api_key_masked = ? LIMIT 1",
-                    (task_id, api_key_masked),
+                    "SELECT 1 FROM api_audit_logs WHERE task_id = ? AND user_id = ? LIMIT 1",
+                    (task_id, user_id),
                 )
                 if not cursor.fetchone():
-                    # 有历史记录但不属于该 key
+                    # 有历史记录但不属于该用户
                     cursor.execute(
                         "SELECT 1 FROM api_audit_logs WHERE task_id = ? LIMIT 1",
                         (task_id,),
@@ -349,8 +413,8 @@ async def get_task_summary(
         try:
             owned = await asyncio.to_thread(_check_ownership)
         except Exception as e:
-            logger.warning("summary auth check failed, allowing access: %s", e)
-            owned = True
+            logger.error("summary auth check failed, denying access (fail-closed): %s", e)
+            raise HTTPException(status_code=503, detail="归属校验暂时不可用，请稍后重试")
         if not owned:
             raise HTTPException(status_code=403, detail="无权访问该任务")
 
@@ -370,17 +434,32 @@ async def get_task_summary(
             return TranscribeResponse(
                 code=200,
                 message="摘要不可用",
-                data={"summary": "", "status": view_data.get("status") if view_data else "unknown"},
+                data={"summary": None, "status": view_data.get("status") if view_data else "unknown"},
             )
 
-        raw_summary = view_data.get("summary", "")
-        # 取前 300 个 Unicode 字符
-        preview = raw_summary[:300] if raw_summary else ""
+        # 诚实状态模型：不再把"总结处理中..."之类的占位字符串当真实摘要返回。
+        # summary_state 由 cache_manager.get_view_data_by_token 提供
+        # （generated/skipped_short/failed/pending）；只有 generated 才有真实文本。
+        raw_summary = view_data.get("summary")
+        summary_state = view_data.get("summary_state")
+        if summary_state is None:
+            # 向后兼容：view_data 尚未带 summary_state 字段（如旧版 cache_manager
+            # 或手工构造的 mock），退回旧的"非空字符串即视为已生成"启发式判断。
+            summary_state = SummaryStatus.GENERATED if raw_summary else None
+
+        if summary_state == SummaryStatus.GENERATED and raw_summary:
+            # 取前 300 个 Unicode 字符
+            preview = raw_summary[:300]
+            return TranscribeResponse(
+                code=200,
+                message="获取摘要成功",
+                data={"summary": preview, "status": "success", "summary_status": summary_state},
+            )
 
         return TranscribeResponse(
             code=200,
-            message="获取摘要成功",
-            data={"summary": preview, "status": "success"},
+            message="摘要不可用",
+            data={"summary": None, "status": "success", "summary_status": summary_state},
         )
     except Exception as exc:
         logger.exception("get summary failed for view_token=%s: %s", view_token, exc)

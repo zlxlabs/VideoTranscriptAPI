@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
 import pytest
+from llm_compat import TokenUsage
 
 from video_transcript_api.llm.core.errors import (
     classify_error,
@@ -90,6 +91,7 @@ class _FakeChatResult:
     content: str = ""
     fallback_from: str = None
     model: str = "test"
+    usage: object = None
     def __str__(self):
         return self.content
 
@@ -187,6 +189,56 @@ class TestSelfCorrectionSmartBehavior:
 
         assert result.success is False
         assert mock_client.chat.call_count == 2  # 1 + 1 retry from config
+
+    @patch("video_transcript_api.llm.llm.get_sync_client")
+    def test_every_self_correction_attempt_records_its_own_usage(self, mock_get_client):
+        """Each real client.chat() round trip during Self-Correction must
+        push its own usage snapshot into the bridge (usage_context) -- not
+        just the final, successful attempt. This is what lets
+        LLMClient._record_usage() later sum the real total token cost
+        instead of only counting the attempt that happened to succeed."""
+        from video_transcript_api.llm.llm import _call_with_json_object_mode
+        from video_transcript_api.llm.core import usage_context
+
+        mock_client = MagicMock()
+        mock_client.chat.side_effect = [
+            _FakeChatResult(
+                content='{"wrong_field": true}',
+                model="attempt-1-model",
+                usage=TokenUsage(prompt_tokens=11, completion_tokens=1, total_tokens=12),
+            ),
+            _FakeChatResult(
+                content='{"calibrated_dialogs": []}',
+                model="attempt-2-model",
+                usage=TokenUsage(prompt_tokens=13, completion_tokens=2, total_tokens=15),
+            ),
+        ]
+        mock_get_client.return_value = mock_client
+
+        config = {"llm": {"json_output": {"max_retries": 2}}}
+
+        result = _call_with_json_object_mode(
+            model="deepseek-v4-flash",
+            prompt="test",
+            schema={
+                "type": "object",
+                "properties": {"calibrated_dialogs": {"type": "array"}},
+                "required": ["calibrated_dialogs"],
+            },
+            config=config,
+            system_prompt="test",
+            reasoning_effort=None,
+            task_type="calibrate_chunk",
+        )
+
+        assert result.success is True
+
+        snapshots = usage_context.pop_chat_result_usage()
+        assert len(snapshots) == 2
+        assert snapshots[0].model == "attempt-1-model"
+        assert snapshots[0].total_tokens == 12
+        assert snapshots[1].model == "attempt-2-model"
+        assert snapshots[1].total_tokens == 15
 
 
 # ============================================================

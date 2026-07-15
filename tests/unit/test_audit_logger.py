@@ -321,6 +321,94 @@ class TestCRUDOperations:
         assert len(calls) == 1
         assert calls[0]["endpoint"] == "/new"
 
+    def test_cleanup_old_logs_also_cleans_llm_usage(self, audit_logger):
+        """codex-review R4 #3: cleanup_old_logs must also purge llm_usage rows
+        older than the same cutoff -- otherwise configuring
+        audit_log_retention_days still leaves llm_usage (one row per LLM
+        call) growing forever, since it's only ever inserted into, never
+        cleaned by the periodic maintenance job (app.py's
+        _periodic_maintenance -> AuditLogger.cleanup_old_logs)."""
+        conn = sqlite3.connect(audit_logger.db_path)
+        conn.execute(
+            """
+            INSERT INTO llm_usage
+            (task_id, stage, model, prompt_tokens, completion_tokens,
+             total_tokens, duration_ms, usage_missing, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("old-task", "calibration", "gpt-x", 10, 20, 30, 100, 0, "2020-01-01 00:00:00"),
+        )
+        conn.execute(
+            """
+            INSERT INTO llm_usage
+            (task_id, stage, model, prompt_tokens, completion_tokens,
+             total_tokens, duration_ms, usage_missing, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("new-task", "summary", "gpt-x", 10, 20, 30, 100, 0, "2099-01-01 00:00:00"),
+        )
+        conn.commit()
+        conn.close()
+
+        deleted = audit_logger.cleanup_old_logs(days=1)
+        assert deleted == 1
+
+        conn = sqlite3.connect(audit_logger.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT task_id FROM llm_usage")
+        remaining = [row[0] for row in cursor.fetchall()]
+        conn.close()
+
+        assert remaining == ["new-task"]
+
+    def test_cleanup_old_logs_uses_same_cutoff_for_both_tables(self, audit_logger):
+        """Old rows in BOTH api_audit_logs and llm_usage (same cutoff) must be
+        deleted together in a single cleanup_old_logs call, and the returned
+        count must reflect both tables combined."""
+        conn = sqlite3.connect(audit_logger.db_path)
+        conn.execute(
+            "INSERT INTO api_audit_logs (api_key_masked, endpoint, request_time) VALUES (?, ?, ?)",
+            ("test****test", "/old", "2020-01-01 00:00:00"),
+        )
+        conn.execute(
+            "INSERT INTO api_audit_logs (api_key_masked, endpoint, request_time) VALUES (?, ?, ?)",
+            ("test****test", "/new", "2099-01-01 00:00:00"),
+        )
+        conn.execute(
+            """
+            INSERT INTO llm_usage
+            (task_id, stage, model, prompt_tokens, completion_tokens,
+             total_tokens, duration_ms, usage_missing, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("old-task", "calibration", "gpt-x", 10, 20, 30, 100, 0, "2020-01-01 00:00:00"),
+        )
+        conn.execute(
+            """
+            INSERT INTO llm_usage
+            (task_id, stage, model, prompt_tokens, completion_tokens,
+             total_tokens, duration_ms, usage_missing, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("new-task", "summary", "gpt-x", 10, 20, 30, 100, 0, "2099-01-01 00:00:00"),
+        )
+        conn.commit()
+        conn.close()
+
+        deleted = audit_logger.cleanup_old_logs(days=1)
+        assert deleted == 2  # 1 old api_audit_logs row + 1 old llm_usage row
+
+        calls = audit_logger.get_recent_calls(limit=10)
+        assert len(calls) == 1
+        assert calls[0]["endpoint"] == "/new"
+
+        conn = sqlite3.connect(audit_logger.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT task_id FROM llm_usage")
+        remaining = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        assert remaining == ["new-task"]
+
     def test_get_all_users_stats(self, audit_logger):
         """get_all_users_stats should return stats for all active users."""
         audit_logger.log_api_call(api_key="key12345678", user_id="user_a", endpoint="/a")
@@ -503,3 +591,132 @@ class TestWebhookLogging:
 
         assert rows["t1"] == "https://hook.example.com/key=aaa"
         assert rows["t2"] == "https://hook.example.com/key=bbb"
+
+
+# ============================================================
+# Migration V3 Tests (llm_usage table)
+# ============================================================
+
+
+class TestMigrateV3:
+    """Verify that _migrate_v3 creates the llm_usage table and indexes."""
+
+    def test_fresh_db_has_llm_usage_table(self, tmp_db):
+        """A freshly created DB should include the llm_usage table."""
+        AuditLogger(db_path=tmp_db)
+        conn = sqlite3.connect(tmp_db)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='llm_usage'"
+        )
+        assert cursor.fetchone() is not None
+        conn.close()
+
+    def test_fresh_db_llm_usage_columns(self, tmp_db):
+        """llm_usage table should have the expected columns."""
+        AuditLogger(db_path=tmp_db)
+        conn = sqlite3.connect(tmp_db)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(llm_usage)")
+        columns = {col[1] for col in cursor.fetchall()}
+        conn.close()
+
+        expected_columns = {
+            "id", "task_id", "stage", "model", "prompt_tokens",
+            "completion_tokens", "total_tokens", "duration_ms",
+            "usage_missing", "created_at",
+        }
+        assert expected_columns == columns
+
+    def test_fresh_db_has_llm_usage_indexes(self, tmp_db):
+        """A freshly created DB should have llm_usage indexes on task_id/created_at."""
+        AuditLogger(db_path=tmp_db)
+        conn = sqlite3.connect(tmp_db)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_llm_usage_%'"
+        )
+        indexes = {row[0] for row in cursor.fetchall()}
+        conn.close()
+        assert {"idx_llm_usage_task_id", "idx_llm_usage_created_at"}.issubset(indexes)
+
+    def test_v2_db_migrates_to_v3(self, tmp_db):
+        """An existing v2 DB (without llm_usage table) should gain it after migration."""
+        # Manually create a v2-style database (schema_version=2, no llm_usage table)
+        conn = sqlite3.connect(tmp_db)
+        conn.execute('''CREATE TABLE schema_version (version INTEGER NOT NULL)''')
+        conn.execute("INSERT INTO schema_version (version) VALUES (2)")
+        conn.execute('''
+            CREATE TABLE api_audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_key_masked TEXT NOT NULL,
+                user_id TEXT,
+                endpoint TEXT NOT NULL,
+                video_url TEXT,
+                request_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                processing_time_ms INTEGER,
+                status_code INTEGER,
+                task_id TEXT,
+                user_agent TEXT,
+                remote_ip TEXT,
+                wechat_webhook TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+
+        logger_instance = AuditLogger(db_path=tmp_db)
+
+        conn = sqlite3.connect(tmp_db)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='llm_usage'"
+        )
+        assert cursor.fetchone() is not None
+        conn.close()
+
+        with logger_instance._get_cursor() as cursor:
+            version = logger_instance._get_schema_version(cursor)
+        assert version == CURRENT_SCHEMA_VERSION
+
+    def test_v3_migration_is_idempotent(self, tmp_db):
+        """Running the v2->v3 migration twice on the same DB must not raise errors."""
+        # Build a v2 DB first
+        conn = sqlite3.connect(tmp_db)
+        conn.execute('''CREATE TABLE schema_version (version INTEGER NOT NULL)''')
+        conn.execute("INSERT INTO schema_version (version) VALUES (2)")
+        conn.execute('''
+            CREATE TABLE api_audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_key_masked TEXT NOT NULL,
+                user_id TEXT,
+                endpoint TEXT NOT NULL,
+                video_url TEXT,
+                request_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                processing_time_ms INTEGER,
+                status_code INTEGER,
+                task_id TEXT,
+                user_agent TEXT,
+                remote_ip TEXT,
+                wechat_webhook TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+
+        # First migration run (v2 -> v3)
+        logger_instance = AuditLogger(db_path=tmp_db)
+        # Second run against the now-v3 database must be a no-op, not an error
+        logger_instance._init_database()
+
+        with logger_instance._get_cursor() as cursor:
+            version = logger_instance._get_schema_version(cursor)
+        assert version == CURRENT_SCHEMA_VERSION
+
+        conn = sqlite3.connect(tmp_db)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(llm_usage)")
+        columns = {col[1] for col in cursor.fetchall()}
+        conn.close()
+        assert "task_id" in columns
+        assert "usage_missing" in columns

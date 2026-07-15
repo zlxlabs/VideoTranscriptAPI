@@ -16,7 +16,7 @@ from .logger import setup_logger
 logger = setup_logger("audit_logger")
 
 # Schema 版本号，每次表结构变更时递增
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 class AuditLogger:
@@ -123,6 +123,9 @@ class AuditLogger:
         if version < 2:
             self._migrate_v2(cursor)
 
+        if version < 3:
+            self._migrate_v3(cursor)
+
         if version < CURRENT_SCHEMA_VERSION:
             self._set_schema_version(cursor, CURRENT_SCHEMA_VERSION)
             logger.info(f"Schema 迁移完成: v{version} -> v{CURRENT_SCHEMA_VERSION}")
@@ -160,6 +163,35 @@ class AuditLogger:
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_wechat_webhook ON api_audit_logs(wechat_webhook)"
+        )
+
+    def _migrate_v3(self, cursor):
+        """v3 迁移：新增 llm_usage 表，记录 LLM 调用 token 用量（按任务/阶段审计）
+
+        每行对应一次 LLMClient.call() 调用，记录 prompt/completion/total token
+        用量、耗时、所属任务 task_id 与处理阶段 stage。provider 未回报 usage 时
+        仍写入一行（token 记 0），并通过 usage_missing 标记，避免静默丢弃。
+        """
+        logger.info("执行 schema 迁移 v3: 创建 llm_usage 表")
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS llm_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                model TEXT NOT NULL,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                usage_missing INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+        ''')
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_llm_usage_task_id ON llm_usage(task_id)'
+        )
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_llm_usage_created_at ON llm_usage(created_at)'
         )
 
     def _mask_api_key(self, api_key: str) -> str:
@@ -394,13 +426,20 @@ class AuditLogger:
 
     def cleanup_old_logs(self, days: int = 90) -> int:
         """
-        清理指定天数之前的日志记录
+        清理指定天数之前的日志记录（api_audit_logs + llm_usage，同一 cutoff）
+
+        llm_usage（schema v3 新增的 LLM token 用量审计表，见 usage_recorder.py）
+        此前从未被任何清理逻辑覆盖——每次 LLM 调用都会插一行，配置了
+        audit_log_retention_days 也拦不住它无限增长（codex-review R4 #3）。
+        两张表的时间列都用同一个 `%Y-%m-%d %H:%M:%S` strftime 格式落库
+        （见 log_api_call 的 request_time 与 usage_recorder.record 的
+        created_at），因此直接复用同一个 cutoff_date，保持清理口径一致。
 
         Args:
             days: 保留天数，默认90天
 
         Returns:
-            int: 删除的记录数量
+            int: 删除的记录数量（两张表合计）
         """
         try:
             # 使用 Python 计算截止日期，避免 SQL 格式化注入
@@ -411,10 +450,19 @@ class AuditLogger:
                     DELETE FROM api_audit_logs
                     WHERE request_time < ?
                 ''', (cutoff_date,))
+                audit_deleted = cursor.rowcount
 
-                deleted_count = cursor.rowcount
+                cursor.execute('''
+                    DELETE FROM llm_usage
+                    WHERE created_at < ?
+                ''', (cutoff_date,))
+                usage_deleted = cursor.rowcount
 
-            logger.info(f"清理了 {deleted_count} 条超过 {days} 天的审计日志记录")
+            deleted_count = audit_deleted + usage_deleted
+            logger.info(
+                f"清理了 {audit_deleted} 条超过 {days} 天的审计日志记录、"
+                f"{usage_deleted} 条超过 {days} 天的 LLM 用量记录"
+            )
             return deleted_count
 
         except Exception as e:

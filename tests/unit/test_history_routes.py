@@ -31,6 +31,14 @@ _API_KEY_MASK = "sk-t**********3456"   # len=18, first4="sk-t", last4="3456"
 _WEBHOOK_A    = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=aaa"
 _WEBHOOK_B    = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=bbb"
 
+# A DIFFERENT full API key that collides with _API_KEY under _mask_api_key()
+# (same length=18, same first4="sk-t", same last4="3456", different middle) --
+# used to prove the auth/filter boundary is user_id, not the masked key,
+# since two distinct tenants can legitimately produce the same mask.
+_COLLIDING_API_KEY = "sk-tCOLLIDEXYZ3456"
+assert len(_COLLIDING_API_KEY) == len(_API_KEY)
+assert _COLLIDING_API_KEY != _API_KEY
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -53,6 +61,8 @@ def db_pair(tmp_path):
     al = AuditLogger(db_path=audit_db_path)
 
     # Minimal cache.db matching production task_status schema
+    # (includes calibration_status/summary_status: the honest-status-model
+    # columns that /api/audit/history now selects)
     conn = sqlite3.connect(cache_db_path)
     conn.execute('''
         CREATE TABLE task_status (
@@ -69,20 +79,25 @@ def db_pair(tmp_path):
             completed_at TIMESTAMP,
             cache_id   TEXT,
             llm_config TEXT,
-            download_url TEXT
+            download_url TEXT,
+            calibration_status TEXT,
+            summary_status TEXT
         )
     ''')
     conn.commit()
     conn.close()
 
     def insert_task(task_id, view_token, platform="youtube", title="Test Title",
-                    author="Test Author", status="success"):
+                    author="Test Author", status="success",
+                    calibration_status=None, summary_status=None):
         c = sqlite3.connect(cache_db_path)
         c.execute(
             "INSERT OR IGNORE INTO task_status "
-            "(task_id, view_token, platform, title, author, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (task_id, view_token, platform, title, author, status),
+            "(task_id, view_token, platform, title, author, status, "
+            "calibration_status, summary_status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (task_id, view_token, platform, title, author, status,
+             calibration_status, summary_status),
         )
         c.commit()
         c.close()
@@ -367,6 +382,57 @@ class TestHistoryEndpoint:
         assert item["view_token"] == "my-view-token-abc"
         assert item["title"] == "My Video Title"
 
+    def test_response_includes_calibration_and_summary_status(self, history_client):
+        """Items should carry the honest-status-model columns from the cache JOIN
+        (frontend does not consume them yet, but the API must surface them)."""
+        client, setup = history_client
+        al = setup["audit_logger"]
+        insert = setup["insert_task"]
+
+        _log(al, "task-status")
+        insert("task-status", "vt-status", calibration_status="partial",
+               summary_status="generated")
+
+        resp = client.get("/api/audit/history")
+        assert resp.status_code == 200
+        item = next(i for i in resp.json()["data"]["items"] if i["task_id"] == "task-status")
+        assert item["calibration_status"] == "partial"
+        assert item["summary_status"] == "generated"
+
+    def test_calibration_and_summary_status_null_when_not_set(self, history_client):
+        """Tasks without these columns populated must not break the response (None, not KeyError)."""
+        client, setup = history_client
+        al = setup["audit_logger"]
+        insert = setup["insert_task"]
+
+        _log(al, "task-nostatus")
+        insert("task-nostatus", "vt-nostatus")
+
+        resp = client.get("/api/audit/history")
+        assert resp.status_code == 200
+        item = next(i for i in resp.json()["data"]["items"] if i["task_id"] == "task-nostatus")
+        assert item["calibration_status"] is None
+        assert item["summary_status"] is None
+
+    def test_disabled_status_values_pass_through_without_error(self, history_client):
+        """The per-task processing-depth feature introduces a new 'disabled'
+        value for both columns (user explicitly turned off calibrate/summarize).
+        The history endpoint must surface it as a plain string like any other
+        status, not choke on an unrecognized value."""
+        client, setup = history_client
+        al = setup["audit_logger"]
+        insert = setup["insert_task"]
+
+        _log(al, "task-disabled")
+        insert("task-disabled", "vt-disabled", calibration_status="disabled",
+               summary_status="disabled")
+
+        resp = client.get("/api/audit/history")
+        assert resp.status_code == 200
+        item = next(i for i in resp.json()["data"]["items"] if i["task_id"] == "task-disabled")
+        assert item["calibration_status"] == "disabled"
+        assert item["summary_status"] == "disabled"
+
     def test_api_key_masked_in_response(self, history_client):
         """Response data should include api_key_masked for localStorage key construction."""
         client, setup = history_client
@@ -399,6 +465,30 @@ class TestHistoryEndpoint:
         assert resp.status_code == 200
         task_ids = {i["task_id"] for i in resp.json()["data"]["items"]}
         assert "other-task" not in task_ids
+
+    def test_masked_key_collision_does_not_leak_across_tenants(self, history_client):
+        """ci-gate review (cloud CI): the tenant boundary must be user_id, not
+        the truncated api_key_masked -- two DIFFERENT real API keys that
+        happen to share the same first-4/last-4 characters (and therefore
+        the same mask) must NOT see each other's history. Before the fix,
+        the WHERE clause filtered on api_key_masked, so this exact scenario
+        would have leaked "other-user"'s task into "test-user"'s results."""
+        client, setup = history_client
+        al = setup["audit_logger"]
+        insert = setup["insert_task"]
+
+        al.log_api_call(
+            api_key=_COLLIDING_API_KEY,
+            user_id="other-user",
+            endpoint="/api/transcribe",
+            task_id="colliding-task",
+        )
+        insert("colliding-task", "vt-colliding")
+
+        resp = client.get("/api/audit/history?status=all")
+        assert resp.status_code == 200
+        task_ids = {i["task_id"] for i in resp.json()["data"]["items"]}
+        assert "colliding-task" not in task_ids
 
 
 # ===========================================================================
@@ -623,6 +713,23 @@ class TestFilterOptionsEndpoint:
         assert resp.status_code == 200
         assert "https://other-webhook.example.com" not in resp.json()["data"]["webhooks"]
 
+    def test_masked_key_collision_does_not_leak_across_tenants(self, history_client):
+        """Same rationale as the /history collision test above -- a colliding
+        api_key_masked must not surface another tenant's webhook."""
+        client, setup = history_client
+        al = setup["audit_logger"]
+
+        al.log_api_call(
+            api_key=_COLLIDING_API_KEY,
+            user_id="other-user",
+            endpoint="/api/transcribe",
+            wechat_webhook="https://colliding-webhook.example.com",
+        )
+
+        resp = client.get("/api/audit/filter-options")
+        assert resp.status_code == 200
+        assert "https://colliding-webhook.example.com" not in resp.json()["data"]["webhooks"]
+
 
 # ===========================================================================
 # GET /api/audit/summary
@@ -715,8 +822,129 @@ class TestSummaryEndpoint:
         resp = client.get("/api/audit/summary?view_token=vt-other")
         assert resp.status_code == 403
 
-    def test_empty_summary_returns_empty_string(self, summary_setup):
-        """Completed task with empty summary text returns 200 with empty string."""
+    def test_masked_key_collision_returns_403_not_leaked_summary(self, summary_setup):
+        """Same collision scenario as /history and /filter-options above --
+        a task owned by a colliding-but-different api_key must still return
+        403, not leak its summary to the current user_id."""
+        client, db_pair, mock_cache = summary_setup
+        al = db_pair["audit_logger"]
+
+        al.log_api_call(
+            api_key=_COLLIDING_API_KEY,
+            user_id="other-user",
+            endpoint="/api/transcribe",
+            task_id="task-colliding",
+        )
+
+        mock_cache.get_task_by_view_token.return_value = {"task_id": "task-colliding", "status": "success"}
+        mock_cache.get_view_data_by_token.return_value = {"status": "success", "summary": "secret"}
+
+        resp = client.get("/api/audit/summary?view_token=vt-colliding")
+        assert resp.status_code == 403
+
+    def test_ownership_check_exception_denies_access_fail_closed(self, summary_setup):
+        """ci-gate review (cloud CI): if the ownership-check query itself
+        raises (DB lock, connection error, etc.), the request must be denied
+        (503), not silently granted access. The previous fail-open behavior
+        would let ANY authenticated caller read a summary they don't own
+        whenever the audit DB hiccups."""
+        client, db_pair, mock_cache = summary_setup
+        al = db_pair["audit_logger"]
+        _log(al, "task-boom")
+
+        mock_cache.get_task_by_view_token.return_value = {"task_id": "task-boom", "status": "success"}
+        mock_cache.get_view_data_by_token.return_value = {"status": "success", "summary": "secret"}
+
+        with patch.object(
+            al, "_get_cursor", side_effect=RuntimeError("audit db unavailable")
+        ):
+            resp = client.get("/api/audit/summary?view_token=vt-boom")
+
+        assert resp.status_code == 503
+
+    def test_missing_user_id_does_not_bypass_ownership_check(self, db_pair):
+        """ci-gate review (local, follow-up on the cloud CI findings above):
+        a caller whose user_info lacks user_id entirely (a misconfigured
+        multi-user entry -- _load_users_config() only warns, it doesn't
+        reject the entry, so validate_token() still issues a token with
+        user_id=None) must NOT have the ownership check skipped outright.
+        Before the fix, `if task_id and user_id:` short-circuited to False
+        for such a caller, bypassing the check completely and granting
+        access to ANY task's summary regardless of its real owner."""
+        al = db_pair["audit_logger"]
+
+        # A real owner logs a task under their own user_id.
+        al.log_api_call(
+            api_key="owner-key",
+            user_id="real-owner",
+            endpoint="/api/transcribe",
+            task_id="task-owned-by-someone-else",
+        )
+
+        mock_cache = MagicMock()
+        mock_cache.db_path = Path(db_pair["cache_db_path"])
+        mock_cache.get_task_by_view_token.return_value = {
+            "task_id": "task-owned-by-someone-else", "status": "success",
+        }
+        mock_cache.get_view_data_by_token.return_value = {
+            "status": "success", "summary": "secret",
+        }
+
+        async def _fake_verify_token_missing_user_id():
+            # api_key present, user_id missing (misconfigured entry).
+            return {"api_key": "misconfigured-key", "wechat_webhook": None}
+
+        from video_transcript_api.api.services.transcription import verify_token
+        from video_transcript_api.api.routes import audit
+
+        app = FastAPI()
+        app.include_router(audit.router)
+        app.dependency_overrides[verify_token] = _fake_verify_token_missing_user_id
+
+        with patch("video_transcript_api.api.routes.audit.audit_logger", al), \
+             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache):
+            client = TestClient(app)
+            resp = client.get("/api/audit/summary?view_token=vt-someone-else")
+
+        assert resp.status_code == 403
+
+    def test_missing_user_id_still_allows_task_with_no_audit_record(self, db_pair):
+        """Sanity check for the fix above: a caller with user_id=None must
+        still be able to access a task that has NO associated audit_log row
+        at all (the pre-existing "compatible with legacy data" carve-out) --
+        the fix must not turn missing-user_id into a blanket 403."""
+        al = db_pair["audit_logger"]
+
+        mock_cache = MagicMock()
+        mock_cache.db_path = Path(db_pair["cache_db_path"])
+        mock_cache.get_task_by_view_token.return_value = {
+            "task_id": "task-no-audit-record", "status": "success",
+        }
+        mock_cache.get_view_data_by_token.return_value = {
+            "status": "success", "summary": "legacy summary",
+        }
+
+        async def _fake_verify_token_missing_user_id():
+            return {"api_key": "misconfigured-key", "wechat_webhook": None}
+
+        from video_transcript_api.api.services.transcription import verify_token
+        from video_transcript_api.api.routes import audit
+
+        app = FastAPI()
+        app.include_router(audit.router)
+        app.dependency_overrides[verify_token] = _fake_verify_token_missing_user_id
+
+        with patch("video_transcript_api.api.routes.audit.audit_logger", al), \
+             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache):
+            client = TestClient(app)
+            resp = client.get("/api/audit/summary?view_token=vt-no-record")
+
+        assert resp.status_code == 200
+
+    def test_empty_summary_returns_none_not_placeholder(self, summary_setup):
+        """Completed task with empty summary text returns 200 with summary=None
+        (honest status model: no more '' or placeholder strings standing in
+        for "no real summary content")."""
         client, db_pair, mock_cache = summary_setup
         al = db_pair["audit_logger"]
         _log(al, "task-nosumm")
@@ -726,10 +954,11 @@ class TestSummaryEndpoint:
 
         resp = client.get("/api/audit/summary?view_token=vt-ns")
         assert resp.status_code == 200
-        assert resp.json()["data"]["summary"] == ""
+        assert resp.json()["data"]["summary"] is None
 
-    def test_summary_missing_key_returns_empty_string(self, summary_setup):
-        """view_data without 'summary' key degrades gracefully to empty string."""
+    def test_summary_missing_key_returns_none_not_placeholder(self, summary_setup):
+        """view_data without 'summary' key degrades gracefully to summary=None
+        (not an empty string, not a "processing..." placeholder)."""
         client, db_pair, mock_cache = summary_setup
         al = db_pair["audit_logger"]
         _log(al, "task-nokey")
@@ -739,4 +968,22 @@ class TestSummaryEndpoint:
 
         resp = client.get("/api/audit/summary?view_token=vt-nk")
         assert resp.status_code == 200
-        assert resp.json()["data"]["summary"] == ""
+        assert resp.json()["data"]["summary"] is None
+
+    def test_summary_status_surfaced_in_response(self, summary_setup):
+        """The new summary_status field must be surfaced verbatim from view_data.summary_state
+        so the frontend can eventually distinguish skipped/failed/pending."""
+        client, db_pair, mock_cache = summary_setup
+        al = db_pair["audit_logger"]
+        _log(al, "task-failedsum")
+
+        mock_cache.get_task_by_view_token.return_value = {"task_id": "task-failedsum", "status": "success"}
+        mock_cache.get_view_data_by_token.return_value = {
+            "status": "success", "summary": None, "summary_state": "failed",
+        }
+
+        resp = client.get("/api/audit/summary?view_token=vt-failedsum")
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["summary"] is None
+        assert data["summary_status"] == "failed"

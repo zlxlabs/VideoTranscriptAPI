@@ -6,7 +6,7 @@ import time
 from typing import Optional, Dict, Any
 
 from fastapi import HTTPException, Header, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictBool, field_validator
 
 from ..context import (
     get_audit_logger,
@@ -47,6 +47,7 @@ from ...utils.notifications.channel import _clean_url
 from ...utils.rendering import get_base_url
 from ...utils.perf_tracker import PerfTracker
 from ...utils.task_status import TaskStatus
+from ...utils.llm_status import CalibrationStatus, SummaryStatus
 
 logger = get_logger()
 config = get_config()
@@ -83,11 +84,60 @@ class NotificationConfig(BaseModel):
         return v
 
 
+class ProcessingOptions(BaseModel):
+    """处理深度开关：控制本次任务要跑到哪一步（只转录 / 转录+校对 / 全流程）。
+
+    两个字段互相独立，默认均为 True（等价于历史行为：完整跑校对+总结）。
+    summarize=True 且 calibrate=False 是合法组合——总结会基于未经 LLM 校对的
+    原始转录文本生成，其质量可能受 ASR 识别噪声（错别字、断句错误等）影响，
+    但仍然可用；系统不做硬性拦截，由调用方自行权衡。
+
+    用 StrictBool 而非普通 bool（ci-gate review）：Pydantic 的宽松 bool 会
+    静默把 "yes"/"1"/"no"/"0" 等字符串转换成布尔值，与本 API 文档声明的
+    JSON boolean 类型不符——请求方一个拼写习惯的差异（比如误传字符串
+    "false" 而不是布尔 false）就可能意外触发/关闭有真实 token 成本的 LLM
+    阶段而不自知。StrictBool 只接受真正的 JSON boolean，其余一律 422。
+    """
+
+    calibrate: StrictBool = Field(True, description="是否执行 LLM 校对")
+    summarize: StrictBool = Field(
+        True,
+        description=(
+            "是否生成内容总结。若 calibrate=False，总结将基于未经校对的原始转录"
+            "文本生成，质量可能受 ASR 识别噪声影响"
+        ),
+    )
+
+
+def normalize_processing_options(
+    processing_options: Optional["ProcessingOptions"],
+) -> dict:
+    """将请求里的 processing_options 归一化为 plain dict。
+
+    None（调用方未指定）等价于全部启用（calibrate=True, summarize=True），
+    与历史行为保持一致——这是贯穿 task dict / llm_task_queue payload 的统一
+    "缺省即全流程"约定，下游（tasks.py/transcription.py/llm_ops.py）都应
+    通过本函数或同等的 `.get(...) or DEFAULT` 兜底来读取，不要直接假设键存在。
+
+    Args:
+        processing_options: 请求体里的 ProcessingOptions 实例，可能为 None
+
+    Returns:
+        dict: {"calibrate": bool, "summarize": bool}
+    """
+    if processing_options is None:
+        return {"calibrate": True, "summarize": True}
+    return processing_options.model_dump()
+
+
 class TranscribeRequest(BaseModel):
     """转录请求数据模型"""
 
     url: str = Field(..., description="视频URL（平台链接，用于 view_token 和缓存）")
-    use_speaker_recognition: bool = Field(False, description="是否使用说话人识别功能")
+    # StrictBool（同 ProcessingOptions，ci-gate review）：这个开关会切换转录
+    # 引擎（FunASR vs CapsWriter）并影响缓存 key，同样不该被 "yes"/"1" 之类
+    # 宽松字符串静默触发。
+    use_speaker_recognition: StrictBool = Field(False, description="是否使用说话人识别功能")
     wechat_webhook: Optional[str] = Field(
         None, description="企业微信webhook地址"
     )
@@ -102,6 +152,10 @@ class TranscribeRequest(BaseModel):
     )
     notification_config: Optional[NotificationConfig] = Field(
         None, description="通知配置（可选，指定渠道和自定义 webhook）"
+    )
+    processing_options: Optional[ProcessingOptions] = Field(
+        None,
+        description="处理深度开关（只转录/转录+校对/全流程）。None 等价于全部启用",
     )
 
     @field_validator("wechat_webhook", "feishu_webhook")
@@ -279,6 +333,12 @@ async def process_task_queue():
             notification_webhooks = task.get("notification_webhooks", {})
             download_url = task.get("download_url")
             metadata_override = task.get("metadata_override")
+            # 处理深度开关（只转录/转录+校对/全流程）：task dict 里缺失时按全流程兜底，
+            # 与 normalize_processing_options(None) 的语义保持一致。
+            processing_options = task.get("processing_options") or {
+                "calibrate": True,
+                "summarize": True,
+            }
 
             try:
                 cache_manager.update_task_status(task_id, TaskStatus.PROCESSING, download_url=download_url)
@@ -293,6 +353,7 @@ async def process_task_queue():
                     metadata_override,
                     notification_channel=notification_channel,
                     notification_webhooks=notification_webhooks,
+                    processing_options=processing_options,
                 )
 
                 def task_completed(future_result):
@@ -335,7 +396,7 @@ async def process_task_queue():
 def process_transcription(
     task_id, url, use_speaker_recognition=False, wechat_webhook=None,
     download_url=None, metadata_override=None, notification_channel=None,
-    notification_webhooks=None,
+    notification_webhooks=None, processing_options=None,
 ):
     """
     处理视频转录
@@ -349,9 +410,13 @@ def process_transcription(
         metadata_override: 元数据覆盖（dict）
         notification_channel: 指定通知渠道（wechat/feishu/None=全部）
         notification_webhooks: per-channel webhook dict {"wechat": "...", "feishu": "..."}
+        processing_options: 处理深度开关 dict {"calibrate": bool, "summarize": bool}，
+            None 时按全流程兜底（向后兼容旧调用方）
     """
     if notification_webhooks is None:
         notification_webhooks = {}
+    if processing_options is None:
+        processing_options = {"calibrate": True, "summarize": True}
     # 性能追踪器：记录各阶段耗时
     tracker = PerfTracker(task_id=task_id)
 
@@ -483,7 +548,49 @@ def process_transcription(
             has_llm_calibrated = "llm_calibrated" in cache_data
             has_llm_summary = "llm_summary" in cache_data
 
-            if has_llm_calibrated and has_llm_summary:
+            # ---- 分层缓存命中判定（相对本次请求的 processing_options）----
+            # 缓存产物只增不减：required = {transcript} ∪ (calibrate→calibrated) ∪
+            # (summarize→summary)。transcript 已保证存在（否则不会进到这个分支）。
+            #
+            # calibrated 层的"已满足"判定不能只看文件是否存在——如果上一轮请求
+            # calibrate=False，llm_calibrated.txt 仍会被写入（内容是本地格式化的
+            # 原文，calibration_status=disabled），此时若本轮请求 calibrate=True，
+            # 必须视为"缺失"以触发真实校对，而不是把 disabled 占位文本误当成
+            # 已完成的校对结果直接返回。summary 层没有这个问题：disabled/failed
+            # 都不落盘 llm_summary.txt（见 llm_ops._save_llm_results），因此文件
+            # 存在即代表该层已有确定性产物（generated 或 skipped_short）。
+            #
+            # NONE 与 disabled 同理需要排除（codex-review R4 #2）：全降级 NONE 现在
+            # 也会落盘一份兜底格式化文本（见 llm_ops._save_llm_results 的
+            # calibrated_saved），但那是"尝试但完全失败"的产物，不是真正完成的
+            # 校对结果——必须允许后续请求（或 /api/recalibrate）把它当作"缺失"
+            # 触发真实重试，而不是被当成已满足的层直接短路返回，否则一次失败会
+            # 永久锁死在失败状态。
+            cached_llm_status = cache_data.get("llm_status") or {}
+            cached_calibration_status = cached_llm_status.get("calibration_status")
+            calibrated_layer_satisfied = (
+                has_llm_calibrated
+                and cached_calibration_status != CalibrationStatus.DISABLED
+                and cached_calibration_status != CalibrationStatus.NONE
+            )
+            calibrate_requested = processing_options.get("calibrate", True)
+            need_calibrated = calibrate_requested and not calibrated_layer_satisfied
+            need_summary = processing_options.get("summarize", True) and not has_llm_summary
+
+            # need_calibrated=False 不代表校对层已经有任何产物——calibrate=False
+            # 会无条件把它压成 False，即便 llm_calibrated 压根不存在（比如只有
+            # transcript 层的旧缓存，或该媒体第一次请求、LLM 从未跑过一次）。
+            # 这种情况下 calibrate_requested=False 是唯一让 need_calibrated=False
+            # 的原因，has_llm_calibrated 仍是 False——不能把它和"层已满足"混为
+            # 一谈，否则下面会把从未存在的 llm_calibrated 读成空字符串，发出
+            # 空校对通知，任务行也不会被标记为 disabled（codex-review R5 #2）。
+            # summary 层不需要同样处理：summary 的 disabled/failed 本来就不落盘
+            # llm_summary.txt（见上面的分层命中判定注释），has_llm_summary=False
+            # 在 calibrate=True 场景下的展示分支已经能正确回退（用 calibrated_text
+            # 兜底），不存在"读空字符串"的问题。
+            calibration_effectively_missing = not calibrate_requested and not has_llm_calibrated
+
+            if not need_calibrated and not need_summary and not calibration_effectively_missing:
                 logger.info("缓存中已有 LLM 结果，直接使用")
                 cache_type = "含说话人识别" if has_speaker_recognition else "普通转录"
                 engine_info = "FunASR" if has_speaker_recognition else "CapsWriter"
@@ -508,26 +615,66 @@ def process_transcription(
                 # 计算统计信息
                 original_length = len(transcript)
                 calibrated_length = len(cache_data.get("llm_calibrated", ""))
-                summary_text = cache_data["llm_summary"]
                 calibrated_text = cache_data.get("llm_calibrated", "")
 
-                # 判断是否跳过了总结（总结文本和校对文本相同）
-                skip_summary = summary_text == calibrated_text
+                # 判断是否跳过了总结：
+                # - 真正的"短文本跳过"：summary 与 calibrated 内容相同（见
+                #   llm_ops._save_llm_results 的 SKIPPED_SHORT 分支，会把
+                #   calibrated 文本原样复制成 summary 落盘）；
+                # - 本次/历史请求根本未要求总结（summarize=False，见函数顶部
+                #   注释：disabled 时不落盘 llm_summary.txt）：has_llm_summary
+                #   为 False，此时 cache_data 里没有 "llm_summary" 键，不能无
+                #   条件下标访问，否则 KeyError（这正是本次修复的问题）。
+                #   两种情况在展示上等价，都走"未生成总结"文案，与周边已有的
+                #   skip_summary 分支保持一致。
+                if has_llm_summary:
+                    summary_text = cache_data["llm_summary"]
+                    skip_summary = summary_text == calibrated_text
+                else:
+                    summary_text = calibrated_text
+                    skip_summary = True
+
+                # 通知里的总结状态文案：与 llm_ops._send_notification 保持一致的
+                # 三态区分（failed/disabled/其他一律"未生成"）——这条"缓存全命中"
+                # 路径此前硬编码"未生成"，不区分 summary_status，导致用户主动
+                # 关闭总结（disabled）时通知误报成"未生成"，与诚实状态模型的
+                # 承诺不符（ci-gate review，云端 CI 发现）。
+                cached_summary_status = cached_llm_status.get("summary_status")
+                if cached_summary_status == SummaryStatus.FAILED:
+                    summary_status_label = "生成失败"
+                elif cached_summary_status == SummaryStatus.DISABLED:
+                    summary_status_label = "未启用"
+                else:
+                    summary_status_label = "未生成"
 
                 # 构建完整的消息格式
                 speaker_info = "（含说话人识别）" if has_speaker_recognition else ""
+                # 这条"缓存全命中"路径独立拼接消息，不经过 llm_ops._send_notification/
+                # _build_calibration_warning，之前完全没有消费 calibration_status——
+                # 但触发这条分支不代表本轮真的做过 LLM 校对：calibrate_requested=False
+                # 时即便历史上跑过一轮 disabled（本地格式化占位文本落盘），
+                # calibrated_layer_satisfied 仍会因 cached_calibration_status==DISABLED
+                # 而判定"层未满足"，need_calibrated 却因 calibrate_requested=False 恒为
+                # False，两者结合会让这条分支把"未经 LLM 校对的占位文本"当作
+                # calibrated_text/summary_text 发出，且不带任何提示（ci-gate review）。
+                calibration_warning = (
+                    "\n⚠️ **AI 校对未启用**：当前显示为未经校对的原始语音识别文本"
+                    "（可能含错别字、断句错误）。"
+                    if cached_calibration_status == CalibrationStatus.DISABLED
+                    else ""
+                )
                 if skip_summary:
-                    # 短文本，未生成总结
+                    # 短文本/未启用/失败，均展示校对文本兜底
                     full_message = f"""## 总结和校对
 🌐 网页查看：{view_url}
 📄 直接获取：{view_url}?raw=calibrated
 
 ## 转录统计
-原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 未生成
+原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_status_label}{calibration_warning}
 
 ## 校对文本{speaker_info}
 {summary_text}"""
-                    logger.info("缓存模式 - 发送校对文本（未总结）")
+                    logger.info(f"缓存模式 - 发送校对文本（总结{summary_status_label}）")
                 else:
                     # 长文本，有总结
                     summary_length = len(summary_text)
@@ -536,7 +683,7 @@ def process_transcription(
 📄 直接获取：{view_url}?raw=calibrated
 
 ## 转录统计
-原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_length:,} 字
+原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_length:,} 字{calibration_warning}
 
 ## 总结{speaker_info}
 {summary_text}"""
@@ -575,7 +722,22 @@ def process_transcription(
 
                 logger.info(f"已发送缓存的 LLM 结果: {video_title}")
 
-                # 缓存全命中（含 LLM 结果）：无后续 LLM 工作，直接置终态 success
+                # 缓存全命中（含 LLM 结果）：无后续 LLM 工作，直接置终态 success。
+                # 把本次已读到的 llm_status.json 快照（cached_llm_status，见上方
+                # 分层缓存命中判定）镜像进这条新建的 task_status 行——否则
+                # create_task 建出的行 calibration_status/summary_status 默认为
+                # NULL，/api/audit/history 对全命中任务会返回空状态，与缓存目录
+                # 里的真实状态不一致（codex-review R2）。沿用 llm_ops 里"从
+                # llm_status.json 读回未触碰层"的同一模式：优先用 llm_status.json
+                # 里的显式值；缺失时（早于诚实状态模型上线的旧缓存）按现有产物
+                # 文件推导合理默认——calibrated_layer_satisfied 已排除 disabled
+                # 占位符，此时真实存在校对文件即可推断为 full；summary 无法
+                # 可靠区分 generated 与 skipped_short，缺失时保持 None，不瞎编。
+                mirrored_calibration_status = cached_calibration_status
+                if mirrored_calibration_status is None and calibrated_layer_satisfied:
+                    mirrored_calibration_status = CalibrationStatus.FULL
+                mirrored_summary_status = cached_llm_status.get("summary_status")
+
                 cache_manager.update_task_status(
                     task_id,
                     TaskStatus.SUCCESS,
@@ -585,6 +747,8 @@ def process_transcription(
                     author=author,
                     cache_id=cache_data.get("cache_id"),
                     download_url=download_url,
+                    calibration_status=mirrored_calibration_status,
+                    summary_status=mirrored_summary_status,
                 )
 
                 # 缓存完全命中（含 LLM 结果），记录计数并输出性能摘要
@@ -611,8 +775,54 @@ def process_transcription(
                 transcript="正在处理已存在的转录文本...",
             )
 
-            # 缓存部分命中（有转录但无 LLM 结果），记录计数
+            # 缓存部分命中（transcript 已在，但请求的层里至少一层缺失），记录计数
             tracker.count("cache_hit_partial")
+
+            # 只在"强制降级为纯文本"的 else 分支里才需要：读缓存里已落盘的说话人
+            # 结构化数据（llm_processed.json，见 cache_manager.get_cache），在不
+            # 重跑说话人分块校对的前提下把真实说话人数回传给协调器，供总结环节
+            # 选择正确的多/单说话人 Prompt（codex-review R5 #3，详见下方 else
+            # 分支注释）。没有说话人识别、或缓存里还没有结构化产物（比如说话人
+            # 识别但从未真正过一次 LLM 校对）时保持 None——协调器会退回自己的
+            # 自动推断，不引入新的失败模式。
+            cached_speaker_count = None
+            if has_speaker_recognition:
+                cached_structured = cache_data.get("llm_processed") or {}
+                cached_speaker_mapping = cached_structured.get("speaker_mapping")
+                if cached_speaker_mapping:
+                    cached_speaker_count = len(cached_speaker_mapping)
+
+            if need_calibrated:
+                # 校对层缺失，需要真实（重新）校对：沿用原始转录内容
+                queued_transcript = transcript
+                queued_transcription_data = transcription_data if has_speaker_recognition else None
+                queued_use_speaker_recognition = has_speaker_recognition
+            else:
+                # need_calibrated=False 到这里有两种情况：
+                # 1) 校对层已满足，只缺总结：复用已有校对文本作为总结输入（而非
+                #    原始转录，质量更高），并强制走纯文本路径
+                #    （transcription_data=None）避免二次说话人推断浪费 LLM 调用
+                #    ——_prepare_llm_content 在 transcription_data 为空时会回退
+                #    到纯文本分支，与 use_speaker_recognition 是否为 True 无关。
+                #    强制纯文本会让协调器的说话人数自动推断失真（纯文本必然判
+                #    成单说话人），所以上面读出 cached_speaker_count 随任务一起
+                #    传下去，由协调器覆盖这个误判（而不是重新推断一次说话人，
+                #    那样就违背了"避免二次说话人推断"的初衷）。
+                # 2) calibration_effectively_missing 命中（calibrate=False 且
+                #    校对层从未存在过，need_summary 可能同时为 False——两层都
+                #    从未处理过；也可能为 True——只是校对层缺失、总结层本身
+                #    还需要真实生成）：cache_data.get("llm_calibrated") 取不到
+                #    值，回退到原始转录——这个分支本身就是把请求交给 llm_ops
+                #    的 skip_calibration 本地格式化路径去产出 disabled 占位
+                #    产物，语义上仍然正确。
+                queued_transcript = cache_data.get("llm_calibrated") or transcript
+                queued_transcription_data = None
+                queued_use_speaker_recognition = has_speaker_recognition
+
+            queued_processing_options = {
+                "calibrate": need_calibrated,
+                "summarize": need_summary,
+            }
 
             try:
                 llm_task_queue.put(
@@ -625,20 +835,22 @@ def process_transcription(
                         "video_title": video_title,
                         "author": author,
                         "description": description,
-                        "transcript": transcript,
-                        "use_speaker_recognition": has_speaker_recognition,
-                        "transcription_data": transcription_data
-                        if has_speaker_recognition
-                        else None,
+                        "transcript": queued_transcript,
+                        "use_speaker_recognition": queued_use_speaker_recognition,
+                        "transcription_data": queued_transcription_data,
+                        "cached_speaker_count": cached_speaker_count,
                         "is_generic": is_generic_downloader or is_from_generic,
                         "wechat_webhook": wechat_webhook,
                         "notification_channel": notification_channel,
                         "notification_webhooks": notification_webhooks,
                         "perf_tracker": tracker,
+                        "processing_options": queued_processing_options,
                     }
                 )
                 logger.info(
-                    f"将LLM任务加入队列: {task_id}, 标题: {video_title}, 说话人识别: {has_speaker_recognition}"
+                    f"将LLM任务加入队列: {task_id}, 标题: {video_title}, "
+                    f"说话人识别: {has_speaker_recognition}, "
+                    f"需补层: calibrate={need_calibrated}, summarize={need_summary}"
                 )
                 # 转录已就绪、LLM 校对/总结进行中 → calibrating（终态由 LLM 阶段写）
                 cache_manager.update_task_status(
@@ -855,6 +1067,7 @@ def process_transcription(
                                     "notification_channel": notification_channel,
                                     "notification_webhooks": notification_webhooks,
                                     "perf_tracker": tracker,
+                                    "processing_options": processing_options,
                                 }
                             )
                             logger.info(f"[youtube-api] LLM task queued: {task_id}")
@@ -989,6 +1202,7 @@ def process_transcription(
                                     "notification_channel": notification_channel,
                                     "notification_webhooks": notification_webhooks,
                                     "perf_tracker": tracker,
+                                    "processing_options": processing_options,
                                 }
                             )
                             logger.info(f"[youtube-api] LLM task queued: {task_id}")
@@ -1126,6 +1340,7 @@ def process_transcription(
                             "notification_channel": notification_channel,
                             "notification_webhooks": notification_webhooks,
                             "perf_tracker": tracker,
+                            "processing_options": processing_options,
                         }
                     )
                     logger.info(
@@ -1363,6 +1578,7 @@ def process_transcription(
                                 "notification_channel": notification_channel,
                                 "notification_webhooks": notification_webhooks,
                                 "perf_tracker": tracker,
+                                "processing_options": processing_options,
                             }
                         )
                         logger.info(

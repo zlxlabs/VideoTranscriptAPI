@@ -50,13 +50,21 @@ def _llm_task(task_id):
 
 def _patches(cm, coordinator):
     """Patch llm_ops module globals to isolate the state-transition logic."""
+    # _save_llm_results now returns the "effective" status dict it actually
+    # persisted (see layered-cache suppression logic); _handle_llm_task uses
+    # that return value to refresh result_dict["stats"] before the terminal
+    # update_task_status() call. return_value=None here means "no layer
+    # write happened" -- the state-transition assertions in this file only
+    # care about success/failed, not the honest-status fields, so this keeps
+    # the isolation intent while matching the real function's contract.
+    mock_save_llm_results = MagicMock(return_value=None)
     return [
         patch.object(llm_ops, "cache_manager", cm),
         patch.object(llm_ops, "llm_coordinator", coordinator),
         # _handle_llm_task calls llm_task_queue.task_done() in finally; isolate it.
         patch.object(llm_ops, "llm_task_queue", MagicMock()),
         patch.object(llm_ops, "_build_result_dict", lambda r: {}),
-        patch.object(llm_ops, "_save_llm_results", MagicMock()),
+        patch.object(llm_ops, "_save_llm_results", mock_save_llm_results),
         patch.object(llm_ops, "_send_notification", MagicMock()),
         patch.object(llm_ops, "get_notification_router", lambda: MagicMock()),
         patch.object(llm_ops, "_generate_title_if_needed", lambda t, title, tr: title),
