@@ -155,10 +155,17 @@ class LLMClient:
             final_model = snapshots[-1].model or model
 
             if known:
+                # 已知部分求和——但只要不是「每次尝试都回报了 usage」，这个和
+                # 就只是真实总量的下界，不是精确值（比如两次尝试，第一次
+                # provider 没回报、第二次回报了 60 token：落库 60 token 且
+                # usage_missing=False 会让审计误以为这是完整数据，第一次真实
+                # 消耗但未知的 token 就这样从记录里"合法化地"消失了）。因此
+                # usage_missing 按「是否每次尝试都有数据」判定，而不是「是否
+                # 至少有一次有数据」（ci-gate review，最终确认轮）。
                 prompt_tokens = sum(s.prompt_tokens or 0 for s in known)
                 completion_tokens = sum(s.completion_tokens or 0 for s in known)
                 total_tokens = sum(s.total_tokens or 0 for s in known)
-                usage_missing = False
+                usage_missing = len(known) < len(snapshots)
             else:
                 # 全部尝试的 provider 都没回报 usage（单次调用场景与此前行为
                 # 一致；理论上也覆盖"重试多次但每次都不回报"的边界情况）。

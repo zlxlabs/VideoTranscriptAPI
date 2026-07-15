@@ -377,13 +377,18 @@ class TestSelfCorrectionRetryUsageAggregation:
         # silently losing attempt 1's 120 tokens from the audit trail.
         assert row == ("attempt-2-model", 200, 50, 250, 0)
 
-    def test_retry_with_partially_missing_usage_still_counts_reported_attempt(
+    def test_retry_with_partially_missing_usage_counts_known_but_flags_incomplete(
         self, client, recorder
     ):
         """A provider that omits usage on the (eventually superseded) first
         attempt but reports it on the successful retry must still have the
-        retry's real tokens counted -- not zeroed out just because one of
-        the attempts was missing."""
+        retry's real tokens counted as a lower-bound sum -- but the row must
+        be flagged usage_missing=True, not silently reported as complete.
+        The first attempt's real (but unknown) token cost is missing from
+        the sum, so treating it as a "complete, accurate" 60-token total
+        would misrepresent the audit data (ci-gate review, final round:
+        the previous behavior only checked "at least one attempt reported
+        usage", not "every attempt reported usage")."""
 
         def fake_call_llm_api(**kwargs):
             usage_context.record_chat_result_usage(model="attempt-1-model", usage=None)
@@ -409,4 +414,7 @@ class TestSelfCorrectionRetryUsageAggregation:
             )
             row = cursor.fetchone()
 
-        assert row == ("attempt-2-model", 50, 10, 60, 0)
+        # Known attempt's tokens (50/10/60) are still summed as a useful
+        # lower bound, but usage_missing=1 makes clear the total is
+        # incomplete -- attempt 1's real cost is unaccounted for.
+        assert row == ("attempt-2-model", 50, 10, 60, 1)
