@@ -543,13 +543,21 @@ class SpeakerInferencer:
 
     @staticmethod
     def _normalize_cached_result(cached: Dict) -> Optional[Dict]:
-        """兼容旧格式缓存（纯 {label: name} 字典）与新格式（含 meta）
+        """只认新格式缓存（含 meta），旧格式一律视为不可复用
 
         新格式：{"mapping": {...}, "meta": {...}, "low_confidence": [...]}
-        旧格式：{label: name, ...} —— 视为全部高置信度（1.0）已采信
+
+        旧格式（纯 {label: name} 字典，本 PR 引入 confidence 门槛之前写入）
+        不包含任何置信度信号——旧的推断逻辑压根没有 confidence 概念。曾经
+        的做法是把这类缓存整体视为 confidence=1.0 直接采信，但这只是编造
+        出的信心，会让"低置信度不再强行套用真名"这条新保证对所有已缓存
+        视频形同虚设（ci-gate review 指出）。这里改为直接判定旧格式不可
+        复用，触发调用方重新推断——重新推断一次的 token 成本是可接受的
+        一次性代价，换来的是新写入的缓存都带有真实 confidence 数据，后续
+        缓存命中判定才有意义。
 
         Returns:
-            规范化后的推断结果字典；无法识别的结构返回 None
+            规范化后的推断结果字典；旧格式或无法识别的结构均返回 None
         """
         if not isinstance(cached, dict):
             return None
@@ -559,16 +567,6 @@ class SpeakerInferencer:
                 "mapping": dict(cached.get("mapping", {})),
                 "meta": dict(cached.get("meta", {})),
                 "low_confidence": list(cached.get("low_confidence", [])),
-            }
-
-        if cached and all(isinstance(v, str) for v in cached.values()):
-            return {
-                "mapping": dict(cached),
-                "meta": {
-                    label: {"name": name, "confidence": 1.0, "applied": True}
-                    for label, name in cached.items()
-                },
-                "low_confidence": [],
             }
 
         return None

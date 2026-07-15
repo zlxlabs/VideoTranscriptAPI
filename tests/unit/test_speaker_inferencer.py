@@ -7,8 +7,9 @@ Covers the "per-speaker sampling + confidence downgrade" refactor:
 - Low-confidence mappings are downgraded to a placeholder label ("SpeakerN"),
   not applied as a real name.
 - Missing/malformed confidence defaults to 1.0 (applied).
-- Cache is only reused when it covers the current speaker set; legacy
-  (flat dict) cache format is treated as fully-confident.
+- Cache is only reused when it covers the current speaker set AND carries
+  real confidence data; legacy (flat dict, pre-confidence-gating) cache
+  format is treated as unusable and forces re-inference (ci-gate review).
 - Prompt sample groups are ordered by first-appearance time.
 """
 
@@ -477,25 +478,51 @@ class TestCacheCoverageValidation(unittest.TestCase):
         self.assertIn("mapping", saved_args[2])
         self.assertIn("meta", saved_args[2])
 
-    def test_legacy_flat_cache_treated_as_full_confidence(self):
+    def test_legacy_flat_cache_is_ignored_and_triggers_reinference(self):
+        """ci-gate review: legacy flat-dict cache (written before this PR
+        introduced confidence gating) carries no real confidence signal.
+        Treating it as confidence=1.0 was a fabricated guarantee that let
+        every already-cached video permanently bypass the new low-confidence
+        downgrade. It must instead be treated as unusable, forcing a fresh
+        (confidence-aware) inference -- the one-time re-inference cost is
+        acceptable; the resulting cache upgrades to the new format."""
         cache_manager = MagicMock()
         cache_manager.get_speaker_mapping.return_value = {
             "Speaker1": "张三",
             "Speaker2": "李四",
         }
         inferencer = _make_inferencer(cache_manager=cache_manager)
+        inferencer.llm_client.call = MagicMock(
+            return_value=_mock_llm_response(
+                speaker_mapping={"Speaker1": "张三", "Speaker2": "王五"},
+                confidence={"Speaker1": 0.95, "Speaker2": 0.3},
+            )
+        )
 
         result = inferencer.infer(
             speakers=["Speaker1", "Speaker2"],
-            dialogs=[_make_dialog("Speaker1", "hi", 0.0)],
+            dialogs=[
+                _make_dialog("Speaker1", "hi", 0.0),
+                _make_dialog("Speaker2", "hello", 1.0),
+            ],
             title="t",
             platform="p",
             media_id="m",
         )
 
-        inferencer.llm_client.call.assert_not_called()
-        self.assertEqual(result["meta"]["Speaker1"]["confidence"], 1.0)
-        self.assertTrue(result["meta"]["Speaker1"]["applied"])
+        # Legacy cache must not short-circuit inference, even though it
+        # nominally "covers" both current speakers.
+        inferencer.llm_client.call.assert_called_once()
+        # Fresh, confidence-aware result -- Speaker2's low confidence (0.3)
+        # correctly triggers the downgrade the legacy cache was hiding.
+        self.assertEqual(result["mapping"]["Speaker1"], "张三")
+        self.assertNotEqual(result["mapping"]["Speaker2"], "王五")
+        self.assertIn("Speaker2", result["low_confidence"])
+        # Re-inferred result is persisted back in the new format, upgrading
+        # the cache so future hits carry real confidence data.
+        cache_manager.save_speaker_mapping.assert_called_once()
+        saved_payload = cache_manager.save_speaker_mapping.call_args[0][2]
+        self.assertIn("meta", saved_payload)
 
 
 class TestNoSamplesAndFailureFallback(unittest.TestCase):
