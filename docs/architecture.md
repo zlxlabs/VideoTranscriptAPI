@@ -273,8 +273,8 @@ data/temp/
 ### 审计日志
 
 - 记录 API 端点、请求/响应时间、处理耗时、状态码、用户信息
-- **LLM token 用量审计**（`audit.db` schema v3，`llm_usage` 表）：每次 `LLMClient.call()` 调用记一行，含 `task_id`/`stage`（calibration/summary/speaker_inference/validation 等）/`model`/prompt·completion·total tokens/耗时；provider 未回报用量时仍写入一行并标记 `usage_missing`，避免静默丢弃
-- 已知限制：标题生成（通用下载器场景）直接调用 `call_llm_api()`，未经过 `LLMClient.call()`，不计入用量统计；llm-compat 内部 Self-Correction 重试只有最后一次的 usage 被记录（桥接槽在同一线程内"写入→立即读出并清空"，中间重试的用量不可见）
+- **LLM token 用量审计**（`audit.db` schema v3，`llm_usage` 表）：每次 `LLMClient.call()` 调用记一行，含 `task_id`/`stage`（calibration/summary/speaker_inference/validation 等）/`model`/prompt·completion·total tokens/耗时；provider 未回报用量时仍写入一行并标记 `usage_missing`，避免静默丢弃。json_object 模式的 Self-Correction 重试触发多次真实 API 往返时，桥接槽按顺序累积全部快照并对 token 求和落一行（而非只记最后一次）；只要有任一次尝试缺失 usage，该行仍会标记 `usage_missing=True`，已知部分求和仅作为下界参考，不会被误标为完整数据。标题生成（通用下载器场景）已改走 `LLMClient.call()`，计入用量统计
+- `llm_usage` 全局聚合（按 stage/总计）不区分调用方用户；多用户模式下仅系统所有者视角（单 token 回退模式，或多用户模式下的 legacy fallback token）可见，避免跨租户泄露调用规模/成本信息，见 `GET /api/audit/stats`
 - 查询接口：`GET /api/audit/stats`（含 `llm_usage` 按 stage 聚合 + 总计）、`GET /api/audit/calls`、`GET /api/audit/history`（含状态字段）
 
 ### 多渠道通知

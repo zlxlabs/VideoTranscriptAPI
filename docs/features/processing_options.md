@@ -38,6 +38,8 @@
 | `false` | `true` | 只转录 + 总结，**总结基于未校对的原始转录文本生成**，质量可能受 ASR 识别噪声（错别字、断句错误等）影响，但仍可用；系统不做硬性拦截，由调用方自行权衡 |
 | `false` | `false` | 只转录，不校对也不总结 |
 
+> **`use_speaker_recognition=true` 时的例外**：`calibrate=false` 跳过的是"逐块把文本喂给 LLM 做文字校正"这一步；**说话人姓名推断**（把 `Speaker1`/`Speaker2` 这类占位符猜成真实姓名）被视为"转录交付物"的一部分而非"校对"，即便 `calibrate=false` 仍会执行，这意味着这个组合并非零 LLM 调用/零 token 成本（`src/video_transcript_api/llm/processors/speaker_aware_processor.py::process()`，ci-gate review 提出过是否应该改为默认跳过，目前维持现状，未来如需要真正的"零 LLM 成本、保留原始说话人占位符"选项，需要新增独立开关）。不启用说话人识别（`use_speaker_recognition=false`）时没有这个例外，`calibrate=false` 确实是零 LLM 调用。
+
 ## 分层缓存复用
 
 ### 核心原则：产物只增不减
