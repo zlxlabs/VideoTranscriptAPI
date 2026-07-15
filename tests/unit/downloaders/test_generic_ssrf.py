@@ -686,6 +686,30 @@ class TestEnvironmentSettingsMergedThroughSession:
         sent_kwargs = mock_send.call_args.kwargs
         assert sent_kwargs.get("proxies", {}).get("https") == "http://proxy.internal:3128"
 
+    def test_proxy_credentials_redacted_from_debug_log(self, monkeypatch):
+        """ci-gate review: HTTP(S)_PROXY commonly embeds credentials as
+        userinfo (http://user:pass@proxy:port). The debug log announcing
+        the detected proxy must not leak them into persisted/aggregated
+        logs -- only scheme/host/port should appear.
+
+        This project logs via loguru (setup_logger), not stdlib logging,
+        so pytest's caplog fixture can't observe it -- patch the module's
+        logger.debug directly instead."""
+        _clear_proxy_env(monkeypatch)
+        monkeypatch.setenv("HTTPS_PROXY", "http://sensitive_user:sensitive_pass@proxy.internal:3128")
+        downloader = GenericDownloader()
+        url = "https://public.example.com/audio.mp3"
+
+        with patch(GETADDRINFO_PATH, side_effect=_public_addrinfo), patch(
+            BASE_SEND_PATH, return_value=_ok_response()
+        ), patch("video_transcript_api.downloaders.generic.logger.debug") as mock_debug:
+            downloader._safe_request("get", url, timeout=5)
+
+        logged_messages = "\n".join(str(call.args[0]) for call in mock_debug.call_args_list)
+        assert "sensitive_user" not in logged_messages
+        assert "sensitive_pass" not in logged_messages
+        assert "proxy.internal:3128" in logged_messages
+
 
 # ---------------------------------------------------------------------------
 # 9. Multi-candidate pinned IP retry (codex-review R8 #2).

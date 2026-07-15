@@ -3,7 +3,7 @@ import mimetypes
 import hashlib
 import time
 import requests
-from urllib.parse import urlparse, unquote, urljoin
+from urllib.parse import urlparse, urlunparse, unquote, urljoin
 from .base import BaseDownloader
 from .models import VideoMetadata, DownloadInfo
 from ..errors import InvalidURLError
@@ -17,6 +17,26 @@ import datetime
 
 # 创建日志记录器
 logger = setup_logger("generic_downloader")
+
+
+def _redact_proxy_credentials(proxy_url: str) -> str:
+    """去掉代理 URL 里嵌入的 user:pass@ 凭据，仅用于日志输出。
+
+    HTTP(S)_PROXY 环境变量常见写法允许把认证信息直接编码进 URL
+    （如 http://user:pass@proxy.internal:3128），DEBUG 日志原样打印
+    这个字符串会把代理密码写进持久化日志/日志采集系统。
+    """
+    try:
+        parsed = urlparse(proxy_url)
+    except ValueError:
+        return proxy_url
+    if not parsed.username and not parsed.password:
+        return proxy_url
+    redacted_netloc = parsed.hostname or ""
+    if parsed.port:
+        redacted_netloc = f"{redacted_netloc}:{parsed.port}"
+    return urlunparse(parsed._replace(netloc=redacted_netloc))
+
 
 class GenericDownloader(BaseDownloader):
     """
@@ -364,7 +384,8 @@ class GenericDownloader(BaseDownloader):
             env_proxy = settings.get("proxies", {}).get(parsed_url.scheme)
             if env_proxy:
                 logger.debug(
-                    f"检测到环境代理配置 {parsed_url.scheme}={env_proxy}，"
+                    f"检测到环境代理配置 {parsed_url.scheme}="
+                    f"{_redact_proxy_credentials(env_proxy)}，"
                     f"本次请求经该代理转发，CONNECT/转发目标为已校验钉定 IP: {url}"
                 )
 
