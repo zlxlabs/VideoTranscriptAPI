@@ -487,6 +487,13 @@ class SpeakerInferencer:
     # confidence 解析与降级
     # ------------------------------------------------------------------
 
+    # 缺失/无法解析的 confidence 找不到任何依据判断"该采信"，因此按此值
+    # （低于任何合理阈值）处理，而不是按 1.0（最高置信度）处理——ci-gate
+    # review（第5轮）指出，这个功能存在的意义就是"不确定的时候不要强行
+    # 套用推断结果"，缺失/无法解析恰恰是最不确定的情况，若默认按满分
+    # 采信，等于反向违背了这个功能本身的初衷。
+    _UNRESOLVABLE_CONFIDENCE_DEFAULT = 0.0
+
     def _resolve_confidence(self, confidence_raw, labels: List[str]) -> Dict[str, float]:
         """解析 LLM 返回的 confidence 字段
 
@@ -494,7 +501,9 @@ class SpeakerInferencer:
         - per-speaker dict（schema 定义的标准格式）：{label: number}
         - 整体标量（部分模型可能不严格遵循 schema）：number，应用到所有 speaker
 
-        解析失败（缺失/类型错误/超出 [0,1] 范围）按 1.0 处理并记录 warning。
+        缺失/类型错误等「无法解析」的情况按 _UNRESOLVABLE_CONFIDENCE_DEFAULT
+        （低置信度，会触发降级为占位符）处理并记录 warning。数值本身合法但
+        超出 [0,1] 范围的，走 clamp（不属于「无法解析」，保留原有行为）。
         """
         if isinstance(confidence_raw, dict):
             return {
@@ -506,30 +515,42 @@ class SpeakerInferencer:
             value = self._coerce_confidence_value(confidence_raw, "<all speakers>")
             return {label: value for label in labels}
 
+        default = self._UNRESOLVABLE_CONFIDENCE_DEFAULT
         if confidence_raw is not None:
             logger.warning(
                 f"Unrecognized confidence format ({type(confidence_raw).__name__}), "
-                f"defaulting all speakers to confidence=1.0"
+                f"treating all speakers as low confidence ({default}) -- downgraded to placeholder"
             )
         else:
             logger.warning(
-                "Missing confidence field in LLM response, defaulting all speakers to confidence=1.0"
+                "Missing confidence field in LLM response, treating all speakers as low "
+                f"confidence ({default}) -- downgraded to placeholder"
             )
-        return {label: 1.0 for label in labels}
+        return {label: default for label in labels}
 
-    @staticmethod
-    def _coerce_confidence_value(value, label: str) -> float:
-        """将单个 confidence 值规范化到 [0,1]，解析失败按 1.0 处理并记录 warning"""
+    @classmethod
+    def _coerce_confidence_value(cls, value, label: str) -> float:
+        """将单个 confidence 值规范化到 [0,1]
+
+        缺失或无法解析成浮点数时按 _UNRESOLVABLE_CONFIDENCE_DEFAULT（低置信度）
+        处理并记录 warning，触发后续降级为占位符的保守路径。数值本身能解析出来
+        但超出 [0,1] 范围的，clamp 到边界（不属于"无法解析"，保留原有行为）。
+        """
+        default = cls._UNRESOLVABLE_CONFIDENCE_DEFAULT
         if value is None:
-            logger.warning(f"Missing confidence for speaker '{label}', defaulting to 1.0")
-            return 1.0
+            logger.warning(
+                f"Missing confidence for speaker '{label}', treating as low confidence "
+                f"({default}) -- downgraded to placeholder"
+            )
+            return default
         try:
             parsed = float(value)
         except (TypeError, ValueError):
             logger.warning(
-                f"Invalid confidence value for speaker '{label}': {value!r}, defaulting to 1.0"
+                f"Invalid confidence value for speaker '{label}': {value!r}, treating as low "
+                f"confidence ({default}) -- downgraded to placeholder"
             )
-            return 1.0
+            return default
         if parsed < 0.0 or parsed > 1.0:
             clamped = max(0.0, min(1.0, parsed))
             logger.warning(
@@ -555,7 +576,13 @@ class SpeakerInferencer:
 
         for speaker in speakers:
             inferred_name = raw_mapping.get(speaker, speaker)
-            confidence = confidence_by_speaker.get(speaker, 1.0)
+            # 正常路径下 confidence_by_speaker 一定覆盖每个 speaker（由
+            # _resolve_confidence(raw_confidence, speakers) 或缓存重放构造），
+            # 这里的 .get 默认值只是防御性兜底；同样按低置信度处理，避免
+            # 万一真的缺键也被误判为满分采信。
+            confidence = confidence_by_speaker.get(
+                speaker, self._UNRESOLVABLE_CONFIDENCE_DEFAULT
+            )
             applied = confidence >= self.confidence_threshold
 
             if applied:

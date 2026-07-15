@@ -6,7 +6,7 @@ Covers the "per-speaker sampling + confidence downgrade" refactor:
 - Per-speaker sample count / char caps are enforced.
 - Low-confidence mappings are downgraded to a placeholder label ("SpeakerN"),
   not applied as a real name.
-- Missing/malformed confidence defaults to 1.0 (applied).
+- Missing/malformed confidence defaults to 0.0 (low confidence, downgraded).
 - Cache is only reused when it covers the current speaker set AND carries
   real confidence data; legacy (flat dict, pre-confidence-gating) cache
   format is treated as unusable and forces re-inference (ci-gate review).
@@ -636,7 +636,12 @@ class TestConfidenceGating(unittest.TestCase):
         # "beta" has no digit -> falls back to its 1-based position in speakers list (2nd).
         self.assertEqual(result["mapping"]["beta"], "说话人2")
 
-    def test_missing_confidence_defaults_to_one_and_applies(self):
+    def test_missing_confidence_field_defaults_to_low_and_downgrades(self):
+        """A response missing the `confidence` field entirely must NOT be
+        treated as maximally confident -- this feature exists specifically
+        to avoid applying uncertain inferences, and a missing confidence
+        signal is the most uncertain case of all. It must default to a LOW
+        confidence so the speaker gets downgraded to a placeholder."""
         inferencer = _make_inferencer(confidence_threshold=0.6)
         response = MagicMock()
         response.structured_output = {
@@ -651,18 +656,46 @@ class TestConfidenceGating(unittest.TestCase):
 
         result = inferencer.infer(speakers=["Speaker1", "Speaker2"], dialogs=dialogs, title="t")
 
-        self.assertEqual(result["meta"]["Speaker1"]["confidence"], 1.0)
-        self.assertTrue(result["meta"]["Speaker1"]["applied"])
-        self.assertEqual(result["mapping"]["Speaker1"], "张三")
+        self.assertEqual(result["meta"]["Speaker1"]["confidence"], 0.0)
+        self.assertFalse(result["meta"]["Speaker1"]["applied"])
+        self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
+        self.assertIn("Speaker1", result["low_confidence"])
 
-    def test_malformed_confidence_value_defaults_to_one(self):
+    def test_per_speaker_confidence_missing_key_defaults_to_low_and_downgrades(self):
+        """A per-speaker confidence dict that simply omits one speaker's key
+        (as opposed to containing an unparsable value) must also default to
+        low confidence for that speaker, not 1.0. The other speaker, whose
+        key IS present with a valid high value, must be unaffected."""
+        result = self._run_infer(
+            speaker_mapping={"Speaker1": "张三", "Speaker2": "李四"},
+            confidence={"Speaker2": 0.9},  # Speaker1 key missing entirely
+        )
+
+        self.assertEqual(result["meta"]["Speaker1"]["confidence"], 0.0)
+        self.assertFalse(result["meta"]["Speaker1"]["applied"])
+        self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
+        self.assertIn("Speaker1", result["low_confidence"])
+
+        self.assertEqual(result["meta"]["Speaker2"]["confidence"], 0.9)
+        self.assertTrue(result["meta"]["Speaker2"]["applied"])
+
+    def test_malformed_confidence_value_defaults_to_low_and_downgrades(self):
+        """A confidence value that cannot be parsed into a float (e.g. a
+        non-numeric string) must default to low confidence, not 1.0. A
+        sibling speaker with a valid, high confidence value in the same
+        response must be unaffected."""
         result = self._run_infer(
             speaker_mapping={"Speaker1": "张三", "Speaker2": "李四"},
             confidence={"Speaker1": "not-a-number", "Speaker2": 0.9},
         )
 
-        self.assertEqual(result["meta"]["Speaker1"]["confidence"], 1.0)
-        self.assertTrue(result["meta"]["Speaker1"]["applied"])
+        self.assertEqual(result["meta"]["Speaker1"]["confidence"], 0.0)
+        self.assertFalse(result["meta"]["Speaker1"]["applied"])
+        self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
+        self.assertIn("Speaker1", result["low_confidence"])
+
+        self.assertEqual(result["meta"]["Speaker2"]["confidence"], 0.9)
+        self.assertTrue(result["meta"]["Speaker2"]["applied"])
 
     def test_scalar_confidence_applies_to_all_speakers(self):
         result = self._run_infer(
