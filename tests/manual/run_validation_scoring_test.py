@@ -1,7 +1,7 @@
 """运行质量验证打分测试的便捷脚本
 
 使用方式：
-    python tests/llm/run_validation_scoring_test.py
+    python tests/manual/run_validation_scoring_test.py
 
 可选参数：
     --segments N    测试的片段数量（默认30）

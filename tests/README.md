@@ -9,9 +9,7 @@
 
 - `test_downloader.py` - 测试下载器工厂和各平台下载器
 - `test_transcriber.py` - 测试转录器功能
-- `test_generic_basic.py` - 通用下载器基础测试
-- `test_generic_url.py` - 通用下载器URL测试
-- `test_download_improvement.py` - 下载器改进测试
+- `test_generic_basic.py` - 通用下载器基础测试（网络请求已 mock）
 
 ### integration/ - 集成测试
 测试组件之间的集成和端到端功能。
@@ -25,10 +23,18 @@
 - `test_concurrent.py` - 并发测试：API的并发处理能力
 
 ### manual/ - 手动测试脚本
-用于开发和调试的手动测试工具。
+用于开发和调试的手动测试工具，需要真实网络/外部服务，默认不参与
+`pytest -q`（已在 pyproject.toml 的 norecursedirs 中排除）。
 
 - `test_transcribe.py` - 测试音视频文件转录功能
 - `llm_test.py` - 测试LLM文本校对和总结功能
+- `test_generic_url.py` - 通用下载器URL测试（含 input() 交互式提示，且会请求本地 API 服务）
+- `test_download_improvement.py` - 下载器改进测试（真实下载 soundhelix.com 大文件）
+- `test_summary_e2e_simple.py` - LLM 总结端到端测试（需要真实 LLM API 凭据）
+- `test_wechat_notification_flow.py` - 企业微信通知全流程测试（发送真实 webhook 消息）
+- `test_debug_webhook_order.py` - webhook 消息顺序调试脚本（无断言，仅供人工核对日志）
+- `test_feishu_real.py` - 飞书通知集成测试（发送真实 webhook 消息）
+- `test_bilibili_official_api_real.py` - Bilibili 官方 API 元数据抓取测试（真实请求 bilibili.com）
 
 ## 运行测试
 

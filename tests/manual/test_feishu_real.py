@@ -4,7 +4,7 @@ Integration tests for Feishu notification with real webhook.
 Sends actual messages to a Feishu bot webhook to verify end-to-end delivery.
 These tests require network access and a valid Feishu webhook.
 
-Run: uv run pytest tests/integration/test_feishu_real.py -v -s
+Run: VTAPI_TESTS_MANUAL=1 uv run pytest tests/manual/test_feishu_real.py -v -s
 """
 
 import time
