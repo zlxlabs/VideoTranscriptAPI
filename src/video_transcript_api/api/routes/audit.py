@@ -30,16 +30,33 @@ router = APIRouter(prefix="/api/audit", tags=["audit"])
 async def get_audit_stats(days: int = 30, user_info: dict = Depends(verify_token)):
     """获取 API 调用统计与 LLM token 用量统计（按 days 时间窗口）。
 
-    llm_usage 聚合块不区分调用方用户（token 用量按任务/阶段审计，非按用户维度），
-    与 user_stats 共用同一个 days 参数控制统计窗口。
+    user_stats 已按 user_id 过滤，天然只反映调用方自己的数据。llm_usage
+    则不同：llm_usage 表没有 user_id 列（token 用量按任务/阶段审计，不是
+    按用户维度设计的），usage_recorder.get_stats() 聚合的是全库所有调用方
+    的用量总和。多用户模式下，若不加区分地把这份全局聚合返回给任意认证
+    通过的用户，会把其他租户的调用规模/成本信息泄露给彼此（ci-gate
+    review）——因此只对能代表"系统所有者"视角的调用方暴露：
+    - 单用户模式（未配置多用户表，只用 fallback token 登录）：压根不存在
+      "其他用户"，全局聚合等价于当前唯一用户自己的用量，暴露没有隐私问题。
+    - 多用户模式下，只有仍用 legacy fallback token（is_legacy=True，通常是
+      部署者留给自己的运维入口）登录才能看到；_users_data 里配置的具体
+      租户用户看不到，llm_usage 返回 None。
     """
     try:
         user_id = user_info.get("user_id")
         # SQLite 查询为同步阻塞调用，放到线程池避免阻塞事件循环
         user_stats = await asyncio.to_thread(audit_logger.get_user_stats, user_id, days)
-        # LLM token 用量统计（按 stage 聚合 + 总计），查询失败时 usage_recorder
-        # 内部已 fail-open 返回全零结构，不会导致整个 /stats 接口 500
-        llm_usage = await asyncio.to_thread(usage_recorder.get_stats, days)
+
+        can_view_global_llm_usage = (
+            not user_manager.is_multi_user_mode() or user_info.get("is_legacy", False)
+        )
+        llm_usage = None
+        if can_view_global_llm_usage:
+            # LLM token 用量统计（按 stage 聚合 + 总计），查询失败时
+            # usage_recorder 内部已 fail-open 返回全零结构，不会导致整个
+            # /stats 接口 500
+            llm_usage = await asyncio.to_thread(usage_recorder.get_stats, days)
+
         return TranscribeResponse(
             code=200,
             message="获取统计信息成功",
