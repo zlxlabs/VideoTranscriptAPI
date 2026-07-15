@@ -31,6 +31,14 @@ _API_KEY_MASK = "sk-t**********3456"   # len=18, first4="sk-t", last4="3456"
 _WEBHOOK_A    = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=aaa"
 _WEBHOOK_B    = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=bbb"
 
+# A DIFFERENT full API key that collides with _API_KEY under _mask_api_key()
+# (same length=18, same first4="sk-t", same last4="3456", different middle) --
+# used to prove the auth/filter boundary is user_id, not the masked key,
+# since two distinct tenants can legitimately produce the same mask.
+_COLLIDING_API_KEY = "sk-tCOLLIDEXYZ3456"
+assert len(_COLLIDING_API_KEY) == len(_API_KEY)
+assert _COLLIDING_API_KEY != _API_KEY
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -458,6 +466,30 @@ class TestHistoryEndpoint:
         task_ids = {i["task_id"] for i in resp.json()["data"]["items"]}
         assert "other-task" not in task_ids
 
+    def test_masked_key_collision_does_not_leak_across_tenants(self, history_client):
+        """ci-gate review (cloud CI): the tenant boundary must be user_id, not
+        the truncated api_key_masked -- two DIFFERENT real API keys that
+        happen to share the same first-4/last-4 characters (and therefore
+        the same mask) must NOT see each other's history. Before the fix,
+        the WHERE clause filtered on api_key_masked, so this exact scenario
+        would have leaked "other-user"'s task into "test-user"'s results."""
+        client, setup = history_client
+        al = setup["audit_logger"]
+        insert = setup["insert_task"]
+
+        al.log_api_call(
+            api_key=_COLLIDING_API_KEY,
+            user_id="other-user",
+            endpoint="/api/transcribe",
+            task_id="colliding-task",
+        )
+        insert("colliding-task", "vt-colliding")
+
+        resp = client.get("/api/audit/history?status=all")
+        assert resp.status_code == 200
+        task_ids = {i["task_id"] for i in resp.json()["data"]["items"]}
+        assert "colliding-task" not in task_ids
+
 
 # ===========================================================================
 # GET /api/audit/history — search (q parameter)
@@ -681,6 +713,23 @@ class TestFilterOptionsEndpoint:
         assert resp.status_code == 200
         assert "https://other-webhook.example.com" not in resp.json()["data"]["webhooks"]
 
+    def test_masked_key_collision_does_not_leak_across_tenants(self, history_client):
+        """Same rationale as the /history collision test above -- a colliding
+        api_key_masked must not surface another tenant's webhook."""
+        client, setup = history_client
+        al = setup["audit_logger"]
+
+        al.log_api_call(
+            api_key=_COLLIDING_API_KEY,
+            user_id="other-user",
+            endpoint="/api/transcribe",
+            wechat_webhook="https://colliding-webhook.example.com",
+        )
+
+        resp = client.get("/api/audit/filter-options")
+        assert resp.status_code == 200
+        assert "https://colliding-webhook.example.com" not in resp.json()["data"]["webhooks"]
+
 
 # ===========================================================================
 # GET /api/audit/summary
@@ -772,6 +821,46 @@ class TestSummaryEndpoint:
 
         resp = client.get("/api/audit/summary?view_token=vt-other")
         assert resp.status_code == 403
+
+    def test_masked_key_collision_returns_403_not_leaked_summary(self, summary_setup):
+        """Same collision scenario as /history and /filter-options above --
+        a task owned by a colliding-but-different api_key must still return
+        403, not leak its summary to the current user_id."""
+        client, db_pair, mock_cache = summary_setup
+        al = db_pair["audit_logger"]
+
+        al.log_api_call(
+            api_key=_COLLIDING_API_KEY,
+            user_id="other-user",
+            endpoint="/api/transcribe",
+            task_id="task-colliding",
+        )
+
+        mock_cache.get_task_by_view_token.return_value = {"task_id": "task-colliding", "status": "success"}
+        mock_cache.get_view_data_by_token.return_value = {"status": "success", "summary": "secret"}
+
+        resp = client.get("/api/audit/summary?view_token=vt-colliding")
+        assert resp.status_code == 403
+
+    def test_ownership_check_exception_denies_access_fail_closed(self, summary_setup):
+        """ci-gate review (cloud CI): if the ownership-check query itself
+        raises (DB lock, connection error, etc.), the request must be denied
+        (503), not silently granted access. The previous fail-open behavior
+        would let ANY authenticated caller read a summary they don't own
+        whenever the audit DB hiccups."""
+        client, db_pair, mock_cache = summary_setup
+        al = db_pair["audit_logger"]
+        _log(al, "task-boom")
+
+        mock_cache.get_task_by_view_token.return_value = {"task_id": "task-boom", "status": "success"}
+        mock_cache.get_view_data_by_token.return_value = {"status": "success", "summary": "secret"}
+
+        with patch.object(
+            al, "_get_cursor", side_effect=RuntimeError("audit db unavailable")
+        ):
+            resp = client.get("/api/audit/summary?view_token=vt-boom")
+
+        assert resp.status_code == 503
 
     def test_empty_summary_returns_none_not_placeholder(self, summary_setup):
         """Completed task with empty summary text returns 200 with summary=None
