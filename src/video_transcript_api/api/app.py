@@ -29,10 +29,15 @@ async def _periodic_maintenance(config: dict) -> None:
 
     - storage.cache_retention_days：缓存（转录产物）保留天数，0 表示永久保留
     - storage.task_status_retention_days：task_status 表终态（success/failed）
-      任务记录保留天数，0 表示永久保留。注意 /view/{view_token} 链接依赖
-      task_status 行解析，因此该值不应短于 cache_retention_days；短于时
-      cleanup_task_status 会按缓存保留期执行（钳制并记 warning），缓存
-      永久保留（0）时任务状态清理会被跳过
+      任务记录保留天数，0 表示永久保留。task_status 行同时被两个下游消费方
+      依赖：/view/{view_token} 链接解析（get_view_data_by_token）与
+      /api/audit/history 的 LEFT JOIN（用于回填标题/平台/状态/view_token）。
+      因此该值不应短于 cache_retention_days 与 audit_log_retention_days
+      两者中的任何一个；短于时 cleanup_task_status 会钳制为二者的较大值
+      （并记 warning）（codex-review R10 #2）。cache_retention_days 或
+      audit_log_retention_days 任一为 0（永久保留）时，task_status 清理会
+      被整体跳过——只要有一个下游消费方永久保留，task_status 就必须永久
+      保留才能不断链
     - storage.audit_log_retention_days：审计日志保留天数，0 表示永久保留
 
     同一次维护周期内，cleanup_old_cache 与 cleanup_task_status 共用同一个
@@ -69,13 +74,22 @@ async def _periodic_maintenance(config: dict) -> None:
                 if deleted:
                     logger.info(f"定期清理：删除 {deleted} 条超过 {cache_days} 天的缓存记录")
             if task_status_days > 0:
-                # 同时传 cache_retention_days：view 链接解析依赖 task_status 行，
-                # 保留期倒挂（task < cache）时由 cleanup_task_status 钳制为缓存
-                # 保留期，避免缓存尚在、/view 链接已死（codex-review R3 #3）。
+                # 钳制目标取 cache_retention_days 与 audit_log_retention_days
+                # 两者的较大值：/view/{view_token} 依赖 cache 保留期，
+                # /api/audit/history 的 LEFT JOIN 依赖 audit 保留期，
+                # task_status 需要活得比两者都久（codex-review R10 #2）。
+                # 二者任一为 0（永久保留）时该消费方永不过期，task_status
+                # 也必须永久保留，因此把钳制目标同样置为 0（复用
+                # cleanup_task_status 中 cache_retention_days<=0 时"跳过
+                # 清理"的既有语义），而不是让 max() 把 0 当作"无要求"直接
+                # 被另一侧的正数盖过。
+                retention_floor_days = (
+                    0 if (cache_days <= 0 or audit_days <= 0) else max(cache_days, audit_days)
+                )
                 deleted = await asyncio.to_thread(
                     get_cache_manager().cleanup_task_status,
                     task_status_days,
-                    cache_days,
+                    retention_floor_days,
                     now=now,
                 )
                 if deleted:

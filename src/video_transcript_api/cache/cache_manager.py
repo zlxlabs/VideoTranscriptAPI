@@ -729,17 +729,23 @@ class CacheManager:
         非终态任务（queued/processing/calibrating）一律保留，避免误删仍在
         处理中、或崩溃后等待启动恢复扫描（recover_orphaned_tasks）的任务。
 
-        view_token 保护（codex-review R3 #3）：/view/{view_token} 的解析
-        链路完全依赖本表——get_view_data_by_token -> get_task_by_view_token
-        -> `SELECT * FROM task_status WHERE view_token = ?`，view_token 不
-        存在于 video_cache 表。因此删除终态任务行会立刻使其 view 链接失效，
-        即使底层缓存产物（video_cache 行 + 文件）仍在保留期内。为维持
-        "链接寿命不短于缓存寿命"的不变式，调用方传入 cache_retention_days
-        时：
-        - cache_retention_days > 0 且 retention_days 短于它：把生效保留期
-          钳制到 cache_retention_days（取二者较大值），并记 warning；
-        - cache_retention_days <= 0（缓存永久保留）：直接跳过清理并记
-          warning——缓存永不过期意味着 view 链接也必须永久有效；
+        下游消费方保护（codex-review R3 #3、R10 #2）：task_status 行同时被
+        两个下游消费方依赖——/view/{view_token} 的解析链路（get_view_data_
+        by_token -> get_task_by_view_token -> `SELECT * FROM task_status
+        WHERE view_token = ?`，view_token 不存在于 video_cache 表）与
+        /api/audit/history 的 LEFT JOIN（回填标题/平台/状态/view_token，
+        默认还会因 `COALESCE(t.status,'unknown')='success'` 过滤条件把
+        对应记录整个漏掉）。因此删除终态任务行会立刻影响这两者，即使底层
+        缓存产物（video_cache 行 + 文件）或审计日志仍在各自的保留期内。为
+        维持"task_status 寿命不短于任一下游消费方寿命"的不变式，调用方
+        （_periodic_maintenance）传入 cache_retention_days 参数时，实际传
+        的是它与 audit_log_retention_days 两者的较大值（详见该函数的钳制
+        目标计算）：
+        - 传入值 > 0 且 retention_days 短于它：把生效保留期钳制到该值
+          （取二者较大值），并记 warning；
+        - 传入值 <= 0（对应下游消费方之一永久保留）：直接跳过清理并记
+          warning——只要有一个下游消费方永不过期，task_status 也必须永久
+          有效；
         - 不传（None，向后兼容旧调用方/测试）：维持原有行为，不做钳制。
 
         时间比较基准优先取 completed_at，若为历史遗留的 NULL（理论上
@@ -757,7 +763,11 @@ class CacheManager:
                 终态记录会被删除
             cache_retention_days: 缓存（转录产物）保留天数配置，用于上述
                 view_token 保护钳制；None 表示调用方未提供、不钳制，
-                0 或负数表示缓存永久保留、跳过清理
+                0 或负数表示缓存永久保留、跳过清理。调用方也可能传入它与
+                其他下游消费方（如 audit_log_retention_days）保留期配置的
+                较大值，以确保 task_status 不早于任何一个消费方过期
+                （codex-review R10 #2，见 _periodic_maintenance 的钳制目标
+                计算）
             now: 计算 cutoff 所用的 UTC 时间基准（tz-aware）。不传（None）
                 时内部自行调用 `datetime.datetime.now(datetime.timezone.utc)`，
                 向后兼容旧调用方/单元测试；调用方需要与 cleanup_old_cache()
@@ -771,17 +781,19 @@ class CacheManager:
             if cache_retention_days is not None:
                 if cache_retention_days <= 0:
                     logger.warning(
-                        "task_status 清理已跳过：cache_retention_days<=0 表示缓存永久保留，"
-                        "而 /view/{view_token} 链接依赖 task_status 行解析，"
-                        "提前删除会造成缓存尚在、链接已死"
+                        "task_status 清理已跳过：调用方传入的保留期下限<=0，表示对应下游"
+                        "消费方（cache_retention_days 和/或 audit_log_retention_days）"
+                        "永久保留，而 /view/{view_token} 与 /api/audit/history 均依赖 "
+                        "task_status 行解析，提前删除会造成数据尚在、链接或审计历史已断"
                     )
                     return 0
                 if retention_days < cache_retention_days:
                     logger.warning(
-                        f"task_status_retention_days({retention_days}) 短于 "
-                        f"cache_retention_days({cache_retention_days})，已钳制为后者："
-                        "/view/{view_token} 链接依赖 task_status 行解析，"
-                        "提前删除会造成缓存尚在、链接已死"
+                        f"task_status_retention_days({retention_days}) 短于调用方传入的"
+                        f"保留期下限({cache_retention_days})（cache_retention_days 与 "
+                        "audit_log_retention_days 中较大的一个），已钳制为该下限："
+                        "/view/{view_token} 与 /api/audit/history 均依赖 task_status 行"
+                        "解析，提前删除会造成数据尚在、链接或审计历史已断"
                     )
                     retention_days = cache_retention_days
 
