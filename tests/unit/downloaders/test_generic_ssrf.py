@@ -875,3 +875,139 @@ class TestPinnedIpCandidateRetry:
 
         assert response.status_code == 200
         assert len(sent_urls) == 2
+
+
+# ---------------------------------------------------------------------------
+# 10. Cross-hop cookie propagation (codex-review P2).
+#
+# _dispatch_pinned_request deliberately builds a fresh requests.Session per
+# hop instead of using Session.send() (see its docstring), so it never gets
+# Session.send()'s automatic redirect/Cookie/hook pipeline for free. That
+# means a Set-Cookie issued on one hop's response was previously never
+# forwarded to the next hop's outgoing request -- some media servers 302 to
+# a download URL that requires a cookie set on the redirecting response to
+# authenticate, and without cross-hop propagation that download would
+# 401/403 even though plain `requests` with allow_redirects=True would have
+# succeeded. Fix: _safe_request threads a RequestsCookieJar shared across
+# every hop of one call, merging each response's Set-Cookie in and
+# attaching whatever has accumulated so far to every subsequent request.
+# ---------------------------------------------------------------------------
+
+
+def _redirect_response_with_cookie(location, cookie_name, cookie_value, domain):
+    """Build a fake redirect response whose .cookies is a real
+    RequestsCookieJar -- what HTTPAdapter.build_response() would have
+    populated from a real Set-Cookie header via extract_cookies_to_jar().
+    These tests patch requests.adapters.HTTPAdapter.send itself (the seam
+    build_response() normally runs inside), so that extraction step never
+    actually executes; setting .cookies directly here stands in for it and
+    lets the test focus on _safe_request's own cross-hop propagation logic,
+    which is what this fix actually touches."""
+    resp = MagicMock()
+    resp.is_redirect = True
+    resp.headers = {"Location": location}
+    jar = requests.cookies.RequestsCookieJar()
+    jar.set(cookie_name, cookie_value, domain=domain, path="/")
+    resp.cookies = jar
+    return resp
+
+
+class TestCookieCarriedAcrossRedirectHops:
+    def test_redirect_set_cookie_is_sent_on_next_hop(self, tmp_path):
+        """A Set-Cookie on the first hop's 302 response must show up in the
+        Cookie header of the second hop's outgoing request."""
+        downloader = _make_downloader(tmp_path)
+        url = "https://cdn.example.com/start"
+
+        sent_requests = []
+
+        def fake_send(request, **kwargs):
+            sent_requests.append(request)
+            if len(sent_requests) == 1:
+                return _redirect_response_with_cookie(
+                    "https://cdn.example.com/final",
+                    "session_token",
+                    "abc123",
+                    "cdn.example.com",
+                )
+            return _ok_response()
+
+        with patch(GETADDRINFO_PATH, side_effect=_public_addrinfo), patch(
+            BASE_SEND_PATH, side_effect=fake_send
+        ):
+            response = downloader._safe_request("get", url, timeout=5)
+
+        assert response.status_code == 200
+        assert len(sent_requests) == 2
+        # First hop is a fresh request: no cookie to send yet.
+        assert "Cookie" not in sent_requests[0].headers
+        # Second hop must carry the cookie set by the first hop's Set-Cookie.
+        assert sent_requests[1].headers.get("Cookie") == "session_token=abc123"
+
+    def test_cookie_domain_matches_real_hostname_despite_pinned_ip_url(self, tmp_path):
+        """Even though _dispatch_pinned_request rewrites the outgoing
+        request's URL to the pinned IP and moves the real hostname into the
+        Host header (PinnedIPHTTPAdapter.send()), the Cookie header must
+        still be computed against the real-hostname domain -- proving
+        cookie attachment isn't silently dropped just because the
+        wire-level connection target looks like an IP literal.
+
+        This holds because cookie attachment happens during
+        Session.prepare_request() inside _dispatch_pinned_request, *before*
+        PinnedIPHTTPAdapter.send() ever touches request.url: prepared.url
+        is still the real-hostname URL at that point, so
+        requests.cookies.MockRequest.get_host()/get_full_url() -- which
+        http.cookiejar's domain-matching machinery calls under the hood --
+        resolve to the real domain. The later IP rewrite only changes what
+        physically goes out as the connection target; it doesn't touch the
+        Cookie header that was already computed."""
+        downloader = _make_downloader(tmp_path)
+        url = "https://public.example.com/audio.mp3"
+
+        seed_cookies = requests.cookies.RequestsCookieJar()
+        seed_cookies.set("auth", "token789", domain="public.example.com", path="/")
+
+        with patch(GETADDRINFO_PATH, side_effect=_public_addrinfo), patch(
+            BASE_SEND_PATH, return_value=_ok_response()
+        ) as mock_send:
+            downloader._safe_request("get", url, timeout=5, cookies=seed_cookies)
+
+        sent_request = mock_send.call_args[0][0]
+        # Connection is still pinned to the resolved IP -- SSRF protection
+        # (the whole point of this dispatch path) is unaffected by adding
+        # cookie support.
+        assert sent_request.url == "https://93.184.216.34/audio.mp3"
+        assert sent_request.headers["Host"] == "public.example.com"
+        # ...yet the cookie scoped to the real hostname was still attached.
+        assert sent_request.headers.get("Cookie") == "auth=token789"
+
+    def test_redirect_hop_limit_and_pinning_not_regressed_with_cookies_flowing(
+        self, tmp_path
+    ):
+        """Cookie propagation must not weaken the two safety properties this
+        file exists to lock down: each hop is still pinned to its own
+        freshly validated IP, and the redirect hop cap still applies -- even
+        while a cookie is flowing across every hop."""
+        downloader = _make_downloader(tmp_path)
+        url = "https://public.example.com/start"
+
+        call_count = {"n": 0}
+
+        def fake_send(request, **kwargs):
+            call_count["n"] += 1
+            return _redirect_response_with_cookie(
+                f"https://public.example.com/hop{call_count['n']}",
+                "session_token",
+                "abc123",
+                "public.example.com",
+            )
+
+        with patch(GETADDRINFO_PATH, side_effect=_public_addrinfo), patch(
+            BASE_SEND_PATH, side_effect=fake_send
+        ):
+            with pytest.raises(InvalidURLError):
+                downloader.download_file(url, "video.mp4")
+
+        # Same limit as TestRedirectLimitExceeded: initial request + 5
+        # allowed redirect hops = 6 requests before the cap trips.
+        assert call_count["n"] == 6

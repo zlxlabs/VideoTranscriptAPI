@@ -86,12 +86,41 @@ class GenericDownloader(BaseDownloader):
         在每一跳都重新校验 + 钉定 IP（见 _dispatch_pinned_request），防止
         公网 URL 通过 302 等方式跳转到内网/云元数据地址造成 SSRF 绕过。
 
+        跨跳 Cookie 透传（codex-review P2）：_dispatch_pinned_request 每跳都
+        新建一个 requests.Session（详见该方法文档），刻意不经过
+        Session.send() 自带的自动重定向/Cookie/Hook 流水线，因此也不会像
+        requests 默认那样自动把上一跳响应的 Set-Cookie 带到下一跳请求。部分
+        媒体服务器用 302 + Set-Cookie 下发后续下载凭证（重定向目标校验这个
+        cookie 才放行），不手动透传会导致这类原本 requests 自动重定向能
+        成功的合法链接在这里变成 401/403。这里用一个贯穿本次调用全部跳数的
+        RequestsCookieJar 解决：每跳发起前把 jar 里已累积的 cookie 通过
+        cookies= 参数带上，每跳响应回来后把它的 Set-Cookie（response.cookies）
+        并入 jar，供后续跳使用。调用方若显式传入 cookies，作为初始种子合并
+        进这个跨跳 jar（当前代码库内没有调用方这样做，但保留该入口以兼容未
+        来调用方）。
+
+        域名匹配在钉定 IP 场景下依然正确：cookies 是在 _dispatch_pinned_request
+        内 session.prepare_request() 阶段被编码进 Cookie 请求头的，这一步发生
+        在 PinnedIPHTTPAdapter.send() 把 request.url 改写成钉定 IP、把 Host
+        头设为真实域名之前——此时 prepared.url 仍是未改写的真实域名 URL，
+        requests.cookies.MockRequest.get_host()/get_full_url() 据此算出的
+        "请求域名"就是真实域名，不会因为最终连接目标是 IP 字面量而匹配失败
+        或被拒绝（unit 测试
+        TestCookieCarriedAcrossRedirectHops.test_cookie_domain_matches_real_hostname_despite_pinned_ip_url
+        直接断言了这一点，而不是仅凭读源码推断）。响应端同理：
+        PinnedIPHTTPAdapter.send() 在改写 request.url/Host 头之后才调用
+        super().send()，而 HTTPAdapter.build_response() 正是用这个已改写过
+        的 request 对象调用 extract_cookies_to_jar() 提取 Set-Cookie——此时
+        request.headers['Host'] 已经是真实域名，MockRequest.get_full_url()
+        会优先用它重建"期望的域名"，所以收到的 Set-Cookie 依然被正确归属到
+        真实域名，而不是钉定 IP。
+
         参数:
             method: 'head' 或 'get'
             url: 请求 URL
-            **kwargs: 透传给底层请求的参数（如 timeout、stream、headers）。
-                      不要传入 allow_redirects，本方法自己手动处理重定向，
-                      从不让底层库自动跳转
+            **kwargs: 透传给底层请求的参数（如 timeout、stream、headers、
+                      cookies）。不要传入 allow_redirects，本方法自己手动
+                      处理重定向，从不让底层库自动跳转
 
         返回:
             requests.Response: 最终（非重定向）响应
@@ -102,8 +131,17 @@ class GenericDownloader(BaseDownloader):
         current_url = url
         redirect_count = 0
 
+        cookie_jar = requests.cookies.RequestsCookieJar()
+        caller_cookies = kwargs.pop("cookies", None)
+        if caller_cookies:
+            cookie_jar = requests.cookies.merge_cookies(cookie_jar, caller_cookies)
+
         while True:
-            response = self._dispatch_pinned_request(method, current_url, **kwargs)
+            response = self._dispatch_pinned_request(
+                method, current_url, cookies=cookie_jar, **kwargs
+            )
+            # 合并本跳响应的 Set-Cookie，供下一跳（如果还有）使用
+            cookie_jar = requests.cookies.merge_cookies(cookie_jar, response.cookies)
 
             if response.is_redirect:
                 redirect_count += 1
@@ -224,7 +262,9 @@ class GenericDownloader(BaseDownloader):
             method: 'head' 或 'get'
             url: 请求 URL（尚未做过 SSRF 校验）
             **kwargs: 透传给 HTTPAdapter.send 的参数（timeout、stream 等）；
-                      headers 会被合并进构造出的请求中
+                      headers、cookies 会被合并进构造出的请求中（cookies 由
+                      _safe_request 的跨跳 Cookie Jar 透传，用于承接上一跳
+                      响应下发的 Set-Cookie，见其文档"跨跳 Cookie 透传"一节）
 
         返回:
             requests.Response
@@ -268,11 +308,16 @@ class GenericDownloader(BaseDownloader):
 
         parsed_url = urlparse(url)
         headers = kwargs.pop("headers", None)
+        # 跨跳 Cookie 透传（见 _safe_request 文档）：session.prepare_request()
+        # 会把它编码进 prepared.headers['Cookie']，且这一步发生在下方 pin
+        # 到 IP 之前，prepared.url 此时仍是真实域名，Cookie 域名匹配按真实
+        # 域名进行，不受最终连接目标是 IP 字面量影响。
+        cookies = kwargs.pop("cookies", None)
 
         session = requests.Session()
         try:
             prepared = session.prepare_request(
-                requests.Request(method.upper(), url, headers=headers)
+                requests.Request(method.upper(), url, headers=headers, cookies=cookies)
             )
             # PinnedIPHTTPAdapter.send() 会把 request.url 原地改写成钉定 IP
             # 的形式（见 utils/pinned_ip_adapter.py），供下面多候选重试循环
