@@ -259,14 +259,30 @@ class SpeakerInferencer:
     def _apply_global_sample_budget(self, sample_groups: Dict[str, Dict]) -> Dict[str, Dict]:
         """对采样总字符数施加全局上限，防止说话人数量异常多时 prompt 失控
 
-        背景：diarization 切分错误可能产生几十个虚假说话人标签，若每人都
-        累加到 max_chars_per_speaker 上限，总量会随说话人数线性膨胀，导致
-        prompt 达到数十万字符（上下文超限或 token 成本失控）。
+        背景：diarization 切分错误可能产生几十甚至上千个虚假说话人标签，若
+        每人都累加到 max_chars_per_speaker 上限，总量会随说话人数线性膨胀，
+        导致 prompt 达到数十万字符（上下文超限或 token 成本失控）。
+
+        ci-gate review 指出：早期实现只累加 own_samples + context_before 的
+        裸文本长度作为"该说话人占用的预算"，但真正写入 prompt 的是
+        _format_sample_dialogs 的渲染结果，它还会给每个说话人加上分组头、
+        时间戳标注、小节标题、发言前缀、列表符号等结构性文本。当说话人数量
+        异常多且每人文本很短时，这部分固定渲染开销本身就能让实际 prompt
+        远超预算，而裸文本长度完全没算到这部分。
+
+        修复：预算判断改用 _render_speaker_segment 渲染出的真实片段长度
+        （与 _format_sample_dialogs 复用同一份渲染逻辑），而不是自行估算
+        渲染格式的开销——避免"模板改了、预算估算跟着漂移"的脆弱性。
+        _format_sample_dialogs 用 "\n\n" 拼接各说话人片段，因此除第一个
+        保留的说话人外，每多保留一个都要把这个分隔符的长度也计入预算，
+        这样累加出的 total_chars 精确等于最终拼接字符串（rstrip 之前）的
+        长度，不是近似值。
 
         裁剪策略保持简单：按「说话人首次出现时间」顺序遍历（与
-        _format_sample_dialogs 的排序一致），逐个说话人累加其采样字符数；
-        一旦加入某说话人会超出全局预算，该说话人及之后（更晚出场）的说话人
-        全部停止采样——不做部分截断，也不做跨说话人的动态再分配。
+        _format_sample_dialogs 的排序一致），逐个说话人累加其渲染片段的
+        真实字符数；一旦加入某说话人会超出全局预算，该说话人及之后（更晚
+        出场）的说话人全部停止采样——不做部分截断，也不做跨说话人的动态
+        再分配。
 
         取舍：这意味着预算耗尽时最晚出场的说话人最先被裁掉，是刻意接受的
         简单降级。被裁掉的说话人不在返回结果中，调用方（_extract_sample_dialogs
@@ -274,14 +290,17 @@ class SpeakerInferencer:
         交由 LLM 依赖其余上下文推断或保留原始标签——复用 P1b 已有逻辑，
         不新造一套裁剪后的展示方式。
 
+        复杂度：每个说话人的渲染片段只在本函数中计算一次（O(1) 增量，不
+        依赖其他说话人的片段），整体是 O(n)（n 为说话人总数），不会因为
+        说话人数量达到几百上千而出现 O(n²) 的重复渲染开销。
+
         Args:
             sample_groups: 裁剪前的按说话人采样结果（键为 speaker，值同
                 _extract_sample_dialogs 返回结构）
 
         Returns:
-            裁剪后的采样结果，总字符数（own_samples + context_before，两者
-            都会被 _format_sample_dialogs 写入最终 prompt）不超过
-            max_total_sample_chars
+            裁剪后的采样结果；对其调用 _format_sample_dialogs 得到的最终
+            渲染字符串长度（rstrip 之前）不超过 max_total_sample_chars
         """
         ordered = sorted(
             sample_groups.items(), key=lambda kv: kv[1].get("first_seen_index", 0)
@@ -290,16 +309,12 @@ class SpeakerInferencer:
         kept: Dict[str, Dict] = {}
         total_chars = 0
         for speaker, info in ordered:
-            # own_samples 是该说话人自己的发言样本；context_before 是首次
-            # 出场前的其他说话人发言（用于辅助 LLM 推断称呼）——两者都会被
-            # _format_sample_dialogs 完整写入 prompt，预算必须覆盖两者之和，
-            # 否则说话人数量多、context_dialogs 配置较大时，即使 own_samples
-            # 总量未超限，实际 prompt 仍可能远超 max_total_sample_chars。
-            own_chars = sum(len(text) for text in info.get("own_samples") or [])
-            context_chars = sum(
-                len(text) for _, text in info.get("context_before") or []
-            )
-            speaker_chars = own_chars + context_chars
+            segment = self._render_speaker_segment(speaker, info)
+            # _format_sample_dialogs 用 "\n\n" 连接各片段：第一个保留的
+            # 说话人不需要前置分隔符，之后每个都要多算 2 个字符，才能让
+            # total_chars 精确对齐最终拼接结果的长度。
+            separator_chars = 2 if kept else 0
+            speaker_chars = separator_chars + len(segment)
             if total_chars + speaker_chars > self.max_total_sample_chars:
                 logger.warning(
                     f"Global sample char budget ({self.max_total_sample_chars}) exhausted "
@@ -393,11 +408,52 @@ class SpeakerInferencer:
         minutes, secs = divmod(remainder, 60)
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
+    def _render_speaker_segment(self, speaker: str, info: Dict) -> str:
+        """渲染单个说话人在 prompt 中对应的文本片段
+
+        从 _format_sample_dialogs 中拆出：该方法按说话人分组渲染、组间无
+        交叉引用（不依赖其他说话人的渲染结果），因此可以把"单个说话人的
+        渲染片段"作为独立单元，同时供 _format_sample_dialogs 拼接最终
+        prompt、供 _apply_global_sample_budget 计算该说话人真实占用的预算
+        ——两处用同一份格式化逻辑，保证"预算算的就是最终写入 prompt 的
+        内容"，不会因为渲染模板改动而跟着漂移。
+
+        Args:
+            speaker: 说话人标签
+            info: 该说话人的采样信息（_extract_sample_dialogs 返回结构中的
+                单个 value：first_seen_time / context_before / own_samples）
+
+        Returns:
+            该说话人对应的渲染文本（多行，不含片段间分隔空行）
+        """
+        lines = []
+        first_seen_time = info.get("first_seen_time")
+        header = f"[{speaker}]"
+        if first_seen_time:
+            header += f"（首次出现于 {first_seen_time}）"
+        lines.append(header)
+
+        context = info.get("context_before") or []
+        if context:
+            lines.append("  上下文（出场前他人发言，可能包含称呼线索）：")
+            for ctx_speaker, ctx_text in context:
+                lines.append(f"    [{ctx_speaker}]: {ctx_text}")
+
+        own_samples = info.get("own_samples") or []
+        if own_samples:
+            lines.append("  本人发言样本：")
+            for text in own_samples:
+                lines.append(f"    - {text}")
+
+        return "\n".join(lines)
+
     def _format_sample_dialogs(self, sample_groups: Dict[str, Dict]) -> str:
         """将按说话人采样结果格式化为 prompt 文本
 
         按「说话人首次出现时间」排序分组，每组标注首次出现时间戳（如有）、
-        出场前上下文（他人称呼线索）与本人发言样本。
+        出场前上下文（他人称呼线索）与本人发言样本。各说话人的渲染片段由
+        _render_speaker_segment 生成（与 _apply_global_sample_budget 的预算
+        计算复用同一份逻辑），此处只负责按顺序拼接。
 
         Args:
             sample_groups: _extract_sample_dialogs 的输出
@@ -410,29 +466,10 @@ class SpeakerInferencer:
             key=lambda kv: kv[1].get("first_seen_index", 0),
         )
 
-        parts = []
-        for speaker, info in ordered:
-            first_seen_time = info.get("first_seen_time")
-            header = f"[{speaker}]"
-            if first_seen_time:
-                header += f"（首次出现于 {first_seen_time}）"
-            parts.append(header)
-
-            context = info.get("context_before") or []
-            if context:
-                parts.append("  上下文（出场前他人发言，可能包含称呼线索）：")
-                for ctx_speaker, ctx_text in context:
-                    parts.append(f"    [{ctx_speaker}]: {ctx_text}")
-
-            own_samples = info.get("own_samples") or []
-            if own_samples:
-                parts.append("  本人发言样本：")
-                for text in own_samples:
-                    parts.append(f"    - {text}")
-
-            parts.append("")
-
-        return "\n".join(parts).rstrip()
+        segments = [
+            self._render_speaker_segment(speaker, info) for speaker, info in ordered
+        ]
+        return "\n\n".join(segments).rstrip()
 
     # ------------------------------------------------------------------
     # confidence 解析与降级

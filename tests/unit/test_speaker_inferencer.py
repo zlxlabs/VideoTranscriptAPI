@@ -13,6 +13,7 @@ Covers the "per-speaker sampling + confidence downgrade" refactor:
 - Prompt sample groups are ordered by first-appearance time.
 """
 
+import time
 import unittest
 from unittest.mock import MagicMock
 
@@ -179,31 +180,73 @@ class TestGlobalSampleCharBudget(unittest.TestCase):
         """Shrinking the budget must cause later-appearing speakers to be
         dropped sooner (an acceptable degradation: latest arrivals lose out).
 
-        context_dialogs=0 isolates this test to own_samples accounting only
-        (each dialog line here is from a different speaker, so with the
-        default context_dialogs=2 every speaker's context_before would pull
-        in the preceding speaker's line too -- exercised separately and
-        deliberately in test_context_before_counts_toward_global_budget)."""
+        context_dialogs=0 isolates this test to own_samples + per-speaker
+        rendering overhead accounting only (each dialog line here is from a
+        different speaker, so with the default context_dialogs=2 every
+        speaker's context_before would pull in the preceding speaker's line
+        too -- exercised separately and deliberately in
+        test_context_before_counts_toward_global_budget).
+
+        The budget that fits exactly 2 speakers is derived from the real
+        renderer (_render_speaker_segment) instead of a hand-computed magic
+        number: pre-fix, "100 raw chars x 2 <= 250" was a valid mental model
+        because the budget only summed raw text; post-fix the budget also
+        counts each speaker's header/timestamp/section-label/prefix
+        overhead, so a hardcoded 250 would silently fit only 1 speaker
+        (not 2) and would need re-tuning by hand every time the prompt
+        template changes -- exactly the fragility this fix eliminates.
+        """
         speakers = [f"Speaker{i}" for i in range(10)]
         dialogs = [
             _make_dialog(speaker, "x" * 100, start_time=float(i))
             for i, speaker in enumerate(speakers)
         ]
 
+        # Probe with an effectively unlimited budget to get each speaker's
+        # unclipped sample info, then measure the real rendered length of
+        # the first 2 speakers' segments (the same renderer that produces
+        # the final prompt) to compute the exact budget that fits both.
+        probe = _make_inferencer(
+            samples_per_speaker=1,
+            max_chars_per_speaker=100,
+            max_total_sample_chars=10**9,
+            context_dialogs=0,
+        )
+        unclipped = probe._extract_sample_dialogs(dialogs, speakers)
+        two_speaker_budget = (
+            len(probe._render_speaker_segment("Speaker0", unclipped["Speaker0"]))
+            + 2  # "\n\n" segment separator used by _format_sample_dialogs
+            + len(probe._render_speaker_segment("Speaker1", unclipped["Speaker1"]))
+        )
+
         inferencer = _make_inferencer(
             samples_per_speaker=1,
             max_chars_per_speaker=100,
-            max_total_sample_chars=250,
+            max_total_sample_chars=two_speaker_budget,
             context_dialogs=0,
         )
         samples = inferencer._extract_sample_dialogs(dialogs, speakers)
 
-        # Budget fits exactly 2 full speakers (100 + 100 <= 250, +1 more would
-        # exceed it), so the earliest-appearing speakers survive and the rest
-        # are excluded via the existing "no samples" fallback path.
+        # Budget fits exactly 2 full speakers; 1 more would exceed it, so
+        # the earliest-appearing speakers survive and the rest are excluded
+        # via the existing "no samples" fallback path.
         self.assertIn("Speaker0", samples)
         self.assertIn("Speaker1", samples)
+        self.assertNotIn("Speaker2", samples)
         self.assertNotIn("Speaker9", samples)
+
+        # Shrinking the budget by just 1 char below the 2-speaker threshold
+        # must drop Speaker1 sooner -- proving the cap genuinely reacts to
+        # the configured limit, not a fixed constant.
+        smaller = _make_inferencer(
+            samples_per_speaker=1,
+            max_chars_per_speaker=100,
+            max_total_sample_chars=two_speaker_budget - 1,
+            context_dialogs=0,
+        )
+        smaller_samples = smaller._extract_sample_dialogs(dialogs, speakers)
+        self.assertIn("Speaker0", smaller_samples)
+        self.assertNotIn("Speaker1", smaller_samples)
 
     def test_late_appearing_speaker_still_sampled_when_budget_not_exhausted(self):
         """Regression guard for the P1b fix: as long as the global budget has
@@ -265,6 +308,123 @@ class TestGlobalSampleCharBudget(unittest.TestCase):
         # raw -- well past the 1500 cap, so some speakers must have been
         # dropped for this assertion to be meaningful (not a vacuous pass).
         self.assertLess(len(samples), num_speakers)
+
+    def test_many_tiny_speakers_actual_rendered_prompt_stays_within_budget(self):
+        """ci-gate review (4th round): the global budget summed own_samples +
+        context_before RAW TEXT, but the actual prompt is produced by
+        _format_sample_dialogs, which adds per-speaker structural text on top
+        of that raw text -- a group header ("[SpeakerN]"), a "first seen at"
+        timestamp annotation, a "context" section label, a "[speaker]: "
+        prefix per context line, a "own dialog samples" section label, and a
+        "- " bullet prefix per own line. When diarization goes badly wrong
+        and produces hundreds of spurious speaker labels with only a
+        character or two of text each, this fixed per-speaker rendering
+        overhead dominates: the raw-text sum stays tiny (looks safe to the
+        old budget check) while the real rendered prompt blows way past
+        max_total_sample_chars.
+
+        This test builds exactly that pathological scenario (400 fake
+        speakers, 1-2 CJK characters of dialog each, plus a timestamp and
+        one context line per speaker so every structural element the
+        renderer adds is exercised) and asserts against the ACTUAL rendered
+        string that will be written into the prompt -- not against a
+        recomputed approximation of it. Pre-fix, this fails (rendered length
+        >> budget) because the cap never even triggers; post-fix, the budget
+        computation reuses the same per-speaker renderer that produces the
+        final prompt, so it cannot drift from what actually gets written.
+
+        Margin: the fixed implementation accumulates each kept speaker's
+        segment length plus its "\\n\\n" join separator, so the running
+        total is an exact (not approximate) prefix of the final joined
+        string's length before the trailing .rstrip(); rstrip only ever
+        removes trailing whitespace, so the real rendered length can only be
+        <= that running total <= max_total_sample_chars. No slack is needed
+        -- the margin is 0.
+        """
+        num_speakers = 400
+        speakers = [f"Speaker{i}" for i in range(num_speakers)]
+        dialogs = []
+        t = 0.0
+        for speaker in speakers:
+            # One short line from the *previous* fake speaker so
+            # context_dialogs=1 gives every speaker a (tiny) context line,
+            # exercising the context-section rendering overhead too.
+            dialogs.append(_make_dialog("Host", "喂", start_time=t))
+            t += 1.0
+            dialogs.append(_make_dialog(speaker, "嗯", start_time=t))
+            t += 1.0
+
+        inferencer = _make_inferencer(
+            samples_per_speaker=1,
+            max_chars_per_speaker=400,
+            context_dialogs=1,
+            max_total_sample_chars=8000,
+        )
+        samples = inferencer._extract_sample_dialogs(dialogs, ["Host"] + speakers)
+        rendered = inferencer._format_sample_dialogs(samples)
+
+        # The bug this test guards against: raw own+context text is minuscule
+        # (a handful of chars per speaker) and would never trip a budget
+        # computed from raw text alone, even though the real rendered prompt
+        # is many times larger once structural overhead is included.
+        raw_total = sum(
+            len(s) for info in samples.values() for s in info.get("own_samples") or []
+        ) + sum(
+            len(text)
+            for info in samples.values()
+            for _, text in info.get("context_before") or []
+        )
+        self.assertLess(
+            raw_total,
+            8000,
+            "sanity check: raw text alone must stay far under budget so this "
+            "scenario actually exercises the rendering-overhead gap, not a "
+            "second raw-text overflow",
+        )
+
+        # The real assertion: what actually gets written into the prompt
+        # must not exceed the configured budget. Zero margin -- see
+        # docstring for why the fixed implementation guarantees this exactly.
+        self.assertLessEqual(len(rendered), 8000)
+
+        # With 400 speakers and a non-trivial per-speaker rendering overhead,
+        # the budget must have actually dropped some speakers for this test
+        # to be meaningful (not a vacuous pass).
+        self.assertLess(len(samples), num_speakers + 1)
+
+    def test_extract_sample_dialogs_stays_fast_with_many_speakers(self):
+        """The per-speaker budget check must stay O(n) in the number of
+        speakers -- re-rendering every already-kept speaker's segment on
+        each new addition (an O(n^2) approach) would turn into a real
+        latency cliff once diarization produces a thousand-plus spurious
+        speaker labels. This is a coarse regression guard, not a strict
+        micro-benchmark: it just needs to catch an accidental return to
+        quadratic behavior."""
+        num_speakers = 1200
+        speakers = [f"Speaker{i}" for i in range(num_speakers)]
+        dialogs = [
+            _make_dialog(speaker, "hi", start_time=float(i))
+            for i, speaker in enumerate(speakers)
+        ]
+
+        inferencer = _make_inferencer(
+            samples_per_speaker=1,
+            max_chars_per_speaker=400,
+            context_dialogs=2,
+            max_total_sample_chars=8000,
+        )
+
+        started_at = time.monotonic()
+        samples = inferencer._extract_sample_dialogs(dialogs, speakers)
+        inferencer._format_sample_dialogs(samples)
+        elapsed = time.monotonic() - started_at
+
+        self.assertLess(
+            elapsed,
+            2.0,
+            f"extraction + rendering took {elapsed:.3f}s for {num_speakers} "
+            f"speakers, which suggests non-linear (e.g. O(n^2)) behavior",
+        )
 
 
 class TestPromptGroupRendering(unittest.TestCase):
