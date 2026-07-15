@@ -122,10 +122,20 @@ class SpeakerInferencer:
                     confidence_by_speaker = {
                         speaker: cached_meta[speaker]["confidence"] for speaker in speakers
                     }
+                    # 缓存里的 meta 可能来自"从未采样、直接 identity fallback"
+                    # 的说话人（sampled=False），必须原样保留这个标记一起重放，
+                    # 否则这些说话人会被当成"送入过 LLM 但 confidence 缺失"，
+                    # 走错路径降级成「说话人N」。缺失该字段的旧条目默认按
+                    # True（已采样）处理，保持原有的阈值重判行为不变。
+                    sampled = {
+                        speaker: cached_meta[speaker].get("sampled", True)
+                        for speaker in speakers
+                    }
                     return self._apply_confidence_gate(
                         speakers=speakers,
                         raw_mapping=raw_mapping,
                         confidence_by_speaker=confidence_by_speaker,
+                        sampled=sampled,
                     )
                 logger.info(
                     f"Cached speaker_mapping does not cover current speakers "
@@ -180,12 +190,21 @@ class SpeakerInferencer:
             for speaker in speakers:
                 raw_mapping.setdefault(speaker, speaker)
 
-            confidence_by_speaker = self._resolve_confidence(raw_confidence, speakers)
+            # confidence 只对实际送入 LLM 的说话人（sample_groups 的 key，
+            # 与 prompt 里的 original_speakers 一致）求解——被预算/无有效
+            # 发言排除的说话人压根没被问过，对它们调用 _resolve_confidence
+            # 只会产生误导性的"缺失 confidence"告警。它们的最终归宿由下面
+            # 的 sampled 标记决定，不经过置信度门槛判断。
+            confidence_by_speaker = self._resolve_confidence(
+                raw_confidence, list(sample_groups.keys())
+            )
+            sampled = {speaker: speaker in sample_groups for speaker in speakers}
 
             inference_result = self._apply_confidence_gate(
                 speakers=speakers,
                 raw_mapping=raw_mapping,
                 confidence_by_speaker=confidence_by_speaker,
+                sampled=sampled,
             )
 
             # 缓存结果（新格式：mapping + meta + low_confidence）
@@ -564,8 +583,18 @@ class SpeakerInferencer:
         speakers: List[str],
         raw_mapping: Dict[str, str],
         confidence_by_speaker: Dict[str, float],
+        sampled: Optional[Dict[str, bool]] = None,
     ) -> Dict:
         """按置信度阈值决定是否采用推断姓名，低于阈值降级为「说话人N」
+
+        Args:
+            sampled: 每个 speaker 是否被实际采样并送入 LLM 判断过。为 False
+                （预算裁剪或压根没有有效发言）的 speaker 从未获得任何推断
+                依据，必须强制走 identity fallback（保留原始标签），不能
+                和"送入 LLM 但 confidence 缺失/无法解析"混用同一条降级为
+                「说话人N」占位符的路径——前者是压根没问过，后者是 LLM
+                给出了不确定的判断，两者对用户的含义完全不同。
+                缺省（None）视为全员已采样，兼容不需要区分的旧调用方。
 
         Returns:
             {"mapping": {...}, "meta": {...}, "low_confidence": [...]}
@@ -575,9 +604,26 @@ class SpeakerInferencer:
         low_confidence: List[str] = []
 
         for speaker in speakers:
+            was_sampled = True if sampled is None else sampled.get(speaker, True)
+
+            if not was_sampled:
+                mapping[speaker] = speaker
+                low_confidence.append(speaker)
+                meta[speaker] = {
+                    "name": speaker,
+                    "confidence": self._UNRESOLVABLE_CONFIDENCE_DEFAULT,
+                    "applied": False,
+                    "sampled": False,
+                }
+                logger.info(
+                    f"Speaker '{speaker}' was never sampled/sent to the LLM "
+                    "(excluded by budget or no valid dialog), keeping original label"
+                )
+                continue
+
             inferred_name = raw_mapping.get(speaker, speaker)
             # 正常路径下 confidence_by_speaker 一定覆盖每个 speaker（由
-            # _resolve_confidence(raw_confidence, speakers) 或缓存重放构造），
+            # _resolve_confidence(raw_confidence, ...) 或缓存重放构造），
             # 这里的 .get 默认值只是防御性兜底；同样按低置信度处理，避免
             # 万一真的缺键也被误判为满分采信。
             confidence = confidence_by_speaker.get(
@@ -601,6 +647,7 @@ class SpeakerInferencer:
                 "name": inferred_name,
                 "confidence": confidence,
                 "applied": applied,
+                "sampled": True,
             }
 
         return {"mapping": mapping, "meta": meta, "low_confidence": low_confidence}
@@ -620,11 +667,22 @@ class SpeakerInferencer:
         return f"说话人{n}"
 
     def _identity_fallback(self, speakers: List[str]) -> Dict:
-        """无法推断时的兜底：所有说话人使用原始标签，标记为未采信"""
+        """无法推断时的兜底：所有说话人使用原始标签，标记为未采信
+
+        meta 里附带 "sampled": False，与 _apply_confidence_gate 的同名字段
+        保持形状一致——虽然这两条路径的结果目前都不会被写入缓存（调用方
+        没有传 platform/media_id 走到这里，或者是异常兜底），但形状统一
+        能避免未来读取 meta 的代码要额外处理"某些路径没有这个 key"。
+        """
         return {
             "mapping": {speaker: speaker for speaker in speakers},
             "meta": {
-                speaker: {"name": speaker, "confidence": 0.0, "applied": False}
+                speaker: {
+                    "name": speaker,
+                    "confidence": 0.0,
+                    "applied": False,
+                    "sampled": False,
+                }
                 for speaker in speakers
             },
             "low_confidence": list(speakers),

@@ -709,6 +709,106 @@ class TestConfidenceGating(unittest.TestCase):
         self.assertTrue(result["meta"]["Speaker2"]["applied"])
 
 
+class TestUnsampledSpeakerIdentityFallback(unittest.TestCase):
+    """A speaker excluded from sampling entirely (global budget, or simply no
+    valid dialog) must keep its ORIGINAL label -- not get downgraded to a
+    "SpeakerN" placeholder. Regression guard: fixing "missing confidence
+    defaults to low" (so a speaker the LLM was asked about but didn't answer
+    for gets downgraded) must not also sweep in speakers the LLM was never
+    asked about at all -- those have zero inference signal and belong to the
+    pre-existing identity-fallback path, not the low-confidence-downgrade
+    path. ci-gate review: "应将未采样标签与 LLM 返回的低置信度猜测区分开，
+    前者保留原标签"."""
+
+    def test_budget_excluded_speaker_keeps_original_label_not_placeholder(self):
+        speakers = ["alpha", "beta", "gamma"]
+        dialogs = [
+            _make_dialog(speaker, "x" * 100, start_time=float(i))
+            for i, speaker in enumerate(speakers)
+        ]
+
+        # Derive a budget that fits exactly "alpha" and "beta" (same probe
+        # technique as test_budget_is_configurable_and_triggers_earlier_when_smaller),
+        # so "gamma" is deterministically excluded by the global sample budget.
+        probe = _make_inferencer(
+            samples_per_speaker=1,
+            max_chars_per_speaker=100,
+            max_total_sample_chars=10**9,
+            context_dialogs=0,
+        )
+        unclipped = probe._extract_sample_dialogs(dialogs, speakers)
+        two_speaker_budget = (
+            len(probe._render_speaker_segment("alpha", unclipped["alpha"]))
+            + 2
+            + len(probe._render_speaker_segment("beta", unclipped["beta"]))
+        )
+
+        inferencer = _make_inferencer(
+            samples_per_speaker=1,
+            max_chars_per_speaker=100,
+            max_total_sample_chars=two_speaker_budget,
+            context_dialogs=0,
+            confidence_threshold=0.6,
+        )
+        # The LLM is only ever prompted with "alpha"/"beta" context (gamma
+        # was excluded before the prompt was built), so a realistic mock
+        # response has no opinion on "gamma" at all.
+        inferencer.llm_client.call = MagicMock(
+            return_value=_mock_llm_response(
+                speaker_mapping={"alpha": "张三", "beta": "李四"},
+                confidence={"alpha": 0.9, "beta": 0.9},
+            )
+        )
+
+        result = inferencer.infer(speakers=speakers, dialogs=dialogs, title="t")
+
+        self.assertEqual(result["mapping"]["alpha"], "张三")
+        self.assertEqual(result["mapping"]["beta"], "李四")
+        # The bug: gamma used to come out as "说话人3" (fabricated
+        # placeholder) instead of keeping its own original label.
+        self.assertEqual(result["mapping"]["gamma"], "gamma")
+        self.assertFalse(result["meta"]["gamma"]["applied"])
+        self.assertFalse(result["meta"]["gamma"]["sampled"])
+        self.assertIn("gamma", result["low_confidence"])
+
+    def test_cache_replay_preserves_unsampled_identity_across_threshold_changes(self):
+        """A cached meta entry marked sampled=False (never sent to the LLM in
+        the original inference) must stay identity-mapped on cache replay
+        regardless of how the confidence_threshold is reconfigured afterward
+        -- it has no confidence signal to re-gate, unlike a genuinely sampled
+        speaker's cached confidence value."""
+        cache_manager = MagicMock()
+        cache_manager.get_speaker_mapping.return_value = {
+            "mapping": {"alpha": "张三", "gamma": "gamma"},
+            "meta": {
+                "alpha": {"name": "张三", "confidence": 0.9, "applied": True, "sampled": True},
+                "gamma": {
+                    "name": "gamma",
+                    "confidence": 0.0,
+                    "applied": False,
+                    "sampled": False,
+                },
+            },
+            "low_confidence": ["gamma"],
+        }
+        # Even a permissive (near-zero) threshold must not resurrect a
+        # fabricated "applied" name for gamma -- it was never inferred.
+        inferencer = _make_inferencer(cache_manager=cache_manager, confidence_threshold=0.01)
+
+        result = inferencer.infer(
+            speakers=["alpha", "gamma"],
+            dialogs=[_make_dialog("alpha", "hi", 0.0)],
+            title="t",
+            platform="p",
+            media_id="m",
+        )
+
+        inferencer.llm_client.call.assert_not_called()
+        self.assertEqual(result["mapping"]["gamma"], "gamma")
+        self.assertFalse(result["meta"]["gamma"]["applied"])
+        self.assertIn("gamma", result["low_confidence"])
+
+
 class TestCacheCoverageValidation(unittest.TestCase):
     """Cached mapping must cover the current speaker set to be reused."""
 
