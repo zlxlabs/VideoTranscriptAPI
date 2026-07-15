@@ -27,17 +27,69 @@ def cm(tmp_path):
     manager.close()
 
 
+def _stub_head_response():
+    """Definitive, non-redirect, no-content-type response for the HEAD probe
+    GenericDownloader._is_media_url runs on RECORDER_URL. Lets get_video_info
+    fall through to its normal "not a media link" ValueError (a soft,
+    non-terminal failure the caller already handles) instead of hanging on
+    an unconfigured MagicMock that looks redirect-like forever.
+    """
+    resp = MagicMock()
+    resp.is_redirect = False
+    resp.headers = {}
+    return resp
+
+
 @pytest.fixture
 def env(cm, monkeypatch):
     """Real (tmp) CacheManager as the status source of truth; mute notifications.
 
     The SSRF validator does real DNS resolution and blocks non-allowlisted
     private IPs — orthogonal to the behavior under test, so stub it out.
+    Both entry points need stubbing: validate_url_safe (used for simple
+    pass/fail gates) and validate_url_safe_with_ips (used by
+    GenericDownloader's IP-pinned request path, see downloaders/generic.py
+    and utils/pinned_ip_adapter.py — codex-review R5 #1) — otherwise
+    GenericDownloader.get_metadata()/get_video_info() still hit the real,
+    unstubbed DNS-rebinding-safe validator for RECORDER_URL's non-http
+    scheme and raise for real.
+
+    codex-review R6 #1 changed validate_url_safe_with_ip's "no pinned IP"
+    contract: GenericDownloader now fails closed (raises InvalidURLError,
+    a _TERMINAL_RESOLVER_ERRORS member that process_transcription
+    re-raises instead of turning into a soft failure) when the IP is None,
+    instead of silently falling back to an unpinned request. The old
+    `lambda url: (url, None)` stub therefore now makes the RECORDER_URL
+    metadata probe below blow up as a *terminal* error, which is not what
+    this fixture is modeling (it only wants SSRF/DNS mechanics out of the
+    way). Returning a real dummy IP keeps GenericDownloader on its normal
+    pinned-dispatch path; requests.adapters.HTTPAdapter.send is stubbed too
+    so that path never actually touches the network.
+
+    codex-review R8 #2 switched GenericDownloader's real dispatch call from
+    validate_url_safe_with_ip (single IP) to validate_url_safe_with_ips
+    (candidate list, for pinned-IP retry across DNS candidates) — the
+    fixture stubs both: validate_url_safe_with_ips because that's what
+    generic.py actually calls now, and validate_url_safe_with_ip because
+    it's still a public, independently-callable function (kept for
+    backward compatibility) that other code could reasonably call.
     """
     monkeypatch.setattr(svc, "cache_manager", cm)
     monkeypatch.setattr(svc, "get_notification_router", lambda: MagicMock())
     monkeypatch.setattr(
         "video_transcript_api.utils.url_validator.validate_url_safe", lambda url: url
+    )
+    monkeypatch.setattr(
+        "video_transcript_api.utils.url_validator.validate_url_safe_with_ip",
+        lambda url: (url, "203.0.113.10"),
+    )
+    monkeypatch.setattr(
+        "video_transcript_api.utils.url_validator.validate_url_safe_with_ips",
+        lambda url, max_candidates=3: (url, ["203.0.113.10"]),
+    )
+    monkeypatch.setattr(
+        "requests.adapters.HTTPAdapter.send",
+        lambda self, request, **kwargs: _stub_head_response(),
     )
     return cm
 

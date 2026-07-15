@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import threading
 
 from fastapi import FastAPI, Request
@@ -24,27 +25,75 @@ from .services.transcription import process_llm_queue, process_task_queue
 
 async def _periodic_maintenance(config: dict) -> None:
     """
-    每日维护任务：按保留期清理过期缓存与审计日志，防止磁盘无限增长。
+    每日维护任务：按保留期清理过期缓存、任务状态记录与审计日志，防止磁盘/数据库无限增长。
 
     - storage.cache_retention_days：缓存（转录产物）保留天数，0 表示永久保留
+    - storage.task_status_retention_days：task_status 表终态（success/failed）
+      任务记录保留天数，0 表示永久保留。task_status 行同时被两个下游消费方
+      依赖：/view/{view_token} 链接解析（get_view_data_by_token）与
+      /api/audit/history 的 LEFT JOIN（用于回填标题/平台/状态/view_token）。
+      因此该值不应短于 cache_retention_days 与 audit_log_retention_days
+      两者中的任何一个；短于时 cleanup_task_status 会钳制为二者的较大值
+      （并记 warning）（codex-review R10 #2）。cache_retention_days 或
+      audit_log_retention_days 任一为 0（永久保留）时，task_status 清理会
+      被整体跳过——只要有一个下游消费方永久保留，task_status 就必须永久
+      保留才能不断链
     - storage.audit_log_retention_days：审计日志保留天数，0 表示永久保留
+
+    同一次维护周期内，cleanup_old_cache 与 cleanup_task_status 共用同一个
+    UTC now（本函数每轮循环只调用一次 datetime.now），避免两次清理各自独
+    立调用 now() 之间出现竞态窗口：cleanup_old_cache 遍历删除文件可能耗时
+    数秒甚至更久，若 cleanup_task_status 随后再独立取一次更晚的 now，两者
+    cutoff 不一致，落在窗口内的记录会出现"缓存判定保留、任务判定删除"，
+    打破"task_status 至少活得跟 cache 一样久"的不变式（codex-review R10 #1）。
     """
     logger = get_logger()
     storage = config.get("storage", {})
     cache_days = int(storage.get("cache_retention_days", 0) or 0)
+    task_status_days = int(storage.get("task_status_retention_days", 180) or 0)
     audit_days = int(storage.get("audit_log_retention_days", 180) or 0)
 
-    if cache_days <= 0 and audit_days <= 0:
-        logger.info("缓存与审计日志保留期均未配置，定期清理任务退出")
+    if cache_days <= 0 and task_status_days <= 0 and audit_days <= 0:
+        logger.info("缓存、任务状态与审计日志保留期均未配置，定期清理任务退出")
         return
 
-    logger.info(f"定期清理任务已启动: cache_retention_days={cache_days}, audit_log_retention_days={audit_days}")
+    logger.info(
+        f"定期清理任务已启动: cache_retention_days={cache_days}, "
+        f"task_status_retention_days={task_status_days}, audit_log_retention_days={audit_days}"
+    )
     while True:
         try:
+            # 本轮维护周期共用的 UTC 时间基准：只调用一次 now()，同时传给
+            # cleanup_old_cache 和 cleanup_task_status，避免二者各自独立
+            # 调用 now() 之间开出竞态窗口（codex-review R10 #1）。
+            now = datetime.datetime.now(datetime.timezone.utc)
             if cache_days > 0:
-                deleted = await asyncio.to_thread(get_cache_manager().cleanup_old_cache, cache_days)
+                deleted = await asyncio.to_thread(
+                    get_cache_manager().cleanup_old_cache, cache_days, now=now
+                )
                 if deleted:
                     logger.info(f"定期清理：删除 {deleted} 条超过 {cache_days} 天的缓存记录")
+            if task_status_days > 0:
+                # 钳制目标取 cache_retention_days 与 audit_log_retention_days
+                # 两者的较大值：/view/{view_token} 依赖 cache 保留期，
+                # /api/audit/history 的 LEFT JOIN 依赖 audit 保留期，
+                # task_status 需要活得比两者都久（codex-review R10 #2）。
+                # 二者任一为 0（永久保留）时该消费方永不过期，task_status
+                # 也必须永久保留，因此把钳制目标同样置为 0（复用
+                # cleanup_task_status 中 cache_retention_days<=0 时"跳过
+                # 清理"的既有语义），而不是让 max() 把 0 当作"无要求"直接
+                # 被另一侧的正数盖过。
+                retention_floor_days = (
+                    0 if (cache_days <= 0 or audit_days <= 0) else max(cache_days, audit_days)
+                )
+                deleted = await asyncio.to_thread(
+                    get_cache_manager().cleanup_task_status,
+                    task_status_days,
+                    retention_floor_days,
+                    now=now,
+                )
+                if deleted:
+                    logger.info(f"定期清理：删除 {deleted} 条超过 {task_status_days} 天的终态任务状态记录")
             if audit_days > 0:
                 deleted = await asyncio.to_thread(get_audit_logger().cleanup_old_logs, audit_days)
                 if deleted:

@@ -641,19 +641,53 @@ class CacheManager:
             logger.error(f"验证缓存完整性失败: {e}")
             return 0
 
-    def cleanup_old_cache(self, days: int = 30) -> int:
+    def cleanup_old_cache(self, days: int = 30, now: Optional[datetime.datetime] = None) -> int:
         """
         清理旧缓存
-        
+
         Args:
             days: 保留最近几天的缓存
-            
+            now: 计算 cutoff 所用的 UTC 时间基准（tz-aware）。不传（None）时
+                内部自行调用 `datetime.datetime.now(datetime.timezone.utc)`，
+                向后兼容旧调用方/单元测试。
+
+                codex-review R10 #1：cleanup_old_cache 遍历并删除文件可能耗
+                时数秒甚至更久，若调用方随后再独立调用一次
+                cleanup_task_status()（其内部再各自调用一次 now()），两次
+                cutoff 会因为耗时而不一致，在其间开出一个竞态窗口——某条
+                缓存记录的 updated_at 恰好落在窗口内时，缓存清理判定"未到
+                cutoff、保留"，但稍晚计算的任务清理 cutoff 已经越过它，判定
+                "删除"，从而打破"task_status 至少活得跟 cache 一样久"的不
+                变式。调用方（_periodic_maintenance）在同一次维护周期内应
+                只计算一次 now，显式传给 cleanup_old_cache 和
+                cleanup_task_status 两者共用。
+
         Returns:
             int: 删除的记录数
+
+        时钟基准（codex-review P2）：video_cache.updated_at 由 SQLite 的
+        `CURRENT_TIMESTAMP` 写入，固定为 UTC、无时区后缀的
+        "YYYY-MM-DD HH:MM:SS" 格式。cutoff 必须以同样的 UTC 基准计算，否则
+        会跟 cleanup_task_status() 的 UTC cutoff 出现时钟偏差：此前这里用
+        的是不带时区的本地 `datetime.datetime.now()`，运行环境若在 UTC
+        以西时区，本地时间比 UTC 慢，算出的字符串形式 cutoff 会比真实 UTC
+        cutoff 更"早"（变相缩短保留期）；以东时区则相反（变相延长保留
+        期）。这个偏差还会破坏"task_status 保留期钳制到 cache_retention_
+        days"这条不变式的前提——二者本应共用同一把时钟量出的 cutoff，否
+        则会在两次清理之间开出一个窗口：task_status 行已按 UTC 基准被删
+        （对应 view_token 立即失效），但底层缓存因本地时间偏移还没到这
+        里算出的 cutoff、仍然存活（或反过来）。这里改为与
+        cleanup_task_status()、AuditLogger.cleanup_old_logs() 一致的写
+        法：取带时区的 UTC now 计算 cutoff，再格式化为不带时区后缀的字符
+        串参与比较，不依赖 sqlite3 模块的隐式 datetime adapter（该
+        adapter 自 Python 3.12 起已弃用）。
         """
         try:
-            cutoff_date = datetime.datetime.now() - datetime.timedelta(days=days)
-            
+            effective_now = now if now is not None else datetime.datetime.now(datetime.timezone.utc)
+            cutoff_date = (
+                effective_now - datetime.timedelta(days=days)
+            ).strftime('%Y-%m-%d %H:%M:%S')
+
             with self._get_cursor() as cursor:
                 # 获取要删除的记录
                 cursor.execute("""
@@ -677,11 +711,113 @@ class CacheManager:
                 deleted_count = len(records_to_delete)
                 logger.info(f"清理了 {deleted_count} 条旧缓存记录")
                 return deleted_count
-                
+
         except Exception as e:
             logger.error(f"清理缓存失败: {e}")
             return 0
-            
+
+    def cleanup_task_status(
+        self,
+        retention_days: int,
+        cache_retention_days: Optional[int] = None,
+        now: Optional[datetime.datetime] = None,
+    ) -> int:
+        """
+        清理过期的终态任务状态记录（task_status 表）
+
+        仅删除已进入终态（success/failed）且完成时间早于保留期的记录；
+        非终态任务（queued/processing/calibrating）一律保留，避免误删仍在
+        处理中、或崩溃后等待启动恢复扫描（recover_orphaned_tasks）的任务。
+
+        下游消费方保护（codex-review R3 #3、R10 #2）：task_status 行同时被
+        两个下游消费方依赖——/view/{view_token} 的解析链路（get_view_data_
+        by_token -> get_task_by_view_token -> `SELECT * FROM task_status
+        WHERE view_token = ?`，view_token 不存在于 video_cache 表）与
+        /api/audit/history 的 LEFT JOIN（回填标题/平台/状态/view_token，
+        默认还会因 `COALESCE(t.status,'unknown')='success'` 过滤条件把
+        对应记录整个漏掉）。因此删除终态任务行会立刻影响这两者，即使底层
+        缓存产物（video_cache 行 + 文件）或审计日志仍在各自的保留期内。为
+        维持"task_status 寿命不短于任一下游消费方寿命"的不变式，调用方
+        （_periodic_maintenance）传入 cache_retention_days 参数时，实际传
+        的是它与 audit_log_retention_days 两者的较大值（详见该函数的钳制
+        目标计算）：
+        - 传入值 > 0 且 retention_days 短于它：把生效保留期钳制到该值
+          （取二者较大值），并记 warning；
+        - 传入值 <= 0（对应下游消费方之一永久保留）：直接跳过清理并记
+          warning——只要有一个下游消费方永不过期，task_status 也必须永久
+          有效；
+        - 不传（None，向后兼容旧调用方/测试）：维持原有行为，不做钳制。
+
+        时间比较基准优先取 completed_at，若为历史遗留的 NULL（理论上
+        update_task_status/recover_orphaned_tasks 在把状态写为终态的同一
+        条 UPDATE 里必定同步写 completed_at = CURRENT_TIMESTAMP，此处仅作
+        防御性兜底）则回退 created_at，避免这类边缘记录永远无法被回收。
+        task_status 的 created_at/completed_at 均由 SQLite 的
+        `CURRENT_TIMESTAMP` 写入，固定为 UTC、无时区后缀的
+        "YYYY-MM-DD HH:MM:SS" 格式；这里用同样格式生成 cutoff 字符串参与
+        比较，避免依赖 sqlite3 模块的隐式 datetime adapter（该 adapter 从
+        Python 3.12 起已弃用），做法与 AuditLogger.cleanup_old_logs 一致。
+
+        Args:
+            retention_days: 保留天数，早于 (当前 UTC 时间 - retention_days) 的
+                终态记录会被删除
+            cache_retention_days: 缓存（转录产物）保留天数配置，用于上述
+                view_token 保护钳制；None 表示调用方未提供、不钳制，
+                0 或负数表示缓存永久保留、跳过清理。调用方也可能传入它与
+                其他下游消费方（如 audit_log_retention_days）保留期配置的
+                较大值，以确保 task_status 不早于任何一个消费方过期
+                （codex-review R10 #2，见 _periodic_maintenance 的钳制目标
+                计算）
+            now: 计算 cutoff 所用的 UTC 时间基准（tz-aware）。不传（None）
+                时内部自行调用 `datetime.datetime.now(datetime.timezone.utc)`，
+                向后兼容旧调用方/单元测试；调用方需要与 cleanup_old_cache()
+                共用同一个 cutoff 时显式传入（见 cleanup_old_cache 的 now
+                参数说明，codex-review R10 #1）
+
+        Returns:
+            int: 实际删除的记录数
+        """
+        try:
+            if cache_retention_days is not None:
+                if cache_retention_days <= 0:
+                    logger.warning(
+                        "task_status 清理已跳过：调用方传入的保留期下限<=0，表示对应下游"
+                        "消费方（cache_retention_days 和/或 audit_log_retention_days）"
+                        "永久保留，而 /view/{view_token} 与 /api/audit/history 均依赖 "
+                        "task_status 行解析，提前删除会造成数据尚在、链接或审计历史已断"
+                    )
+                    return 0
+                if retention_days < cache_retention_days:
+                    logger.warning(
+                        f"task_status_retention_days({retention_days}) 短于调用方传入的"
+                        f"保留期下限({cache_retention_days})（cache_retention_days 与 "
+                        "audit_log_retention_days 中较大的一个），已钳制为该下限："
+                        "/view/{view_token} 与 /api/audit/history 均依赖 task_status 行"
+                        "解析，提前删除会造成数据尚在、链接或审计历史已断"
+                    )
+                    retention_days = cache_retention_days
+
+            effective_now = now if now is not None else datetime.datetime.now(datetime.timezone.utc)
+            cutoff = (
+                effective_now - datetime.timedelta(days=retention_days)
+            ).strftime('%Y-%m-%d %H:%M:%S')
+
+            with self._get_cursor() as cursor:
+                cursor.execute('''
+                    DELETE FROM task_status
+                    WHERE status IN (?, ?)
+                      AND COALESCE(completed_at, created_at) < ?
+                ''', (TaskStatus.SUCCESS, TaskStatus.FAILED, cutoff))
+
+                deleted_count = cursor.rowcount
+
+            logger.info(f"清理了 {deleted_count} 条超过 {retention_days} 天的终态任务状态记录")
+            return deleted_count
+
+        except Exception as e:
+            logger.error(f"清理任务状态记录失败: {e}")
+            return 0
+
     def close(self):
         """关闭数据库连接"""
         if hasattr(self._local, 'connection'):

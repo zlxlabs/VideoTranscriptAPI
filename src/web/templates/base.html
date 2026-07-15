@@ -94,7 +94,32 @@
         .header .meta a:hover {
             text-decoration: underline;
         }
-        
+
+        /* ========== 站内导航（提交任务 / 任务历史） ========== */
+        .site-nav {
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .site-nav-link {
+            color: var(--header-text);
+            text-decoration: none;
+            font-size: 0.85rem;
+            padding: 4px 12px;
+            border: 1px solid currentColor;
+            border-radius: 6px;
+            opacity: 0.75;
+            transition: opacity 0.2s ease, background 0.2s ease;
+        }
+
+        .site-nav-link:hover {
+            opacity: 1;
+            background: rgba(128, 128, 128, 0.15);
+        }
+
         .section {
             padding: 30px;
             border-bottom: 1px solid var(--border-primary);
@@ -298,7 +323,12 @@
             .header h1 {
                 font-size: 1.5rem;
             }
-            
+
+            .site-nav-link {
+                font-size: 0.78rem;
+                padding: 3px 10px;
+            }
+
             .section {
                 padding: 20px;
             }
@@ -964,6 +994,10 @@
             <button id="theme-toggle" class="theme-toggle" title="切换到浅色模式">
                 ☀️
             </button>
+            <nav class="site-nav">
+                <a href="/add_task_by_web" class="site-nav-link">📝 提交任务</a>
+                <a href="/static/history.html" class="site-nav-link">📋 任务历史</a>
+            </nav>
             <h1>{{ title or "视频转录查看器" }}</h1>
             {% if author or url %}
             <div class="meta">
@@ -1082,9 +1116,51 @@
         });
     </script>
 
-    <!-- 一键复制脚本 -->
+    <!-- 通用剪贴板复制脚本（供 URL 复制、正文复制共用） -->
     <script>
+        /**
+         * 降级复制方案：通过隐藏 textarea + execCommand('copy') 实现，
+         * 用于 navigator.clipboard 不可用（如非 HTTPS 环境）时的兜底。
+         * 使用 textarea 而非 input，保证多行正文复制时换行不丢失。
+         */
+        function fallbackCopyToClipboard(text) {
+            var tmp = document.createElement('textarea');
+            tmp.value = text;
+            // 移出可视区域，避免影响页面布局与滚动
+            tmp.style.position = 'fixed';
+            tmp.style.top = '-9999px';
+            tmp.style.left = '-9999px';
+            tmp.style.opacity = '0';
+            document.body.appendChild(tmp);
+            tmp.focus();
+            tmp.select();
+            try {
+                document.execCommand('copy');
+            } finally {
+                document.body.removeChild(tmp);
+            }
+        }
+
+        /**
+         * 通用剪贴板复制函数：优先使用 navigator.clipboard API，
+         * 不可用或失败时自动降级到 execCommand 方案。
+         * @param {string} text 待复制的文本内容
+         * @param {Function} onDone 复制完成后的回调（用于驱动按钮的“已复制”视觉反馈）
+         */
+        function copyTextToClipboard(text, onDone) {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(onDone).catch(function() {
+                    fallbackCopyToClipboard(text);
+                    onDone();
+                });
+            } else {
+                fallbackCopyToClipboard(text);
+                onDone();
+            }
+        }
+
         document.addEventListener('DOMContentLoaded', function() {
+            // 场景一：一键复制链接 URL（沿用原有的按钮文案短暂反馈样式）
             document.querySelectorAll('.quick-copy-btn').forEach(function(btn) {
                 btn.addEventListener('click', function() {
                     var path = btn.getAttribute('data-path');
@@ -1092,26 +1168,32 @@
                     var actionEl = btn.querySelector('.quick-copy-action');
                     var originalText = actionEl.textContent;
 
-                    navigator.clipboard.writeText(fullUrl).then(function() {
+                    copyTextToClipboard(fullUrl, function() {
                         btn.classList.add('copied');
                         actionEl.textContent = 'Copied!';
                         setTimeout(function() {
                             btn.classList.remove('copied');
                             actionEl.textContent = originalText;
                         }, 1500);
-                    }).catch(function() {
-                        // Fallback: select from temp input
-                        var tmp = document.createElement('input');
-                        tmp.value = fullUrl;
-                        document.body.appendChild(tmp);
-                        tmp.select();
-                        document.execCommand('copy');
-                        document.body.removeChild(tmp);
+                    });
+                });
+            });
+
+            // 场景二：复制正文内容（内容总结 / 校对文本），复制目标区块的纯文本
+            document.querySelectorAll('.copy-content-btn').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    var targetId = btn.getAttribute('data-copy-target');
+                    var targetEl = targetId ? document.getElementById(targetId) : null;
+                    if (!targetEl) return;
+                    var text = targetEl.innerText || targetEl.textContent || '';
+                    var originalHtml = btn.innerHTML;
+
+                    copyTextToClipboard(text, function() {
                         btn.classList.add('copied');
-                        actionEl.textContent = 'Copied!';
+                        btn.textContent = '✅ 已复制';
                         setTimeout(function() {
                             btn.classList.remove('copied');
-                            actionEl.textContent = originalText;
+                            btn.innerHTML = originalHtml;
                         }, 1500);
                     });
                 });
