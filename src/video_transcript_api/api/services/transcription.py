@@ -134,7 +134,10 @@ class TranscribeRequest(BaseModel):
     """转录请求数据模型"""
 
     url: str = Field(..., description="视频URL（平台链接，用于 view_token 和缓存）")
-    use_speaker_recognition: bool = Field(False, description="是否使用说话人识别功能")
+    # StrictBool（同 ProcessingOptions，ci-gate review）：这个开关会切换转录
+    # 引擎（FunASR vs CapsWriter）并影响缓存 key，同样不该被 "yes"/"1" 之类
+    # 宽松字符串静默触发。
+    use_speaker_recognition: StrictBool = Field(False, description="是否使用说话人识别功能")
     wechat_webhook: Optional[str] = Field(
         None, description="企业微信webhook地址"
     )

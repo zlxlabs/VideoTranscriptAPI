@@ -53,15 +53,21 @@ class TestProcessingOptionsSchema:
         with pytest.raises(Exception):
             ProcessingOptions(calibrate="not-a-bool-and-not-coercible")
 
-    def test_loosely_coercible_string_is_rejected_not_silently_coerced(self):
+    @pytest.mark.parametrize("field_name", ["calibrate", "summarize"])
+    @pytest.mark.parametrize(
+        "loose_value", ["yes", "no", "1", "0", "true", "false", 1, 0]
+    )
+    def test_loosely_coercible_value_is_rejected_not_silently_coerced(
+        self, field_name, loose_value
+    ):
         """ci-gate review: plain Pydantic `bool` would silently coerce
-        "yes"/"1"/"no"/"0" into True/False, contradicting the API's documented
-        JSON-boolean contract -- a caller's string typo could unknowingly
-        toggle a real, cost-bearing LLM stage on/off. StrictBool must reject
-        these instead of coercing them."""
-        for loose_value in ("yes", "no", "1", "0", "true", "false"):
-            with pytest.raises(Exception):
-                ProcessingOptions(calibrate=loose_value)
+        "yes"/"1"/"no"/"0" strings AND JSON numbers 1/0 into True/False,
+        contradicting the API's documented JSON-boolean contract -- a
+        caller's string/number typo could unknowingly toggle a real,
+        cost-bearing LLM stage on/off. StrictBool must reject these instead
+        of coercing them. Covers both StrictBool fields, not just calibrate."""
+        with pytest.raises(Exception):
+            ProcessingOptions(**{field_name: loose_value})
 
     def test_transcribe_request_defaults_processing_options_to_none(self):
         req = TranscribeRequest(url="https://example.com/v1")
@@ -74,6 +80,19 @@ class TestProcessingOptionsSchema:
         )
         assert req.processing_options.calibrate is False
         assert req.processing_options.summarize is True
+
+    @pytest.mark.parametrize("loose_value", ["yes", "1", "0", "true", 1, 0])
+    def test_use_speaker_recognition_rejects_loosely_coercible_value(
+        self, loose_value
+    ):
+        """ci-gate review: same StrictBool contract as ProcessingOptions --
+        this field switches the transcription engine and affects the cache
+        key, so it must not silently coerce "yes"/"1"/1/0 either."""
+        with pytest.raises(Exception):
+            TranscribeRequest(
+                url="https://example.com/v1",
+                use_speaker_recognition=loose_value,
+            )
 
 
 class TestNormalizeProcessingOptions:
@@ -231,17 +250,37 @@ class TestTranscribeTaskDictProcessingOptions:
         )
         assert resp.status_code == 422
 
-    def test_loosely_coercible_boolean_string_returns_422(self, client):
-        """ci-gate review: "yes"/"1" etc. are NOT rejected by plain bool's
+    @pytest.mark.parametrize("field_name", ["calibrate", "summarize"])
+    @pytest.mark.parametrize("loose_value", ["yes", "1", "0", "true", 1, 0])
+    def test_loosely_coercible_boolean_value_returns_422(
+        self, client, field_name, loose_value
+    ):
+        """ci-gate review: "yes"/"1"/1/0 etc. are NOT rejected by plain bool's
         lenient coercion (they'd silently become True/False) -- unlike the
         already-covered "yes-please" case above, which fails even lenient
-        coercion. This is the actual gap StrictBool closes."""
-        for loose_value in ("yes", "1", "0", "true"):
-            resp = client.post(
-                "/api/transcribe",
-                json={
-                    "url": "https://www.youtube.com/watch?v=abc123",
-                    "processing_options": {"calibrate": loose_value},
-                },
-            )
-            assert resp.status_code == 422, f"value {loose_value!r} should be rejected"
+        coercion. This is the actual gap StrictBool closes. Covers both
+        StrictBool fields (calibrate/summarize), plus JSON numbers."""
+        resp = client.post(
+            "/api/transcribe",
+            json={
+                "url": "https://www.youtube.com/watch?v=abc123",
+                "processing_options": {field_name: loose_value},
+            },
+        )
+        assert resp.status_code == 422, f"{field_name}={loose_value!r} should be rejected"
+
+    @pytest.mark.parametrize("loose_value", ["yes", "1", "0", "true", 1, 0])
+    def test_loosely_coercible_use_speaker_recognition_returns_422(
+        self, client, loose_value
+    ):
+        """use_speaker_recognition switches the transcription engine and
+        affects the cache key -- the same StrictBool contract applies
+        (ci-gate review, extending the ProcessingOptions fix to this field)."""
+        resp = client.post(
+            "/api/transcribe",
+            json={
+                "url": "https://www.youtube.com/watch?v=abc123",
+                "use_speaker_recognition": loose_value,
+            },
+        )
+        assert resp.status_code == 422, f"value {loose_value!r} should be rejected"
