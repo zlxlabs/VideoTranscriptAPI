@@ -370,8 +370,18 @@ async def get_task_summary(
     # 但查询本身抛异常（数据库锁/连接问题等）时，绝不能等同于"允许访问"——
     # 之前的 fail-open 会让任何认证用户在审计库异常时读到不属于自己的摘要，
     # 这里改为 fail-closed，异常时拒绝访问并返回 503（云端 CI codex gate）。
+    #
+    # 注意：条件只看 task_id，不再要求 user_id 非空（本地 codex review 追加
+    # 发现）——多用户配置里缺失 user_id 字段时，_load_users_config() 只记
+    # warning、并不拒绝该配置项，validate_token() 依然会正常签发这个
+    # user_info（user_id 为 None）。若这里保留 "and user_id"，配置不完整
+    # 的租户会被直接跳过整段归属校验，等同于对任何 view_token 都放行。
+    # user_id=None 传入下面的参数化查询会被 SQLite 翻译成 SQL NULL，
+    # "user_id = NULL" 语义上不匹配任何行（即使目标行的 user_id 也是
+    # NULL），因此天然会落到"有记录但不属于当前调用方"的拒绝分支，行为
+    # 仍是安全的 fail-closed，不需要特殊分支。
     task_id = task_info.get("task_id")
-    if task_id and user_id:
+    if task_id:
         def _check_ownership() -> bool:
             with audit_logger._get_cursor() as cursor:
                 cursor.execute(

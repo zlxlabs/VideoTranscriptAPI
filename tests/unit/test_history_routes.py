@@ -862,6 +862,85 @@ class TestSummaryEndpoint:
 
         assert resp.status_code == 503
 
+    def test_missing_user_id_does_not_bypass_ownership_check(self, db_pair):
+        """ci-gate review (local, follow-up on the cloud CI findings above):
+        a caller whose user_info lacks user_id entirely (a misconfigured
+        multi-user entry -- _load_users_config() only warns, it doesn't
+        reject the entry, so validate_token() still issues a token with
+        user_id=None) must NOT have the ownership check skipped outright.
+        Before the fix, `if task_id and user_id:` short-circuited to False
+        for such a caller, bypassing the check completely and granting
+        access to ANY task's summary regardless of its real owner."""
+        al = db_pair["audit_logger"]
+
+        # A real owner logs a task under their own user_id.
+        al.log_api_call(
+            api_key="owner-key",
+            user_id="real-owner",
+            endpoint="/api/transcribe",
+            task_id="task-owned-by-someone-else",
+        )
+
+        mock_cache = MagicMock()
+        mock_cache.db_path = Path(db_pair["cache_db_path"])
+        mock_cache.get_task_by_view_token.return_value = {
+            "task_id": "task-owned-by-someone-else", "status": "success",
+        }
+        mock_cache.get_view_data_by_token.return_value = {
+            "status": "success", "summary": "secret",
+        }
+
+        async def _fake_verify_token_missing_user_id():
+            # api_key present, user_id missing (misconfigured entry).
+            return {"api_key": "misconfigured-key", "wechat_webhook": None}
+
+        from video_transcript_api.api.services.transcription import verify_token
+        from video_transcript_api.api.routes import audit
+
+        app = FastAPI()
+        app.include_router(audit.router)
+        app.dependency_overrides[verify_token] = _fake_verify_token_missing_user_id
+
+        with patch("video_transcript_api.api.routes.audit.audit_logger", al), \
+             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache):
+            client = TestClient(app)
+            resp = client.get("/api/audit/summary?view_token=vt-someone-else")
+
+        assert resp.status_code == 403
+
+    def test_missing_user_id_still_allows_task_with_no_audit_record(self, db_pair):
+        """Sanity check for the fix above: a caller with user_id=None must
+        still be able to access a task that has NO associated audit_log row
+        at all (the pre-existing "compatible with legacy data" carve-out) --
+        the fix must not turn missing-user_id into a blanket 403."""
+        al = db_pair["audit_logger"]
+
+        mock_cache = MagicMock()
+        mock_cache.db_path = Path(db_pair["cache_db_path"])
+        mock_cache.get_task_by_view_token.return_value = {
+            "task_id": "task-no-audit-record", "status": "success",
+        }
+        mock_cache.get_view_data_by_token.return_value = {
+            "status": "success", "summary": "legacy summary",
+        }
+
+        async def _fake_verify_token_missing_user_id():
+            return {"api_key": "misconfigured-key", "wechat_webhook": None}
+
+        from video_transcript_api.api.services.transcription import verify_token
+        from video_transcript_api.api.routes import audit
+
+        app = FastAPI()
+        app.include_router(audit.router)
+        app.dependency_overrides[verify_token] = _fake_verify_token_missing_user_id
+
+        with patch("video_transcript_api.api.routes.audit.audit_logger", al), \
+             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache):
+            client = TestClient(app)
+            resp = client.get("/api/audit/summary?view_token=vt-no-record")
+
+        assert resp.status_code == 200
+
     def test_empty_summary_returns_none_not_placeholder(self, summary_setup):
         """Completed task with empty summary text returns 200 with summary=None
         (honest status model: no more '' or placeholder strings standing in
