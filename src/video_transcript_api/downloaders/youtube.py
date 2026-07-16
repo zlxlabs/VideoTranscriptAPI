@@ -926,12 +926,18 @@ class YoutubeDownloader(BaseDownloader):
                 })
 
             # 按开始时间排序；无法解析为数字的 start（含属性缺失的 None）视为
-            # 0，仅用于决定排序位置，不影响下方 start_time 字段本身的 None 判定
+            # 0，仅用于决定排序位置，不影响下方 start_time 字段本身的 None 判定。
+            # 非有限值（nan/inf）同样视为 0：float("nan") 不会抛异常，若不校验
+            # isfinite 会把字面量 nan 当作排序 key 直接喂给 sort()——NaN 与任何
+            # 数比较恒为 False，会破坏其它合法条目之间原本正确的相对顺序（不只
+            # 是这条脏数据自己排错位置），而不仅仅是不可解析字符串那种能被
+            # except 捕获的情况。
             def _safe_start(item):
                 try:
-                    return float(item["start_raw"])
+                    value = float(item["start_raw"])
                 except (TypeError, ValueError):
                     return 0.0
+                return value if math.isfinite(value) else 0.0
 
             raw_items.sort(key=_safe_start)
 

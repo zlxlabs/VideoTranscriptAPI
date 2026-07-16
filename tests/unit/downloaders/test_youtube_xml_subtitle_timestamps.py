@@ -240,6 +240,40 @@ def test_reversed_interval_end_before_start_yields_none_end_time():
     ]
 
 
+XML_NAN_START = (
+    '<transcript>'
+    '<text start="5.0" dur="1.0">Five</text>'
+    '<text start="nan" dur="1.0">NanEntry</text>'
+    '<text start="1.0" dur="1.0">One</text>'
+    '</transcript>'
+)
+
+
+def test_nan_start_attribute_does_not_corrupt_sort_order_of_other_entries():
+    """Regression for `_safe_start`'s sort key: `float("nan")` does not raise
+    (unlike `float("not-a-number")`), so it used to slip straight through the
+    try/except and become the literal sort key `nan`. NaN comparisons are
+    always False, which can corrupt the relative order of *other*, perfectly
+    legal entries too (Python's sort is not robust to a NaN key breaking the
+    total order) -- e.g. sort([5, nan, 1], ...) can leave 5 sorted before 1.
+    After the fix, non-finite start values (nan/inf) are treated the same as
+    unparseable ones: sort key 0.0, used only for ordering. The corrupt
+    entry's own start_time/end_time (a separate, already-correct code path)
+    stays None; its text is preserved; and -- the actual bug under test --
+    the two legitimate entries (start=1.0, start=5.0) must sort correctly
+    relative to each other."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_NAN_START)
+
+    assert result.text == "NanEntry One Five"
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "NanEntry"},
+        {"start_time": 1.0, "end_time": 2.0, "text": "One"},
+        {"start_time": 5.0, "end_time": 6.0, "text": "Five"},
+    ]
+
+
 def test_start_plus_dur_sum_overflow_yields_none_end_time():
     """"start" and "dur" are each individually finite (1e308 parses fine and
     passes math.isfinite() on its own), so neither raises ValueError/TypeError.
