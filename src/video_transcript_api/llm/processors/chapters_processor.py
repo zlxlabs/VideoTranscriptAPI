@@ -16,6 +16,7 @@
 """
 
 import hashlib
+import json
 import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
@@ -82,26 +83,6 @@ _TITLE_TRUNCATE_TO = 23
 
 
 # ============================================================
-# 指纹（fingerprint）分隔符
-# ============================================================
-
-# 条目间分隔符（ASCII Unit Separator）：分隔各 segment 的指纹片段。
-_FINGERPRINT_ENTRY_SEP = "\x1f"
-# 条目内字段分隔符（ASCII Record Separator）：分隔单条 segment 内 text /
-# start_time / end_time 三个字段，故意选一个与条目间分隔符不同的不可见字符，
-# 避免"字段边界"和"条目边界"用同一个分隔符时可能出现的交叉拼接碰撞。
-_FINGERPRINT_FIELD_SEP = "\x1e"
-# 字段缺失（None）时的固定占位符：用于 start_time/end_time 无法解析，以及
-# speaker 字段完全不存在这两种场景。必须与任何合法取值的字符串表示（如
-# 秒数的 "0.0"，或 speaker 的空字符串 ""）都不可能重合，否则"字段缺失"会
-# 与"字段恰好是这个值"混同——例如 start_time=None 与 start_time=0 混同，
-# 让"完全没有时间轴"和"时间轴从 0 秒开始"产生同一个指纹片段；speaker 缺失
-# 与 speaker="" 混同，让"没有说话人信息"和"说话人字段为空"产生同一个指纹
-# 片段。
-_FINGERPRINT_NONE_FIELD_PLACEHOLDER = "\x00"
-
-
-# ============================================================
 # 结果类型
 # ============================================================
 
@@ -137,13 +118,15 @@ class ChaptersResult:
     - 成功: chapters=完整列表, status=GENERATED
 
     fingerprint 覆盖每条 segment 的 text + 规范化后的 start_time/end_time +
-    speaker（而非只哈希文本）：条目间用 "\x1f" 分隔符拼接，条目内
-    text/start_time/end_time/speaker 四个字段再用 "\x1e" 分隔符拼接，两级
-    分隔符都避免拼接结果碰撞（如 ["ab","c"] 与 ["a","bc"] 文本相同拼接结果
-    但分段不同）。同一段文本若时间轴被修正（如时间戳纠错）或说话人被修正
-    （如"说话人2"改成真实姓名）但文本本身未变，指纹也会随之变化——这样
-    上层若把 fingerprint 接入缓存层，就不会复用一份挂着旧时间戳/旧说话人
-    的章节结果。详见 `_compute_fingerprint`。segments 为 None/空时该值为 None。
+    speaker（而非只哈希文本）：把 segments 规范化为结构化条目列表后做规范化
+    JSON 序列化（ensure_ascii + 固定分隔符 + sort_keys，逐字节确定性输出），
+    再对 JSON 文本求 sha1——JSON 的字符串转义与"每条 segment 是数组里独立
+    一个元素"的结构，从根上排除手工分隔符拼接可能出现的字段/条目边界碰撞
+    （包括 speaker 里恰好含有分隔符字符本身的场景）。同一段文本若时间轴被
+    修正（如时间戳纠错）或说话人被修正（如"说话人2"改成真实姓名）但文本
+    本身未变，指纹也会随之变化——这样上层若把 fingerprint 接入缓存层，就
+    不会复用一份挂着旧时间戳/旧说话人的章节结果。详见 `_compute_fingerprint`。
+    segments 为 None/空时该值为 None。
     """
 
     chapters: List[Chapter]
@@ -198,20 +181,35 @@ def _compute_fingerprint(segments: List[Dict[str, Any]]) -> str:
     说话人纠正后章节梗概里引用的人名可能整段是错的，却因为指纹没变而被
     缓存层静默判定为"原文未变"继续复用。
 
-    两级分隔符都是正文几乎不可能出现的不可见字符，且互不相同：
-    - 条目间用 `_FINGERPRINT_ENTRY_SEP`（"\\x1f"），避免 ["ab","c"] 与
-      ["a","bc"] 这类不同分段但拼接结果相同的文本发生指纹碰撞；
-    - 条目内 text/start_time/end_time/speaker 四个字段再用
-      `_FINGERPRINT_FIELD_SEP`（"\\x1e"）分隔，避免字段边界和条目边界共用
-      同一分隔符时可能出现的交叉拼接碰撞。
+    实现：结构化条目列表 + 规范化 JSON 序列化，而不是手工分隔符拼接。
+    早期实现用两级不可见字符分隔符（条目间 "\\x1f"、条目内字段间 "\\x1e"）
+    手工拼接字符串，但字段内容本身未经任何转义——一旦 speaker 恰好含有这两
+    个分隔符字符（哪怕是构造出来的边界情况），拼接结果可以与完全不同的
+    segment 序列产生字节级碰撞（例如一条"speaker 里塞了假分隔符"的 segment
+    可以伪造成两条独立 segment 拼接后的相同字节串），指纹从"内容摘要"退化
+    成"可被构造碰撞的弱校验"。同理，固定占位符方案（缺字段用 "\\x00" 代替）
+    本身也不安全：一旦真实数据里出现字面值恰好是占位符的 speaker（同样属于
+    构造/损坏数据），会与"字段缺失"混同。
 
-    start_time/end_time 在拼入前先用 `_to_seconds` 规范化（同一个时间不论用
-    float 还是 "HH:MM:SS" 字符串表示，指纹片段都一致）；解析失败或缺失时、
-    以及 speaker 字段完全不存在时，统一用固定占位符
-    `_FINGERPRINT_NONE_FIELD_PLACEHOLDER` 代替，而不是空字符串或直接跳过——
-    占位符与任何合法秒数的 str() 输出、或合法（哪怕是空串）speaker 都不可能
-    重合，从根上排除"字段缺失"与"字段恰好是这个值"混同的歧义（时间缺失
-    vs 时间恰好是 0；说话人字段不存在 vs 说话人字段是空字符串）。
+    改为对结构化条目列表做 `json.dumps(..., ensure_ascii=True,
+    separators=(",", ":"), sort_keys=True)` 后再 sha1：
+    - JSON 字符串会转义控制字符（含 "\\x1f"/"\\x1e"/"\\x00" 等），不存在
+      "字段内容里塞入分隔符即可伪造边界"的问题；
+    - 每条 segment 是数组里独立的一个 dict 元素，序列的分段方式由 JSON 语法
+      本身保证，不依赖任何自定义分隔符；
+    - "字段缺失" 用 dict 里显式**不放该 key** 表达（而不是某个固定占位符
+      字符串）：speaker 完全不存在时不放 "sp" 键，与 "sp" 恰好是任意字符串
+      （包括边界值如空串或 "\\x00"）在 JSON 层面就是两种不同的结构，不可能
+      混同；start_time/end_time 解析失败或缺失时 "s"/"e" 的值是 JSON
+      null，与合法秒数（哪怕是 0）用 JSON 数字表示，两者不可能重合。
+    - `separators=(",", ":")` 去掉默认的空格，`sort_keys=True` 固定键序，
+      保证同一逻辑输入不论 dict 构造顺序如何都序列化成同一段字节，指纹
+      仍然稳定可复现。
+
+    start_time/end_time 在写入前先用 `_to_seconds` 规范化（同一个时间不论用
+    float 还是 "HH:MM:SS" 字符串表示，指纹片段都一致）。speaker 写入前强转
+    str（上游 FunASR 原始 dict 的 speaker 可能是裸 int），避免类型不一致
+    导致同一说话人因表示类型不同（int 2 与字符串 "2"）产生不同指纹。
 
     Args:
         segments: 原始 segment 列表（未经任何处理），每条形如
@@ -220,28 +218,24 @@ def _compute_fingerprint(segments: List[Dict[str, Any]]) -> str:
     Returns:
         str: sha1 十六进制摘要
     """
-    def _time_field(value: Any) -> str:
-        seconds = _to_seconds(value)
-        return str(seconds) if seconds is not None else _FINGERPRINT_NONE_FIELD_PLACEHOLDER
-
-    def _speaker_field(seg: Dict[str, Any]) -> str:
+    entries: List[Dict[str, Any]] = []
+    for seg in segments:
+        entry: Dict[str, Any] = {
+            "t": seg.get("text") or "",
+            "s": _to_seconds(seg.get("start_time")),
+            "e": _to_seconds(seg.get("end_time")),
+        }
         speaker = seg.get("speaker")
-        # 强转 str：上游 FunASR 原始 dict 的 speaker 字段可能是裸 int（说话人
-        # 编号，如 2），不强转会让下面的 str.join() 直接抛
-        # TypeError（要求序列元素全是 str）——在 process() 还没来得及返回
-        # 任何诚实状态之前就整体崩溃。None/缺失语义不受影响，仍走占位符。
-        return str(speaker) if speaker is not None else _FINGERPRINT_NONE_FIELD_PLACEHOLDER
+        if speaker is not None:
+            # 显式区分"无 speaker 键"（缺失）与"speaker 为任意字符串"（含
+            # 空串、含分隔符字符等边界值）；强转 str 避免 int/str 表示同一
+            # 说话人时产生不同指纹（同 `_build_segment_lines` 的处理）。
+            entry["sp"] = str(speaker)
+        entries.append(entry)
 
-    entries = [
-        _FINGERPRINT_FIELD_SEP.join((
-            seg.get("text") or "",
-            _time_field(seg.get("start_time")),
-            _time_field(seg.get("end_time")),
-            _speaker_field(seg),
-        ))
-        for seg in segments
-    ]
-    fingerprint_source = _FINGERPRINT_ENTRY_SEP.join(entries)
+    fingerprint_source = json.dumps(
+        entries, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    )
     return hashlib.sha1(fingerprint_source.encode("utf-8")).hexdigest()
 
 

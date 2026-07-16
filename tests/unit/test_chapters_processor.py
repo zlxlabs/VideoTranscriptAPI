@@ -1025,6 +1025,65 @@ class TestFingerprint(ChaptersProcessorTestBase):
         self.assertIsNotNone(result_empty.fingerprint)
         self.assertNotEqual(result_missing.fingerprint, result_empty.fingerprint)
 
+    def test_fingerprint_distinguishes_explicit_null_byte_speaker_from_missing(self):
+        """The old fixed placeholder for "missing speaker" was literally the
+        string "\\x00" -- a segment with an actual speaker value of "\\x00"
+        (adversarial/corrupted upstream data) would collide with an entry
+        that has no speaker key at all, since both serialized to the exact
+        same placeholder token. The fix must keep these distinguishable by
+        construction (e.g. presence/absence of a dict key), not by picking a
+        different placeholder string that just moves the same class of bug
+        to a new unlucky value."""
+        segs_null_byte_speaker = [
+            {"text": "same text content here", "start_time": 0.0, "end_time": 10.0,
+             "speaker": "\x00"},
+        ]
+        segs_missing_speaker = [
+            {"text": "same text content here", "start_time": 0.0, "end_time": 10.0},
+        ]
+
+        result_null_byte = self.processor.process(segments=segs_null_byte_speaker, title="T")
+        result_missing = self.processor.process(segments=segs_missing_speaker, title="T")
+
+        self.assertIsNotNone(result_null_byte.fingerprint)
+        self.assertIsNotNone(result_missing.fingerprint)
+        self.assertNotEqual(result_null_byte.fingerprint, result_missing.fingerprint)
+
+    def test_fingerprint_field_separator_injection_no_longer_collides(self):
+        """Old bug: raw delimiter-joined fingerprint strings have no
+        escaping, so a single segment whose speaker embeds both internal
+        separator characters (entry-sep "\\x1f", field-sep "\\x1e") can
+        produce a byte-identical fingerprint source to an unrelated
+        two-segment sequence -- the field boundaries "blur" into what looks
+        like a second entry:
+
+            1 segment, speaker="X\\x1fworld\\x1e2.0\\x1e3.0\\x1eY"
+            -> old source: "hello\\x1e0.0\\x1e1.0\\x1eX\\x1fworld\\x1e2.0\\x1e3.0\\x1eY"
+
+            2 segments ("hello"/speaker X, "world"/speaker Y)
+            -> old source: "hello\\x1e0.0\\x1e1.0\\x1eX" + "\\x1f" +
+                            "world\\x1e2.0\\x1e3.0\\x1eY"
+            -> byte-identical to the line above.
+
+        A structured JSON array (each segment its own escaped array element)
+        cannot collide this way -- must no longer produce the same
+        fingerprint."""
+        segs_single_crafted = [
+            {"text": "hello", "start_time": 0.0, "end_time": 1.0,
+             "speaker": "X\x1fworld\x1e2.0\x1e3.0\x1eY"},
+        ]
+        segs_two_clean = [
+            {"text": "hello", "start_time": 0.0, "end_time": 1.0, "speaker": "X"},
+            {"text": "world", "start_time": 2.0, "end_time": 3.0, "speaker": "Y"},
+        ]
+
+        result_crafted = self.processor.process(segments=segs_single_crafted, title="T")
+        result_clean = self.processor.process(segments=segs_two_clean, title="T")
+
+        self.assertIsNotNone(result_crafted.fingerprint)
+        self.assertIsNotNone(result_clean.fingerprint)
+        self.assertNotEqual(result_crafted.fingerprint, result_clean.fingerprint)
+
     def test_fingerprint_stable_for_identical_input_including_speaker(self):
         """Fully identical input (same text, times, AND speaker) across
         repeated calls must still produce the exact same fingerprint now
