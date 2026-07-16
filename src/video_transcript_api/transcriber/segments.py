@@ -186,7 +186,11 @@ def load_segments(cache_dir: Path) -> Optional[List[Dict[str, Any]]]:
         try:
             with file_path.open("r", encoding="utf-8") as f:
                 raw = json.load(f)
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            # UnicodeDecodeError 是 ValueError 的子类而非 OSError，必须单独列出，
+            # 否则遇到非法 UTF-8 字节（如生产环境偶发的编码损坏文件）会绕过这个
+            # except 直接抛出，违反本模块"从不抛异常"的契约。与 OSError/
+            # JSONDecodeError 同等对待：记 warning，尝试下一优先级来源。
             logger.warning(f"读取时间片段文件失败，尝试下一优先级来源: {file_path} ({exc})")
             continue
 

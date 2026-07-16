@@ -271,3 +271,27 @@ class TestLoadSegments:
         # supported segment source (json only).
         (tmp_path / "transcript_capswriter.txt").write_text("plain text, no timing", encoding="utf-8")
         assert load_segments(tmp_path) is None
+
+    def test_invalid_utf8_in_funasr_falls_back_to_valid_capswriter(self, tmp_path):
+        # UnicodeDecodeError is a ValueError subclass, NOT an OSError, so the
+        # bare (OSError, json.JSONDecodeError) except tuple used to miss it and
+        # let it propagate uncaught -- violating this module's "never raises"
+        # contract. A corrupt primary source must be treated the same as a
+        # missing/malformed one: fall back to the next-priority source.
+        (tmp_path / "transcript_funasr.json").write_bytes(
+            b'{"segments": [{"start_time": 0.0, "end_time": 1.0, "text": "bad \xff\xfe byte"}]}'
+        )
+        capswriter_data = {
+            "segments": [{"start_time": 0.0, "end_time": 1.0, "text": "fallback ok"}]
+        }
+        (tmp_path / "transcript_capswriter.json").write_text(
+            json.dumps(capswriter_data, ensure_ascii=False), encoding="utf-8"
+        )
+        result = load_segments(tmp_path)
+        assert result == [{"start_time": 0.0, "end_time": 1.0, "text": "fallback ok"}]
+
+    def test_invalid_utf8_only_returns_none_without_raising(self, tmp_path):
+        (tmp_path / "transcript_funasr.json").write_bytes(
+            b'{"segments": [{"start_time": 0.0, "end_time": 1.0, "text": "bad \xff\xfe byte"}]}'
+        )
+        assert load_segments(tmp_path) is None
