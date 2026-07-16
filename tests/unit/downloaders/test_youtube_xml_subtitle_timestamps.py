@@ -176,3 +176,36 @@ def test_invalid_xml_returns_none_unchanged():
     result = downloader._parse_youtube_subtitle_xml(XML_INVALID)
 
     assert result is None
+
+
+XML_START_PLUS_DUR_OVERFLOWS = (
+    '<transcript>'
+    '<text start="1e308" dur="1e308">Overflowing</text>'
+    '<text start="1.5" dur="2.0">World</text>'
+    '</transcript>'
+)
+
+
+def test_start_plus_dur_sum_overflow_yields_none_end_time():
+    """"start" and "dur" are each individually finite (1e308 parses fine and
+    passes math.isfinite() on its own), so neither raises ValueError/TypeError.
+    But float addition does not raise OverflowError like int->float
+    conversion does -- it silently saturates to inf (1e308 + 1e308 == inf).
+    Before the fix, end = start + duration was never re-checked after the
+    sum, producing an end_time of inf and violating the "time field is None
+    or finite non-negative" invariant. After the fix, the sum itself is
+    validated with math.isfinite(): start_time is kept (valid on its own),
+    end_time is nulled out, text is preserved, and the rest of the batch
+    (including its own end_time) is untouched.
+
+    Entries are sorted by start time (legacy behavior), so the start=1.5
+    entry ("World") sorts before the start=1e308 entry ("Overflowing")."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_START_PLUS_DUR_OVERFLOWS)
+
+    assert result.text == "World Overflowing"
+    assert result.segments == [
+        {"start_time": 1.5, "end_time": 3.5, "text": "World"},
+        {"start_time": 1e308, "end_time": None, "text": "Overflowing"},
+    ]

@@ -228,3 +228,33 @@ def test_astronomically_large_duration_overflows_to_none_end_time():
     assert result.segments == [
         {"start_time": 0.0, "end_time": None, "text": "Hello"},
     ]
+
+
+def test_start_plus_duration_sum_overflow_yields_none_end_time():
+    """start and duration are each individually finite (1e308 is a legal
+    float, well within range), so float(item.start) / float(item.duration)
+    both succeed and pass math.isfinite() on their own. But float addition
+    does NOT raise OverflowError the way int->float conversion does -- it
+    silently saturates to inf (1e308 + 1e308 == inf). Before the fix,
+    end_time = start_time + duration was never re-checked after the sum, so
+    this produced an end_time of inf, violating the "time field is None or
+    finite non-negative" invariant. After the fix, the sum itself is
+    validated with math.isfinite(): start_time is kept (it was valid on its
+    own), end_time is nulled out, and the text and the rest of the batch are
+    untouched."""
+    downloader = _make_downloader()
+    downloader.ytt_api = Mock()
+    downloader.ytt_api.list = Mock(return_value=[FakeTranscriptListing("en")])
+    downloader.ytt_api.fetch = Mock(return_value=[
+        FakeSnippet("Overflowing", 1e308, 1e308),
+        FakeSnippet("world", 1.5, 2.0),
+    ])
+
+    result = downloader._fetch_youtube_transcript_result("video123")
+
+    assert isinstance(result, SubtitleResult)
+    assert result.text == "Overflowing world"
+    assert result.segments == [
+        {"start_time": 1e308, "end_time": None, "text": "Overflowing"},
+        {"start_time": 1.5, "end_time": 3.5, "text": "world"},
+    ]

@@ -789,7 +789,14 @@ class YoutubeDownloader(BaseDownloader):
                 try:
                     duration = float(item.duration)
                     if math.isfinite(duration):
-                        end_time = start_time + duration
+                        # start_time 与 duration 各自有限，不代表二者之和有限：
+                        # float 加法不像 int->float 转换那样会抛 OverflowError，
+                        # 而是静默饱和为 inf（如二者均为 1e308）。相加后必须
+                        # 再校验一次，非有限值同样置 None，维持“时间字段要么
+                        # None 要么有限非负”的不变式
+                        candidate_end_time = start_time + duration
+                        if math.isfinite(candidate_end_time):
+                            end_time = candidate_end_time
                 except (AttributeError, TypeError, ValueError, OverflowError):
                     end_time = None
 
@@ -948,7 +955,15 @@ class YoutubeDownloader(BaseDownloader):
                         try:
                             duration = float(item["dur_raw"])
                             if math.isfinite(duration):
-                                end = start + duration
+                                # start 与 duration 各自有限，不代表二者之和有限：
+                                # float 加法不像 int->float 转换那样会抛
+                                # OverflowError，而是静默饱和为 inf（如二者均
+                                # 为 1e308）。相加后必须再校验一次，非有限值
+                                # 同样置 None，维持“时间字段要么 None 要么有限
+                                # 非负”的不变式
+                                candidate_end = start + duration
+                                if math.isfinite(candidate_end):
+                                    end = candidate_end
                         except (TypeError, ValueError):
                             end = None
 
