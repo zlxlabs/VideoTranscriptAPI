@@ -588,6 +588,11 @@ class YouTubeApiClient:
     _SRT_TIMESTAMP_RANGE_PATTERN = re.compile(
         r"(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})"
     )
+    # "时间样式片段"宽松正则：只要求形如 "12:34" 的数字+冒号结构（不要求三段
+    # 齐全、不要求毫秒），用于 _looks_like_timeline_attempt 判断一条格式已损坏
+    # 的 "-->" 行是否至少有一侧"长得像"时间，从而把它和纯文本里偶然出现的
+    # "-->"（如 "Settings --> Privacy"）区分开。
+    _TIME_STYLE_FRAGMENT_PATTERN = re.compile(r"\d{1,2}:\d{2}")
 
     @staticmethod
     def parse_srt_to_text(srt_content: str) -> str:
@@ -688,7 +693,19 @@ class YouTubeApiClient:
         轴，导致该文本行从当前 cue 的文本里静默丢失。SRT 的标准结构是
         "索引行(纯数字) -> 时间轴行 -> 文本行... -> 空行分隔"，因此只有当
         "-->" 行紧跟在一个纯数字索引行之后（即处于"预期时间轴位置"）时，才
-        当作（哪怕格式已损坏的）时间轴声明；否则一律当作普通正文。
+        可能是一条（哪怕格式已损坏的）时间轴声明。
+
+        但即便处于"预期时间轴位置"，也不能仅凭 "-->" 出现就判定为时间轴：
+        像 "Settings --> Privacy" 这样纯文本的操作指引，如果恰好是某个 cue
+        的第一行正文（该 cue 的真实时间轴行整行缺失），也会紧跟在索引行之
+        后，此时若无条件当作损坏的时间轴，会导致这行正文的文本收集从 j=i+1
+        开始（即从它自己之后算起）而丢失自身，最终在 segments 里整条消失
+        （legacy parse_srt_to_text 的严格正则不识别它、仍会把它当正文保留，
+        造成 text 与 segments 背离）。因此这里再加一层"长得像时间"的约束：
+        "-->" 两侧至少要有一侧命中 `_TIME_STYLE_FRAGMENT_PATTERN`（形如
+        "12:34" 的数字+冒号片段），如 "00:00:0X --> 00:00:04" 两侧都命中，
+        仍判定为损坏的时间轴；"Settings --> Privacy" 两侧都不含任何时间样式
+        片段，判定为普通正文，交由调用方的孤儿文本路径（R6）兜底收集。
 
         Args:
             line: 已经 strip 过的单行文本
@@ -698,7 +715,13 @@ class YouTubeApiClient:
         Returns:
             bool: 是否应被当作一条时间轴声明（不论格式是否合法）
         """
-        return "-->" in line and prev_line.isdigit()
+        if "-->" not in line or not prev_line.isdigit():
+            return False
+        left, _, right = line.partition("-->")
+        return bool(
+            YouTubeApiClient._TIME_STYLE_FRAGMENT_PATTERN.search(left)
+            or YouTubeApiClient._TIME_STYLE_FRAGMENT_PATTERN.search(right)
+        )
 
     @staticmethod
     def _extract_srt_segments(lines: list) -> list:

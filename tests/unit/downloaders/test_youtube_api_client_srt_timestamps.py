@@ -147,6 +147,25 @@ SRT_ALL_NUMERIC_BODY = (
     "100\n"
 )
 
+SRT_ORPHAN_ARROW_BODY_NO_TIME_STYLE = (
+    "1\n"
+    "00:00:01,000 --> 00:00:02,000\n"
+    "First line\n"
+    "\n"
+    "42\n"
+    "Settings --> Privacy to change\n"
+    "\n"
+    "3\n"
+    "00:00:05,000 --> 00:00:06,000\n"
+    "Third line\n"
+)
+
+SRT_CORRUPTED_TIMELINE_WITH_LETTER = (
+    "1\n"
+    "00:00:0X --> 00:00:04\n"
+    "Hello world\n"
+)
+
 SRT_EMPTY = ""
 
 
@@ -400,6 +419,55 @@ def test_all_numeric_body_cues_yield_empty_text_but_populated_segments():
         {"start_time": 1.0, "end_time": 4.0, "text": "42"},
         {"start_time": 5.0, "end_time": 8.0, "text": "100"},
     ]
+
+
+def test_orphan_body_text_containing_arrow_with_no_time_style_lands_as_none_time_segment():
+    """Regression for gate-r14 P2: a cue whose timeline row is entirely
+    missing (index line followed directly by body text, no "-->" timeline
+    row at all -- mirrors SRT_MIDDLE_CUE_MISSING_TIMELINE_ROW), where that
+    orphaned body text itself happens to contain "-->" (e.g. a UI hint like
+    "Settings --> Privacy"), must NOT be misclassified as a (corrupted)
+    timeline boundary just because it sits in the "expected timeline
+    position" (right after a digit index line). Neither side of its "-->"
+    looks like a time (no digit+colon fragment), so it must fall through to
+    the orphan-text path (R6) and land in segments with start_time/end_time
+    = None -- not be silently dropped (which is what happened before this
+    fix, since the text-collection loop would then start scanning for body
+    text *after* this very line, capturing nothing)."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(
+        SRT_ORPHAN_ARROW_BODY_NO_TIME_STYLE
+    )
+
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": 2.0, "text": "First line"},
+        {"start_time": None, "end_time": None, "text": "Settings --> Privacy to change"},
+        {"start_time": 5.0, "end_time": 6.0, "text": "Third line"},
+    ]
+    assert result.text == "First line Settings --> Privacy to change Third line"
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_ORPHAN_ARROW_BODY_NO_TIME_STYLE
+    ) == result.text
+
+
+def test_corrupted_timeline_with_letter_and_time_style_still_treated_as_broken_timeline():
+    """A genuinely corrupted timeline row (e.g. a stray letter replacing a
+    digit: "00:00:0X --> 00:00:04") must NOT be reclassified as body text by
+    the new "looks like a time" guard -- both sides still contain a
+    "12:34"-style digit+colon fragment ("00:00" / "00:00:04"), so it must
+    keep being recognized as a damaged timeline boundary: the cue's text is
+    preserved with start_time/end_time = None (the regex itself still fails
+    to match, since "X" isn't a digit)."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(
+        SRT_CORRUPTED_TIMELINE_WITH_LETTER
+    )
+
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Hello world"},
+    ]
+    assert result.text == "00:00:0X --> 00:00:04 Hello world"
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_CORRUPTED_TIMELINE_WITH_LETTER
+    ) == result.text
 
 
 def test_empty_srt_content():
