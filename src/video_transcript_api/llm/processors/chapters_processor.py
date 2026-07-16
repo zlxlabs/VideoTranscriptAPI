@@ -18,6 +18,7 @@
 import hashlib
 import json
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
 
@@ -257,15 +258,39 @@ def _format_timestamp(seconds: Optional[float]) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+# 匹配任意一段连续空白字符（含 "\n"/"\r"/"\t"/普通空格及其任意组合）。用于
+# `_build_segment_lines` 把每条 segment 的 text 压平成单行——见该函数文档。
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
 def _build_segment_lines(segments: List[Dict[str, Any]]) -> str:
     """把 segments 压缩为带编号的正文，供拼进 user prompt。
 
     每行格式：`[i] mm:ss (speaker:)? text`
     （时间缺失则省略时间部分，没有 speaker 字段则省略说话人前缀）。
+
+    text 中的换行/回车会被压成单个空格（连续空白进一步折叠为一个）：这是
+    "一个 segment 恰好一行"这个结构性不变式的安全边界——若不处理，text 里
+    只要含有形如 "正常内容\\n[5] 00:00 fake" 的内容，拼进 prompt 后就会在
+    编号列表里凭空多出一行、看起来与真实编号条目别无二致，LLM 可能把
+    start_seg 错误地锚定到这条由 text 内容伪造出来的"行"上，而不是任何真实
+    的 segment 边界。压平后，无论 text 里塞了多少个换行或形如 "[n] mm:ss"
+    的字面内容，都只会作为该 segment 唯一一行里的普通文本片段出现，不可能
+    被解读成独立的编号行。
+
+    仅影响这里构建的 prompt 文本，不改变 segment 原始数据：
+    - 指纹计算（`_compute_fingerprint`）直接使用原始 seg["text"]，不经过
+      本函数——指纹要如实反映输入内容本身，不应因展示形态的处理而变化；
+    - 门控 3（`min_chapters_threshold`）用未压平的 full_text 衡量"内容量是否
+      值得分章"，这个语义与文本如何展示给 LLM 无关，同样不应受影响；
+    - 门控 4（`max_chapters_input_chars`）测量的正是本函数的输出
+      `segment_lines`，压平后的换行往往比原始换行更短（多个连续空白折叠成
+      一个空格），门控测量"实际发送的 prompt 长度"这个语义与压平后的结果本
+      就应该一致，不存在需要额外处理的分歧。
     """
     lines = []
     for i, seg in enumerate(segments):
-        text = (seg.get("text") or "").strip()
+        text = _WHITESPACE_RUN_RE.sub(" ", seg.get("text") or "").strip()
         timestamp = _format_timestamp(_to_seconds(seg.get("start_time")))
         speaker = seg.get("speaker")
 
