@@ -20,6 +20,9 @@ from video_transcript_api.llm.processors.chapters_processor import (
     ChaptersProcessor,
     ChaptersResult,
     Chapter,
+    _to_seconds,
+    _format_timestamp,
+    _build_segment_lines,
 )
 from video_transcript_api.llm.core.config import LLMConfig
 from video_transcript_api.utils.llm_status import ChaptersStatus
@@ -59,6 +62,72 @@ def mock_llm_response(chapters):
     response = Mock()
     response.structured_output = {"chapters": chapters}
     return response
+
+
+class TestToSeconds(unittest.TestCase):
+    """Locks _to_seconds' handling of the two upstream time formats."""
+
+    def test_none_returns_none(self):
+        self.assertIsNone(_to_seconds(None))
+
+    def test_numeric_passthrough(self):
+        self.assertEqual(_to_seconds(12.5), 12.5)
+        self.assertEqual(_to_seconds(30), 30.0)
+
+    def test_hhmmss_string(self):
+        self.assertEqual(_to_seconds("00:01:05"), 65.0)
+        self.assertEqual(_to_seconds("01:00:00"), 3600.0)
+
+    def test_mmss_string(self):
+        self.assertEqual(_to_seconds("01:05"), 65.0)
+
+    def test_unparseable_string_returns_none(self):
+        self.assertIsNone(_to_seconds("not-a-time"))
+
+    def test_bool_returns_none(self):
+        """bool is a subclass of int in Python -- must not be silently treated as seconds."""
+        self.assertIsNone(_to_seconds(True))
+
+
+class TestFormatTimestamp(unittest.TestCase):
+    """Locks the compressed prompt timestamp format: mm:ss, or h:mm:ss past 1 hour."""
+
+    def test_none_returns_empty_string(self):
+        self.assertEqual(_format_timestamp(None), "")
+
+    def test_under_one_hour_uses_mmss(self):
+        self.assertEqual(_format_timestamp(65), "01:05")
+        self.assertEqual(_format_timestamp(0), "00:00")
+
+    def test_over_one_hour_uses_hmmss(self):
+        self.assertEqual(_format_timestamp(3665), "1:01:05")
+
+
+class TestBuildSegmentLines(unittest.TestCase):
+    """Locks the compressed segment format: `[i] mm:ss (speaker:)? text`."""
+
+    def test_basic_format_with_time_no_speaker(self):
+        segments = [{"text": "hello world", "start_time": 65.0, "end_time": 70.0}]
+        lines = _build_segment_lines(segments)
+        self.assertEqual(lines, "[0] 01:05 hello world")
+
+    def test_format_with_speaker(self):
+        segments = [{"text": "hi", "start_time": 5.0, "end_time": 10.0, "speaker": "Alice"}]
+        lines = _build_segment_lines(segments)
+        self.assertEqual(lines, "[0] 00:05 Alice: hi")
+
+    def test_missing_time_omits_time_part(self):
+        segments = [{"text": "hi", "start_time": None, "end_time": None}]
+        lines = _build_segment_lines(segments)
+        self.assertEqual(lines, "[0] hi")
+
+    def test_multiple_segments_numbered_and_newline_joined(self):
+        segments = [
+            {"text": "first", "start_time": 0.0, "end_time": 5.0},
+            {"text": "second", "start_time": 5.0, "end_time": 10.0},
+        ]
+        lines = _build_segment_lines(segments)
+        self.assertEqual(lines, "[0] 00:00 first\n[1] 00:05 second")
 
 
 class ChaptersProcessorTestBase(unittest.TestCase):
