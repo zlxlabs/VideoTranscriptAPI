@@ -753,19 +753,41 @@ class YouTubeApiClient:
                 start_time = None
                 end_time = None
 
-            # 收集该时间轴对应的文本行，直到遇到空行/序号行/下一个时间轴行
-            # （下一个时间轴行同样按"宽松判定"处理，避免误吞下一条 cue；判定
-            # 时同样要求紧跟纯数字索引行，正文里的 "-->" 不会被当作边界）
+            # 收集该时间轴对应的文本行，直到遇到空行/下一条 cue 的索引行/下一个
+            # 时间轴行（下一个时间轴行同样按"宽松判定"处理，避免误吞下一条
+            # cue；判定时同样要求紧跟纯数字索引行，正文里的 "-->" 不会被当作
+            # 边界）。
             text_lines = []
             j = i + 1
             prev_candidate = line  # 时间轴行本身作为文本收集循环的"上一行"
             while j < len(lines):
                 candidate = lines[j].strip()
+
+                if not candidate:
+                    break
+
+                if candidate.isdigit():
+                    # 纯数字行本身可能是真正的"下一条 cue 的索引行"，也可能只是
+                    # 正文里恰好出现的一个数字（如歌词/台词就是个数字 "42"）。
+                    # 只有它的下一行"像"一条时间轴（含损坏时间轴的宽松尝试）时，
+                    # 才当作索引行、结束当前 cue 的文本收集；否则按普通正文继续
+                    # 收集，避免把该行之后的正文从这条 cue 的 segments 里丢掉。
+                    next_line = lines[j + 1].strip() if j + 1 < len(lines) else ""
+                    next_is_timeline = bool(
+                        YouTubeApiClient._SRT_TIMESTAMP_RANGE_PATTERN.match(next_line)
+                    ) or YouTubeApiClient._looks_like_timeline_attempt(next_line, candidate)
+                    if next_is_timeline:
+                        break
+                    text_lines.append(re.sub(r"<[^>]+>", "", candidate))
+                    prev_candidate = candidate
+                    j += 1
+                    continue
+
                 candidate_match = YouTubeApiClient._SRT_TIMESTAMP_RANGE_PATTERN.match(candidate)
                 candidate_is_timeline_attempt = bool(
                     candidate_match
                 ) or YouTubeApiClient._looks_like_timeline_attempt(candidate, prev_candidate)
-                if not candidate or candidate.isdigit() or candidate_is_timeline_attempt:
+                if candidate_is_timeline_attempt:
                     break
                 text_lines.append(re.sub(r"<[^>]+>", "", candidate))
                 prev_candidate = candidate

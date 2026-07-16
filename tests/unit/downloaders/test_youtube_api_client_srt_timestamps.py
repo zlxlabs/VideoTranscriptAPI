@@ -81,6 +81,33 @@ SRT_BODY_TEXT_WITH_ARROW_THEN_NEXT_CUE = (
     "Next cue text\n"
 )
 
+SRT_BODY_TEXT_WITH_STANDALONE_DIGIT_LINE = (
+    "1\n"
+    "00:00:01,000 --> 00:00:04,000\n"
+    "The answer is\n"
+    "42\n"
+    "more text after the number\n"
+)
+
+SRT_BODY_TEXT_WITH_STANDALONE_DIGIT_LINE_THEN_NEXT_CUE = (
+    "1\n"
+    "00:00:01,000 --> 00:00:04,000\n"
+    "The answer is\n"
+    "42\n"
+    "more text after the number\n"
+    "\n"
+    "2\n"
+    "00:00:05,000 --> 00:00:08,000\n"
+    "Next cue text\n"
+)
+
+SRT_BODY_ENDS_WITH_STANDALONE_DIGIT_LINE = (
+    "1\n"
+    "00:00:01,000 --> 00:00:04,000\n"
+    "The final line is\n"
+    "42\n"
+)
+
 SRT_EMPTY = ""
 
 
@@ -190,6 +217,73 @@ def test_body_text_containing_arrow_does_not_break_next_cue_boundary():
         {"start_time": 5.0, "end_time": 8.0, "text": "Next cue text"},
     ]
     assert YouTubeApiClient.parse_srt_to_text(SRT_BODY_TEXT_WITH_ARROW_THEN_NEXT_CUE) == result.text
+
+
+def test_standalone_digit_line_in_cue_body_is_kept_as_text_not_treated_as_index():
+    """A pure-digit line that is genuine cue body content (e.g. a lyric/line
+    of dialogue that is literally the number "42") must not be mistaken for
+    the next cue's index line -- doing so would prematurely end text
+    collection and silently drop everything after it from segments (even
+    though it still shows up in the plain-text output, since that extraction
+    is a separate, cue-unaware pass). A digit line only counts as a real
+    index line when the line immediately following it is a timeline (or a
+    corrupted-timeline attempt); here the next line is ordinary text, so "42"
+    and everything after it must stay inside this cue's segment."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(
+        SRT_BODY_TEXT_WITH_STANDALONE_DIGIT_LINE
+    )
+
+    assert result.segments == [
+        {
+            "start_time": 1.0,
+            "end_time": 4.0,
+            "text": "The answer is 42 more text after the number",
+        },
+    ]
+    # Backward-compatible plain-text extraction is untouched by this fix --
+    # its cue-unaware, line-by-line algorithm has always dropped a standalone
+    # digit line (treating it as an index line), unrelated to this bug.
+    assert result.text == "The answer is more text after the number"
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_BODY_TEXT_WITH_STANDALONE_DIGIT_LINE
+    ) == result.text
+
+
+def test_standalone_digit_line_in_cue_body_does_not_break_next_cue_boundary():
+    """The same in-body digit line must not throw off detection of the
+    following, genuinely well-formed cue -- mirrors the existing stray
+    "-->" body-text regression test for the digit case."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(
+        SRT_BODY_TEXT_WITH_STANDALONE_DIGIT_LINE_THEN_NEXT_CUE
+    )
+
+    assert result.segments == [
+        {
+            "start_time": 1.0,
+            "end_time": 4.0,
+            "text": "The answer is 42 more text after the number",
+        },
+        {"start_time": 5.0, "end_time": 8.0, "text": "Next cue text"},
+    ]
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_BODY_TEXT_WITH_STANDALONE_DIGIT_LINE_THEN_NEXT_CUE
+    ) == result.text
+
+
+def test_standalone_digit_line_at_end_of_cue_with_no_following_line_is_kept():
+    """A digit line with nothing after it (end of file) has no lookahead
+    line to prove it is a real index -- it must default to being treated as
+    ordinary text rather than silently vanishing from the cue's segment."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(
+        SRT_BODY_ENDS_WITH_STANDALONE_DIGIT_LINE
+    )
+
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": 4.0, "text": "The final line is 42"},
+    ]
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_BODY_ENDS_WITH_STANDALONE_DIGIT_LINE
+    ) == result.text
 
 
 def test_empty_srt_content():
