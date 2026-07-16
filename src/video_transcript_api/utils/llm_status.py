@@ -54,12 +54,19 @@ class ChaptersStatus(StrEnum):
 
     章节生成比总结多一种正常跳过路径：SKIPPED_NO_TIMELINE ——
     输入根本没有可用的时间轴信息（segments 为 None/空），既不算"过短"也不算"失败"，
-    是从一开始就不具备生成条件的正常路径。
+    是从一开始就不具备生成条件的正常路径。这一路径同样覆盖"过滤后有效 segment
+    数少于 2 个"的情形（哪怕单个 segment 的文本长度已超过 min_chapters_threshold）：
+    单块时间轴没有任何内部边界可供切分，结构上不可能产出章节功能要求的至少 2
+    个章节，对导航毫无锚定价值，语义上等同于"没有可用的时间轴"——必须在调用
+    LLM 之前就判定为 SKIPPED_NO_TIMELINE，而不是让 LLM 调用注定因步骤 3 的章节
+    数量下限校验失败（FAILED 在分层补跑语义里是"可重试"，会导致这种结构上永远
+    不可能成功的输入被反复重试、反复消耗 LLM 调用）。
     """
 
     GENERATED = "generated"                    # 章节成功生成
     SKIPPED_SHORT = "skipped_short"             # 原文过短，未触发章节生成（正常路径，非失败）
-    SKIPPED_NO_TIMELINE = "skipped_no_timeline"  # 没有可用的分段时间轴，无法生成章节（正常路径，非失败）
+    SKIPPED_NO_TIMELINE = "skipped_no_timeline"  # 没有可用的分段时间轴，无法生成章节（正常路径，非失败）；
+                                                  # 含"有效 segment 数 < 2"这种结构上不可能分章的情形
     FAILED = "failed"                           # 触发了生成但失败（LLM 异常、输出不合法或结构校验不通过）
     PENDING = "pending"                         # 章节阶段尚未执行完成（任务仍在处理中）
     DISABLED = "disabled"                       # 用户主动关闭章节生成

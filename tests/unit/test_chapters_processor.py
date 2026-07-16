@@ -291,6 +291,47 @@ class TestGating(ChaptersProcessorTestBase):
         self.assertEqual(result.chapters, [])
         self.llm_client.call.assert_not_called()
 
+    def test_single_segment_over_threshold_skipped_no_timeline(self):
+        """gate-r14 P2: filtering can leave exactly one usable segment whose
+        text alone already exceeds min_chapters_threshold -- structurally
+        that can never produce >= _MIN_CHAPTER_COUNT (2) chapters (a single
+        block has no internal boundary to split on), so calling the LLM
+        would just burn a call on a guaranteed structural-validation FAILED
+        (see step 3's chapter-count-bounds check). FAILED is retryable
+        under the future tiered-reprocessing semantics, so without this
+        gate a single over-long segment would get retried forever for
+        nothing. A lone segment offers no navigable structure at all, which
+        is semantically equivalent to "no usable timeline" -- so this must
+        resolve to SKIPPED_NO_TIMELINE (not FAILED), and the LLM must never
+        be called."""
+        segments = make_segments(1, text_repeat=50)  # single segment, well over threshold
+        self.assertGreater(len(segments[0]["text"]), self.config.min_chapters_threshold)
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.SKIPPED_NO_TIMELINE)
+        self.assertEqual(result.chapters, [])
+        self.assertEqual(result.segment_count, 1)
+        self.assertIsNotNone(result.error)
+        self.assertIn("timeline", result.error.lower())
+        self.llm_client.call.assert_not_called()
+
+    def test_two_segments_over_threshold_generates_normally(self):
+        """Boundary check for the same gate: exactly two usable segments
+        must NOT be treated as structurally insufficient -- two segments
+        can in principle be split into two chapters, so generation proceeds
+        as normal, unaffected by the new gate."""
+        segments = make_segments(2, text_repeat=50)
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "gist a", "start_seg": 0},
+            {"title": "B", "gist": "gist b", "start_seg": 1},
+        ])
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.llm_client.call.assert_called_once()
+
     def test_too_long_text_failed(self):
         tiny_config = LLMConfig(
             api_key="k", base_url="u",

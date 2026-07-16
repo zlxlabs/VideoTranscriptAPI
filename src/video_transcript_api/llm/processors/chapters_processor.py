@@ -653,6 +653,25 @@ class ChaptersProcessor:
                 error=None, fingerprint=fingerprint, segment_count=segment_count,
             )
 
+        # 门控 2.5：过滤后有效 segment 数少于 _MIN_CHAPTER_COUNT（2）个时，结构上
+        # 不可能产出步骤 3 要求的至少 2 个章节——哪怕单个 segment 的文本长度已经
+        # 超过 min_chapters_threshold（门控 3）也一样：单块时间轴没有任何内部
+        # 边界可供切分，对导航毫无锚定价值，语义上等同于"没有可用的时间轴"。
+        # 必须在调用 LLM 之前判定，否则这类输入注定在步骤 3 的章节数量下限校验
+        # 处失败——FAILED 在未来分层补跑语义里是"可重试"状态，会让这种结构上
+        # 永远不可能成功的请求被反复重试、反复烧钱。因此复用 SKIPPED_NO_TIMELINE
+        # （正常跳过，不重试），而不是 FAILED。
+        if segment_count < _MIN_CHAPTER_COUNT:
+            error = (
+                f"timeline 不足 {_MIN_CHAPTER_COUNT} 个分段，无法分章 "
+                f"(only {segment_count} usable segment(s) after filtering)"
+            )
+            logger.info(f"[CHAPTERS] {error}, skipping (timeline insufficient for chapters)")
+            return ChaptersResult(
+                chapters=[], status=ChaptersStatus.SKIPPED_NO_TIMELINE,
+                error=error, fingerprint=fingerprint, segment_count=segment_count,
+            )
+
         # 门控 3：原文过短，未触发章节生成（正常路径，非失败）
         if len(full_text) < self.config.min_chapters_threshold:
             logger.info(
