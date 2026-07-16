@@ -707,6 +707,40 @@ class TestFingerprint(ChaptersProcessorTestBase):
 
         self.assertNotEqual(result_a.fingerprint, result_b.fingerprint)
 
+    def test_fingerprint_uses_separator_between_segment_texts(self):
+        """Fingerprint must not be a naive concatenation of segment texts --
+        ["ab", "c"] and ["a", "bc"] concatenate to the same string "abc" and
+        would collide under plain "".join(). An invisible separator (e.g.
+        "\\x1f") between segments makes the two groupings distinguishable."""
+        segs_ab_c = [
+            {"text": "ab", "start_time": 0.0, "end_time": 1.0},
+            {"text": "c", "start_time": 1.0, "end_time": 2.0},
+        ]
+        segs_a_bc = [
+            {"text": "a", "start_time": 0.0, "end_time": 1.0},
+            {"text": "bc", "start_time": 1.0, "end_time": 2.0},
+        ]
+
+        result1 = self.processor.process(segments=segs_ab_c, title="T")
+        result2 = self.processor.process(segments=segs_a_bc, title="T")
+
+        self.assertIsNotNone(result1.fingerprint)
+        self.assertIsNotNone(result2.fingerprint)
+        self.assertNotEqual(result1.fingerprint, result2.fingerprint)
+
+    def test_fingerprint_stable_across_calls_with_separator(self):
+        """Same segment grouping (not just same concatenated text) must still
+        produce a stable fingerprint across repeated calls."""
+        segs = [
+            {"text": "ab", "start_time": 0.0, "end_time": 1.0},
+            {"text": "c", "start_time": 1.0, "end_time": 2.0},
+        ]
+
+        result1 = self.processor.process(segments=segs, title="T1")
+        result2 = self.processor.process(segments=segs, title="T2 (different title)")
+
+        self.assertEqual(result1.fingerprint, result2.fingerprint)
+
 
 class TestModelFallback(unittest.TestCase):
     """LLMConfig() constructed directly (bypassing from_dict, whose own defaulting

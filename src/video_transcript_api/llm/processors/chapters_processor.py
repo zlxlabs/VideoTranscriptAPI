@@ -106,8 +106,10 @@ class ChaptersResult:
     - 原文过长/LLM 异常/语义或结构校验不通过: chapters=[], status=FAILED, error 非空
     - 成功: chapters=完整列表, status=GENERATED
 
-    fingerprint 是全部 segment text 按序拼接后的 sha1，用于上层判断"原文是否变化"
-    （例如决定是否可以复用缓存），segments 为 None/空时该值为 None。
+    fingerprint 是全部 segment text 按序用 "\x1f" 分隔符拼接后的 sha1（而非直接
+    拼接，避免 ["ab","c"] 与 ["a","bc"] 这类不同分段但拼接结果相同的文本发生
+    指纹碰撞），用于上层判断"原文是否变化"（例如决定是否可以复用缓存），
+    segments 为 None/空时该值为 None。
     """
 
     chapters: List[Chapter]
@@ -440,7 +442,12 @@ class ChaptersProcessor:
 
         segment_count = len(segments)
         full_text = "".join((seg.get("text") or "") for seg in segments)
-        fingerprint = hashlib.sha1(full_text.encode("utf-8")).hexdigest()
+        # 指纹用不可见分隔符 "\x1f"（ASCII Unit Separator，正文几乎不可能出现）
+        # 拼接各 segment 文本再取 sha1，而不是直接拼接 full_text——否则
+        # ["ab", "c"] 与 ["a", "bc"] 会拼出同一个字符串 "abc"，指纹发生碰撞，
+        # 让上层误判"原文未变化"。full_text 本身继续用于长度门控，不受影响。
+        fingerprint_source = "\x1f".join((seg.get("text") or "") for seg in segments)
+        fingerprint = hashlib.sha1(fingerprint_source.encode("utf-8")).hexdigest()
 
         # 门控 2：segments 非空，但没有任何一条能解析出 start_time —— 章节功能
         # 的核心价值就是时间范围，完全没有时间信息时生成出来的章节也没有意义。
