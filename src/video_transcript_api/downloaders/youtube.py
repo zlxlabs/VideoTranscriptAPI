@@ -790,6 +790,16 @@ class YoutubeDownloader(BaseDownloader):
             except (AttributeError, TypeError, ValueError, OverflowError):
                 start_time = None
 
+            # 负 start 在派生 end_time 之前立刻清洗（不能等到最后统一调用
+            # sanitize_time_pair 才清洗）：end_time = start_time + duration，
+            # 若在 start_time 还带着非法负值时就用它计算 end，一个负 start
+            # （如 -5）配上足够大的正 duration（如 10）会算出看似合法的正数
+            # end（5），而这个 end 本身毫无意义——它是从一个已知非法的起点
+            # 派生出来的，不能因为数值本身非负就蒙混过关。提前清洗保证
+            # end_time 只可能从"已验证合法的 start_time"派生。
+            if start_time is not None and start_time < 0:
+                start_time = None
+
             # end_time 依赖 start_time + duration，两者任一不可用则整体置 None；
             # duration 同样可能是天文数字，同上需要捕获 OverflowError
             end_time = None
@@ -966,6 +976,14 @@ class YoutubeDownloader(BaseDownloader):
                         if not math.isfinite(start):
                             start = None
                     except (TypeError, ValueError):
+                        start = None
+
+                    # 负 start 在派生 end 之前立刻清洗（同 snippet 路径的处理，见
+                    # _build_subtitle_result_from_snippets 的同名注释）：负 start
+                    # 配正 duration 可能算出一个看似合法的正 end，但那是从已知
+                    # 非法的起点派生出来的，不能放行——必须先清洗 start，end
+                    # 只从已验证合法的 start 派生
+                    if start is not None and start < 0:
                         start = None
 
                     # end_time 依赖 start + duration，两者任一不可用则整体置 None

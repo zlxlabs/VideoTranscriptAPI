@@ -300,6 +300,36 @@ def test_negative_duration_yields_none_end_time():
     ]
 
 
+def test_negative_start_with_positive_duration_does_not_leak_end_time():
+    """Regression for a real leak in the derivation order: start=-5 (invalid,
+    must be nulled) with duration=10 naively computes end = -5 + 10 = 5 -- a
+    *positive* number that slips past sanitize_time_pair's "end negative"
+    rule (unlike the -5.0/duration=2.0 case in
+    test_negative_start_becomes_none_text_and_other_snippets_unaffected,
+    where end stays negative and gets caught anyway). Before the fix, end
+    was derived from start BEFORE start's own negativity was cleaned, so a
+    meaningless end=5 (derived from an already-invalid start) leaked through
+    as (None, 5.0). After the fix, start is cleaned first; end is only ever
+    derived from an already-validated start, so an invalid start yields
+    (None, None). A normal snippet in the same batch confirms the fix
+    doesn't touch valid entries."""
+    downloader = _make_downloader()
+    downloader.ytt_api = Mock()
+    downloader.ytt_api.list = Mock(return_value=[FakeTranscriptListing("en")])
+    downloader.ytt_api.fetch = Mock(return_value=[
+        FakeSnippet("Negative start leak", -5.0, 10.0),
+        FakeSnippet("world", 1.5, 2.0),
+    ])
+
+    result = downloader._fetch_youtube_transcript_result("video123")
+
+    assert result.text == "Negative start leak world"
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Negative start leak"},
+        {"start_time": 1.5, "end_time": 3.5, "text": "world"},
+    ]
+
+
 def test_reversed_interval_end_before_start_yields_none_end_time():
     """A small negative duration whose sum with start is still non-negative
     (end >= 0) but ends up before start (end < start, an inverted interval)

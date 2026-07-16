@@ -274,6 +274,33 @@ def test_nan_start_attribute_does_not_corrupt_sort_order_of_other_entries():
     ]
 
 
+XML_NEGATIVE_START_POSITIVE_DURATION = (
+    '<transcript><text start="-5.0" dur="10.0">Negative start leak</text></transcript>'
+)
+
+
+def test_negative_start_with_positive_duration_does_not_leak_end_time():
+    """Regression for a real leak in the derivation order: start=-5 (invalid,
+    must be nulled) with dur=10 naively computes end = -5 + 10 = 5 -- a
+    *positive* number that slips past sanitize_time_pair's "end negative"
+    rule (unlike the -5.0/dur=2.0 case in
+    test_negative_start_attribute_yields_none_start_and_end_time, where end
+    stays negative and gets caught anyway). Before the fix, end was derived
+    from start BEFORE start's own negativity was cleaned, so a meaningless
+    end=5 (derived from an already-invalid start) leaked through as
+    (None, 5.0). After the fix, start is cleaned first; end is only ever
+    derived from an already-validated start, so an invalid start yields
+    (None, None)."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_NEGATIVE_START_POSITIVE_DURATION)
+
+    assert result.text == "Negative start leak"
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Negative start leak"},
+    ]
+
+
 def test_start_plus_dur_sum_overflow_yields_none_end_time():
     """"start" and "dur" are each individually finite (1e308 parses fine and
     passes math.isfinite() on its own), so neither raises ValueError/TypeError.
