@@ -888,17 +888,21 @@ class YoutubeDownloader(BaseDownloader):
             root = ET.fromstring(xml_content)
 
             # 提取文本内容与原始时间属性字符串。start/dur 在此处不做数值转换，
-            # 避免个别条目属性格式错误时连带影响文本提取（见下方独立的
-            # 时间戳分段提取步骤）。
+            # 也不做默认值填充——`.get()` 不传 default，属性缺失时得到 None，
+            # 而不是伪造成字符串 "0"。伪造成 "0" 会在下方解析出一个虚假的
+            # "起点为 0" 或"零时长"时间戳，违反"坏/缺时间 -> None"的不变式。
+            # 属性缺失与格式错误统一交给下方独立的时间戳分段提取步骤处理
+            # （两者都会走 except 分支，最终落到 None，不影响文本提取）。
             raw_items = []
             for text_element in root.findall(".//text"):
                 raw_items.append({
-                    "start_raw": text_element.get("start", "0"),
-                    "dur_raw": text_element.get("dur", "0"),
+                    "start_raw": text_element.get("start"),
+                    "dur_raw": text_element.get("dur"),
                     "content": (text_element.text or "").strip(),
                 })
 
-            # 按开始时间排序；无法解析为数字的 start 视为 0，不影响排序继续
+            # 按开始时间排序；无法解析为数字的 start（含属性缺失的 None）视为
+            # 0，仅用于决定排序位置，不影响下方 start_time 字段本身的 None 判定
             def _safe_start(item):
                 try:
                     return float(item["start_raw"])

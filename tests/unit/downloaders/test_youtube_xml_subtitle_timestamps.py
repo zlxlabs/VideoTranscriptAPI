@@ -14,6 +14,13 @@ timing information entirely. These tests lock down:
   break text extraction, and never drop that entry from segments either
   ("text is never lost" invariant): only the offending entry's
   start_time/end_time is nulled out; the rest of the batch is untouched.
+- Missing "start"/"dur" attributes must NOT be faked as 0 -- that would
+  fabricate a bogus "starts at 0" or "zero duration" timestamp, violating
+  the "bad/missing time -> None" invariant. A missing "start" nulls
+  start_time (and therefore end_time, which depends on it); a missing
+  "dur" (with a valid start) nulls only end_time. Text is unaffected either
+  way, and the "start" sort key still treats a missing attribute as 0 for
+  ordering purposes only (unchanged legacy behavior).
 - Empty subtitle XML (no <text> elements): text == "" and segments is None.
 - Fully invalid XML still returns None (unchanged from before).
 
@@ -38,6 +45,14 @@ XML_NORMAL_UNSORTED = (
 
 XML_MISSING_DUR = (
     '<transcript><text start="1.0">No duration</text></transcript>'
+)
+
+XML_MISSING_START = (
+    '<transcript><text dur="3.0">No start</text></transcript>'
+)
+
+XML_MISSING_BOTH = (
+    '<transcript><text>No timing at all</text></transcript>'
 )
 
 XML_BAD_START_ATTR = (
@@ -71,14 +86,47 @@ def test_parses_and_sorts_by_start_time_text_unchanged():
     ]
 
 
-def test_missing_dur_attribute_defaults_to_zero_duration():
+def test_missing_dur_attribute_yields_none_end_time():
+    """A missing "dur" attribute must not be faked as a zero-length duration
+    (end_time == start_time). start_time is still valid (parsed from
+    "start"), but end_time depends on a real duration -- with none
+    available, it must be None rather than a fabricated zero-length cue."""
     downloader = _make_downloader()
 
     result = downloader._parse_youtube_subtitle_xml(XML_MISSING_DUR)
 
     assert result.text == "No duration"
     assert result.segments == [
-        {"start_time": 1.0, "end_time": 1.0, "text": "No duration"},
+        {"start_time": 1.0, "end_time": None, "text": "No duration"},
+    ]
+
+
+def test_missing_start_attribute_yields_none_start_and_end_time():
+    """A missing "start" attribute must not be faked as "starts at 0" --
+    start_time must be None. end_time depends on start_time, so it must be
+    None too even though "dur" is present and valid. Text is unaffected,
+    and the item still sorts (via the 0-fallback sort key, unchanged legacy
+    behavior for ordering purposes only) without raising."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_MISSING_START)
+
+    assert result.text == "No start"
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "No start"},
+    ]
+
+
+def test_missing_both_start_and_dur_attributes_yields_none_times_text_kept():
+    """Both attributes missing: both time fields are None, but the cue's
+    text is still preserved in segments (text is never lost)."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_MISSING_BOTH)
+
+    assert result.text == "No timing at all"
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "No timing at all"},
     ]
 
 
