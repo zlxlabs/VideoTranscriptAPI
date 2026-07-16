@@ -20,7 +20,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from ...transcriber.segments import parse_time_to_seconds
 from ...utils.logging import setup_logger
@@ -91,8 +91,17 @@ _TITLE_TRUNCATE_TO = 23
 class Chapter:
     """单个章节。
 
-    start_seg/end_seg 是 segments 列表里的下标（闭区间）；start_time/end_time
-    是反查对应 segment 的时间戳后转换出的秒数，上游缺失时间信息时可能为 None。
+    start_seg/end_seg 是调用方传入的**原始** segments 列表（过滤前）里的下标
+    （闭区间），不是入口过滤后内部列表的位置——process() 的入口会跳过非 dict/
+    空文本的脏条目，若 start_seg/end_seg 改为对着过滤后列表重新编号，调用方
+    （包括未来基于原始列表构造的页面锚点，如 `#dlg-{start_seg}`）会用错误的
+    下标去索引自己手上的原始列表，锚定到错误的位置。因此全程保留原始索引：
+    入口过滤只决定"哪些原始下标幸存"，幸存原始下标序列可能不连续（中间的
+    下标对应被过滤掉的条目），但 start_seg/end_seg 取值永远来自这个幸存原始
+    下标集合，从不重新编号（见 `_derive_end_segs`/`_derive_times`）。
+
+    start_time/end_time 是按 start_seg/end_seg 这两个原始下标反查对应 segment
+    的时间戳后转换出的秒数，上游缺失时间信息时可能为 None。
 
     若推导出 end_time < start_time（segments 时间乱序/脏数据导致），end_time
     会被诚实降级为 None，绝不产出非法区间；不改变 start_seg/end_seg 的顺序
@@ -263,10 +272,19 @@ def _format_timestamp(seconds: Optional[float]) -> str:
 _WHITESPACE_RUN_RE = re.compile(r"\s+")
 
 
-def _build_segment_lines(segments: List[Dict[str, Any]]) -> str:
-    """把 segments 压缩为带编号的正文，供拼进 user prompt。
+def _build_segment_lines(indexed_segments: List[Tuple[int, Dict[str, Any]]]) -> str:
+    """把 (原始索引, segment) 对压缩为带编号的正文，供拼进 user prompt。
 
-    每行格式：`[i] mm:ss (speaker:)? text`
+    每行格式：`[i] mm:ss (speaker:)? text`，其中 `i` 是调用方传入的**原始**
+    segments 列表下标（即入口过滤前的位置），而不是本函数内部重新计数的
+    位置。入口过滤（跳过非 dict/空文本条目）发生在调用方，幸存条目的原始
+    下标可能不连续（如 0, 2, 5...，中间的下标对应被跳过的条目）——这是正常
+    现象：LLM 只需按正文里实际出现的编号引用 start_seg，不要求编号连续，
+    见 `CHAPTERS_SYSTEM_PROMPT` 里"编号可能不连续"的说明。这样 LLM 返回的
+    start_seg 天然就是原始下标，后续校验/推导（`_validate_and_normalize_start_segs`
+    /`_derive_end_segs`/`_derive_times`）不需要再做一次"过滤后位置 -> 原始
+    下标"的换算，也就不存在换算遗漏导致的锚点偏移（见 `Chapter` 类文档）。
+
     （时间缺失则省略时间部分，没有 speaker 字段则省略说话人前缀）。
 
     text 中的换行/回车会被压成单个空格（连续空白进一步折叠为一个）：这是
@@ -289,7 +307,7 @@ def _build_segment_lines(segments: List[Dict[str, Any]]) -> str:
       就应该一致，不存在需要额外处理的分歧。
     """
     lines = []
-    for i, seg in enumerate(segments):
+    for i, seg in indexed_segments:
         text = _WHITESPACE_RUN_RE.sub(" ", seg.get("text") or "").strip()
         timestamp = _format_timestamp(_to_seconds(seg.get("start_time")))
         speaker = seg.get("speaker")
@@ -340,14 +358,21 @@ def _normalize_title_length(title: str, idx: int) -> str:
 
 def _validate_and_normalize_start_segs(
     raw_chapters: Any,
-    segment_count: int,
+    survived_indices: List[int],
 ) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
     """校验并规范化 LLM 返回的 chapters 列表的 start_seg 序列。
 
     校验以下内容：
-    1. 每项 start_seg 必须是 int（排除 bool）且落在 [0, segment_count) 范围内
+    1. 每项 start_seg 必须是 int（排除 bool）且属于 `survived_indices`——即
+       调用方传入的**原始** segments 列表里、经入口过滤后幸存下来的原始下标
+       集合。这里不再用 `[0, segment_count)` 区间校验：入口过滤后幸存的原始
+       下标可能不连续（中间的下标对应被过滤掉的条目），区间校验会放行一个
+       "数值上在范围内、但实际已被过滤掉"的下标（见 `Chapter` 类文档的锚点
+       偏移问题），必须严格按幸存下标集合的成员关系校验。
     2. 按 start_seg 去重（保留首次出现），去重后的序列必须严格递增
-    3. 去重后若首项 start_seg > 0，钳制为 0（覆盖开头；这是自动修正，不算校验失败）
+    3. 去重后若首项 start_seg 不是幸存下标里最小的那个，钳制为最小幸存下标
+       （覆盖开头；这是自动修正，不算校验失败）——同样不能再硬编码钳制为字面
+       量 0：0 本身就可能已被过滤掉，不在幸存下标集合里。
     4. title、gist 必须是非空字符串（strip 后非空）——曾经缺失/非字符串/空白值
        会被 `str(x or "").strip()` 强转成空串照样成章，导致章节标题/梗概为空。
        与 start_seg 越界/重复同等对待：视为语义校验失败，触发重试。
@@ -361,17 +386,23 @@ def _validate_and_normalize_start_segs(
 
     Args:
         raw_chapters: response.structured_output.get("chapters") 的原始返回
-        segment_count: 输入 segments 的总条数（N），用于范围校验
+        survived_indices: 入口过滤后幸存的原始下标列表，按原始顺序升序排列
+            （由调用方保证非空——`segment_count < _MIN_CHAPTER_COUNT` 的门控
+            已经在调用前拦下了空/单元素的情况）
 
     Returns:
         (normalized, error):
         - 成功：normalized 是去重 + 钳制后的 [{"title","gist","start_seg"}, ...]
-          列表（按 start_seg 升序），title 为未截断的完整原文，error 为 None
+          列表（按 start_seg 升序，start_seg 取值来自 survived_indices），
+          title 为未截断的完整原文，error 为 None
         - 失败：normalized 为 None，error 是具体原因描述（用于拼进重试 prompt
           或写入最终失败结果的 error 字段）
     """
     if not isinstance(raw_chapters, list) or not raw_chapters:
         return None, "chapters field is missing, not a list, or empty"
+
+    survived_set = set(survived_indices)
+    min_survived = survived_indices[0]  # survived_indices 按原始顺序升序排列
 
     items: List[Dict[str, Any]] = []
     for idx, item in enumerate(raw_chapters):
@@ -381,9 +412,11 @@ def _validate_and_normalize_start_segs(
         start_seg = item.get("start_seg")
         if not isinstance(start_seg, int) or isinstance(start_seg, bool):
             return None, f"chapters[{idx}].start_seg is not an int: {start_seg!r}"
-        if not (0 <= start_seg < segment_count):
+        if start_seg not in survived_set:
             return None, (
-                f"chapters[{idx}].start_seg={start_seg} out of range [0, {segment_count})"
+                f"chapters[{idx}].start_seg={start_seg} out of range (not among the "
+                f"{len(survived_indices)} surviving segment indices in "
+                f"[{survived_indices[0]}, {survived_indices[-1]}])"
             )
 
         raw_title = item.get("title")
@@ -419,32 +452,72 @@ def _validate_and_normalize_start_segs(
             seq = [d["start_seg"] for d in deduped]
             return None, f"start_seg sequence not strictly increasing after dedup: {seq}"
 
-    # 首项若 > 0，钳制为 0（覆盖开头，不算失败）
-    if deduped[0]["start_seg"] > 0:
+    # 首项若不是最小幸存下标，钳制为最小幸存下标（覆盖开头，不算失败）。
+    # 不能钳制为字面量 0——0 本身可能已被入口过滤掉、不在幸存下标集合里。
+    if deduped[0]["start_seg"] > min_survived:
         logger.info(
             f"[CHAPTERS] Clamping first chapter start_seg from "
-            f"{deduped[0]['start_seg']} to 0"
+            f"{deduped[0]['start_seg']} to {min_survived} (smallest surviving segment index)"
         )
-        deduped[0] = {**deduped[0], "start_seg": 0}
+        deduped[0] = {**deduped[0], "start_seg": min_survived}
 
     return deduped, None
 
 
-def _derive_end_segs(chapters: List[Dict[str, Any]], segment_count: int) -> None:
-    """原地为每章填充 end_seg：下一章起点的前一个位置，末章到最后一条 segment。"""
+def _derive_end_segs(chapters: List[Dict[str, Any]], survived_indices: List[int]) -> None:
+    """原地为每章填充 end_seg（原始 segments 列表里的下标，非过滤后位置）。
+
+    末章 end_seg = 最大幸存原始下标；非末章 end_seg = "下一章 start_seg 在幸存
+    序列中的前一个元素"的原始下标。不能简单用 `下一章 start_seg - 1`——幸存
+    下标一旦因过滤而不连续（如 [0, 2, 3, 4]，1 已被过滤），`3 - 1 = 2` 恰好
+    还能碰对，但 `4 - 1 = 3` 就会指向一个仍然幸存、但不是"紧邻前一个"的下标
+    （当中间还有更大跨度的空洞时更明显，如幸存 [0, 5, 8]，下一章 start=8 时
+    `8 - 1 = 7` 根本不是幸存下标，直接错误）。这里改为先建立"幸存下标 ->
+    在幸存序列中的位置"的映射，再用该位置回退一位取值，保证 end_seg 永远
+    落在幸存下标集合内、且是真正紧邻的前一个元素。
+
+    Args:
+        chapters: 已通过语义校验、按 start_seg 升序排列的章节列表（原地修改）
+        survived_indices: 入口过滤后幸存的原始下标列表，按原始顺序升序排列
+    """
+    # 幸存原始下标 -> 在幸存序列中的位置。每章的 start_seg 必然是幸存下标之一
+    # （已经过 `_validate_and_normalize_start_segs` 校验），所以这里查表不会
+    # 缺键；又因为序列严格递增且首项已钳制为最小幸存下标，非首章的位置必然
+    # >= 1，`position - 1` 不会越界到负数。
+    position_by_index = {idx: pos for pos, idx in enumerate(survived_indices)}
     n = len(chapters)
     for i, chapter in enumerate(chapters):
         if i + 1 < n:
-            chapter["end_seg"] = chapters[i + 1]["start_seg"] - 1
+            next_start = chapters[i + 1]["start_seg"]
+            chapter["end_seg"] = survived_indices[position_by_index[next_start] - 1]
         else:
-            chapter["end_seg"] = segment_count - 1
+            chapter["end_seg"] = survived_indices[-1]
 
 
-def _derive_times(chapters: List[Dict[str, Any]], segments: List[Dict[str, Any]]) -> None:
-    """原地为每章填充 start_time/end_time：反查对应 segment 的时间戳并转秒（None 容忍）。"""
+def _derive_times(
+    chapters: List[Dict[str, Any]],
+    segment_by_index: Dict[int, Dict[str, Any]],
+) -> None:
+    """原地为每章填充 start_time/end_time：按原始下标反查对应 segment 的时间戳
+    并转秒（None 容忍）。
+
+    start_seg/end_seg 是**原始** segments 列表的下标，不是过滤后列表的位置——
+    反查必须通过 `segment_by_index`（原始下标 -> 幸存 segment 的映射）完成，
+    不能再用 `filtered_segments[start_seg]` 这种按位置切片的写法：一旦发生
+    过滤，原始下标与过滤后列表的位置会分道扬镳，位置切片会静默取到错误的
+    （在过滤跨度较大时甚至是越界的）segment。
+
+    Args:
+        chapters: 已推导出 start_seg/end_seg 的章节列表（原地修改）
+        segment_by_index: 原始下标 -> 幸存 segment 字典的映射
+    """
     for chapter in chapters:
-        chapter["start_time"] = _to_seconds(segments[chapter["start_seg"]].get("start_time"))
-        chapter["end_time"] = _to_seconds(segments[chapter["end_seg"]].get("end_time"))
+        chapter["start_time"] = _to_seconds(
+            segment_by_index[chapter["start_seg"]].get("start_time")
+        )
+        chapter["end_time"] = _to_seconds(
+            segment_by_index[chapter["end_seg"]].get("end_time")
+        )
 
 
 def _sanitize_end_time(
@@ -648,11 +721,18 @@ class ChaptersProcessor:
         # transcriber.segments.normalize_segments 对非 dict"直接跳过"、对
         # 空文本"没有留存价值，跳过"的口径保持一致，避免同一类脏数据在两处
         # 产生不同的容忍口径。
+        #
+        # 关键：过滤时保留每条幸存 segment 的**原始下标**（`enumerate(segments)`
+        # 里的 orig_idx，过滤前的位置），而不是丢弃原始下标、事后用
+        # `enumerate(filtered_segments)` 重新编号。原始下标才是调用方手上那份
+        # 原始 segments 列表的真实坐标——后续编号正文、语义校验、end_seg/时间
+        # 推导全部围绕这份原始下标进行，start_seg/end_seg 才能一直索引调用方
+        # 的原始列表，不因过滤而错位（见 `Chapter` 类文档）。
         original_count = len(segments)
-        filtered_segments: List[Dict[str, Any]] = []
+        filtered_pairs: List[Tuple[int, Dict[str, Any]]] = []
         non_dict_count = 0
         blank_text_count = 0
-        for seg in segments:
+        for orig_idx, seg in enumerate(segments):
             if not isinstance(seg, dict):
                 non_dict_count += 1
                 continue
@@ -660,8 +740,8 @@ class ChaptersProcessor:
             if not isinstance(text, str) or not text.strip():
                 blank_text_count += 1
                 continue
-            filtered_segments.append(seg)
-        segments = filtered_segments
+            filtered_pairs.append((orig_idx, seg))
+        segments = [seg for _, seg in filtered_pairs]
 
         if non_dict_count > 0:
             logger.warning(
@@ -684,11 +764,19 @@ class ChaptersProcessor:
                 error=None, fingerprint=None, segment_count=0,
             )
 
+        # 幸存原始下标列表（按原始顺序升序，enumerate 天然保证）与"原始下标 ->
+        # 幸存 segment"的映射，供后面语义校验（成员关系）、end_seg 推导（在
+        # 幸存序列中回退一位）、时间反查（按原始下标查表）复用，避免各处各自
+        # 重新计算、口径不一致。
+        survived_indices: List[int] = [idx for idx, _ in filtered_pairs]
+        segment_by_index: Dict[int, Dict[str, Any]] = dict(filtered_pairs)
+
         segment_count = len(segments)
         full_text = "".join((seg.get("text") or "") for seg in segments)
         # 指纹覆盖每条 segment 的 text + 规范化后的 start_time/end_time（细节见
         # `_compute_fingerprint`），而不是只哈希文本拼接——full_text 本身继续
-        # 只用于下面的长度门控，不受指纹算法影响。
+        # 只用于下面的长度门控，不受指纹算法影响。指纹用的是幸存条目的原始
+        # text（`segments` 此时已是幸存条目组成的列表，条目本身未被改写）。
         fingerprint = _compute_fingerprint(segments)
 
         # 门控 2：segments 非空，但没有任何一条能解析出 start_time —— 章节功能
@@ -744,7 +832,9 @@ class ChaptersProcessor:
         # 仅测量 full_text 会漏判，实际发送的 prompt 仍可能远超模型上限。
         # 注：门控 3（min_chapters_threshold）语义是"内容量是否值得分章"，与发送
         # 开销无关，继续用 full_text 测量，不受这里影响。
-        segment_lines = _build_segment_lines(segments)
+        # 传入 filtered_pairs（原始下标, segment）而非 segments：编号必须用
+        # 原始下标，见 `_build_segment_lines` 文档。
+        segment_lines = _build_segment_lines(filtered_pairs)
 
         # 门控 4：原文过长，直接判失败而不是把超大输入硬塞给模型
         if len(segment_lines) > self.config.max_chapters_input_chars:
@@ -785,7 +875,10 @@ class ChaptersProcessor:
             )
 
         # 步骤 2：调用 LLM（内含语义校验失败时的单次重试）——segment_lines 已在
-        # 门控 4 处构建完毕，此处直接复用，避免重复压缩同一份输入。
+        # 门控 4 处构建完毕，此处直接复用，避免重复压缩同一份输入。传入
+        # survived_indices（原始下标集合）而非 segment_count：语义校验必须
+        # 按幸存原始下标的成员关系判定，不是简单的区间校验，见
+        # `_validate_and_normalize_start_segs` 文档。
         normalized, raw_chapters, call_error = self._generate_with_retry(
             segment_lines=segment_lines,
             title=title,
@@ -793,7 +886,7 @@ class ChaptersProcessor:
             description=description,
             model=model,
             reasoning_effort=reasoning_effort,
-            segment_count=segment_count,
+            survived_indices=survived_indices,
         )
 
         if normalized is None:
@@ -818,9 +911,11 @@ class ChaptersProcessor:
                 error=error, fingerprint=fingerprint, segment_count=segment_count,
             )
 
-        # 步骤 4：推导 end_seg 与 start_time/end_time
-        _derive_end_segs(normalized, segment_count)
-        _derive_times(normalized, segments)
+        # 步骤 4：推导 end_seg 与 start_time/end_time——均按原始下标进行
+        # （survived_indices/segment_by_index），不能再用 segment_count/
+        # segments 做位置换算，见 `_derive_end_segs`/`_derive_times` 文档。
+        _derive_end_segs(normalized, survived_indices)
+        _derive_times(normalized, segment_by_index)
 
         # 步骤 5：合并相邻同名章节
         merged = _merge_adjacent_same_title(normalized)
@@ -882,7 +977,7 @@ class ChaptersProcessor:
         description: str,
         model: str,
         reasoning_effort: Optional[str],
-        segment_count: int,
+        survived_indices: List[int],
     ) -> tuple[Optional[List[Dict[str, Any]]], Any, Optional[str]]:
         """调用 LLM 生成章节，若语义校验失败则携带具体错误重试一次。
 
@@ -927,7 +1022,7 @@ class ChaptersProcessor:
 
             raw_chapters = (response.structured_output or {}).get("chapters")
             normalized, validation_error = _validate_and_normalize_start_segs(
-                raw_chapters, segment_count
+                raw_chapters, survived_indices
             )
 
             if normalized is not None:

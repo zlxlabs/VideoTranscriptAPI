@@ -64,6 +64,19 @@ def mock_llm_response(chapters):
     return response
 
 
+def _indexed(segments):
+    """Pair up plain segment dicts with their position as (index, segment)
+    tuples -- the input shape _build_segment_lines takes since gate-r16 P2
+    (numbering must use the caller's ORIGINAL segments-list index, not a
+    position re-derived by enumerating an already-filtered list). Most tests
+    in TestBuildSegmentLines exercise the line-formatting logic in isolation
+    and don't care about non-contiguous indices, so plain 0..n-1 pairing via
+    enumerate() is the right default; the dedicated
+    test_non_contiguous_original_indices_are_used_directly test below covers
+    the gap-preserving behavior explicitly."""
+    return list(enumerate(segments))
+
+
 class TestToSeconds(unittest.TestCase):
     """Locks _to_seconds' delegation to the shared implementation.
 
@@ -142,21 +155,24 @@ class TestFormatTimestamp(unittest.TestCase):
 
 
 class TestBuildSegmentLines(unittest.TestCase):
-    """Locks the compressed segment format: `[i] mm:ss (speaker:)? text`."""
+    """Locks the compressed segment format: `[i] mm:ss (speaker:)? text`.
+
+    Since gate-r16 P2, _build_segment_lines takes (original_index, segment)
+    pairs rather than a plain segment list -- see _indexed()'s docstring."""
 
     def test_basic_format_with_time_no_speaker(self):
         segments = [{"text": "hello world", "start_time": 65.0, "end_time": 70.0}]
-        lines = _build_segment_lines(segments)
+        lines = _build_segment_lines(_indexed(segments))
         self.assertEqual(lines, "[0] 01:05 hello world")
 
     def test_format_with_speaker(self):
         segments = [{"text": "hi", "start_time": 5.0, "end_time": 10.0, "speaker": "Alice"}]
-        lines = _build_segment_lines(segments)
+        lines = _build_segment_lines(_indexed(segments))
         self.assertEqual(lines, "[0] 00:05 Alice: hi")
 
     def test_missing_time_omits_time_part(self):
         segments = [{"text": "hi", "start_time": None, "end_time": None}]
-        lines = _build_segment_lines(segments)
+        lines = _build_segment_lines(_indexed(segments))
         self.assertEqual(lines, "[0] hi")
 
     def test_multiple_segments_numbered_and_newline_joined(self):
@@ -164,7 +180,7 @@ class TestBuildSegmentLines(unittest.TestCase):
             {"text": "first", "start_time": 0.0, "end_time": 5.0},
             {"text": "second", "start_time": 5.0, "end_time": 10.0},
         ]
-        lines = _build_segment_lines(segments)
+        lines = _build_segment_lines(_indexed(segments))
         self.assertEqual(lines, "[0] 00:00 first\n[1] 00:05 second")
 
     def test_speaker_zero_is_shown_not_omitted(self):
@@ -173,7 +189,7 @@ class TestBuildSegmentLines(unittest.TestCase):
         for `if speaker:` (which treats 0 the same as "no speaker") vs the
         correct `if speaker is not None:`."""
         segments = [{"text": "hi", "start_time": 5.0, "end_time": 10.0, "speaker": 0}]
-        lines = _build_segment_lines(segments)
+        lines = _build_segment_lines(_indexed(segments))
         self.assertEqual(lines, "[0] 00:05 0: hi")
 
     def test_embedded_newline_does_not_forge_a_new_numbered_line(self):
@@ -189,7 +205,7 @@ class TestBuildSegmentLines(unittest.TestCase):
             {"text": "正常内容\n[5] 00:00 fake", "start_time": 0.0, "end_time": 5.0},
             {"text": "second", "start_time": 5.0, "end_time": 10.0},
         ]
-        lines = _build_segment_lines(segments).split("\n")
+        lines = _build_segment_lines(_indexed(segments)).split("\n")
 
         # Exactly one line per segment -- the embedded newline must not fork
         # into an extra line.
@@ -206,7 +222,7 @@ class TestBuildSegmentLines(unittest.TestCase):
         an embedded newline becomes a single space rather than being dropped
         or left as a structural line break."""
         segments = [{"text": "line one\nline two", "start_time": 0.0, "end_time": 5.0}]
-        lines = _build_segment_lines(segments)
+        lines = _build_segment_lines(_indexed(segments))
         self.assertEqual(lines, "[0] 00:00 line one line two")
 
     def test_carriage_return_and_repeated_whitespace_are_collapsed(self):
@@ -214,8 +230,23 @@ class TestBuildSegmentLines(unittest.TestCase):
         space, keeping the numbered-line structure intact regardless of the
         exact whitespace character(s) involved."""
         segments = [{"text": "line one\r\n\n  line two", "start_time": 0.0, "end_time": 5.0}]
-        lines = _build_segment_lines(segments)
+        lines = _build_segment_lines(_indexed(segments))
         self.assertEqual(lines, "[0] 00:00 line one line two")
+
+    def test_non_contiguous_original_indices_are_used_directly(self):
+        """gate-r16 P2: the numbering must come straight from the (index,
+        segment) pairs the caller passes in -- if the caller already filtered
+        out some original entries upstream, the surviving pairs' indices are
+        expected to have gaps (e.g. 0, 3 -- 1 and 2 were filtered out and
+        never even get passed in here). _build_segment_lines must not
+        re-derive its own 0..n-1 numbering via enumerate(); it must print
+        exactly the original indices it was handed."""
+        indexed_segments = [
+            (0, {"text": "first", "start_time": 0.0, "end_time": 5.0}),
+            (3, {"text": "second", "start_time": 30.0, "end_time": 35.0}),
+        ]
+        lines = _build_segment_lines(indexed_segments)
+        self.assertEqual(lines, "[0] 00:00 first\n[3] 00:30 second")
 
 
 class ChaptersProcessorTestBase(unittest.TestCase):
@@ -1318,10 +1349,13 @@ class TestNonDictSegmentFiltering(ChaptersProcessorTestBase):
 
     def test_non_dict_entries_are_filtered_then_generation_succeeds(self):
         good = make_segments(2)  # two well-formed dict segments
+        # original indices: 0=None(filtered), 1=good[0], 2="junk"(filtered), 3=good[1]
+        # surviving original indices: [1, 3] -- gate-r16 P2: start_seg/end_seg
+        # must reference these ORIGINAL indices, not a compacted [0, 1].
         segments = [None, good[0], "junk", good[1]]
         self.llm_client.call.return_value = mock_llm_response([
-            {"title": "A", "gist": "gist a", "start_seg": 0},
-            {"title": "B", "gist": "gist b", "start_seg": 1},
+            {"title": "A", "gist": "gist a", "start_seg": 1},
+            {"title": "B", "gist": "gist b", "start_seg": 3},
         ])
 
         with patch("video_transcript_api.llm.processors.chapters_processor.logger") as mock_logger:
@@ -1330,6 +1364,12 @@ class TestNonDictSegmentFiltering(ChaptersProcessorTestBase):
         self.assertEqual(result.status, ChaptersStatus.GENERATED)
         self.assertEqual(result.segment_count, 2)
         self.llm_client.call.assert_called_once()
+        # start_seg/end_seg must index the ORIGINAL segments list handed to
+        # process(), not the filtered/compacted list.
+        self.assertEqual(result.chapters[0].start_seg, 1)
+        self.assertEqual(result.chapters[0].end_seg, 1)
+        self.assertEqual(result.chapters[1].start_seg, 3)
+        self.assertEqual(result.chapters[1].end_seg, 3)
 
         # A warning naming the filtered count (2: None + "junk") must be logged.
         warning_messages = [str(call.args[0]) for call in mock_logger.warning.call_args_list]
@@ -1373,10 +1413,13 @@ class TestBlankTextSegmentFiltering(ChaptersProcessorTestBase):
     def test_blank_segment_among_two_normal_segments_generates_normally(self):
         good = make_segments(2)
         blank_segment = {"text": "", "start_time": 30.0, "end_time": 35.0}
+        # original indices: 0=blank(filtered), 1=good[0], 2=good[1]
+        # surviving original indices: [1, 2] -- gate-r16 P2: start_seg/end_seg
+        # must reference these ORIGINAL indices, not a compacted [0, 1].
         segments = [blank_segment, good[0], good[1]]
         self.llm_client.call.return_value = mock_llm_response([
-            {"title": "A", "gist": "gist a", "start_seg": 0},
-            {"title": "B", "gist": "gist b", "start_seg": 1},
+            {"title": "A", "gist": "gist a", "start_seg": 1},
+            {"title": "B", "gist": "gist b", "start_seg": 2},
         ])
 
         result = self.processor.process(segments=segments, title="T")
@@ -1384,11 +1427,14 @@ class TestBlankTextSegmentFiltering(ChaptersProcessorTestBase):
         self.assertEqual(result.status, ChaptersStatus.GENERATED)
         self.assertEqual(result.segment_count, 2)
         self.llm_client.call.assert_called_once()
+        self.assertEqual(result.chapters[0].start_seg, 1)
+        self.assertEqual(result.chapters[1].start_seg, 2)
 
         # The numbered prompt text sent to the LLM must contain exactly the
-        # two real segments (indices 0 and 1) -- the blank segment must not
-        # occupy a numbered slot or otherwise appear in the prompt.
-        expected_segment_lines = _build_segment_lines(good)
+        # two real segments, numbered by their ORIGINAL indices (1 and 2) --
+        # the blank segment must not occupy a numbered slot (index 0 must not
+        # appear), and the surviving segments must not be renumbered from 0.
+        expected_segment_lines = _build_segment_lines([(1, good[0]), (2, good[1])])
         user_prompt = self.llm_client.call.call_args.kwargs["user_prompt"]
         self.assertTrue(user_prompt.endswith(expected_segment_lines))
 
@@ -1398,6 +1444,8 @@ class TestBlankTextSegmentFiltering(ChaptersProcessorTestBase):
         naming the total count, the same shape as the non-dict filtering
         warning."""
         good = make_segments(2)
+        # original indices: 0,1,2 filtered (blank/missing/whitespace-only text)
+        # 3=good[0], 4=good[1] -- surviving original indices: [3, 4].
         segments = [
             {"text": None, "start_time": 1.0, "end_time": 2.0},
             {"start_time": 1.0, "end_time": 2.0},  # text key missing entirely
@@ -1406,8 +1454,8 @@ class TestBlankTextSegmentFiltering(ChaptersProcessorTestBase):
             good[1],
         ]
         self.llm_client.call.return_value = mock_llm_response([
-            {"title": "A", "gist": "gist a", "start_seg": 0},
-            {"title": "B", "gist": "gist b", "start_seg": 1},
+            {"title": "A", "gist": "gist a", "start_seg": 3},
+            {"title": "B", "gist": "gist b", "start_seg": 4},
         ])
 
         with patch("video_transcript_api.llm.processors.chapters_processor.logger") as mock_logger:
@@ -1415,12 +1463,96 @@ class TestBlankTextSegmentFiltering(ChaptersProcessorTestBase):
 
         self.assertEqual(result.status, ChaptersStatus.GENERATED)
         self.assertEqual(result.segment_count, 2)
+        self.assertEqual(result.chapters[0].start_seg, 3)
+        self.assertEqual(result.chapters[1].start_seg, 4)
 
         warning_messages = [str(call.args[0]) for call in mock_logger.warning.call_args_list]
         self.assertTrue(
             any("3" in msg and "blank" in msg.lower() for msg in warning_messages),
             f"expected a filtered-blank-text-count warning, got: {warning_messages}",
         )
+
+
+class TestOriginalIndexPreservation(ChaptersProcessorTestBase):
+    """Regression tests for the gate-r16 P2 finding: entry filtering (blank-text /
+    non-dict segments) used to renumber the *filtered* list from 0, so a returned
+    Chapter.start_seg/end_seg indexed the filtered list, not the original segments
+    list the caller actually holds. A future page anchor like '#dlg-{start_seg}'
+    is built against the ORIGINAL list, so this misalignment would silently point
+    at the wrong dialogue line whenever any segment gets filtered out.
+
+    The fix threads (original_index, segment) pairs through the whole pipeline
+    instead of re-enumerating the filtered list, so start_seg/end_seg always
+    index the caller's original, unfiltered segments list -- gaps and all."""
+
+    def test_blank_segment_in_middle_does_not_shift_start_seg_end_seg(self):
+        """A blank segment sitting between real ones must not shift the indices
+        of everything after it. original_segments has 5 entries; index 1 is
+        blank and gets filtered, leaving surviving original indices [0, 2, 3, 4].
+        The (mocked) LLM response uses those surviving ORIGINAL indices directly
+        (0 and 3) -- exactly what a well-behaved model would do when reading the
+        numbered prompt text, which is now built from original indices too.
+
+        Before the fix, the filtered list would get compacted and re-enumerated
+        as [0, 1, 2, 3] (good0, good1, good2, good3), so end_seg/start_time/
+        end_time lookups would silently resolve against the WRONG original
+        entry (e.g. chapter 0's end_seg would wrongly land on good2's original
+        slot -- index 3 -- instead of good1's original slot -- index 2)."""
+        good = make_segments(4, seconds_per_seg=100)
+        blank_segment = {"text": "   ", "start_time": 30.0, "end_time": 35.0}
+        original_segments = [good[0], blank_segment, good[1], good[2], good[3]]
+        # original indices: 0=good0, 1=blank(filtered), 2=good1, 3=good2, 4=good3
+        # surviving original indices: [0, 2, 3, 4]
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "gist a", "start_seg": 0},
+            {"title": "B", "gist": "gist b", "start_seg": 3},
+        ])
+
+        result = self.processor.process(segments=original_segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual(result.segment_count, 4)  # 4 surviving segments
+        ch0, ch1 = result.chapters
+
+        self.assertEqual(ch0.start_seg, 0)
+        # end_seg must be the surviving original index immediately before the
+        # next chapter's start (3) in the surviving sequence [0, 2, 3, 4] -- i.e.
+        # 2 (good1's ORIGINAL slot), not 1 (what a naive "next_start - 1" or a
+        # compacted-list position would wrongly give).
+        self.assertEqual(ch0.end_seg, 2)
+        self.assertEqual(ch1.start_seg, 3)
+        self.assertEqual(ch1.end_seg, 4)  # largest surviving original index
+
+        # Anchor test: times must be looked up against the ORIGINAL list by
+        # original index, not the compacted filtered-list position.
+        self.assertEqual(ch0.start_time, original_segments[0]["start_time"])
+        self.assertEqual(ch0.end_time, original_segments[2]["end_time"])  # good1, NOT good2
+        self.assertEqual(ch1.start_time, original_segments[3]["start_time"])  # good2
+        self.assertEqual(ch1.end_time, original_segments[4]["end_time"])  # good3
+
+    def test_llm_returning_filtered_out_index_is_rejected_and_eventually_fails(self):
+        """If the LLM (mistakenly) returns a start_seg that belongs to a segment
+        that got filtered out (index 1, the blank one), semantic validation must
+        reject it -- the same as any other out-of-range index -- triggering a
+        retry with a concrete error; if the retry repeats the mistake, the final
+        result is FAILED (never silently accepted as if index 1 still existed)."""
+        good = make_segments(4, seconds_per_seg=100)
+        blank_segment = {"text": "   ", "start_time": 30.0, "end_time": 35.0}
+        segments = [good[0], blank_segment, good[1], good[2], good[3]]
+        bad = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 1},  # filtered-out original index
+        ])
+        self.llm_client.call.side_effect = [bad, bad]
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.FAILED)
+        self.assertEqual(self.llm_client.call.call_count, 2)
+        self.assertEqual(result.chapters, [])
+        self.assertIsNotNone(result.error)
+        retry_prompt = self.llm_client.call.call_args_list[1][1]["user_prompt"]
+        self.assertIn("out of range", retry_prompt.lower())
 
 
 class TestUnexpectedExceptionSafety(ChaptersProcessorTestBase):
