@@ -786,10 +786,32 @@ class YouTubeApiClient:
         开始（即从它自己之后算起）而丢失自身，最终在 segments 里整条消失
         （legacy parse_srt_to_text 的严格正则不识别它、仍会把它当正文保留，
         造成 text 与 segments 背离）。因此这里再加一层"长得像时间"的约束：
-        "-->" 两侧至少要有一侧命中 `_TIME_STYLE_FRAGMENT_PATTERN`（形如
-        "12:34" 的数字+冒号片段），如 "00:00:0X --> 00:00:04" 两侧都命中，
-        仍判定为损坏的时间轴；"Settings --> Privacy" 两侧都不含任何时间样式
-        片段，判定为普通正文，交由调用方的孤儿文本路径（R6）兜底收集。
+        "-->" 两侧都必须命中 `_TIME_STYLE_FRAGMENT_PATTERN`（形如 "12:34"
+        的数字+冒号片段）才判定为损坏的时间轴，如 "00:00:0X --> 00:00:04"
+        两侧都命中，仍判定为损坏的时间轴；"Settings --> Privacy" 两侧都不
+        含任何时间样式片段，判定为普通正文，交由调用方的孤儿文本路径
+        （R6）兜底收集。
+
+        gate-r27 P2：之前是"至少一侧命中"（OR），会把 cue 首行正文里恰好
+        一侧含时间样式片段的行误判为损坏时间轴——例如 "Meet at 12:30 -->
+        lobby"，左侧 "12:30" 命中片段正则，右侧 "lobby" 不含任何数字，OR
+        逻辑下整行被当成一条损坏的时间轴声明，导致这行正文本身被吞掉、不
+        进入任何 cue 的文本（既不在当前 cue 里，也不会被当作下一条 cue 的
+        文本收集起点，因为收集是从 j=i+1 开始的）。真正损坏的时间轴（如
+        "00:00:0X --> 00:00:04"）两侧永远都是"数字+冒号"结构，只有正文
+        偶然带时间样式词汇时才会出现"一侧像时间、另一侧不像"的情况，因此
+        改成两侧都必须命中（AND）才判定为损坏时间轴，能不牺牲对真损坏行的
+        识别、同时放过这类单侧误判。
+
+        一致性核查（gate-r27 P2）：对形如 "00:00:01,000 --> garbage" 这种
+        "一侧完整时间戳格式、另一侧纯垃圾"的行，legacy `parse_srt_to_text`
+        用的 `_SRT_TIMESTAMP_LINE_PATTERN.match()` 要求两侧都齐全数字才能
+        匹配成功，这类行匹配失败，因此 legacy 路径把整行原样当正文保留进
+        text。收紧为 AND 后，这类行同样两侧非同时命中而判定为普通正文，
+        交由孤儿文本路径按原始整行文本收集——与 legacy 的处理口径一致（都
+        是"保留为文本，不消费为时间轴"），不会造成 text/segments 背离。
+        测试见 test_youtube_api_client_srt_timestamps.py 中
+        test_gate_r27_one_side_time_style_other_side_garbage_matches_legacy_text_handling。
 
         BOM 容忍：prev_line 的纯数字判断用 `_strip_bom` 剥掉可能存在的行首
         UTF-8 BOM 后再做 isdigit() 检查——否则文件开头带 BOM 时，第一条 cue
@@ -809,7 +831,7 @@ class YouTubeApiClient:
         left, _, right = line.partition("-->")
         return bool(
             YouTubeApiClient._TIME_STYLE_FRAGMENT_PATTERN.search(left)
-            or YouTubeApiClient._TIME_STYLE_FRAGMENT_PATTERN.search(right)
+            and YouTubeApiClient._TIME_STYLE_FRAGMENT_PATTERN.search(right)
         )
 
     @staticmethod

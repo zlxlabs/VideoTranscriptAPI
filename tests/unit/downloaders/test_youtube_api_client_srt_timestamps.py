@@ -274,6 +274,56 @@ SRT_BOTH_SIDES_INVALID = (
     "Hello world\n"
 )
 
+# gate-r27 P2: a cue whose timeline row is entirely missing (mirrors
+# SRT_ORPHAN_ARROW_BODY_NO_TIME_STYLE's structure), where the orphaned body
+# text itself contains "-->" AND happens to have a "12:34"-style time
+# fragment on exactly one side ("12:30" on the left of "Meet at 12:30 -->
+# lobby"; "lobby" on the right has no digits at all). Before the AND fix,
+# the old "at least one side" (OR) rule misclassified this as a corrupted
+# timeline declaration, silently swallowing the body text itself (the
+# text-collection loop for the "next cue" starts scanning *after* this
+# line, so the line's own content is never captured anywhere).
+SRT_CUE_BODY_ONE_SIDED_TIME_STYLE_THEN_GARBAGE_SIDE = (
+    "1\n"
+    "00:00:01,000 --> 00:00:02,000\n"
+    "First line\n"
+    "\n"
+    "42\n"
+    "Meet at 12:30 --> lobby\n"
+    "\n"
+    "3\n"
+    "00:00:05,000 --> 00:00:06,000\n"
+    "Third line\n"
+)
+
+# gate-r27 P2: dedicated non-regression fixture for the AND fix -- a
+# genuinely corrupted timeline row where BOTH sides still contain a
+# "12:34"-style digit+colon fragment ("00:00" / "00:00:04") must keep being
+# recognized as a damaged timeline boundary (not reclassified as body text
+# just because the AND guard was tightened).
+SRT_GATE_R27_BOTH_SIDES_TIME_STYLE_STILL_BROKEN = (
+    "1\n"
+    "00:00:0Y --> 00:00:04\n"
+    "Hello world\n"
+)
+
+# gate-r27 P2: consistency fixture for a "-->" row where one side is a
+# complete, well-formed timestamp and the other side is arbitrary garbage
+# with no digit+colon fragment at all ("00:00:01,000 --> garbage"). Placed
+# after a normal, fully recognized cue so `found_any_cue` is already True,
+# letting us directly observe how this specific row is classified (rather
+# than the whole SRT collapsing to segments=None for having no recognizable
+# cue at all).
+SRT_ONE_SIDE_FULL_TIMESTAMP_OTHER_SIDE_GARBAGE = (
+    "1\n"
+    "00:00:01,000 --> 00:00:04,000\n"
+    "Hello world\n"
+    "\n"
+    "2\n"
+    "00:00:01,000 --> garbage\n"
+    "Second cue text\n"
+)
+
 SRT_EMPTY = ""
 
 # gate-r16 P2: a UTF-8 BOM (U+FEFF) prepended to the file content (as many
@@ -817,3 +867,95 @@ def test_bom_prefixed_srt_legacy_parse_srt_to_text_keeps_historical_quirk():
 
     assert result.text == "﻿1 Hello world This is a test"
     assert YouTubeApiClient.parse_srt_to_text(SRT_WITH_BOM) == result.text
+
+
+def test_gate_r27_cue_body_first_line_with_one_sided_time_style_lands_as_text_not_broken_timeline():
+    """gate-r27 P2: "Meet at 12:30 --> lobby" as a cue's orphaned body text
+    (its real timeline row is missing entirely, index line followed
+    directly by this body line) must NOT be misjudged as a damaged timeline
+    just because its LEFT side ("12:30") happens to look like a time -- the
+    RIGHT side ("lobby") has no digit+colon fragment at all. The old "at
+    least one side" (OR) rule swallowed this line whole (treated as a
+    corrupted timeline boundary, so the text-collection for whatever
+    "follows" it starts scanning from the line *after* it, losing this
+    line's own content everywhere). The tightened "both sides" (AND) rule
+    correctly falls through to the orphan-text path (R6): the line lands in
+    segments as its own entry with start_time/end_time = None, and text
+    stays byte-identical to the legacy parser (which never recognized this
+    line as a timeline row in the first place, since it doesn't match the
+    full "HH:MM:SS,mmm --> HH:MM:SS,mmm" shape)."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(
+        SRT_CUE_BODY_ONE_SIDED_TIME_STYLE_THEN_GARBAGE_SIDE
+    )
+
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": 2.0, "text": "First line"},
+        {"start_time": None, "end_time": None, "text": "Meet at 12:30 --> lobby"},
+        {"start_time": 5.0, "end_time": 6.0, "text": "Third line"},
+    ]
+    assert result.text == "First line Meet at 12:30 --> lobby Third line"
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_CUE_BODY_ONE_SIDED_TIME_STYLE_THEN_GARBAGE_SIDE
+    ) == result.text
+
+
+def test_gate_r27_both_sides_time_style_corrupted_timeline_still_treated_as_broken():
+    """gate-r27 P2 non-regression: tightening `_looks_like_timeline_attempt`
+    from "at least one side" to "both sides must match" must not lose the
+    ability to recognize a genuinely corrupted timeline row. "00:00:0Y -->
+    00:00:04" has a stray letter breaking the strict digit-count regex, but
+    BOTH sides still contain a "12:34"-style digit+colon fragment ("00:00"
+    on the left, "00:00:04" on the right) -- it must keep being classified
+    as a damaged timeline boundary: the cue text is preserved with
+    start_time/end_time = None (not reclassified as plain body text)."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(
+        SRT_GATE_R27_BOTH_SIDES_TIME_STYLE_STILL_BROKEN
+    )
+
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Hello world"},
+    ]
+    assert result.text == "00:00:0Y --> 00:00:04 Hello world"
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_GATE_R27_BOTH_SIDES_TIME_STYLE_STILL_BROKEN
+    ) == result.text
+
+
+def test_gate_r27_one_side_time_style_other_side_garbage_matches_legacy_text_handling():
+    """gate-r27 P2 consistency check: for a "-->" row where one side is a
+    complete, well-formed timestamp and the other side is arbitrary garbage
+    with no digit+colon fragment ("00:00:01,000 --> garbage"), the tightened
+    AND rule no longer treats it as a (corrupted) timeline candidate -- it
+    falls through to plain text/orphan-text handling.
+
+    Consistency conclusion (verified against legacy `parse_srt_to_text`):
+    legacy's own timeline-line recognition (`_SRT_TIMESTAMP_LINE_PATTERN`,
+    matched with a plain, non-strict regex) requires BOTH sides to be a
+    fully-formed "HH:MM:SS,mmm" timestamp to match at all -- "garbage" on
+    the right never matches, so legacy's `.match()` fails and legacy keeps
+    this entire line as literal body text (never consumed as a timeline
+    row). After the AND fix, the segments path reaches exactly the same
+    verdict: this row is not a recognized timeline row, so it is collected
+    as literal text into the orphan-text buffer alongside the following
+    body line. Both paths agree -- "preserve as text, never consume as a
+    timeline" -- so text and segments stay consistent (the hard invariant:
+    segments-side text must never be lost, and legacy text must stay
+    byte-identical)."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(
+        SRT_ONE_SIDE_FULL_TIMESTAMP_OTHER_SIDE_GARBAGE
+    )
+
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": 4.0, "text": "Hello world"},
+        {
+            "start_time": None,
+            "end_time": None,
+            "text": "00:00:01,000 --> garbage Second cue text",
+        },
+    ]
+    assert (
+        result.text == "Hello world 00:00:01,000 --> garbage Second cue text"
+    )
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_ONE_SIDE_FULL_TIMESTAMP_OTHER_SIDE_GARBAGE
+    ) == result.text
