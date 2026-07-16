@@ -595,6 +595,59 @@ class TestTitleTruncation(ChaptersProcessorTestBase):
         self.assertEqual(result.status, ChaptersStatus.GENERATED)
         self.assertEqual(result.chapters[0].title, boundary_title)
 
+    def test_different_long_titles_sharing_truncated_prefix_are_not_merged(self):
+        """Two DIFFERENT full-length titles that happen to share the same
+        first 23 chars must be compared (for adjacent-same-title merging)
+        BEFORE truncation, not after. If truncation ran first, both would
+        collapse to the identical 24-char string and get wrongly merged --
+        losing one chapter's worth of content (and potentially dropping the
+        result below the 2-chapter minimum, forcing a bogus FAILED)."""
+        segments = make_segments(10)
+        common_prefix = "X" * 23
+        title1 = common_prefix + "11"  # 25 chars, first 23 == common_prefix
+        title2 = common_prefix + "22"  # 25 chars, first 23 == common_prefix, differs after
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": title1, "gist": "part one", "start_seg": 0},
+            {"title": title2, "gist": "part two", "start_seg": 5},
+        ])
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual(len(result.chapters), 2)  # must NOT be merged into 1
+        expected_truncated = common_prefix + "…"
+        self.assertEqual(result.chapters[0].title, expected_truncated)
+        self.assertEqual(result.chapters[1].title, expected_truncated)
+        # Each chapter keeps its own gist -- proof they were never merged.
+        self.assertEqual(result.chapters[0].gist, "part one")
+        self.assertEqual(result.chapters[1].gist, "part two")
+        self.assertEqual(result.chapters[0].start_seg, 0)
+        self.assertEqual(result.chapters[1].start_seg, 5)
+
+    def test_truly_identical_long_titles_still_merge_after_truncation(self):
+        """Sanity check for the other direction: two adjacent chapters with the
+        exact same overlong title must still merge normally -- truncation
+        happening after merge (instead of before) must not break this case.
+        A third, distinct chapter keeps the post-merge count at 2 (at the
+        minimum), isolating this from the below-minimum-after-merge case
+        covered separately in TestStructuralValidation."""
+        segments = make_segments(12)
+        long_title = "z" * 30
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": long_title, "gist": "part one", "start_seg": 0},
+            {"title": long_title, "gist": "part two", "start_seg": 4},
+            {"title": "Topic B", "gist": "different topic", "start_seg": 8},
+        ])
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual(len(result.chapters), 2)  # the first two merged into one
+        self.assertEqual(result.chapters[0].title, ("z" * 23) + "…")
+        self.assertIn("part one", result.chapters[0].gist)
+        self.assertIn("part two", result.chapters[0].gist)
+        self.assertEqual(result.chapters[1].title, "Topic B")
+
 
 class TestStructuralValidation(ChaptersProcessorTestBase):
     def test_too_few_chapters_fails(self):

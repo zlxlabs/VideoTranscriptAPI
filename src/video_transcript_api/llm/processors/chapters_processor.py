@@ -240,9 +240,13 @@ def _normalize_title_length(title: str, idx: int) -> str:
     本身不是"语义错误"，不值得为它触发重试或判 FAILED——直接在本地截断为
     前 `_TITLE_TRUNCATE_TO` 字 + "…"，只记一条 warning 日志，不影响结果状态。
 
+    调用时机：必须在"相邻同名章节合并"（`_merge_adjacent_same_title`）及合并后
+    的数量校验**之后**才截断，不能提前——否则两个前 23 字相同但完整内容不同
+    的长标题会被截成同一字符串，被合并逻辑误判成"同名"而错误合并。
+
     Args:
         title: 已经 strip 过的标题原文
-        idx: 该章节在本轮 LLM 返回列表中的下标，仅用于日志定位
+        idx: 该章节在最终章节列表中的下标，仅用于日志定位
 
     Returns:
         str: 长度 <= `_TITLE_MAX_CHARS` 的标题（未超长时原样返回）
@@ -270,9 +274,13 @@ def _validate_and_normalize_start_segs(
     4. title、gist 必须是非空字符串（strip 后非空）——曾经缺失/非字符串/空白值
        会被 `str(x or "").strip()` 强转成空串照样成章，导致章节标题/梗概为空。
        与 start_seg 越界/重复同等对待：视为语义校验失败，触发重试。
-    5. title 长度规范化（软处理，不算校验失败）：prompt 要求 title 不超过
-       20 字，但 LLM 不保证遵守；strip 后长度 > `_TITLE_MAX_CHARS` 时截断为
-       前 `_TITLE_TRUNCATE_TO` 字 + "…"，只记 warning，不触发重试。
+
+    注意：title 长度规范化（超长截断）**不**在这里做。这里保留的是原始完整
+    title（仅 strip），供调用方在"合并相邻同名章节"时用完整标题比较——如果在
+    这一步就截断，两个前 23 字相同但完整内容不同的长标题会被截成同一个字符
+    串，随后被 `_merge_adjacent_same_title` 误判成"同名"而错误合并。截断改
+    为在合并（及合并后的数量校验）**之后**、构造最终 Chapter 列表前统一做
+    （见 `_normalize_title_length` 的调用点）。
 
     Args:
         raw_chapters: response.structured_output.get("chapters") 的原始返回
@@ -281,7 +289,7 @@ def _validate_and_normalize_start_segs(
     Returns:
         (normalized, error):
         - 成功：normalized 是去重 + 钳制后的 [{"title","gist","start_seg"}, ...]
-          列表（按 start_seg 升序），error 为 None
+          列表（按 start_seg 升序），title 为未截断的完整原文，error 为 None
         - 失败：normalized 为 None，error 是具体原因描述（用于拼进重试 prompt
           或写入最终失败结果的 error 字段）
     """
@@ -313,10 +321,8 @@ def _validate_and_normalize_start_segs(
                 f"chapters[{idx}].gist is missing, not a string, or blank: {raw_gist!r}"
             )
 
-        title = _normalize_title_length(raw_title.strip(), idx)
-
         items.append({
-            "title": title,
+            "title": raw_title.strip(),
             "gist": raw_gist.strip(),
             "start_seg": start_seg,
         })
@@ -623,10 +629,14 @@ class ChaptersProcessor:
 
         _warn_if_density_out_of_range(merged)
 
+        # 步骤 7：title 长度规范化（软处理，超长截断）——必须放在合并与合并后
+        # 数量校验之后：截断是有损操作，若提前做，两个前 23 字相同但完整内容
+        # 不同的长标题会被截成同一字符串，被步骤 5 的合并逻辑误判成"同名"而
+        # 错误合并（见 `_normalize_title_length` 文档）。
         final_chapters = [
             Chapter(
                 index=i,
-                title=chapter["title"],
+                title=_normalize_title_length(chapter["title"], i),
                 gist=chapter["gist"],
                 start_seg=chapter["start_seg"],
                 end_seg=chapter["end_seg"],
