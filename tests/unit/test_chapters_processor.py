@@ -550,6 +550,52 @@ class TestTitleGistValidation(ChaptersProcessorTestBase):
         self.assertEqual(result.chapters[0].title, "A")
 
 
+class TestTitleTruncation(ChaptersProcessorTestBase):
+    """Prompt declares title <=20 chars but this is not enforced upstream by
+    the LLM. Rather than treating an overlong title as a semantic-validation
+    failure (triggering a retry, or FAILED if the retry is also overlong --
+    not worth it for a cosmetic length issue), it is soft-normalized locally:
+    stripped, then truncated to 23 chars + "..." if still over 24 chars.
+    Status/retry behavior is unaffected; only a warning is logged."""
+
+    def test_overlong_title_truncated_and_logs_warning(self):
+        segments = make_segments(10)
+        long_title = "x" * 50
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": long_title, "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+
+        with patch("video_transcript_api.llm.processors.chapters_processor.logger") as mock_logger:
+            result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual(self.llm_client.call.call_count, 1)  # no retry triggered
+        truncated = result.chapters[0].title
+        self.assertEqual(truncated, ("x" * 23) + "…")
+        self.assertEqual(len(truncated), 24)
+        warning_messages = [str(call.args[0]) for call in mock_logger.warning.call_args_list]
+        self.assertTrue(
+            any("title" in msg.lower() and "truncat" in msg.lower() for msg in warning_messages),
+            f"expected a title truncation warning, got: {warning_messages}",
+        )
+
+    def test_title_at_boundary_not_truncated(self):
+        """Exactly 24 chars after strip is within bounds -- must pass through
+        unchanged (only strictly-greater-than-24 triggers truncation)."""
+        segments = make_segments(10)
+        boundary_title = "y" * 24
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": boundary_title, "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual(result.chapters[0].title, boundary_title)
+
+
 class TestStructuralValidation(ChaptersProcessorTestBase):
     def test_too_few_chapters_fails(self):
         segments = make_segments(10)

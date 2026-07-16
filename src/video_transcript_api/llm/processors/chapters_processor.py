@@ -74,6 +74,11 @@ _MAX_CHAPTER_COUNT = 100
 _MIN_CHAPTER_SECONDS = 60          # 平均章节时长下限（秒），低于此值只 warning，不算失败
 _MAX_CHAPTER_SECONDS = 40 * 60     # 平均章节时长上限（秒）
 
+# prompt 里要求 title 不超过 20 字，但纯靠 LLM 自觉不可靠，本地不做硬校验
+# （不值得为超长标题触发重试/判 FAILED），超过此长度直接截断 + 记 warning。
+_TITLE_MAX_CHARS = 24
+_TITLE_TRUNCATE_TO = 23
+
 
 # ============================================================
 # 结果类型
@@ -228,6 +233,30 @@ def _build_segment_lines(segments: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _normalize_title_length(title: str, idx: int) -> str:
+    """把已经 strip 过的 title 截断到 `_TITLE_MAX_CHARS` 字以内（软处理）。
+
+    prompt 里声明 title 不超过 20 字，但完全依赖 LLM 自觉不可靠。超长标题
+    本身不是"语义错误"，不值得为它触发重试或判 FAILED——直接在本地截断为
+    前 `_TITLE_TRUNCATE_TO` 字 + "…"，只记一条 warning 日志，不影响结果状态。
+
+    Args:
+        title: 已经 strip 过的标题原文
+        idx: 该章节在本轮 LLM 返回列表中的下标，仅用于日志定位
+
+    Returns:
+        str: 长度 <= `_TITLE_MAX_CHARS` 的标题（未超长时原样返回）
+    """
+    if len(title) <= _TITLE_MAX_CHARS:
+        return title
+    truncated = title[:_TITLE_TRUNCATE_TO] + "…"
+    logger.warning(
+        f"[CHAPTERS] chapters[{idx}].title exceeds {_TITLE_MAX_CHARS} chars "
+        f"({len(title)}), truncating: {title!r} -> {truncated!r}"
+    )
+    return truncated
+
+
 def _validate_and_normalize_start_segs(
     raw_chapters: Any,
     segment_count: int,
@@ -241,6 +270,9 @@ def _validate_and_normalize_start_segs(
     4. title、gist 必须是非空字符串（strip 后非空）——曾经缺失/非字符串/空白值
        会被 `str(x or "").strip()` 强转成空串照样成章，导致章节标题/梗概为空。
        与 start_seg 越界/重复同等对待：视为语义校验失败，触发重试。
+    5. title 长度规范化（软处理，不算校验失败）：prompt 要求 title 不超过
+       20 字，但 LLM 不保证遵守；strip 后长度 > `_TITLE_MAX_CHARS` 时截断为
+       前 `_TITLE_TRUNCATE_TO` 字 + "…"，只记 warning，不触发重试。
 
     Args:
         raw_chapters: response.structured_output.get("chapters") 的原始返回
@@ -281,8 +313,10 @@ def _validate_and_normalize_start_segs(
                 f"chapters[{idx}].gist is missing, not a string, or blank: {raw_gist!r}"
             )
 
+        title = _normalize_title_length(raw_title.strip(), idx)
+
         items.append({
-            "title": raw_title.strip(),
+            "title": title,
             "gist": raw_gist.strip(),
             "start_seg": start_seg,
         })
