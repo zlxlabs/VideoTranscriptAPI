@@ -48,6 +48,13 @@ def parse_time_to_seconds(value: Any) -> Optional[float]:
     否则下游对时间做 `int()` 转换时会直接崩溃。用 `math.isfinite` 兜底，
     覆盖 int/float 直传和字符串解析两类入口。
 
+    损坏的时钟分量不得伪装成合法时间：`"HH:MM:SS"`（三段）要求分钟、秒
+    分量均 `< 60`（小时不限——长录音的小时数可以合法超过 99）；
+    `"MM:SS"`（两段）只要求秒分量 `< 60`（分钟不限，`"125:30"` 这类
+    "总分钟数" 表示是合法输入）。任一分量越界（如 `"00:99:00"`、
+    `"00:00:99"`）一律返回 `None`，而不是像 `total = h*3600+m*60+s` 那样
+    静默换算出一个看似合理、实则被污染的秒数。
+
     JSON 允许任意精度整数，反序列化后可能拿到 `10**400` 这类超出 double 可
     表示范围的 Python int——`float()` 转换会抛 `OverflowError`（而不是像
     字符串解析那样静默变成 `inf`），同样按非法时间处理，返回 `None`。
@@ -101,8 +108,17 @@ def parse_time_to_seconds(value: Any) -> Optional[float]:
             if len(numbers) == 2:
                 hours = 0.0
                 minutes, seconds_part = numbers
+                # 两段 "MM:SS"：分钟不设上限（"125:30" 这类总分钟数表示是
+                # 合法输入），但秒分量仍是一个真实的时钟单位，必须 < 60，
+                # 否则 "00:99" 这类损坏值会被静默换算成 99 秒。
+                if not (seconds_part < 60):
+                    return None
             else:
                 hours, minutes, seconds_part = numbers
+                # 三段 "HH:MM:SS"：分钟、秒都是时钟单位，均须 < 60；小时
+                # 不限（长录音的小时数可以合法超过 99）。
+                if not (minutes < 60 and seconds_part < 60):
+                    return None
             total = hours * 3600 + minutes * 60 + seconds_part
             return total if math.isfinite(total) and total >= 0 else None
 
@@ -251,11 +267,15 @@ def load_segments(cache_dir: Path) -> Optional[List[Dict[str, Any]]]:
         try:
             with file_path.open("r", encoding="utf-8") as f:
                 raw = json.load(f)
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
             # UnicodeDecodeError 是 ValueError 的子类而非 OSError，必须单独列出，
             # 否则遇到非法 UTF-8 字节（如生产环境偶发的编码损坏文件）会绕过这个
-            # except 直接抛出，违反本模块"从不抛异常"的契约。与 OSError/
-            # JSONDecodeError 同等对待：记 warning，尝试下一优先级来源。
+            # except 直接抛出，违反本模块"从不抛异常"的契约。RecursionError 同理
+            # 是 RuntimeError 的子类而非 OSError/ValueError——病态深度嵌套的 JSON
+            # （如构造攻击或损坏导出文件里的 "[[[[...]]]]"）会让 json.load() 的
+            # 递归下降解析器超出 Python 默认递归深度抛出 RecursionError，同样必须
+            # 单独列出。三者与 OSError/JSONDecodeError 同等对待：记 warning，
+            # 尝试下一优先级来源。
             logger.warning(f"读取时间片段文件失败，尝试下一优先级来源: {file_path} ({exc})")
             continue
 

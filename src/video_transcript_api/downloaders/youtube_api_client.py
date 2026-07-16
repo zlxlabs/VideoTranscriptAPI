@@ -789,6 +789,18 @@ class YouTubeApiClient:
         def to_seconds(hours: str, minutes: str, seconds: str, millis: str) -> float:
             return int(hours) * 3600 + int(minutes) * 60 + int(seconds) + int(millis) / 1000.0
 
+        def has_valid_clock_components(minutes: str, seconds: str) -> bool:
+            """校验分钟、秒分量是否落在合法时钟范围内（均须 < 60，小时不限）。
+
+            与 `transcriber.segments.parse_time_to_seconds` 对 "HH:MM:SS"
+            的校验口径保持一致（同一条"损坏时间不得伪装真实时间"策略的两处
+            落地）：`_SRT_TIMESTAMP_RANGE_PATTERN` 只按数字位数匹配（`\\d{2}`），
+            不校验数值范围，因此像 "00:00:99,000" 这样每段都恰好两位数字、
+            但秒分量越界的字符串同样会匹配成功——若不在这里补一道数值校验，
+            会被 `to_seconds` 静默换算成 99 秒这个虚假时间。
+            """
+            return int(minutes) < 60 and int(seconds) < 60
+
         segments = []
         i = 0
         # 上一行（已 strip），用于判断当前行是否紧跟纯数字索引行——只有处于
@@ -850,12 +862,20 @@ class YouTubeApiClient:
 
             if match:
                 h1, m1, s1, ms1, h2, m2, s2, ms2 = match.groups()
-                start_time = to_seconds(h1, m1, s1, ms1)
-                end_time = to_seconds(h2, m2, s2, ms2)
-                # 区间倒挂校验（如时间轴顺序写反）一律诚实降级为 None，绝不
-                # 影响文本保留（详见 sanitize_time_pair 文档）。数字捕获组
-                # 本身不可能为负，因此这里实际只会触发"end < start"这条规则
-                start_time, end_time = sanitize_time_pair(start_time, end_time)
+                if has_valid_clock_components(m1, s1) and has_valid_clock_components(m2, s2):
+                    start_time = to_seconds(h1, m1, s1, ms1)
+                    end_time = to_seconds(h2, m2, s2, ms2)
+                    # 区间倒挂校验（如时间轴顺序写反）一律诚实降级为 None，绝不
+                    # 影响文本保留（详见 sanitize_time_pair 文档）。数字捕获组
+                    # 本身不可能为负，因此这里实际只会触发"end < start"这条规则
+                    start_time, end_time = sanitize_time_pair(start_time, end_time)
+                else:
+                    # 数字位数齐全（正则能匹配），但分钟/秒分量超出合法时钟
+                    # 范围（如 "00:00:99,000" 的秒分量 99）——与格式彻底损坏
+                    # 的时间轴同等对待：文本保留，时间置 None，不静默换算出
+                    # 一个虚假秒数（见 has_valid_clock_components 文档）。
+                    start_time = None
+                    end_time = None
             else:
                 # 时间轴行格式损坏（如缺位数字、分隔符错误），无法解析出具体
                 # 秒数，但仍需保留该 cue 的文本，时间字段置 None

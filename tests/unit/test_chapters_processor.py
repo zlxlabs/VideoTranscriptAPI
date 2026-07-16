@@ -1243,6 +1243,56 @@ class TestFingerprint(ChaptersProcessorTestBase):
         self.assertIsNotNone(result1.fingerprint)
         self.assertEqual(result1.fingerprint, result2.fingerprint)
 
+    def test_fingerprint_changes_when_leading_blank_entry_shifts_survivor_indices(self):
+        """gate-r17 P2: a leading blank-text entry is filtered out before
+        fingerprinting (it has no retention value), but the *original*
+        index of every surviving segment still shifts by one (0,1,2,... ->
+        1,2,3,...). The survivors' text/start_time/end_time are completely
+        unchanged, so a fingerprint that only hashes (text, start_time,
+        end_time, speaker) is blind to this shift -- yet the cached
+        chapters' start_seg/end_seg anchors (which key off these very
+        original indices, see gate-r16 P2) now point at entirely different
+        segments. The fingerprint must change so a caching layer keyed on
+        it cannot silently keep serving chapters with misaligned anchors."""
+        segments_no_blank = make_segments(5)
+        segments_with_leading_blank = [
+            {"text": "   ", "start_time": 0.0, "end_time": 0.0},
+        ] + make_segments(5)
+
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 3},
+        ])
+
+        result_no_blank = self.processor.process(segments=segments_no_blank, title="T")
+        result_with_blank = self.processor.process(
+            segments=segments_with_leading_blank, title="T"
+        )
+
+        self.assertIsNotNone(result_no_blank.fingerprint)
+        self.assertIsNotNone(result_with_blank.fingerprint)
+        self.assertNotEqual(result_no_blank.fingerprint, result_with_blank.fingerprint)
+
+    def test_fingerprint_stable_when_no_entries_are_filtered(self):
+        """Sanity check for the other direction: when nothing gets filtered
+        (no non-dict / blank-text entries), every survivor's original index
+        equals its position, so adding the "i" field to the fingerprint
+        must not make an otherwise-identical input produce a different
+        fingerprint across repeated calls."""
+        segments = make_segments(6)
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 3},
+        ])
+
+        result1 = self.processor.process(segments=segments, title="T1")
+        result2 = self.processor.process(
+            segments=segments, title="T2 (different title, same segments)"
+        )
+
+        self.assertIsNotNone(result1.fingerprint)
+        self.assertEqual(result1.fingerprint, result2.fingerprint)
+
 
 class TestIntegerSpeaker(ChaptersProcessorTestBase):
     """FunASR raw dicts can carry `speaker` as a bare int (diarization label,

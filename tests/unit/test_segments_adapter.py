@@ -48,6 +48,34 @@ class TestParseTimeToSeconds:
     def test_mm_ss_string(self):
         assert parse_time_to_seconds("02:03") == 123.0
 
+    def test_hh_mm_ss_invalid_minutes_component_returns_none(self):
+        # gate-r17 P2: "corrupted clock components must not masquerade as a
+        # real time" -- a three-segment HH:MM:SS string's minutes component
+        # must be < 60. Before this fix, "00:99:00" silently converted to
+        # 99*60 = 5940 seconds, a fabricated timestamp.
+        assert parse_time_to_seconds("00:99:00") is None
+
+    def test_hh_mm_ss_invalid_seconds_component_returns_none(self):
+        # Same rule applied to the seconds component of a three-segment
+        # HH:MM:SS string: "00:00:99" used to silently convert to 99 seconds.
+        assert parse_time_to_seconds("00:00:99") is None
+
+    def test_hh_mm_ss_unbounded_hours_component_is_valid(self):
+        # Only minutes/seconds are clock-bounded; hours has no upper bound
+        # (a long recording can legitimately exceed 99 hours).
+        assert parse_time_to_seconds("120:00:00") == 432000.0
+
+    def test_mm_ss_invalid_seconds_component_returns_none(self):
+        # Two-segment MM:SS: seconds must be < 60. "00:99" used to silently
+        # convert to 99 seconds.
+        assert parse_time_to_seconds("00:99") is None
+
+    def test_mm_ss_unbounded_minutes_component_is_valid(self):
+        # Minutes has no upper bound in the two-segment MM:SS form -- this is
+        # a legitimate "total minutes" representation (e.g. from a duration
+        # counter), unlike the three-segment HH:MM:SS clock form.
+        assert parse_time_to_seconds("125:30") == 7530.0
+
     def test_none_returns_none(self):
         assert parse_time_to_seconds(None) is None
 
@@ -365,3 +393,28 @@ class TestLoadSegments:
             b'{"segments": [{"start_time": 0.0, "end_time": 1.0, "text": "bad \xff\xfe byte"}]}'
         )
         assert load_segments(tmp_path) is None
+
+    def test_deeply_nested_json_recursion_error_returns_none_without_raising(self, tmp_path):
+        # gate-r17 P3: json.load() on pathologically deep nesting raises
+        # RecursionError, which is a RuntimeError subclass -- NOT covered by
+        # the (OSError, json.JSONDecodeError, UnicodeDecodeError) except
+        # tuple. Before this fix, this would propagate uncaught, violating
+        # this module's "never raises, fall back to the next source" contract.
+        deeply_nested = "[" * 100_000 + "]" * 100_000
+        (tmp_path / "transcript_funasr.json").write_text(deeply_nested, encoding="utf-8")
+        assert load_segments(tmp_path) is None
+
+    def test_deeply_nested_json_falls_back_to_valid_capswriter(self, tmp_path):
+        # Same as other corrupted-primary-source cases: a RecursionError on
+        # transcript_funasr.json must not block falling back to a valid
+        # transcript_capswriter.json.
+        deeply_nested = "[" * 100_000 + "]" * 100_000
+        (tmp_path / "transcript_funasr.json").write_text(deeply_nested, encoding="utf-8")
+        capswriter_data = {
+            "segments": [{"start_time": 0.0, "end_time": 1.0, "text": "fallback ok"}]
+        }
+        (tmp_path / "transcript_capswriter.json").write_text(
+            json.dumps(capswriter_data, ensure_ascii=False), encoding="utf-8"
+        )
+        result = load_segments(tmp_path)
+        assert result == [{"start_time": 0.0, "end_time": 1.0, "text": "fallback ok"}]

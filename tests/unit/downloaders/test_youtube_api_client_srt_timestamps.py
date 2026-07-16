@@ -166,6 +166,24 @@ SRT_CORRUPTED_TIMELINE_WITH_LETTER = (
     "Hello world\n"
 )
 
+# gate-r17 P2: syntactically well-formed (two digits per field) but
+# semantically bogus -- "99" seconds is not a valid clock value (seconds
+# must be < 60). Before this fix, the regex only checked digit COUNT, not
+# clock-VALIDITY, so this silently converted to 99 seconds via
+# hours*3600+minutes*60+seconds -- the same "corrupted time masquerading as
+# real time" bug fixed for parse_time_to_seconds in transcriber/segments.py.
+SRT_INVALID_SECONDS_COMPONENT = (
+    "1\n"
+    "00:00:99,000 --> 00:00:04,000\n"
+    "Hello world\n"
+)
+
+SRT_INVALID_MINUTES_COMPONENT = (
+    "1\n"
+    "00:99:00,000 --> 00:00:04,000\n"
+    "Hello world\n"
+)
+
 SRT_EMPTY = ""
 
 # gate-r16 P2: a UTF-8 BOM (U+FEFF) prepended to the file content (as many
@@ -485,6 +503,39 @@ def test_corrupted_timeline_with_letter_and_time_style_still_treated_as_broken_t
     assert result.text == "00:00:0X --> 00:00:04 Hello world"
     assert YouTubeApiClient.parse_srt_to_text(
         SRT_CORRUPTED_TIMELINE_WITH_LETTER
+    ) == result.text
+
+
+def test_invalid_seconds_component_treated_as_corrupted_timeline():
+    """A timestamp line can fully match the digit-count regex while still
+    carrying an out-of-range clock component: "00:00:99,000" claims 99
+    seconds, which is not a valid clock value. Per the same "corrupted clock
+    components must not masquerade as a real time" policy enforced by
+    parse_time_to_seconds (transcriber/segments.py, gate-r17 P2/P3), this
+    must NOT be silently converted to 99 seconds. The cue is instead treated
+    like any other corrupted timeline: start_time/end_time = None, text
+    preserved, plain text output byte-identical to the legacy parser (which
+    never consumes the time value in the first place)."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_INVALID_SECONDS_COMPONENT)
+
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Hello world"},
+    ]
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_INVALID_SECONDS_COMPONENT
+    ) == result.text
+
+
+def test_invalid_minutes_component_treated_as_corrupted_timeline():
+    """Same rule applied to the minutes component: "00:99:00,000" claims 99
+    minutes, also invalid."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_INVALID_MINUTES_COMPONENT)
+
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Hello world"},
+    ]
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_INVALID_MINUTES_COMPONENT
     ) == result.text
 
 

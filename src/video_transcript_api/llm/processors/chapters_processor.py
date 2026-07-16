@@ -179,7 +179,7 @@ def _to_seconds(value: Union[float, int, str, None]) -> Optional[float]:
     return seconds
 
 
-def _compute_fingerprint(segments: List[Dict[str, Any]]) -> str:
+def _compute_fingerprint(indexed_segments: List[Tuple[int, Dict[str, Any]]]) -> str:
     """计算 segments 的指纹（sha1 十六进制摘要），用于上层判断"原文是否变化"。
 
     指纹覆盖每条 segment 的 text + 规范化后的 start_time/end_time + speaker，
@@ -216,21 +216,34 @@ def _compute_fingerprint(segments: List[Dict[str, Any]]) -> str:
       保证同一逻辑输入不论 dict 构造顺序如何都序列化成同一段字节，指纹
       仍然稳定可复现。
 
+    每条目额外携带 "i"（原始下标，过滤前的位置，即调用方传入的
+    `filtered_pairs`）——gate-r17 P2 修复：若不带原始下标，"幸存内容不变，
+    但前面多插入/删除了一个会被过滤掉的空白/非法条目" 这种输入会让所有
+    幸存条目的原始下标整体平移（如 0,1,2 -> 1,2,3），而 text/start_time/
+    end_time/speaker 均未变化，指纹会被误判为"内容未变"；但 start_seg/
+    end_seg 锚点（见 `Chapter` 类文档）恰恰就是按原始下标写死的，一旦缓存
+    层日后接入指纹判重，会复用一份锚点已经整体错位、指向完全不同 segment
+    的旧章节结果。带上 "i" 后，任何导致原始下标平移的输入变化都会被指纹
+    捕获到。
+
     start_time/end_time 在写入前先用 `_to_seconds` 规范化（同一个时间不论用
     float 还是 "HH:MM:SS" 字符串表示，指纹片段都一致）。speaker 写入前强转
     str（上游 FunASR 原始 dict 的 speaker 可能是裸 int），避免类型不一致
     导致同一说话人因表示类型不同（int 2 与字符串 "2"）产生不同指纹。
 
     Args:
-        segments: 原始 segment 列表（未经任何处理），每条形如
-            {"text": str, "start_time": ..., "end_time": ..., "speaker": 可选, ...}
+        indexed_segments: (原始下标, segment) 二元组列表——原始下标必须是
+            过滤前的位置（调用方应直接传入 `filtered_pairs`），每条 segment
+            形如 {"text": str, "start_time": ..., "end_time": ...,
+            "speaker": 可选, ...}
 
     Returns:
         str: sha1 十六进制摘要
     """
     entries: List[Dict[str, Any]] = []
-    for seg in segments:
+    for orig_idx, seg in indexed_segments:
         entry: Dict[str, Any] = {
+            "i": orig_idx,
             "t": seg.get("text") or "",
             "s": _to_seconds(seg.get("start_time")),
             "e": _to_seconds(seg.get("end_time")),
@@ -773,11 +786,14 @@ class ChaptersProcessor:
 
         segment_count = len(segments)
         full_text = "".join((seg.get("text") or "") for seg in segments)
-        # 指纹覆盖每条 segment 的 text + 规范化后的 start_time/end_time（细节见
-        # `_compute_fingerprint`），而不是只哈希文本拼接——full_text 本身继续
-        # 只用于下面的长度门控，不受指纹算法影响。指纹用的是幸存条目的原始
-        # text（`segments` 此时已是幸存条目组成的列表，条目本身未被改写）。
-        fingerprint = _compute_fingerprint(segments)
+        # 指纹覆盖每条 segment 的原始下标 + text + 规范化后的 start_time/
+        # end_time（细节见 `_compute_fingerprint`），而不是只哈希文本拼接
+        # ——full_text 本身继续只用于下面的长度门控，不受指纹算法影响。传入
+        # filtered_pairs（原始下标, segment）而非 segments：原始下标必须
+        # 随过滤前的位置一并进入指纹，否则"幸存内容不变、但前面多插了一个
+        # 会被过滤掉的空白条目"这类导致原始下标整体平移的输入会被误判为
+        # 指纹未变（gate-r17 P2，详见 `_compute_fingerprint` 文档）。
+        fingerprint = _compute_fingerprint(filtered_pairs)
 
         # 门控 2：segments 非空，但没有任何一条能解析出 start_time —— 章节功能
         # 的核心价值就是时间范围，完全没有时间信息时生成出来的章节也没有意义。
