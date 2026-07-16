@@ -914,6 +914,62 @@ class TestFingerprint(ChaptersProcessorTestBase):
 
         self.assertEqual(result1.fingerprint, result2.fingerprint)
 
+    def test_fingerprint_changes_when_only_timestamps_differ(self):
+        """Same segment text but a corrected start_time/end_time (e.g. a
+        timestamp-fixup pass ran, text untouched) must still change the
+        fingerprint. If the fingerprint only hashed text, this would collide
+        and a downstream cache keyed on fingerprint could keep serving
+        chapters annotated with the stale start_time/end_time."""
+        segs_original = [
+            {"text": "same text content here", "start_time": 0.0, "end_time": 10.0},
+        ]
+        segs_time_fixed = [
+            {"text": "same text content here", "start_time": 3.0, "end_time": 10.0},
+        ]
+
+        result_original = self.processor.process(segments=segs_original, title="T")
+        result_time_fixed = self.processor.process(segments=segs_time_fixed, title="T")
+
+        self.assertIsNotNone(result_original.fingerprint)
+        self.assertIsNotNone(result_time_fixed.fingerprint)
+        self.assertNotEqual(result_original.fingerprint, result_time_fixed.fingerprint)
+
+    def test_fingerprint_stable_for_identical_input_including_times(self):
+        """Fully identical input (same text AND same start_time/end_time)
+        across repeated calls must still produce the exact same fingerprint
+        now that timestamps are part of the hashed input."""
+        segs = [
+            {"text": "stable text", "start_time": 12.5, "end_time": 20.0},
+            {"text": "more stable text", "start_time": 20.0, "end_time": 30.0},
+        ]
+
+        result1 = self.processor.process(segments=segs, title="T1")
+        result2 = self.processor.process(segments=segs, title="T2 (different title)")
+
+        self.assertIsNotNone(result1.fingerprint)
+        self.assertEqual(result1.fingerprint, result2.fingerprint)
+
+    def test_fingerprint_distinguishes_none_time_from_zero_time(self):
+        """start_time/end_time of None must not collide with start_time/
+        end_time of 0 -- the two carry very different meaning ("no usable
+        timeline at all" vs "timeline starts at second 0") and must hash to
+        different fingerprints. This locks in the fixed placeholder used for
+        None instead of e.g. an empty string, which could otherwise coincide
+        with some numeric string in degenerate cases."""
+        segs_none_time = [
+            {"text": "same text content here", "start_time": None, "end_time": None},
+        ]
+        segs_zero_time = [
+            {"text": "same text content here", "start_time": 0.0, "end_time": 0.0},
+        ]
+
+        result_none_time = self.processor.process(segments=segs_none_time, title="T")
+        result_zero_time = self.processor.process(segments=segs_zero_time, title="T")
+
+        self.assertIsNotNone(result_none_time.fingerprint)
+        self.assertIsNotNone(result_zero_time.fingerprint)
+        self.assertNotEqual(result_none_time.fingerprint, result_zero_time.fingerprint)
+
 
 class TestModelFallback(unittest.TestCase):
     """LLMConfig() constructed directly (bypassing from_dict, whose own defaulting
