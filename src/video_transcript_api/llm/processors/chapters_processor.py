@@ -272,10 +272,13 @@ def _build_segment_lines(segments: List[Dict[str, Any]]) -> str:
         prefix = f"[{i}]"
         if timestamp:
             prefix += f" {timestamp}"
-        if speaker:
-            # 强转 str：speaker 可能是裸 int（同 `_speaker_field`），f-string
-            # 插值本身不会因此报错，这里显式转换只为类型意图明确、与指纹
-            # 计算侧保持一致，不依赖插值的隐式转换
+        if speaker is not None:
+            # is not None 而非直接判真值：合法的说话人 ID 可能是数字 0
+            # （FunASR 说话人分离结果里第一位说话人的标签），`if speaker:`
+            # 会把它当假值误判为"无说话人"而漏掉前缀。强转 str：speaker 可能是裸 int，
+            # f-string 插值本身不会因此报错，这里显式转换只为类型意图明确、
+            # 与指纹计算侧（`_compute_fingerprint` 同样用 is not None）保持
+            # 一致，不依赖插值的隐式转换。
             prefix += f" {str(speaker)}:"
 
         lines.append(f"{prefix} {text}".strip())

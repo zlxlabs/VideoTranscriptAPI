@@ -167,6 +167,15 @@ class TestBuildSegmentLines(unittest.TestCase):
         lines = _build_segment_lines(segments)
         self.assertEqual(lines, "[0] 00:00 first\n[1] 00:05 second")
 
+    def test_speaker_zero_is_shown_not_omitted(self):
+        """speaker=0 is a legitimate diarization label (FunASR's first
+        speaker slot) -- must not be swallowed by a falsy check. Regression
+        for `if speaker:` (which treats 0 the same as "no speaker") vs the
+        correct `if speaker is not None:`."""
+        segments = [{"text": "hi", "start_time": 5.0, "end_time": 10.0, "speaker": 0}]
+        lines = _build_segment_lines(segments)
+        self.assertEqual(lines, "[0] 00:05 0: hi")
+
 
 class ChaptersProcessorTestBase(unittest.TestCase):
     def setUp(self):
@@ -1024,6 +1033,28 @@ class TestFingerprint(ChaptersProcessorTestBase):
         self.assertIsNotNone(result_missing.fingerprint)
         self.assertIsNotNone(result_empty.fingerprint)
         self.assertNotEqual(result_missing.fingerprint, result_empty.fingerprint)
+
+    def test_fingerprint_distinguishes_speaker_zero_from_missing_speaker(self):
+        """speaker=0 (a legitimate first-speaker diarization label, not
+        "no speaker") must produce a different fingerprint than a segment
+        with no speaker key at all -- same falsy-vs-absent pitfall as
+        `_build_segment_lines`'s `if speaker:` bug, but on the fingerprint
+        side. `_compute_fingerprint` already guards this correctly with
+        `if speaker is not None:`; this test locks that in."""
+        segs_missing_speaker = [
+            {"text": "same text content here", "start_time": 0.0, "end_time": 10.0},
+        ]
+        segs_speaker_zero = [
+            {"text": "same text content here", "start_time": 0.0, "end_time": 10.0,
+             "speaker": 0},
+        ]
+
+        result_missing = self.processor.process(segments=segs_missing_speaker, title="T")
+        result_speaker_zero = self.processor.process(segments=segs_speaker_zero, title="T")
+
+        self.assertIsNotNone(result_missing.fingerprint)
+        self.assertIsNotNone(result_speaker_zero.fingerprint)
+        self.assertNotEqual(result_missing.fingerprint, result_speaker_zero.fingerprint)
 
     def test_fingerprint_distinguishes_explicit_null_byte_speaker_from_missing(self):
         """The old fixed placeholder for "missing speaker" was literally the
