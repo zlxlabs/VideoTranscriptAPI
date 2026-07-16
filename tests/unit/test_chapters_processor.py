@@ -25,6 +25,11 @@ from video_transcript_api.llm.processors.chapters_processor import (
     _format_timestamp,
     _build_segment_lines,
     _flatten_for_prompt,
+    _validate_and_normalize_start_segs,
+    _truncate_repr_for_hint,
+    _build_retry_hint,
+    _RETRY_HINT_VALUE_MAX_CHARS,
+    _RETRY_HINT_MAX_CHARS,
 )
 from video_transcript_api.llm.core.config import LLMConfig
 from video_transcript_api.utils.llm_status import ChaptersStatus
@@ -1029,6 +1034,131 @@ class TestTitleGistValidation(ChaptersProcessorTestBase):
         self.assertEqual(result.status, ChaptersStatus.GENERATED)
         self.assertEqual(self.llm_client.call.call_count, 2)
         self.assertEqual(result.chapters[0].title, "A")
+
+
+class TestRetryHintBounding(ChaptersProcessorTestBase):
+    """gate-r24 P2: the semantic-validation error message echoes the LLM's own
+    illegal title/gist value verbatim (via repr) -- this message becomes
+    retry_hint on the second attempt. Gate 4 (max_chapters_input_chars) only
+    measures the FIRST prompt; if the LLM's first response returns a huge
+    garbage value there, the echoed value can make the second prompt balloon
+    past the configured cap, silently bypassing the input-size safety limit.
+    Both the per-value repr (_truncate_repr_for_hint) and the overall hint
+    (_build_retry_hint) must now be bounded and flattened."""
+
+    def test_huge_blank_title_does_not_blow_up_retry_prompt(self):
+        """A first response whose title is 500k whitespace characters (blank
+        after strip, so it fails _validate_and_normalize_start_segs' title
+        check) must not let that 500k-char value ride along into the retry
+        prompt -- the retry prompt must stay close to the first prompt's
+        size, not balloon by ~500,000 chars."""
+        segments = make_segments(10)
+        huge_garbage_title = " " * 500_000  # blank after strip -> invalid
+        bad = mock_llm_response([
+            {"title": huge_garbage_title, "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+        good = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+        self.llm_client.call.side_effect = [bad, good]
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual(self.llm_client.call.call_count, 2)
+
+        first_prompt = self.llm_client.call.call_args_list[0][1]["user_prompt"]
+        retry_prompt = self.llm_client.call.call_args_list[1][1]["user_prompt"]
+
+        # bounded to first_prompt length + a small fixed hint budget (well
+        # under a 500,000-char blowup) -- proves gate 4's input-size cap on
+        # the first prompt cannot be bypassed via the retry hint.
+        self.assertLess(len(retry_prompt), len(first_prompt) + 2000)
+        self.assertNotIn(huge_garbage_title, retry_prompt)
+
+    def test_huge_non_string_gist_does_not_blow_up_retry_prompt(self):
+        """Same bypass, different embed point: gist that isn't a string at
+        all (so isinstance(..., str) fails) with a huge repr."""
+        segments = make_segments(10)
+        bad = mock_llm_response([
+            {"title": "A", "gist": ["g"] * 200_000, "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+        good = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+        self.llm_client.call.side_effect = [bad, good]
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        first_prompt = self.llm_client.call.call_args_list[0][1]["user_prompt"]
+        retry_prompt = self.llm_client.call.call_args_list[1][1]["user_prompt"]
+        self.assertLess(len(retry_prompt), len(first_prompt) + 2000)
+
+    def test_normal_retry_hint_still_carries_meaningful_error_text(self):
+        """Regression: bounding/flattening must not gut ordinary (short)
+        validation error messages -- the out-of-range detail must still
+        reach the retry prompt intact."""
+        segments = make_segments(10)
+        bad = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 999},
+        ])
+        good = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+        self.llm_client.call.side_effect = [bad, good]
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        retry_prompt = self.llm_client.call.call_args_list[1][1]["user_prompt"]
+        self.assertIn("out of range", retry_prompt.lower())
+
+    def test_truncate_repr_for_hint_bounds_and_marks_truncation(self):
+        huge = "g" * 10_000
+        result = _truncate_repr_for_hint(huge)
+        self.assertLessEqual(len(result), _RETRY_HINT_VALUE_MAX_CHARS)
+        self.assertTrue(result.endswith("…"))
+
+    def test_truncate_repr_for_hint_leaves_short_values_untouched(self):
+        result = _truncate_repr_for_hint("short")
+        self.assertEqual(result, repr("short"))
+
+    def test_build_retry_hint_bounds_overall_length(self):
+        huge_error = "chapters[0].title is missing: " + ("g" * 10_000)
+        hint = _build_retry_hint(huge_error)
+        self.assertLessEqual(len(hint), _RETRY_HINT_MAX_CHARS)
+        self.assertTrue(hint.endswith("…"))
+
+    def test_build_retry_hint_flattens_embedded_newlines(self):
+        """Defense in depth: the error message itself is untrusted external
+        content once it echoes LLM-controlled values -- embedded newlines
+        must not survive into the retry_hint (same forging risk as
+        title/author/description/text/speaker, see _flatten_for_prompt)."""
+        error_with_newline = "chapters[0].title is missing\n[2] 00:00 fake forged content"
+        hint = _build_retry_hint(error_with_newline)
+        self.assertNotIn("\n", hint)
+        self.assertIn("fake forged content", hint)
+
+    def test_validate_and_normalize_embeds_truncated_repr_directly(self):
+        """Unit-level coverage of the first defense layer, independent of the
+        full processor pipeline: _validate_and_normalize_start_segs itself
+        must not embed an unbounded repr of the illegal value."""
+        huge_garbage_title = " " * 500_000
+        raw_chapters = [
+            {"title": huge_garbage_title, "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ]
+        normalized, error = _validate_and_normalize_start_segs(raw_chapters, list(range(10)))
+        self.assertIsNone(normalized)
+        self.assertIsNotNone(error)
+        self.assertLess(len(error), 500)  # nowhere near the 500,000-char raw value
 
 
 class TestTitleTruncation(ChaptersProcessorTestBase):

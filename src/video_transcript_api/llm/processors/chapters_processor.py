@@ -87,6 +87,19 @@ _TITLE_TRUNCATE_TO = 23
 # 截断同一级别的软处理），详见 `_truncate_description`。
 _DESCRIPTION_MAX_CHARS = 2000
 
+# 语义校验失败信息会把 LLM 自己返回的非法值（如超长 title/gist 原文）通过
+# repr 回显进错误描述，这份描述又会被拼进第二次调用的 retry_hint——如果不
+# 加限制，LLM 首次返回一个超长垃圾值就能让第二次 prompt 远超
+# `max_chapters_input_chars`，绕过门控 4"只测量首次 prompt"的输入安全上限
+# （gate-r24 P2）。两级防线，详见 `_truncate_repr_for_hint`/`_build_retry_hint`：
+# 1. 逐值截断——校验函数拼错误信息时，对每个被 repr 回显的非法值单独限长；
+# 2. 整体截断 + 压平——构造最终 retry_hint 前的兜底，不依赖上游是否记得
+#    逐值截断。
+_RETRY_HINT_VALUE_MAX_CHARS = 200
+_RETRY_HINT_VALUE_TRUNCATE_TO = 199
+_RETRY_HINT_MAX_CHARS = 1000
+_RETRY_HINT_TRUNCATE_TO = 999
+
 
 # ============================================================
 # 结果类型
@@ -532,6 +545,58 @@ def _truncate_description(description: Optional[str]) -> str:
     return truncated
 
 
+def _truncate_repr_for_hint(value: Any) -> str:
+    """把即将拼进语义校验错误信息的不可信值转成安全长度的 repr（gate-r24 P2）。
+
+    仅供 `_validate_and_normalize_start_segs` 内部拼错误信息时替代裸的
+    `{value!r}` 插值——value 是 LLM 返回的原始字段（start_seg 类型错误时
+    的整个值、title、gist），完全不受本服务控制，理论上可以长达数十万字符
+    （如 LLM 返回大段垃圾填充）。不做限长的话，这个 repr 会原样进入
+    `_validate_and_normalize_start_segs` 的返回值，最终拼进第二次调用的
+    retry_hint，让第二次 prompt 的长度失控。
+
+    Args:
+        value: 待展示的非法值，任意类型（未必是 str——start_seg 类型错误
+            分支可能传入任意 JSON 类型）
+
+    Returns:
+        str: repr(value) 的结果，长度 <= `_RETRY_HINT_VALUE_MAX_CHARS`
+            （超长时截断为前 `_RETRY_HINT_VALUE_TRUNCATE_TO` 字符 + "…"）
+    """
+    text = repr(value)
+    if len(text) <= _RETRY_HINT_VALUE_MAX_CHARS:
+        return text
+    return text[:_RETRY_HINT_VALUE_TRUNCATE_TO] + "…"
+
+
+def _build_retry_hint(validation_error: str) -> str:
+    """把语义校验错误信息转换为安全的 retry_hint（gate-r24 P2 第二层防线）。
+
+    独立于 `_truncate_repr_for_hint` 的逐值截断——这里是构造 retry_hint 前
+    的最后一道兜底，不依赖调用方是否记得对每个被回显的值做限长：
+    1. 整体截断到 `_RETRY_HINT_MAX_CHARS`：即使未来某条新增的校验错误信息
+       忘记做逐值截断，也不会让第二次 prompt 的长度失控、绕过门控 4
+       （`max_chapters_input_chars` 只测量首次 prompt，见
+       `ChaptersProcessor._process_impl` 门控 4 注释）；
+    2. 经 `_flatten_for_prompt` 压平：错误信息本身也是拼进 prompt 的外部
+       不可信内容（含 LLM 自己返回的原始 title/gist 片段），必须与
+       title/author/description/text/speaker 走同一道压平防线，防止换行
+       伪造出形如 "[i] mm:ss text" 的假编号行（见 `_flatten_for_prompt`
+       文档）。
+
+    Args:
+        validation_error: `_validate_and_normalize_start_segs` 返回的错误
+            描述原文
+
+    Returns:
+        str: 压平后长度 <= `_RETRY_HINT_MAX_CHARS` 的安全 retry_hint
+    """
+    flattened = _flatten_for_prompt(validation_error)
+    if len(flattened) <= _RETRY_HINT_MAX_CHARS:
+        return flattened
+    return flattened[:_RETRY_HINT_TRUNCATE_TO] + "…"
+
+
 def _validate_and_normalize_start_segs(
     raw_chapters: Any,
     survived_indices: List[int],
@@ -587,7 +652,10 @@ def _validate_and_normalize_start_segs(
 
         start_seg = item.get("start_seg")
         if not isinstance(start_seg, int) or isinstance(start_seg, bool):
-            return None, f"chapters[{idx}].start_seg is not an int: {start_seg!r}"
+            return None, (
+                f"chapters[{idx}].start_seg is not an int: "
+                f"{_truncate_repr_for_hint(start_seg)}"
+            )
         if start_seg not in survived_set:
             return None, (
                 f"chapters[{idx}].start_seg={start_seg} out of range (not among the "
@@ -598,13 +666,15 @@ def _validate_and_normalize_start_segs(
         raw_title = item.get("title")
         if not isinstance(raw_title, str) or not raw_title.strip():
             return None, (
-                f"chapters[{idx}].title is missing, not a string, or blank: {raw_title!r}"
+                f"chapters[{idx}].title is missing, not a string, or blank: "
+                f"{_truncate_repr_for_hint(raw_title)}"
             )
 
         raw_gist = item.get("gist")
         if not isinstance(raw_gist, str) or not raw_gist.strip():
             return None, (
-                f"chapters[{idx}].gist is missing, not a string, or blank: {raw_gist!r}"
+                f"chapters[{idx}].gist is missing, not a string, or blank: "
+                f"{_truncate_repr_for_hint(raw_gist)}"
             )
 
         items.append({
@@ -1282,7 +1352,10 @@ class ChaptersProcessor:
                     video_title=title,
                     author=author,
                     description=description,
-                    retry_hint=validation_error,
+                    # 不能直接传 validation_error 原文——它可能回显了 LLM
+                    # 自己返回的非法 title/gist 原文（gate-r24 P2），必须先
+                    # 经 `_build_retry_hint` 做整体截断 + 压平，见其文档。
+                    retry_hint=_build_retry_hint(validation_error),
                 )
 
         return None, raw_chapters, f"Semantic validation failed after retry: {validation_error}"
