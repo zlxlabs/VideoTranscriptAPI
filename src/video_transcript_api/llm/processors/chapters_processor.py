@@ -82,6 +82,11 @@ _MAX_CHAPTER_SECONDS = 40 * 60     # 平均章节时长上限（秒）
 _TITLE_MAX_CHARS = 24
 _TITLE_TRUNCATE_TO = 23
 
+# description 来自外部平台（视频简介），长度不受本服务控制，理论上可以达到
+# 数 KB 甚至更长；防御性截断到此长度，只记 warning、不算失败（与 title 超长
+# 截断同一级别的软处理），详见 `_truncate_description`。
+_DESCRIPTION_MAX_CHARS = 2000
+
 
 # ============================================================
 # 结果类型
@@ -281,8 +286,43 @@ def _format_timestamp(seconds: Optional[float]) -> str:
 
 
 # 匹配任意一段连续空白字符（含 "\n"/"\r"/"\t"/普通空格及其任意组合）。用于
-# `_build_segment_lines` 把每条 segment 的 text 压平成单行——见该函数文档。
+# `_flatten_for_prompt` 把任意外部字符串压平成单行——见该函数文档。
 _WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+def _flatten_for_prompt(value: str) -> str:
+    """把任意外部字符串压平为单行，供拼进章节 prompt（安全边界，务必读完）。
+
+    **安全边界**：章节 prompt 的行结构——每一行要么是 `[i] mm:ss (speaker:)?
+    text` 形式的真实编号行，要么是与编号无关的固定文案/元数据行——是章节生成
+    语义校验（`_validate_and_normalize_start_segs` 按幸存原始下标的成员关系
+    校验 LLM 返回的 `start_seg`）的信任基础。这份校验只能确认"LLM 返回的编号
+    在正文里出现过"，却无法区分某一行 `[i] ...` 是真实的 segment 边界，还是
+    由某段外部字符串的内容伪造出来的——只要伪造出的编号 i 恰好是某个真实的
+    幸存原始下标，校验就会把它当作合法值放行，但其真实对应的是伪造内容的
+    边界，而非下标 i 真正的 segment 边界（时间/内容归属由此出错，且不会被
+    任何现有校验拦下）。
+
+    因此：**任何外部字符串一旦要拼进章节 prompt，就不允许保留原始换行**。
+    这不是某一个字段的问题，而是一整类风险——凡是来源不受本服务控制的字符串
+    （视频 title/author/description 来自外部平台，完全可能含换行；speaker/
+    text 来自转录结果，同样不可信）都必须先经本函数压平，才能进入 prompt，
+    不允许任何遗漏入口。`_build_segment_lines` 对 text/speaker 的处理、
+    `ChaptersProcessor._process_impl` 对 title/author/description 的处理，
+    都必须统一调用这一个函数，而不是各自维护一份相似的空白折叠逻辑。
+
+    实现：复用 `_build_segment_lines` 原有的空白折叠正则 `_WHITESPACE_RUN_RE`
+    ——连续空白（含换行/回车/制表符）折叠为单个空格，再 strip 首尾空白。
+
+    Args:
+        value: 待压平的原始字符串，可能为 None、空串、含前后空白、含任意
+            数量/任意位置的换行
+
+    Returns:
+        str: 空白折叠为单个空格并 strip 后的单行字符串；value 为 None 或
+            空串时返回空串
+    """
+    return _WHITESPACE_RUN_RE.sub(" ", value or "").strip()
 
 
 def _build_segment_lines(indexed_segments: List[Tuple[int, Dict[str, Any]]]) -> str:
@@ -318,7 +358,9 @@ def _build_segment_lines(indexed_segments: List[Tuple[int, Dict[str, Any]]]) -> 
     校验——LLM 返回 start_seg=5 时会被当作合法值接受，但其真实对应的是被
     伪造出来的 "假正文" 边界，而非下标 5 那条 segment 真正的内容边界，
     章节的时间/内容归属由此出错且不会被任何现有校验拦下。处理方式与 text
-    完全一致：复用同一个 `_WHITESPACE_RUN_RE` 压平 + strip。
+    完全一致：复用同一个 `_flatten_for_prompt`（gate-r21 P2 起，text/speaker
+    的压平逻辑与 title/author/description 的压平逻辑合并为这一个统一 helper，
+    见其文档——本函数不再直接调用 `_WHITESPACE_RUN_RE`）。
 
     仅影响这里构建的 prompt 文本，不改变 segment 原始数据：
     - 指纹计算（`_compute_fingerprint`）直接使用原始 seg["text"]/speaker，
@@ -333,7 +375,7 @@ def _build_segment_lines(indexed_segments: List[Tuple[int, Dict[str, Any]]]) -> 
     """
     lines = []
     for i, seg in indexed_segments:
-        text = _WHITESPACE_RUN_RE.sub(" ", seg.get("text") or "").strip()
+        text = _flatten_for_prompt(seg.get("text") or "")
         timestamp = _format_timestamp(_to_seconds(seg.get("start_time")))
         speaker = seg.get("speaker")
 
@@ -351,7 +393,7 @@ def _build_segment_lines(indexed_segments: List[Tuple[int, Dict[str, Any]]]) -> 
             # 强转后同样要压平空白（gate-r18 P2）：与 text 的处理理由完全
             # 一致——不压平的话，含换行的 speaker 就是"一个 segment 恰好
             # 一行"这个不变式唯一未封死的入口，见本函数文档的专门说明。
-            speaker_flat = _WHITESPACE_RUN_RE.sub(" ", str(speaker)).strip()
+            speaker_flat = _flatten_for_prompt(str(speaker))
             prefix += f" {speaker_flat}:"
 
         lines.append(f"{prefix} {text}".strip())
@@ -382,6 +424,44 @@ def _normalize_title_length(title: str, idx: int) -> str:
     logger.warning(
         f"[CHAPTERS] chapters[{idx}].title exceeds {_TITLE_MAX_CHARS} chars "
         f"({len(title)}), truncating: {title!r} -> {truncated!r}"
+    )
+    return truncated
+
+
+def _truncate_description(description: Optional[str]) -> str:
+    """防御性截断 description：进 prompt 前的最后一道长度防线（gate-r21 P3）。
+
+    description 来自外部平台（视频简介），长度不受本服务控制，理论上可以
+    达到数 KB 甚至更长。若不截断，两个问题会叠加发生：
+    1. 门控 4（`max_chapters_input_chars`）此前只测量 `segment_lines`，完全
+       没有把 title/author/description 计入"实际发送给 LLM 的 prompt 总
+       长度"——一份 segment_lines 略低于上限、但 description 长达数十万字符
+       的输入能悄悄绕过门控，送进 LLM 的实际 prompt 远超预期开销（详见
+       `ChaptersProcessor._process_impl` 门控 4 处的注释）；
+    2. 即便修正门控测量口径，若不先截断，一条数十万字符的 description 本身
+       就会让门控测量值失真到失去意义。
+
+    截断到 `_DESCRIPTION_MAX_CHARS` 字符，只记一条 warning、不影响结果状态
+    ——截断本身不是语义错误，不值得为它触发重试或判 FAILED，与
+    `_normalize_title_length` 对超长 title 的软处理同一级别。
+
+    Args:
+        description: 原始 description，可能为 None/空串，也可能长达数十万
+            字符（None 按空串处理，调用方无需自行判空）
+
+    Returns:
+        str: 长度 <= `_DESCRIPTION_MAX_CHARS` 的 description（未超长时原样
+            返回）。不做压平/strip——那是 `_flatten_for_prompt` 的职责，
+            两者刻意分开：一个管长度上限，一个管行结构安全，避免一个函数
+            承担两种不相关的校验语义。
+    """
+    description = description or ""
+    if len(description) <= _DESCRIPTION_MAX_CHARS:
+        return description
+    truncated = description[:_DESCRIPTION_MAX_CHARS]
+    logger.warning(
+        f"[CHAPTERS] description exceeds {_DESCRIPTION_MAX_CHARS} chars "
+        f"({len(description)}), truncating before building prompt"
     )
     return truncated
 
@@ -869,10 +949,31 @@ class ChaptersProcessor:
         # 原始下标，见 `_build_segment_lines` 文档。
         segment_lines = _build_segment_lines(filtered_pairs)
 
-        # 门控 4：原文过长，直接判失败而不是把超大输入硬塞给模型
-        if len(segment_lines) > self.config.max_chapters_input_chars:
+        # title/author/description 同样会拼进 user prompt（见
+        # `build_chapters_user_prompt`），门控 4 若只测 segment_lines 会漏算
+        # 这部分开销——description 尤其可能长达数 KB 甚至更长（gate-r21 P3）。
+        # 这里先做防御性截断（`_truncate_description`），再统一压平
+        # （`_flatten_for_prompt`——同时也是"伪造编号行"问题的统一防线，见其
+        # 文档）。压平/截断后的结果既用于下面的门控测量，也直接传给
+        # `_generate_with_retry` 构建实际 prompt：两处用的是同一份字符串，
+        # 门控测量的长度与真正发送的内容不会产生分歧。
+        description = _truncate_description(description)
+        flat_title = _flatten_for_prompt(title)
+        flat_author = _flatten_for_prompt(author)
+        flat_description = _flatten_for_prompt(description)
+
+        # 门控 4：原文过长，直接判失败而不是把超大输入硬塞给模型。测量口径是
+        # segment_lines 长度 + 压平后元数据（title/author/description）长度
+        # 之和——user prompt 里固定的模板文案（"**内容辅助信息**："、
+        # "**编号正文**（请基于以下编号划分章节）："等字面量）开销只有几十
+        # 字符，相对 max_chapters_input_chars 的量级（通常是万级以上）可以
+        # 忽略不计，不纳入测量。
+        metadata_chars = len(flat_title) + len(flat_author) + len(flat_description)
+        prompt_chars = len(segment_lines) + metadata_chars
+        if prompt_chars > self.config.max_chapters_input_chars:
             error = (
-                f"Input too long for chapters: {len(segment_lines)} chars > "
+                f"Input too long for chapters: {prompt_chars} chars "
+                f"(segment_lines={len(segment_lines)} + metadata={metadata_chars}) > "
                 f"max_chapters_input_chars={self.config.max_chapters_input_chars}"
             )
             logger.error(f"[CHAPTERS] {error}")
@@ -911,12 +1012,16 @@ class ChaptersProcessor:
         # 门控 4 处构建完毕，此处直接复用，避免重复压缩同一份输入。传入
         # survived_indices（原始下标集合）而非 segment_count：语义校验必须
         # 按幸存原始下标的成员关系判定，不是简单的区间校验，见
-        # `_validate_and_normalize_start_segs` 文档。
+        # `_validate_and_normalize_start_segs` 文档。传入 flat_title/
+        # flat_author/flat_description（已截断 + 压平）而非原始 title/
+        # author/description：门控 4 的长度测量与实际发送给 LLM 的内容必须
+        # 是同一份字符串，且压平是"伪造编号行"问题的统一防线（见
+        # `_flatten_for_prompt` 文档），不能在这里退回未压平的原始值。
         normalized, raw_chapters, call_error = self._generate_with_retry(
             segment_lines=segment_lines,
-            title=title,
-            author=author,
-            description=description,
+            title=flat_title,
+            author=flat_author,
+            description=flat_description,
             model=model,
             reasoning_effort=reasoning_effort,
             survived_indices=survived_indices,
@@ -1017,6 +1122,15 @@ class ChaptersProcessor:
         LLM 调用强制走 json_object 模式（force_json_mode="json_object"）：
         json_schema 严格模式失败即返回、没有重试，本方法依赖的"重试"语义完全
         建立在 json_object 模式的 Self-Correction 能力之上。
+
+        Args:
+            title/author/description: 调用方（`_process_impl`）必须已经用
+                `_truncate_description`（仅 description）+ `_flatten_for_prompt`
+                处理过——本方法不重复压平/截断，直接原样拼进 prompt。这是
+                "伪造编号行"防线（见 `_flatten_for_prompt` 文档）与门控 4
+                长度测量口径一致性（见 `_process_impl` 门控 4 注释）共同要求
+                的前提：门控测量的必须是"实际发送的那份字符串"，若本方法再
+                自行处理一遍，测量口径与实际发送内容就可能产生分歧。
 
         Returns:
             (normalized_chapters, raw_chapters, error):

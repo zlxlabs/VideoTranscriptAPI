@@ -330,6 +330,58 @@ def test_negative_start_with_positive_duration_does_not_leak_end_time():
     ]
 
 
+def test_bool_start_is_rejected_as_invalid_time():
+    """gate-r21 P3: item.start being a bool (e.g. True/False, however that
+    might slip through from a malformed/mocked upstream response) must NOT
+    be silently accepted by float() -- bool is a subclass of int, so
+    float(True) == 1.0 and float(False) == 0.0 both "succeed" and look like
+    legitimate small timestamps. The shared time-parsing adapter
+    (transcriber.segments.parse_time_to_seconds) already explicitly rejects
+    bool for this exact reason; this per-item conversion must apply the same
+    isinstance(value, bool) guard for consistency. start_time must be nulled
+    out for the offending snippet, but its text must still be preserved in
+    segments (per-item fault tolerance), and end_time -- which depends on a
+    valid start_time -- must also stay None even though duration itself is
+    legitimate."""
+    downloader = _make_downloader()
+    downloader.ytt_api = Mock()
+    downloader.ytt_api.list = Mock(return_value=[FakeTranscriptListing("en")])
+    downloader.ytt_api.fetch = Mock(return_value=[
+        FakeSnippet("Bool start", True, 1.5),
+        FakeSnippet("world", 1.5, 2.0),
+    ])
+
+    result = downloader._fetch_youtube_transcript_result("video123")
+
+    assert isinstance(result, SubtitleResult)
+    assert result.text == "Bool start world"
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Bool start"},
+        {"start_time": 1.5, "end_time": 3.5, "text": "world"},
+    ]
+
+
+def test_bool_duration_is_rejected_as_invalid_time():
+    """Same bool-rejection rule applies symmetrically to item.duration: a
+    legitimate start_time paired with a bool duration must not compute a
+    bogus 1-second (or 0-second) end_time via float(True)/float(False).
+    start_time and text are unaffected; only end_time is nulled out."""
+    downloader = _make_downloader()
+    downloader.ytt_api = Mock()
+    downloader.ytt_api.list = Mock(return_value=[FakeTranscriptListing("en")])
+    downloader.ytt_api.fetch = Mock(return_value=[
+        FakeSnippet("Bool duration", 5.0, True),
+    ])
+
+    result = downloader._fetch_youtube_transcript_result("video123")
+
+    assert isinstance(result, SubtitleResult)
+    assert result.text == "Bool duration"
+    assert result.segments == [
+        {"start_time": 5.0, "end_time": None, "text": "Bool duration"},
+    ]
+
+
 def test_reversed_interval_end_before_start_yields_none_end_time():
     """A small negative duration whose sum with start is still non-negative
     (end >= 0) but ends up before start (end < start, an inverted interval)

@@ -762,12 +762,24 @@ def build_chapters_user_prompt(
     设计原则：动态内容放在末尾，最大化 KV Cache 前缀复用（与 build_calibrate_user_prompt
     等保持一致的组织方式）。
 
+    **调用方契约（安全边界，gate-r21 P2）**：video_title/author/description
+    必须是调用方已经压平过（不含任何换行）的字符串——本函数不对它们做二次
+    换行清洗，直接原样拼进 prompt。这三者与 segment_lines 一起构成同一份
+    prompt 文本，若其中任意一个含有换行，就可能在 prompt 里伪造出形如
+    "[i] mm:ss fake" 的假编号行，一旦 i 恰好是某个真实存在的编号，就会
+    让 ChaptersProcessor 的语义校验（按幸存原始下标的成员关系判定）把伪造
+    内容误判为合法的 start_seg 锚点。当前唯一调用方
+    `ChaptersProcessor._generate_with_retry` 在调用本函数前已统一通过
+    `_flatten_for_prompt` 压平三者（并对 description 做了长度截断），
+    详见该函数与 `ChaptersProcessor._process_impl` 门控 4 处的注释；未来若
+    新增调用方，必须遵守同样的前置压平约定，不能绕过。
+
     Args:
         segment_lines: 压缩后的编号正文，每行形如 "[i] mm:ss (speaker:)? text"
             （由 ChaptersProcessor._build_segment_lines 生成）
-        video_title: 视频标题
-        author: 作者/频道
-        description: 视频描述
+        video_title: 视频标题（调用方须已压平，不含换行，见上方契约说明）
+        author: 作者/频道（同上）
+        description: 视频描述（同上；调用方还应已做长度截断）
         retry_hint: 上一次输出违反语义约束（start_seg 越界/未递增等）时的具体错误描述，
             用于二次调用时引导模型修正，为空则不追加此段
 
