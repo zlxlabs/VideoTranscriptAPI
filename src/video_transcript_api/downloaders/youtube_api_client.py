@@ -579,72 +579,76 @@ class YouTubeApiClient:
                 original_error=e
             )
 
-    # SRT 时间轴行正则（如 "00:00:01,000 --> 00:00:04,000"），文本提取和时间戳
-    # 提取共用同一份正则，保证两者对"什么算时间轴行"的判断完全一致。
+    # SRT 时间轴行正则（如 "00:00:01,000 --> 00:00:04,000"）。这是 legacy
+    # 文本提取路径（parse_srt_to_subtitle_result 主循环，即 parse_srt_to_text
+    # 的实现）判断"这一行是不是时间轴声明"的唯一依据：`.match()` 只锚定
+    # 行首、不要求整行都被这段正则耗尽——命中即整行被当作时间轴丢弃（不进入
+    # text），未命中则整行原样当作正文保留（进入 text）。
+    #
+    # gate-r28 P2 根治：segments 提取路径（`_extract_srt_segments`）此前在
+    # 这条判定之外，额外独立维护了一套"看起来像时间轴"启发式
+    # （`_looks_like_timeline_attempt`，要求行紧跟纯数字索引行、且 "-->"
+    # 两侧都含时间样式片段），目的是"抢救"格式已损坏、这条严格正则判定不出
+    # 的时间轴行，避免其文本被下一条 cue 的收集起点吞掉。但这层"抢救"本身
+    # 制造了新的分歧：一条 cue 缺失时间轴行、其正文首行恰好两侧都含时间样式
+    # 片段时（如 "Meet at 12:30 --> leave at 13:00"），会被误判为损坏时间轴
+    # 而整行被吞掉——legacy 明明会把这行原样保留为正文，segments 里却彻底
+    # 消失，text 与 segments 背离。这是"启发式判定与 legacy 不一致"这类问题
+    # 第 N 次露头（此前 gate-r14/r16/r27 已经各修过一次同源分歧）。
+    #
+    # 根治方式：不再为 segments 路径单独维护第二套启发式判定，两条路径统一
+    # 复用同一个判定函数 `_is_srt_timeline_declaration_line`（就是对这条
+    # 正则 `.match()` 的直接包装）——当且仅当 legacy 会把某一行整行当作
+    # 时间轴声明消费掉时，segments 路径才把它当作 cue 边界；legacy 留作
+    # 正文的行（不论是不是"看起来像"损坏的时间轴），segments 路径一律按
+    # 正文/孤儿路径处理，文本保留、时间置 None。两条路径对"这一行算不算
+    # 时间轴"的答案因此逐行完全一致，构造上不可能再出现背离，不需要靠新增
+    # 测试用例逐个堵漏洞。
+    #
+    # 代价（也是唯一自洽的选择）：一份 SRT 如果通篇没有任何一行能满足这条
+    # 严格判定（例如所有 "-->" 行都因为位数缺失/多余、分隔符错误而匹配不
+    # 上），segments 会退化为 None——这与 legacy"完全找不到任何可识别内容"
+    # 时的历史行为一致：既然 legacy 判定"这不是一条可信的时间轴声明"，
+    # segments 就不能装作找到了一条只是时间为 None 的 cue。
     _SRT_TIMESTAMP_LINE_PATTERN = re.compile(
         r"\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}"
     )
-    # 同上，但带分组，用于把各段数字提取出来换算成秒
-    _SRT_TIMESTAMP_RANGE_PATTERN = re.compile(
-        r"(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})"
-    )
+
     # 严格版时间戳正则，仅用于 segments 提取路径解析具体时间值（gate-r24
-    # P2）。`_SRT_TIMESTAMP_RANGE_PATTERN` 配合 `.match()` 只锚定开头、不要求
+    # P2）。`_SRT_TIMESTAMP_LINE_PATTERN` 配合 `.match()` 只锚定开头、不要求
     # 整行都被消耗——"00:00:01,000 --> 00:00:04,0000"（结尾多出一位毫秒数字）
-    # 或行尾带任意垃圾字符的行，仍能匹配出一段"合法"的时间前缀，被当作真实
-    # 时间收录进 segments，绕过了本该判定为"损坏时间轴"的分支。这条正则与
-    # `.fullmatch()` 搭配使用，专门校验一整行是否"恰好"就是一段时间轴声明：
-    # - 允许首尾空白（`\s*`）：调用处传入的 line 已经过 `.strip()`，这里的
+    # 或行尾带任意垃圾字符的行，仍能匹配出一段"合法"的时间前缀。这条正则与
+    # `.fullmatch()` 搭配使用，专门校验 "-->" 某一侧是否"恰好"就是一段合法
+    # 的时间声明：
+    # - 允许首尾空白（`\s*`）：调用处传入的一侧文本已经过 `.strip()`，这里的
     #   `\s*` 只是防御性冗余，不依赖调用方一定已经 strip 过；
     # - 毫秒固定 3 位数字（`\d{3}`，gate-r25 P2）：SRT 标准毫秒字段就是恰好
-    #   3 位零填充写法（如 "000"）。之前放宽成 `\d{1,3}` 是为了"兼容"未零
-    #   填充的写法，但这与本条正则本身的定位矛盾——它只负责校验"数值是否
-    #   可信"，不负责判定这行是不是时间轴（那是 cue 边界判定的职责，见下）。
-    #   1-2 位毫秒是非标准写法，和"结尾多出一位毫秒数字"或"行尾带垃圾字符"
-    #   本质上是同一类问题：格式不是恰好合法的样子，因此必须同等对待——
-    #   fullmatch 失败，落入下面的"损坏时间轴"分支（文本保留、时间置
-    #   None），不能被静默当成一个（换算方式还含糊不清的）合法时间收录。
+    #   3 位零填充写法（如 "000"）。1-2 位毫秒是非标准写法，和"结尾多出一位
+    #   毫秒数字"或"行尾带垃圾字符"本质上是同一类问题：格式不是恰好合法的
+    #   样子，因此必须同等对待——fullmatch 失败，落入下面的"该侧时间不可信"
+    #   分支（文本保留、该侧时间置 None），不能被静默当成一个合法时间收录。
     #
-
-    # gate-r26 P2：起止两侧独立校验。之前用一条覆盖整行的严格正则
-    # （`\s*HH:MM:SS,mmm\s*-->\s*HH:MM:SS,mmm\s*`）配合 `.fullmatch()`——只要
-    # 有一侧格式损坏（如 "00:00:01,000 --> 00:99:04,000" 的结束分钟越界，或
-    # 结束毫秒不是恰好 3 位），整行 fullmatch 失败，起止两侧会被一起判定为
-    # "损坏时间轴"，start_time 也被连带置 None。但合法的 start 恰恰是章节
-    # 锚定最需要的信息——不能因为 end 一侧的损坏而陪葬。因此改为对 "-->"
-    # 两侧分别单独套用同一份"单侧时间戳"正则（下方 `_SRT_TIMESTAMP_SIDE_
-    # STRICT_PATTERN`）配合 `.fullmatch()`：哪一侧不能恰好匹配（含毫秒非 3
-    # 位、分钟/秒时钟分量越界、行尾带垃圾字符等），就把哪一侧置 None；只有
-    # 两侧都无法匹配时才等同于旧版"整条时间轴损坏"的效果（均为 None）。
+    # 这条正则只负责"某一侧数值是否可信"这一步（cue 已经确定是一条时间轴
+    # 之后），不参与 cue 边界判定（那是 `_is_srt_timeline_declaration_line`
+    # 的职责），因此收紧这条正则不影响哪一行被当作时间轴、也不影响
+    # `parse_srt_to_text` 的输出。
     #
-    # 单侧校验沿用旧整行正则相同的设计取舍：毫秒固定 3 位数字（`\d{3}`，
-    # gate-r25 P2）——SRT 标准毫秒字段就是恰好 3 位零填充写法（如 "000"）。
-    # 1-2 位毫秒、结尾多出一位毫秒数字、行尾带垃圾字符本质上是同一类问题：
-    # 格式不是恰好合法的样子，因此必须同等对待——fullmatch 失败，该侧置
-    # None，不能被静默当成一个合法时间收录。分钟/秒时钟分量是否 < 60 由
+    # gate-r26 P2：起止两侧独立校验。之前用一条覆盖整行的严格正则配合
+    # `.fullmatch()`——只要有一侧格式损坏（如结束分钟越界，或结束毫秒不是
+    # 恰好 3 位），整行 fullmatch 失败，起止两侧会被一起判定为"损坏时间轴"，
+    # start_time 也被连带置 None。但合法的 start 恰恰是章节锚定最需要的
+    # 信息——不能因为 end 一侧的损坏而陪葬。因此改为对 "-->" 两侧分别单独
+    # 套用同一份"单侧时间戳"正则（下方）配合 `.fullmatch()`：哪一侧不能
+    # 恰好匹配，就把哪一侧置 None；只有两侧都无法匹配时才等同于旧版"整条
+    # 时间轴损坏"的效果（均为 None）。分钟/秒时钟分量是否 < 60 由
     # `has_valid_clock_components` 在 fullmatch 成功之后再单独校验（该正则
     # 本身只按数字位数匹配，不校验数值范围）。
     #
-    # 调用处对已经命中 "-->" 的时间轴行做 `str.partition("-->")` 并对两侧
-    # 各自 `.strip()`，天然吸收了旧整行正则里 `\s*` 负责的首尾空白容忍，
-    # 因此单侧正则本身不需要再写 `\s*`。
-    #
-    # 不能改动 `_SRT_TIMESTAMP_LINE_PATTERN`/`_SRT_TIMESTAMP_RANGE_PATTERN`
-    # 本身——`parse_srt_to_text`（文本提取路径）与 `_extract_srt_segments` 的
-    # cue 边界判定（is_timeline_attempt/next_is_timeline）都依赖它们现有的
-    # 宽松语义来判断"这是不是一条时间轴行"，收紧会改变 cue 切分结果，让
-    # `parse_srt_to_text` 的输出偏离历史行为（违反逐字节兼容契约）。这条新
-    # 正则只用于"已经确定是一条时间轴行之后，其某一侧数值是否可信"这一步，
-    # 不参与 cue 边界判定，因此不影响文本提取路径，也不改变哪一行被当作
-    # cue 边界。
+    # 调用处对已经命中的时间轴行做 `str.partition("-->")` 并对两侧各自
+    # `.strip()`，天然吸收了首尾空白容忍，因此单侧正则本身不需要再写 `\s*`。
     _SRT_TIMESTAMP_SIDE_STRICT_PATTERN = re.compile(
         r"(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})"
     )
-    # "时间样式片段"宽松正则：只要求形如 "12:34" 的数字+冒号结构（不要求三段
-    # 齐全、不要求毫秒），用于 _looks_like_timeline_attempt 判断一条格式已损坏
-    # 的 "-->" 行是否至少有一侧"长得像"时间，从而把它和纯文本里偶然出现的
-    # "-->"（如 "Settings --> Privacy"）区分开。
-    _TIME_STYLE_FRAGMENT_PATTERN = re.compile(r"\d{1,2}:\d{2}")
 
     # UTF-8 BOM（U+FEFF）字符。部分编辑器/导出工具会在文件最开头写入这个不可见
     # 字符——它不是 Python str.strip() 会移除的空白字符，一旦出现在 SRT 首个
@@ -655,8 +659,7 @@ class YouTubeApiClient:
     @staticmethod
     def _strip_bom(line: str) -> str:
         """去掉行首可能存在的 UTF-8 BOM 字符，仅供 segments 提取路径在做
-        "是不是纯数字索引行" 判断前使用（见 `_extract_srt_segments`/
-        `_looks_like_timeline_attempt`）。
+        "是不是纯数字索引行" 判断前使用（见 `_extract_srt_segments`）。
 
         背景：str.strip() 不会移除 U+FEFF（它按 Unicode 定义不是空白字符），
         所以文件开头若带 BOM，第一个索引行 "1" 实际会是 "﻿1"——
@@ -677,6 +680,27 @@ class YouTubeApiClient:
             str: 去掉行首 BOM 后的文本；不含 BOM 时原样返回
         """
         return line.lstrip(YouTubeApiClient._UTF8_BOM)
+
+    @staticmethod
+    def _is_srt_timeline_declaration_line(line: str) -> bool:
+        """判断某一行是否会被 legacy 文本提取路径当作一条时间轴声明整行吞掉
+
+        这是 legacy 文本提取（`parse_srt_to_subtitle_result` 主循环，即
+        `parse_srt_to_text` 的实现）与 `_extract_srt_segments` 共用的唯一
+        判定入口：直接包装 `_SRT_TIMESTAMP_LINE_PATTERN.match()`，不做任何
+        额外的"看起来像"式宽松判断。两条路径都调用这同一个函数，因此对
+        "这一行算不算时间轴"的答案逐行保证一致，不存在第二套独立维护、可能
+        与 legacy 走偏的启发式（gate-r28 P2 根治，详见类定义上方
+        `_SRT_TIMESTAMP_LINE_PATTERN` 的说明）。
+
+        Args:
+            line: 已经 strip 过的单行文本
+
+        Returns:
+            bool: legacy 文本路径是否会把这一整行当作时间轴声明消费掉（即
+                该行不会出现在 parse_srt_to_text 的输出里）
+        """
+        return bool(YouTubeApiClient._SRT_TIMESTAMP_LINE_PATTERN.match(line))
 
     @staticmethod
     def parse_srt_to_text(srt_content: str) -> str:
@@ -730,8 +754,9 @@ class YouTubeApiClient:
                 i += 1
                 continue
 
-            # 跳过时间轴行
-            if YouTubeApiClient._SRT_TIMESTAMP_LINE_PATTERN.match(line):
+            # 跳过时间轴行（判定逻辑与 segments 提取路径共用同一个函数，
+            # 见 _is_srt_timeline_declaration_line）
+            if YouTubeApiClient._is_srt_timeline_declaration_line(line):
                 i += 1
                 continue
 
@@ -762,93 +787,31 @@ class YouTubeApiClient:
         return SubtitleResult(text=text, segments=segments)
 
     @staticmethod
-    def _looks_like_timeline_attempt(line: str, prev_line: str) -> bool:
-        """
-        判断某一行是否"像"一条 SRT 时间轴声明行，即使其数字格式已经损坏
-
-        用箭头符号 "-->" 作为宽松判定依据：正常 SRT 里只有时间轴行会包含这个
-        符号，字幕正文几乎不会出现。这样即便一条 cue 的时间轴因为格式错误
-        (缺位数字、分隔符错误等) 匹配不上 `_SRT_TIMESTAMP_RANGE_PATTERN`，也
-        能被识别为"这里本应是一条时间轴"，从而正确切出 cue 边界，避免把下一条
-        cue 的内容错误地拼接为当前 cue 的文本（反之亦然）。
-
-        但这个宽松匹配不能无条件生效：字幕正文本身偶尔会出现 "-->"（如操作
-        指引 "Settings --> Privacy"），若不加约束会被误判成下一条 cue 的时间
-        轴，导致该文本行从当前 cue 的文本里静默丢失。SRT 的标准结构是
-        "索引行(纯数字) -> 时间轴行 -> 文本行... -> 空行分隔"，因此只有当
-        "-->" 行紧跟在一个纯数字索引行之后（即处于"预期时间轴位置"）时，才
-        可能是一条（哪怕格式已损坏的）时间轴声明。
-
-        但即便处于"预期时间轴位置"，也不能仅凭 "-->" 出现就判定为时间轴：
-        像 "Settings --> Privacy" 这样纯文本的操作指引，如果恰好是某个 cue
-        的第一行正文（该 cue 的真实时间轴行整行缺失），也会紧跟在索引行之
-        后，此时若无条件当作损坏的时间轴，会导致这行正文的文本收集从 j=i+1
-        开始（即从它自己之后算起）而丢失自身，最终在 segments 里整条消失
-        （legacy parse_srt_to_text 的严格正则不识别它、仍会把它当正文保留，
-        造成 text 与 segments 背离）。因此这里再加一层"长得像时间"的约束：
-        "-->" 两侧都必须命中 `_TIME_STYLE_FRAGMENT_PATTERN`（形如 "12:34"
-        的数字+冒号片段）才判定为损坏的时间轴，如 "00:00:0X --> 00:00:04"
-        两侧都命中，仍判定为损坏的时间轴；"Settings --> Privacy" 两侧都不
-        含任何时间样式片段，判定为普通正文，交由调用方的孤儿文本路径
-        （R6）兜底收集。
-
-        gate-r27 P2：之前是"至少一侧命中"（OR），会把 cue 首行正文里恰好
-        一侧含时间样式片段的行误判为损坏时间轴——例如 "Meet at 12:30 -->
-        lobby"，左侧 "12:30" 命中片段正则，右侧 "lobby" 不含任何数字，OR
-        逻辑下整行被当成一条损坏的时间轴声明，导致这行正文本身被吞掉、不
-        进入任何 cue 的文本（既不在当前 cue 里，也不会被当作下一条 cue 的
-        文本收集起点，因为收集是从 j=i+1 开始的）。真正损坏的时间轴（如
-        "00:00:0X --> 00:00:04"）两侧永远都是"数字+冒号"结构，只有正文
-        偶然带时间样式词汇时才会出现"一侧像时间、另一侧不像"的情况，因此
-        改成两侧都必须命中（AND）才判定为损坏时间轴，能不牺牲对真损坏行的
-        识别、同时放过这类单侧误判。
-
-        一致性核查（gate-r27 P2）：对形如 "00:00:01,000 --> garbage" 这种
-        "一侧完整时间戳格式、另一侧纯垃圾"的行，legacy `parse_srt_to_text`
-        用的 `_SRT_TIMESTAMP_LINE_PATTERN.match()` 要求两侧都齐全数字才能
-        匹配成功，这类行匹配失败，因此 legacy 路径把整行原样当正文保留进
-        text。收紧为 AND 后，这类行同样两侧非同时命中而判定为普通正文，
-        交由孤儿文本路径按原始整行文本收集——与 legacy 的处理口径一致（都
-        是"保留为文本，不消费为时间轴"），不会造成 text/segments 背离。
-        测试见 test_youtube_api_client_srt_timestamps.py 中
-        test_gate_r27_one_side_time_style_other_side_garbage_matches_legacy_text_handling。
-
-        BOM 容忍：prev_line 的纯数字判断用 `_strip_bom` 剥掉可能存在的行首
-        UTF-8 BOM 后再做 isdigit() 检查——否则文件开头带 BOM 时，第一条 cue
-        真实的时间轴行（紧跟在 "﻿1" 这个被 BOM 污染的索引行之后）会因为
-        `prev_line.isdigit()` 误判为 False 而漏判，详见 `_strip_bom` 文档。
-
-        Args:
-            line: 已经 strip 过的单行文本
-            prev_line: 已经 strip 过的上一行文本，用于判断当前行是否紧跟在
-                纯数字索引行之后
-
-        Returns:
-            bool: 是否应被当作一条时间轴声明（不论格式是否合法）
-        """
-        if "-->" not in line or not YouTubeApiClient._strip_bom(prev_line).isdigit():
-            return False
-        left, _, right = line.partition("-->")
-        return bool(
-            YouTubeApiClient._TIME_STYLE_FRAGMENT_PATTERN.search(left)
-            and YouTubeApiClient._TIME_STYLE_FRAGMENT_PATTERN.search(right)
-        )
-
-    @staticmethod
     def _extract_srt_segments(lines: list) -> list:
         """
         从 SRT 文本行中提取时间戳分段信息
 
         核心不变式（文本永不丢失）：只要一条 cue 有非空文本，就必须出现在
-        返回的 segments 里——哪怕它的时间轴行格式已经损坏无法解析，甚至
-        整行缺失（索引行后面直接是正文，完全没有任何含 "-->" 的行）。前两
-        种情况下该条目的 start_time / end_time 会被置为 None，但 text 依旧
-        完整保留；第三种"孤儿文本"（无法归属到任何 cue 的正文块）同样会被
-        落成一条独立 segment（start_time / end_time 均为 None），保证不会
-        出现"进了 result.text 却不进 segments"的静默丢字幕。只有当整段
-        SRT 里完全没有任何可识别的 cue（既没有合法时间轴，也没有看起来像
-        时间轴的行）时，才会返回空列表（由调用方转换为 None）——此时孤儿
-        文本也一并丢弃，维持历史行为不变。
+        返回的 segments 里——哪怕它的时间轴行格式已经损坏无法解析具体数值，
+        甚至整行缺失（索引行后面直接是正文，完全没有任何被识别为时间轴的
+        行）。前一种情况下该条目的 start_time / end_time 会被置为 None，但
+        text 依旧完整保留；后一种"孤儿文本"（无法归属到任何 cue 的正文块）
+        同样会被落成一条独立 segment（start_time / end_time 均为 None），
+        保证不会出现"进了 result.text 却不进 segments"的静默丢字幕。只有当
+        整段 SRT 里完全没有任何一行满足 `_is_srt_timeline_declaration_line`
+        （即 legacy 也完全找不到任何时间轴声明）时，才会返回空列表（由调用
+        方转换为 None）——此时孤儿文本也一并丢弃，维持历史行为不变。
+
+        cue 边界判定（哪一行算时间轴）与 legacy 文本提取路径完全共用同一个
+        判定函数 `_is_srt_timeline_declaration_line`（gate-r28 P2 根治，见
+        该函数与 `_SRT_TIMESTAMP_LINE_PATTERN` 的说明）——不再为这条路径
+        单独维护一套"看起来像时间轴"的启发式。legacy 判定为正文的行（哪怕
+        它包含 "-->" 或数字+冒号这样"像"时间的片段），这里也一律按正文/
+        孤儿路径处理：文本保留，时间置 None。
+
+        时间值提取仍然是独立的严格步骤：cue 边界一旦确定，"-->" 两侧各自
+        再套用 `_SRT_TIMESTAMP_SIDE_STRICT_PATTERN.fullmatch()` 校验数值是
+        否可信（位数、时钟范围），该侧不可信则该侧置 None，不影响另一侧。
 
         任何异常都不会向上抛出影响文本提取（由调用方 try/except 兜底）。
 
@@ -868,30 +831,30 @@ class YouTubeApiClient:
 
             与 `transcriber.segments.parse_time_to_seconds` 对 "HH:MM:SS"
             的校验口径保持一致（同一条"损坏时间不得伪装真实时间"策略的两处
-            落地）：`_SRT_TIMESTAMP_RANGE_PATTERN` 只按数字位数匹配（`\\d{2}`），
-            不校验数值范围，因此像 "00:00:99,000" 这样每段都恰好两位数字、
-            但秒分量越界的字符串同样会匹配成功——若不在这里补一道数值校验，
-            会被 `to_seconds` 静默换算成 99 秒这个虚假时间。
+            落地）：`_SRT_TIMESTAMP_LINE_PATTERN` 只按数字位数匹配
+            （`\\d{2}`），不校验数值范围，因此像 "00:00:99,000" 这样每段都
+            恰好两位数字、但秒分量越界的字符串同样会被判定为一条时间轴。若
+            不在这里补一道数值校验，会被 `to_seconds` 静默换算成 99 秒这个
+            虚假时间。
             """
             return int(minutes) < 60 and int(seconds) < 60
 
         segments = []
         i = 0
-        # 上一行（已 strip），用于判断当前行是否紧跟纯数字索引行——只有处于
-        # "预期时间轴位置" 的 "-->" 行才可能是（损坏的）时间轴，正文中偶然
-        # 出现的 "-->" 一律当普通文本，见 _looks_like_timeline_attempt。
-        prev_line = ""
         # 孤儿文本缓冲区：收集尚未归属到任何 cue 的正文行——典型场景是某条
-        # cue 的时间轴行整行缺失（索引行后面直接接正文，没有任何 "-->" 行），
-        # 导致这段正文既不在任何 cue 的时间轴之后，也没有自己的时间轴可以
-        # 开启一条新 cue。收集规则与主文本提取（parse_srt_to_text）保持一致：
-        # 纯数字行当索引行无条件跳过，空行是块边界，其余非空行收集为文本。
+        # cue 的时间轴行整行缺失（索引行后面直接接正文，没有任何时间轴声明
+        # 行），导致这段正文既不在任何 cue 的时间轴之后，也没有自己的时间轴
+        # 可以开启一条新 cue；也包括一行"看起来像"时间轴但不满足严格判定的
+        # 行（legacy 判定为正文，这里同样按正文处理，gate-r28 P2）。收集
+        # 规则与主文本提取（parse_srt_to_text）保持一致：纯数字行当索引行
+        # 无条件跳过，空行是块边界，其余非空行收集为文本。
         orphan_text_parts: list = []
-        # 整份 SRT 是否曾出现过至少一个可识别的 cue（合法时间轴或损坏但
-        # "看起来像"时间轴的行）。只有出现过，孤儿文本才会被落地为独立
-        # segment；如果整份文件压根没有任何可识别的 cue 结构，维持历史行为
-        # 返回空列表（由调用方转换为 None），孤儿文本全部丢弃不落地——避免
-        # 把"根本不是字幕格式的纯文本"伪装成一条时间为 None 的 segment。
+        # 整份 SRT 是否曾出现过至少一行满足 `_is_srt_timeline_declaration_line`
+        # 的时间轴声明。只有出现过，孤儿文本才会被落地为独立 segment；如果
+        # 整份文件压根没有任何一行满足这个判定（与 legacy 完全找不到时间轴
+        # 声明的判断口径一致），维持历史行为返回空列表（由调用方转换为
+        # None），孤儿文本全部丢弃不落地——避免把"根本不是字幕格式的纯文本"
+        # 伪装成一条时间为 None 的 segment。
         found_any_cue = False
 
         def flush_orphan_text() -> None:
@@ -904,12 +867,9 @@ class YouTubeApiClient:
 
         while i < len(lines):
             line = lines[i].strip()
-            match = YouTubeApiClient._SRT_TIMESTAMP_RANGE_PATTERN.match(line)
-            is_timeline_attempt = bool(match) or YouTubeApiClient._looks_like_timeline_attempt(
-                line, prev_line
-            )
+            is_timeline = YouTubeApiClient._is_srt_timeline_declaration_line(line)
 
-            if not is_timeline_attempt:
+            if not is_timeline:
                 if not line:
                     # 空行：块边界，把已缓冲的孤儿文本落地成一条 segment
                     flush_orphan_text()
@@ -925,23 +885,22 @@ class YouTubeApiClient:
                     # orphan_text_parts 的分支仍然用原始（含 BOM）的 line，
                     # 不影响任何真实正文内容的保留。
                     orphan_text_parts.append(re.sub(r"<[^>]+>", "", line))
-                prev_line = line
                 i += 1
                 continue
 
-            # 命中一条 cue 的时间轴（或其损坏后的宽松尝试）：先把此前尚未
-            # 归属的孤儿文本落地，再按原逻辑处理这条 cue
+            # 命中一条 cue 的时间轴声明：先把此前尚未归属的孤儿文本落地，
+            # 再按原逻辑处理这条 cue
             flush_orphan_text()
             found_any_cue = True
 
-            # 时间值解析改用严格锚定匹配（gate-r24 P2），并对起止两侧独立
-            # 校验（gate-r26 P2）：is_timeline_attempt 判定 cue 边界仍然用
-            # 上面的宽松 match（不能改，见 cue 边界判定的文档），但具体时间
-            # 数值必须每一侧各自严格匹配才可信——宽松匹配成功但某一侧严格
-            # 匹配失败（如该侧毫秒位数超标、时钟分量越界、行尾带垃圾字符），
-            # 只把那一侧置 None，不连累另一侧本来合法的时间（如 start）；只
-            # 有两侧都无法解析时，效果才等同旧版"整条时间轴损坏"（均为
-            # None）。不静默放行一个只匹配了前缀或跨到另一侧的"合法"时间。
+            # 时间值解析用严格锚定匹配（gate-r24 P2），并对起止两侧独立校验
+            # （gate-r26 P2）：cue 边界判定用上面共用的
+            # `_is_srt_timeline_declaration_line`（不能改，见该函数与
+            # `_SRT_TIMESTAMP_LINE_PATTERN` 的文档），但具体时间数值必须每
+            # 一侧各自严格匹配才可信——宽松匹配成功但某一侧严格匹配失败
+            # （如该侧毫秒位数超标、时钟分量越界、行尾带垃圾字符），只把那
+            # 一侧置 None，不连累另一侧本来合法的时间（如 start）；只有两侧
+            # 都无法解析时，效果才等同旧版"整条时间轴损坏"（均为 None）。
             start_part, _, end_part = line.partition("-->")
             start_match = YouTubeApiClient._SRT_TIMESTAMP_SIDE_STRICT_PATTERN.fullmatch(
                 start_part.strip()
@@ -974,13 +933,11 @@ class YouTubeApiClient:
             # 无谓牵连（如 start=None、end=4.0 时原样保留 end）。
             start_time, end_time = sanitize_time_pair(start_time, end_time)
 
-            # 收集该时间轴对应的文本行，直到遇到空行/下一条 cue 的索引行/下一个
-            # 时间轴行（下一个时间轴行同样按"宽松判定"处理，避免误吞下一条
-            # cue；判定时同样要求紧跟纯数字索引行，正文里的 "-->" 不会被当作
-            # 边界）。
+            # 收集该时间轴对应的文本行，直到遇到空行/下一条 cue 的索引行/
+            # 下一个时间轴声明行（同样用共用的判定函数，避免误吞下一条
+            # cue）。
             text_lines = []
             j = i + 1
-            prev_candidate = line  # 时间轴行本身作为文本收集循环的"上一行"
             while j < len(lines):
                 candidate = lines[j].strip()
 
@@ -990,31 +947,25 @@ class YouTubeApiClient:
                 if YouTubeApiClient._strip_bom(candidate).isdigit():
                     # 纯数字行本身可能是真正的"下一条 cue 的索引行"，也可能只是
                     # 正文里恰好出现的一个数字（如歌词/台词就是个数字 "42"）。
-                    # 只有它的下一行"像"一条时间轴（含损坏时间轴的宽松尝试）时，
-                    # 才当作索引行、结束当前 cue 的文本收集；否则按普通正文继续
-                    # 收集，避免把该行之后的正文从这条 cue 的 segments 里丢掉。
-                    # BOM 容忍：同上，剥掉行首 BOM 后再判断是否纯数字（对称覆盖
-                    # BOM 理论上出现在非首行的边界情况，虽然实践中 BOM 只会出现
+                    # 只有它的下一行满足时间轴声明判定时，才当作索引行、结束
+                    # 当前 cue 的文本收集；否则按普通正文继续收集，避免把该
+                    # 行之后的正文从这条 cue 的 segments 里丢掉。BOM 容忍：
+                    # 同上，剥掉行首 BOM 后再判断是否纯数字（对称覆盖 BOM
+                    # 理论上出现在非首行的边界情况，虽然实践中 BOM 只会出现
                     # 在文件最开头）。
                     next_line = lines[j + 1].strip() if j + 1 < len(lines) else ""
-                    next_is_timeline = bool(
-                        YouTubeApiClient._SRT_TIMESTAMP_RANGE_PATTERN.match(next_line)
-                    ) or YouTubeApiClient._looks_like_timeline_attempt(next_line, candidate)
+                    next_is_timeline = YouTubeApiClient._is_srt_timeline_declaration_line(
+                        next_line
+                    )
                     if next_is_timeline:
                         break
                     text_lines.append(re.sub(r"<[^>]+>", "", candidate))
-                    prev_candidate = candidate
                     j += 1
                     continue
 
-                candidate_match = YouTubeApiClient._SRT_TIMESTAMP_RANGE_PATTERN.match(candidate)
-                candidate_is_timeline_attempt = bool(
-                    candidate_match
-                ) or YouTubeApiClient._looks_like_timeline_attempt(candidate, prev_candidate)
-                if candidate_is_timeline_attempt:
+                if YouTubeApiClient._is_srt_timeline_declaration_line(candidate):
                     break
                 text_lines.append(re.sub(r"<[^>]+>", "", candidate))
-                prev_candidate = candidate
                 j += 1
 
             segment_text = " ".join(t for t in text_lines if t).strip()
@@ -1025,15 +976,15 @@ class YouTubeApiClient:
                     "text": segment_text,
                 })
 
-            prev_line = lines[j - 1].strip()
             i = j
 
         # 文件结尾仍有残留孤儿文本（文件未以空行收尾）：一并落地
         flush_orphan_text()
 
         if not found_any_cue:
-            # 整份 SRT 没有任何可识别的 cue：维持历史行为返回空列表（调用方
-            # 会转换成 None），孤儿文本一律不落地
+            # 整份 SRT 没有任何一行满足时间轴声明判定（与 legacy 完全找不到
+            # 时间轴声明的判断口径一致）：维持历史行为返回空列表（调用方会
+            # 转换成 None），孤儿文本一律不落地
             return []
 
         return segments
