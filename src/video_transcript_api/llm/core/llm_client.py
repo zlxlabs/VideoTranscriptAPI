@@ -51,8 +51,14 @@ class LLMClient:
         response_schema: Optional[Dict] = None,
         reasoning_effort: Optional[str] = None,
         task_type: str = "unknown",
+        force_json_mode: Optional[str] = None,
     ) -> LLMResponse:
         """调用 LLM API
+
+        Args:
+            force_json_mode: 透传给 call_llm_api，强制指定结构化输出的 JSON 模式
+                （目前仅 "json_object" 有意义）。默认 None，保持原有按模型名自动
+                选择的行为，详见 call_llm_api 的同名参数文档。
 
         Raises:
             FatalError: 不可重试的错误（认证、权限等）
@@ -86,6 +92,7 @@ class LLMClient:
                 response_schema=response_schema,
                 system_prompt=system_prompt,
                 config=self.config,
+                force_json_mode=force_json_mode,
             )
 
             if isinstance(result, StructuredResult):

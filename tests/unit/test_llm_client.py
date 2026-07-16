@@ -80,6 +80,31 @@ class TestLLMClientSuccess:
         assert result.structured_output == {"key": "value"}
         assert mock_call.call_count == 1
 
+    @patch("video_transcript_api.llm.core.llm_client.call_llm_api")
+    def test_force_json_mode_forwarded(self, mock_call, client):
+        """force_json_mode must reach call_llm_api unchanged (used by ChaptersProcessor
+        to force the Self-Correction-capable json_object path)."""
+        mock_call.return_value = StructuredResult(success=True, data={"chapters": []})
+
+        client.call(
+            model="test-model",
+            system_prompt="system",
+            user_prompt="user",
+            response_schema={"type": "object"},
+            force_json_mode="json_object",
+        )
+
+        assert mock_call.call_args.kwargs.get("force_json_mode") == "json_object"
+
+    @patch("video_transcript_api.llm.core.llm_client.call_llm_api")
+    def test_force_json_mode_defaults_to_none(self, mock_call, client):
+        """Existing callers that don't pass force_json_mode must see unchanged behavior."""
+        mock_call.return_value = "text"
+
+        client.call(model="test-model", system_prompt="s", user_prompt="u")
+
+        assert mock_call.call_args.kwargs.get("force_json_mode") is None
+
 
 # ============================================================
 # Error Mapping Tests (llm-compat errors -> project errors)

@@ -20,6 +20,7 @@ from video_transcript_api.llm.llm import (
     reset_llm_stats,
     get_llm_stats,
     StructuredResult,
+    call_llm_api,
 )
 
 
@@ -240,6 +241,72 @@ class TestSchemaToPromptInstruction:
         """Empty schema should return empty string."""
         assert _schema_to_prompt_instruction({}) == ""
         assert _schema_to_prompt_instruction(None) == ""
+
+
+class TestForceJsonMode:
+    """Tests for the force_json_mode override on call_llm_api.
+
+    json_schema mode (see _call_with_json_schema_mode) fails outright with no
+    retry, while json_object mode has a Self-Correction retry loop. Callers
+    that need the retry path (e.g. chapters generation) must be able to force
+    json_object regardless of the model-name-based mode_by_model mapping.
+    force_json_mode defaults to None so all existing callers are unaffected.
+    """
+
+    def teardown_method(self):
+        set_default_config(None)
+
+    @patch("video_transcript_api.llm.llm._call_with_json_object_mode")
+    @patch("video_transcript_api.llm.llm._call_with_json_schema_mode")
+    def test_force_json_object_skips_model_based_selection(self, mock_schema_call, mock_object_call):
+        """A model that resolves to json_schema by pattern must use json_object
+        when force_json_mode='json_object' is passed."""
+        mock_object_call.return_value = StructuredResult(success=True, data={"chapters": []})
+        config = {
+            "llm": {
+                "json_output": {
+                    "mode_by_model": {"*": "json_schema"},
+                    "enable_fallback": True,
+                }
+            }
+        }
+
+        call_llm_api(
+            model="gpt-4o",
+            prompt="p",
+            task_type="chapters",
+            response_schema={"type": "object", "required": ["chapters"]},
+            config=config,
+            force_json_mode="json_object",
+        )
+
+        mock_object_call.assert_called_once()
+        mock_schema_call.assert_not_called()
+
+    @patch("video_transcript_api.llm.llm._call_with_json_object_mode")
+    @patch("video_transcript_api.llm.llm._call_with_json_schema_mode")
+    def test_no_force_uses_model_based_selection(self, mock_schema_call, mock_object_call):
+        """Default behavior (force_json_mode=None) must be unchanged."""
+        mock_schema_call.return_value = StructuredResult(success=True, data={})
+        config = {
+            "llm": {
+                "json_output": {
+                    "mode_by_model": {"*": "json_schema"},
+                    "enable_fallback": True,
+                }
+            }
+        }
+
+        call_llm_api(
+            model="gpt-4o",
+            prompt="p",
+            task_type="key_info",
+            response_schema={"type": "object"},
+            config=config,
+        )
+
+        mock_schema_call.assert_called_once()
+        mock_object_call.assert_not_called()
 
 
 class TestDefaultConfig:
