@@ -47,3 +47,21 @@ class SummaryStatus(StrEnum):
     DISABLED = "disabled"            # 用户通过 processing_options.summarize=False 主动关闭总结
                                       # （区别于 SKIPPED_SHORT：SKIPPED_SHORT 是"想生成但文本太短"，
                                       # DISABLED 是"用户压根不想要总结"）
+
+
+class ChaptersStatus(StrEnum):
+    """章节梗概状态：与 SummaryStatus 并列的"诚实状态模型"，语义一一对应。
+
+    章节生成比总结多一种正常跳过路径：SKIPPED_NO_TIMELINE ——
+    输入根本没有可用的时间轴信息（segments 为 None/空），既不算"过短"也不算"失败"，
+    是从一开始就不具备生成条件的正常路径。
+    """
+
+    GENERATED = "generated"                    # 章节成功生成
+    SKIPPED_SHORT = "skipped_short"             # 原文过短，未触发章节生成（正常路径，非失败）
+    SKIPPED_NO_TIMELINE = "skipped_no_timeline"  # 没有可用的分段时间轴，无法生成章节（正常路径，非失败）
+    FAILED = "failed"                           # 触发了生成但失败（LLM 异常、输出不合法或结构校验不通过）
+    PENDING = "pending"                         # 章节阶段尚未执行完成（任务仍在处理中）
+    DISABLED = "disabled"                       # 用户主动关闭章节生成
+                                                 # （区别于 SKIPPED_SHORT/SKIPPED_NO_TIMELINE：
+                                                 # 那两者是"想生成但条件不满足"，DISABLED 是"用户压根不想要"）
