@@ -30,6 +30,14 @@
 
 ---
 
+## 运行时生命周期
+
+FastAPI lifespan 为每个应用实例创建并绑定独立的 `RuntimeContext`，配置预检和模块导入不会启动线程、连接数据库或创建运行目录。CLI 启动只加载并验证配置一次，同一个配置对象同时决定 Uvicorn 监听地址和 lifespan 运行时资源。预检会严格验证生命周期字段、维护保留期的类型与范围，以及可选后端 `enabled` 的布尔类型；后端凭据仅在对应功能明确启用时必填。请求协程、转录线程池和 LLM 消费线程都会显式绑定所属 context，避免并行应用实例共享隐式全局状态。
+
+关闭时按“停止接收与取消后台 owner → 等待转录 producer → 排空 LLM 队列与 worker → 关闭数据库和日志资源 → 关闭通知客户端”的顺序执行，并为 worker 等待设置有界超时。这样在途任务仍可发送最后的成功或失败通知；若 producer 未能在时限内退出，LLM 消费线程、通知客户端和共享资源会保留到进程结束，避免迟到的 LLM 入队无人消费，或关闭中的任务访问已释放连接。
+
+---
+
 ## 多平台下载器
 
 项目使用工厂模式动态匹配下载器，支持以下平台：
@@ -159,7 +167,9 @@ LLMCoordinator.process(content, title, ...)
 | | `pending` | 总结阶段尚未执行完成 |
 | | `disabled` | 用户通过 `processing_options.summarize=false` 主动关闭总结 |
 
-落盘载体：缓存目录下的 `llm_status.json`（读-改-写按字段合并，未传字段保留旧值）+ `task_status` 表的 `calibration_status`/`summary_status` 两列（作为 JSON 的镜像，供 `/api/audit/history` 查询消费而不必逐个打开缓存文件）。`/api/audit/summary` 据此只在 `summary_status == generated` 时返回真实文本，其余状态一律返回 `null`，不再用占位字符串掩盖失败。
+`llm_status.json` 表示媒体的当前状态，后续请求可以继续补层并推进它。`task_status` 则表示一次请求的不可变终态：创建时保存规范化 `processing_options` 和 `submitted_by`，artifact/status 原子写入成功后才通过 compare-and-set 写一次 `terminal_snapshot`；`success`/`failed` 终态之后即使 `force=True` 也不能覆盖。两者不能再被理解为互相镜像。
+
+进程若在 artifact 写入后、任务终态写入前崩溃，artifact 保留，启动恢复只把仍处于 queued/processing/calibrating 的请求标为 failed。repository 的保存、清理和恢复错误必须向维护协调层抛出，由协调层记录并在下一周期重试，不能用返回 `0` 或 `False` 伪装成功。终态任务清理没有注入 `AuditLogger` 时必须拒绝删除，不能绕过审计归档。
 
 处理深度开关（`processing_options`）与分层缓存复用的完整语义，见 [处理深度开关功能文档](features/processing_options.md)。
 
@@ -275,7 +285,9 @@ data/temp/
 - 记录 API 端点、请求/响应时间、处理耗时、状态码、用户信息
 - **LLM token 用量审计**（`audit.db` schema v3，`llm_usage` 表）：每次 `LLMClient.call()` 调用记一行，含 `task_id`/`stage`（calibration/summary/speaker_inference/validation 等）/`model`/prompt·completion·total tokens/耗时；provider 未回报用量时仍写入一行并标记 `usage_missing`，避免静默丢弃。json_object 模式的 Self-Correction 重试触发多次真实 API 往返时，桥接槽按顺序累积全部快照并对 token 求和落一行（而非只记最后一次）；只要有任一次尝试缺失 usage，该行仍会标记 `usage_missing=True`，已知部分求和仅作为下界参考，不会被误标为完整数据。标题生成（通用下载器场景）已改走 `LLMClient.call()`，计入用量统计
 - `llm_usage` 全局聚合（按 stage/总计）不区分调用方用户；多用户模式下仅系统所有者视角（单 token 回退模式，或多用户模式下的 legacy fallback token）可见，避免跨租户泄露调用规模/成本信息，见 `GET /api/audit/stats`
-- 查询接口：`GET /api/audit/stats`（含 `llm_usage` 按 stage 聚合 + 总计）、`GET /api/audit/calls`、`GET /api/audit/history`（含状态字段）
+- **任务审计快照**（`audit.db` schema v4，`task_audit_snapshots` 表）：终态任务以幂等 upsert 归档标题、平台、提交者、处理选项和状态。升级启动时会用每批最多 500 条的 repair 操作循环完成全部旧终态任务回填，再对外服务；周期维护继续补偿运行期失败。任务清理在 `cache.db` 跨进程写锁覆盖下严格执行“复检资格 → 归档 → 清空 `view_token` 并标记 `content_expired` → 删除任务行”；任一步失败都保留任务供后续 cleanup 重试。若删除失败且任务行仍在，会补偿恢复快照 capability；若进程在标记过期后、删除任务行前中断，普通 archive/repair 不会复活已撤销的 capability，下一次 cleanup 会幂等地继续删除任务行。尚未标记内容过期的快照即使暂时没有审计行引用也会保留，避免后续调用审计重新引用该任务时缺失历史；已过期快照仅在最后一条审计引用和对应任务行都消失后清理，不延长正文或转录访问期。
+- **公开 capability fail-closed**：`view_token` 查询同时检查 audit-owned 快照；快照一旦标记 `content_expired`，即使进程在删除 `task_status` 前中断，公开查看也立即返回未找到，不会在跨库恢复窗口重新开放。
+- 查询接口：`GET /api/audit/stats`（含 `llm_usage` 按 stage 聚合 + 总计）、`GET /api/audit/calls`、`GET /api/audit/history`（只查询 `audit.db` 的终态日志和快照，不再按请求 `ATTACH cache.db`；状态过滤仅接受 `success`、`failed`、`all`，并返回 `content_expired`）
 
 ### 多渠道通知
 
@@ -305,6 +317,8 @@ data/temp/
 ### 结果查看
 
 访问 `GET /view/{view_token}`，根据任务状态展示不同页面：
+
+`view_token` 是不可猜测的公开只读 capability，设计目的就是让处理结果可直接分享；媒体缓存和结果允许跨提交者复用。`user_id` 只约束提交归属、私有审计历史和用量统计，不把公开内容改造成严格租户资源。重新校对、删除等写操作仍需认证与相应权限。任务清理后 capability 失效，但 audit snapshot 只保留元数据和 `content_expired` 标记，不延长正文访问期。
 
 | 状态 | 模板 |
 |------|------|
@@ -337,7 +351,7 @@ data/temp/
 | `notification_config` | object | 否 | 通知配置：`{channel: "feishu", webhook: "..."}` |
 | `download_url` | string | 否 | 实际下载地址（跳过平台下载器） |
 | `metadata_override` | object | 否 | 元数据覆盖（title/description/author） |
-| `processing_options` | object | 否 | 处理深度开关：`{calibrate: bool=true, summarize: bool=true}`，`null` 等价于全部启用 |
+| `processing_options` | object | 否 | 处理深度开关：`{calibrate: bool=true, summarize: bool=true, infer_speaker_names: bool=true}`，`null` 等价于全部启用 |
 
 详见 [Download URL 与 Metadata Override 功能文档](features/source_url_and_metadata_override.md)、[处理深度开关功能文档](features/processing_options.md)。
 

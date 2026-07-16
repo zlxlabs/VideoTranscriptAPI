@@ -38,6 +38,12 @@
 
 ## 运行测试
 
+部署脚本的纯本地 mock 回归（不会连接 Docker daemon、registry 或远程服务器）：
+
+```bash
+uv run python -m pytest -q tests/deployment/test_pull_and_deploy.py
+```
+
 ### 运行单元测试
 ```bash
 # 运行所有单元测试

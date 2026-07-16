@@ -41,11 +41,14 @@
 ### 2. 字段说明
 
 - **API密钥**（作为key）：用户的唯一标识符，建议格式：`sk-userXXX-随机字符串`
-- **user_id**：用户内部ID，用于日志和统计
+- **user_id**：永久稳定且不可复用的审计主体，只允许字母、数字、点、下划线和连字符，最长 64 字符；`legacy_user` 为系统保留值
 - **name**：用户显示名称
 - **wechat_webhook**：用户专用的企业微信webhook地址（可选）
 - **created_at**：用户创建时间
 - **enabled**：用户是否启用（false时该用户无法使用API）
+- **permissions**：权限数组，可选值为 `recalibrate`、`delete`、`admin`；未知权限会阻止启动或 reload
+
+已有 `users.json` 会被严格校验：缺字段、空或重复 `user_id`（包括 disabled 用户）、保留值、非法权限和错误类型都会被拒绝。只有文件不存在时才进入 legacy fallback；已有但为空、损坏或无效的文件不会静默降级。热加载采用 validate-then-swap，失败时保留上一份有效配置。
 
 ### 3. API密钥生成建议
 

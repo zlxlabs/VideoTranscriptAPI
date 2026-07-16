@@ -14,7 +14,8 @@
   "use_speaker_recognition": true,
   "processing_options": {
     "calibrate": true,
-    "summarize": true
+    "summarize": true,
+    "infer_speaker_names": true
   }
 }
 ```
@@ -26,8 +27,9 @@
 | `processing_options` | object | 否 | `null` | 处理深度开关，`null` 等价于全部启用（历史行为） |
 | `processing_options.calibrate` | boolean | 否 | `true` | 是否执行 LLM 校对 |
 | `processing_options.summarize` | boolean | 否 | `true` | 是否生成内容总结 |
+| `processing_options.infer_speaker_names` | boolean | 否 | `true` | 是否把说话人占位标签推断为真实姓名；仅在启用说话人识别时生效 |
 
-对应 Pydantic 模型定义在 `src/video_transcript_api/api/services/transcription.py::ProcessingOptions`。
+唯一的规范化模型定义在 `src/video_transcript_api/api/processing_options.py::ProcessingOptions`。三个字段只接受 JSON boolean；缺省时统一规范化为三个 `true`；未知或拼错的字段会直接返回校验错误，不会静默忽略后按默认值启用功能。
 
 ### 开关组合语义
 
@@ -38,7 +40,9 @@
 | `false` | `true` | 只转录 + 总结，**总结基于未校对的原始转录文本生成**，质量可能受 ASR 识别噪声（错别字、断句错误等）影响，但仍可用；系统不做硬性拦截，由调用方自行权衡 |
 | `false` | `false` | 只转录，不校对也不总结 |
 
-> **`use_speaker_recognition=true` 时的例外**：`calibrate=false` 跳过的是"逐块把文本喂给 LLM 做文字校正"这一步；**说话人姓名推断**（把 `Speaker1`/`Speaker2` 这类占位符猜成真实姓名）被视为"转录交付物"的一部分而非"校对"，即便 `calibrate=false` 仍会执行，这意味着 `{calibrate:false, summarize:false}` 这个组合在启用说话人识别时可能产生 LLM 调用（说话人映射/`key_info` 命中缓存时不会真的调用；首次无缓存时最多触发两次：`key_info` 提取 + 说话人推断），不是绝对的零 token 成本（`src/video_transcript_api/llm/processors/speaker_aware_processor.py::process()`，ci-gate review 提出过是否应该改为默认跳过，目前维持现状，未来如需要真正的"零 LLM 成本、保留原始说话人占位符"选项，需要新增独立开关）。不启用说话人识别（`use_speaker_recognition=false`）且同时 `summarize=false` 时，`calibrate=false` 才确实是零 LLM 调用。
+> **独立说话人开关**：`infer_speaker_names` 不依赖 `calibrate` 或 `summarize`。因此只关闭后两者但保留 `infer_speaker_names=true` 时，有说话人识别数据的任务仍可调用 LLM；没有说话人识别数据时该开关不生效，也不会仅为生成标题而调用 LLM。三个开关全部为 `false` 始终是明确的零 LLM 请求语义。
+
+说话人姓名映射以版本化 `speaker_mapping.json` artifact 保存到 `video_cache.files_loc` 指向的媒体目录。artifact 包含转录/diarization 输入指纹、完整 speaker 集合和 `source=llm`；写入复用媒体锁并通过临时文件原子替换。`infer_speaker_names=false` 时只复用指纹与 speaker 集合均有效的完整映射，未命中则保留原始通用标签，且不会把通用标签写成“已完成”缓存。
 
 ## 分层缓存复用
 
@@ -117,10 +121,11 @@ need_summary    = 本次请求 summarize=True AND NOT 已有 llm_summary 文件
 
 | 文件 | 说明 |
 |------|------|
-| `src/video_transcript_api/api/services/transcription.py` | `ProcessingOptions` 模型、`normalize_processing_options()`、分层缓存命中判定 |
+| `src/video_transcript_api/api/processing_options.py` | 唯一的 `ProcessingOptions` 模型与规范化函数 |
+| `src/video_transcript_api/api/services/transcription.py` | 分层缓存命中判定与规范化选项透传 |
 | `src/video_transcript_api/api/services/llm_ops.py` | `_save_llm_results()` 分层落盘保护逻辑、通知文案 |
 | `src/video_transcript_api/utils/llm_status.py` | `CalibrationStatus`/`SummaryStatus` 枚举定义 |
-| `src/video_transcript_api/cache/cache_manager.py` | `save_llm_status()`（`llm_status.json` 读改写合并）、`_resolve_summary_state()` |
+| `src/video_transcript_api/cache/cache_manager.py` | `save_llm_status()` 合并、说话人 artifact 的 `files_loc` 定位与原子写入 |
 | `src/web/templates/transcript.html` | 校对警告条 + 总结四态文案渲染 |
 | `tests/integration/test_layered_cache.py` | 分层缓存命中矩阵集成测试 |
 | `tests/unit/test_processing_options.py` | 请求 schema 与任务字典透传单测 |

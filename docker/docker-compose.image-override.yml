@@ -1,0 +1,4 @@
+# Image-only override used to pin rollback while preserving legacy service settings.
+services:
+  video-transcript-api:
+    image: ${VIDEO_TRANSCRIPT_IMAGE:?VIDEO_TRANSCRIPT_IMAGE must be an immutable digest}
