@@ -1031,6 +1031,38 @@ class TestFingerprint(ChaptersProcessorTestBase):
         self.assertEqual(result1.fingerprint, result2.fingerprint)
 
 
+class TestIntegerSpeaker(ChaptersProcessorTestBase):
+    """FunASR raw dicts can carry `speaker` as a bare int (diarization label,
+    e.g. 2) rather than a string like "Speaker 2" -- process() must not crash
+    on this before it even gets a chance to return an honest status."""
+
+    def test_integer_speaker_does_not_raise_and_generates(self):
+        segments = make_segments(10, speaker=2)
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+
+        result = self.processor.process(segments=segments, title="T")  # must not raise
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+
+    def test_integer_speaker_fingerprint_is_stable(self):
+        segments = make_segments(10, speaker=2)
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+
+        result1 = self.processor.process(segments=segments, title="T1")
+        result2 = self.processor.process(
+            segments=segments, title="T2 (different title, same segments)"
+        )
+
+        self.assertIsNotNone(result1.fingerprint)
+        self.assertEqual(result1.fingerprint, result2.fingerprint)
+
+
 class TestModelFallback(unittest.TestCase):
     """LLMConfig() constructed directly (bypassing from_dict, whose own defaulting
     logic falls chapters_model back to calibrate_model) leaves chapters_model=None.

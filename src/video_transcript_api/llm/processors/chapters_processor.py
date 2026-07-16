@@ -226,7 +226,11 @@ def _compute_fingerprint(segments: List[Dict[str, Any]]) -> str:
 
     def _speaker_field(seg: Dict[str, Any]) -> str:
         speaker = seg.get("speaker")
-        return speaker if speaker is not None else _FINGERPRINT_NONE_FIELD_PLACEHOLDER
+        # 强转 str：上游 FunASR 原始 dict 的 speaker 字段可能是裸 int（说话人
+        # 编号，如 2），不强转会让下面的 str.join() 直接抛
+        # TypeError（要求序列元素全是 str）——在 process() 还没来得及返回
+        # 任何诚实状态之前就整体崩溃。None/缺失语义不受影响，仍走占位符。
+        return str(speaker) if speaker is not None else _FINGERPRINT_NONE_FIELD_PLACEHOLDER
 
     entries = [
         _FINGERPRINT_FIELD_SEP.join((
@@ -275,7 +279,10 @@ def _build_segment_lines(segments: List[Dict[str, Any]]) -> str:
         if timestamp:
             prefix += f" {timestamp}"
         if speaker:
-            prefix += f" {speaker}:"
+            # 强转 str：speaker 可能是裸 int（同 `_speaker_field`），f-string
+            # 插值本身不会因此报错，这里显式转换只为类型意图明确、与指纹
+            # 计算侧保持一致，不依赖插值的隐式转换
+            prefix += f" {str(speaker)}:"
 
         lines.append(f"{prefix} {text}".strip())
     return "\n".join(lines)
