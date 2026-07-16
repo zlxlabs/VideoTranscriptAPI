@@ -614,5 +614,70 @@ class TestFingerprint(ChaptersProcessorTestBase):
         self.assertNotEqual(result_a.fingerprint, result_b.fingerprint)
 
 
+class TestModelFallback(unittest.TestCase):
+    """LLMConfig() constructed directly (bypassing from_dict, whose own defaulting
+    logic falls chapters_model back to calibrate_model) leaves chapters_model=None.
+    The processor must resolve a usable model at call time instead of passing
+    None straight through to the LLM client."""
+
+    def _make_processor(self, config):
+        llm_client = Mock()
+        llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+        processor = ChaptersProcessor(llm_client=llm_client, config=config)
+        return processor, llm_client
+
+    def test_missing_chapters_model_falls_back_to_summary_model(self):
+        config = LLMConfig(
+            api_key="k", base_url="u",
+            calibrate_model="calib-model",
+            summary_model="summary-model",
+            min_chapters_threshold=10,
+        )
+        self.assertIsNone(config.chapters_model)  # sanity: bare constructor, no from_dict default
+        processor, llm_client = self._make_processor(config)
+
+        result = processor.process(segments=make_segments(10), title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        call_kwargs = llm_client.call.call_args[1]
+        self.assertEqual(call_kwargs.get("model"), "summary-model")
+
+    def test_missing_chapters_and_summary_model_falls_back_to_calibrate_model(self):
+        config = LLMConfig(
+            api_key="k", base_url="u",
+            calibrate_model="calib-model",
+            summary_model="",  # falsy -- chain must keep walking
+            min_chapters_threshold=10,
+        )
+        processor, llm_client = self._make_processor(config)
+
+        result = processor.process(segments=make_segments(10), title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        call_kwargs = llm_client.call.call_args[1]
+        self.assertEqual(call_kwargs.get("model"), "calib-model")
+
+    def test_configured_chapters_model_is_not_overridden(self):
+        """The fallback chain must only kick in when chapters_model is unset --
+        a configured value always wins."""
+        config = LLMConfig(
+            api_key="k", base_url="u",
+            calibrate_model="calib-model",
+            summary_model="summary-model",
+            chapters_model="chapters-model",
+            min_chapters_threshold=10,
+        )
+        processor, llm_client = self._make_processor(config)
+
+        result = processor.process(segments=make_segments(10), title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        call_kwargs = llm_client.call.call_args[1]
+        self.assertEqual(call_kwargs.get("model"), "chapters-model")
+
+
 if __name__ == "__main__":
     unittest.main()

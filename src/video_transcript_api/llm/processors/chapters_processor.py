@@ -485,6 +485,17 @@ class ChaptersProcessor:
             model = self.config.chapters_model
             reasoning_effort = self.config.chapters_reasoning_effort
 
+        # 运行时兜底：LLMConfig.from_dict() 会把未配置的 chapters_model 默认
+        # 成 calibrate_model，但直接用 LLMConfig(...) 构造（跳过 from_dict）时
+        # chapters_model 保持 None——不做兜底会把 None 传给 LLM 客户端。
+        # 兜底链与 from_dict 的默认语义对齐，只是多绕一步 summary_model：
+        # chapters_model -> summary_model -> calibrate_model。
+        if not model:
+            model = self.config.summary_model or self.config.calibrate_model
+            logger.warning(
+                f"[CHAPTERS] chapters_model not configured, falling back to {model!r}"
+            )
+
         # 步骤 2：压缩输入 + 调用 LLM（内含语义校验失败时的单次重试）
         segment_lines = _build_segment_lines(segments)
         normalized, raw_chapters, call_error = self._generate_with_retry(
