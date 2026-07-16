@@ -583,6 +583,202 @@ class TestGetTaskByViewToken:
 
 
 # ---------------------------------------------------------------------------
+# get_existing_task_by_url 排序优先级
+# ---------------------------------------------------------------------------
+
+class TestGetExistingTaskByUrl:
+    """回归测试：get_existing_task_by_url 的三段式排序（success 最高 / failed 垫底 / 其余按最新）。
+
+    与 TestGetTaskByViewToken 是同一种 bug 模式的姊妹场景：查重逻辑按
+    (url, use_speaker_recognition) 而非 view_token 查找现有任务，旧的 CASE
+    语句同样未列出 calibrating（也未列出 failed），两者都落入 ELSE 分支，
+    导致更早的 failed 记录可能掩盖更晚的、仍在处理甚至已成功的记录，
+    使 create_task 的去重逻辑误判并复用了错误的旧任务。
+    """
+
+    def _create_task_at_time(self, cm, url, status, timestamp,
+                              use_speaker_recognition=False, media_id="vid1", platform="youtube"):
+        """Helper: create a task with a specific status at a specific timestamp.
+
+        同一 url（+ use_speaker_recognition）重复调用会复用同一个 view_token
+        （不同 task_id），用于模拟同一 URL 多次提交在不同状态下留下的多条记录。
+        """
+        task_info = cm.create_task(
+            url=url, use_speaker_recognition=use_speaker_recognition,
+            platform=platform, media_id=media_id,
+        )
+        task_id = task_info["task_id"]
+        cm.update_task_status(task_id, status, platform=platform, media_id=media_id)
+        # Force a specific created_at to control ordering
+        with cm._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE task_status SET created_at = ? WHERE task_id = ?",
+                (timestamp, task_id),
+            )
+        return task_info
+
+    def test_calibrating_beats_earlier_failed(self, cm):
+        """核心回归场景：更晚的 calibrating 记录应该战胜更早的 failed 记录。"""
+        url = "https://example.com/existing-url-vid1"
+        failed_task = self._create_task_at_time(
+            cm, url, "failed", "2026-01-01 00:00:00"
+        )
+        calibrating_task = self._create_task_at_time(
+            cm, url, TaskStatus.CALIBRATING, "2026-01-01 01:00:00"
+        )
+
+        result = cm.get_existing_task_by_url(url, use_speaker_recognition=False)
+        assert result is not None
+        assert result["task_id"] == calibrating_task["task_id"]
+        assert result["task_id"] != failed_task["task_id"]
+
+    def test_success_beats_earlier_failed(self, cm):
+        """success 优先级仍然高于 failed（既有语义不变）。"""
+        url = "https://example.com/existing-url-vid2"
+        failed_task = self._create_task_at_time(
+            cm, url, "failed", "2026-01-01 00:00:00"
+        )
+        success_task = self._create_task_at_time(
+            cm, url, TaskStatus.SUCCESS, "2026-01-01 01:00:00"
+        )
+
+        result = cm.get_existing_task_by_url(url, use_speaker_recognition=False)
+        assert result is not None
+        assert result["task_id"] == success_task["task_id"]
+        assert result["task_id"] != failed_task["task_id"]
+
+    def test_success_beats_later_non_terminal(self, cm):
+        """success 优先级仍然最高，不会被 created_at 更晚的非终态任务反超。"""
+        url = "https://example.com/existing-url-vid3"
+        success_task = self._create_task_at_time(
+            cm, url, TaskStatus.SUCCESS, "2026-01-01 00:00:00"
+        )
+        processing_task = self._create_task_at_time(
+            cm, url, TaskStatus.PROCESSING, "2026-01-01 01:00:00"
+        )
+
+        result = cm.get_existing_task_by_url(url, use_speaker_recognition=False)
+        assert result is not None
+        assert result["task_id"] == success_task["task_id"]
+        assert result["task_id"] != processing_task["task_id"]
+
+    def test_non_terminal_group_returns_latest(self, cm):
+        """多条非终态记录（无 success/failed）时，返回 created_at 最新的一条。"""
+        url = "https://example.com/existing-url-vid4"
+        queued_task = self._create_task_at_time(
+            cm, url, TaskStatus.QUEUED, "2026-01-01 00:00:00"
+        )
+        calibrating_task = self._create_task_at_time(
+            cm, url, TaskStatus.CALIBRATING, "2026-01-01 01:00:00"
+        )
+
+        result = cm.get_existing_task_by_url(url, use_speaker_recognition=False)
+        assert result is not None
+        assert result["task_id"] == calibrating_task["task_id"]
+        assert result["task_id"] != queued_task["task_id"]
+
+
+# ---------------------------------------------------------------------------
+# get_existing_task_by_media 排序优先级
+# ---------------------------------------------------------------------------
+
+class TestGetExistingTaskByMedia:
+    """回归测试：get_existing_task_by_media 的三段式排序（success 最高 / failed 垫底 / 其余按最新）。
+
+    与 TestGetTaskByViewToken / TestGetExistingTaskByUrl 是同一种 bug 模式的第三次
+    复制粘贴传播：语义去重逻辑按 (platform, media_id, use_speaker_recognition) 而非
+    view_token/url 查找现有任务，旧的 CASE 语句是更早的穷举写法（success/
+    processing/queued 三个分支 + ELSE），既没有列出 calibrating 也没有列出
+    failed，两者都落入 ELSE 分支，导致更早的 failed 记录可能掩盖同一
+    (platform, media_id) 下更晚的、仍在处理甚至已成功的记录。
+    """
+
+    def _create_task_at_time(self, cm, platform, media_id, status, timestamp,
+                              use_speaker_recognition=False):
+        """Helper: create a task with a specific status at a specific timestamp.
+
+        每次调用使用按 timestamp 派生的不同 url，确保测试只通过
+        (platform, media_id, use_speaker_recognition) 关联多条记录，不依赖
+        URL 精确匹配路径，用于模拟同一媒体不同 URL 格式多次提交在不同状态下
+        留下的多条记录。
+        """
+        url = f"https://example.com/media-test/{platform}/{media_id}?t={timestamp}"
+        task_info = cm.create_task(
+            url=url, use_speaker_recognition=use_speaker_recognition,
+            platform=platform, media_id=media_id,
+        )
+        task_id = task_info["task_id"]
+        cm.update_task_status(task_id, status, platform=platform, media_id=media_id)
+        # Force a specific created_at to control ordering
+        with cm._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE task_status SET created_at = ? WHERE task_id = ?",
+                (timestamp, task_id),
+            )
+        return task_info
+
+    def test_calibrating_beats_earlier_failed(self, cm):
+        """核心回归场景：更晚的 calibrating 记录应该战胜更早的 failed 记录。"""
+        platform, media_id = "youtube", "media-vid1"
+        failed_task = self._create_task_at_time(
+            cm, platform, media_id, "failed", "2026-01-01 00:00:00"
+        )
+        calibrating_task = self._create_task_at_time(
+            cm, platform, media_id, TaskStatus.CALIBRATING, "2026-01-01 01:00:00"
+        )
+
+        result = cm.get_existing_task_by_media(platform, media_id, use_speaker_recognition=False)
+        assert result is not None
+        assert result["task_id"] == calibrating_task["task_id"]
+        assert result["task_id"] != failed_task["task_id"]
+
+    def test_success_beats_earlier_failed(self, cm):
+        """success 优先级仍然高于 failed（既有语义不变）。"""
+        platform, media_id = "youtube", "media-vid2"
+        failed_task = self._create_task_at_time(
+            cm, platform, media_id, "failed", "2026-01-01 00:00:00"
+        )
+        success_task = self._create_task_at_time(
+            cm, platform, media_id, TaskStatus.SUCCESS, "2026-01-01 01:00:00"
+        )
+
+        result = cm.get_existing_task_by_media(platform, media_id, use_speaker_recognition=False)
+        assert result is not None
+        assert result["task_id"] == success_task["task_id"]
+        assert result["task_id"] != failed_task["task_id"]
+
+    def test_success_beats_later_non_terminal(self, cm):
+        """success 优先级仍然最高，不会被 created_at 更晚的非终态任务反超。"""
+        platform, media_id = "youtube", "media-vid3"
+        success_task = self._create_task_at_time(
+            cm, platform, media_id, TaskStatus.SUCCESS, "2026-01-01 00:00:00"
+        )
+        processing_task = self._create_task_at_time(
+            cm, platform, media_id, TaskStatus.PROCESSING, "2026-01-01 01:00:00"
+        )
+
+        result = cm.get_existing_task_by_media(platform, media_id, use_speaker_recognition=False)
+        assert result is not None
+        assert result["task_id"] == success_task["task_id"]
+        assert result["task_id"] != processing_task["task_id"]
+
+    def test_non_terminal_group_returns_latest(self, cm):
+        """多条非终态记录（无 success/failed）时，返回 created_at 最新的一条。"""
+        platform, media_id = "youtube", "media-vid4"
+        queued_task = self._create_task_at_time(
+            cm, platform, media_id, TaskStatus.QUEUED, "2026-01-01 00:00:00"
+        )
+        calibrating_task = self._create_task_at_time(
+            cm, platform, media_id, TaskStatus.CALIBRATING, "2026-01-01 01:00:00"
+        )
+
+        result = cm.get_existing_task_by_media(platform, media_id, use_speaker_recognition=False)
+        assert result is not None
+        assert result["task_id"] == calibrating_task["task_id"]
+        assert result["task_id"] != queued_task["task_id"]
+
+
+# ---------------------------------------------------------------------------
 # task_status.calibration_status / summary_status columns (migration)
 # ---------------------------------------------------------------------------
 

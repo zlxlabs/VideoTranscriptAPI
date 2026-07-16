@@ -20,7 +20,25 @@ class CacheManager:
     管理视频转录缓存的类
     使用 SQLite 数据库存储元数据，文件系统存储实际内容
     """
-    
+
+    # 从多条同源 task_status 记录中挑选"最合适"一条时共用的 ORDER BY 排序表达式。
+    # 排序策略分三段，不穷举具体状态值，避免状态机演进（新增状态）时腐化：
+    # - success 永远最高优先级（优先返回成功完成的任务）
+    # - failed 永远垫底，避免旧的失败记录掩盖同一 key（view_token / url /
+    #   (platform, media_id)）下更新的、仍在处理中（queued/processing/
+    #   calibrating 等）或已成功的任务
+    # - 其余任何状态（不管是当前已知的还是未来新增的）统一排在中间优先级，
+    #   组内按 created_at DESC 排序，返回最新的一条
+    # 被 get_task_by_view_token / get_existing_task_by_url /
+    # get_existing_task_by_media 三处共用：这段排序逻辑已经因为各自维护
+    # 独立字面量 SQL 而漏改过两次（遗漏 calibrating 分支），提取成单一
+    # 常量后，状态机再演进只需改这一处。
+    _TASK_STATUS_PRIORITY_ORDER_BY = (
+        "CASE WHEN status = 'success' THEN 0 "
+        "WHEN status = 'failed' THEN 2 "
+        "ELSE 1 END, created_at DESC"
+    )
+
     def __init__(self, cache_dir: str = "./data/cache", db_path: str = None):
         """
         初始化缓存管理器
@@ -1280,6 +1298,7 @@ class CacheManager:
           仍在处理中（queued/processing/calibrating 等）或已成功的任务
         - 其余任何状态（不管是当前已知的还是未来新增的）统一排在中间优先级，
           组内按 created_at DESC 排序，返回最新的一条
+        （具体排序表达式见类级常量 _TASK_STATUS_PRIORITY_ORDER_BY）
 
         Args:
             view_token: 查看token
@@ -1290,16 +1309,11 @@ class CacheManager:
         try:
             with self._get_cursor() as cursor:
                 # success 最高优先级；failed 垫底；其余状态居中按最新排序
-                cursor.execute("""
+                cursor.execute(f"""
                     SELECT * FROM task_status
                     WHERE view_token = ?
                     ORDER BY
-                        CASE
-                            WHEN status = 'success' THEN 0
-                            WHEN status = 'failed' THEN 2
-                            ELSE 1
-                        END,
-                        created_at DESC
+                        {self._TASK_STATUS_PRIORITY_ORDER_BY}
                     LIMIT 1
                 """, (view_token,))
                 row = cursor.fetchone()
@@ -1506,31 +1520,33 @@ class CacheManager:
     def get_existing_task_by_url(self, url: str, use_speaker_recognition: bool = False) -> Optional[Dict[str, Any]]:
         """
         根据URL和说话人识别参数查找现有任务
-        
+
+        排序策略分三段，不穷举具体状态值，避免状态机演进（新增状态）时腐化：
+        - success 永远最高优先级（优先返回成功完成的任务）
+        - failed 永远垫底，避免旧的失败记录掩盖同一 URL 下更新的、
+          仍在处理中（queued/processing/calibrating 等）或已成功的任务
+        - 其余任何状态（不管是当前已知的还是未来新增的）统一排在中间优先级，
+          组内按 created_at DESC 排序，返回最新的一条
+        （具体排序表达式见类级常量 _TASK_STATUS_PRIORITY_ORDER_BY）
+
         Args:
             url: 视频URL
             use_speaker_recognition: 是否使用说话人识别
-            
+
         Returns:
             Optional[Dict]: 现有任务信息（包含task_id和view_token），如果没有找到则返回None
         """
         try:
             with self._get_cursor() as cursor:
                 # 查找相同URL和说话人识别设置的任务
-                # 优先返回成功完成的任务，其次是处理中的任务
-                cursor.execute('''
+                # success 最高优先级；failed 垫底；其余状态居中按最新排序
+                cursor.execute(f'''
                     SELECT task_id, view_token, url, download_url, use_speaker_recognition, status,
                            title, author, platform, media_id, cache_id, created_at
                     FROM task_status
                     WHERE url = ? AND use_speaker_recognition = ?
                     ORDER BY
-                        CASE status
-                            WHEN 'success' THEN 1
-                            WHEN 'processing' THEN 2
-                            WHEN 'queued' THEN 3
-                            ELSE 4
-                        END,
-                        created_at DESC
+                        {self._TASK_STATUS_PRIORITY_ORDER_BY}
                     LIMIT 1
                 ''', (url, use_speaker_recognition))
 
@@ -1565,6 +1581,14 @@ class CacheManager:
         """
         根据(platform, media_id)查找现有任务，用于同源视频不同URL格式的去重
 
+        排序策略分三段，不穷举具体状态值，避免状态机演进（新增状态）时腐化：
+        - success 永远最高优先级（优先返回成功完成的任务）
+        - failed 永远垫底，避免旧的失败记录掩盖同一 (platform, media_id) 下
+          更新的、仍在处理中（queued/processing/calibrating 等）或已成功的任务
+        - 其余任何状态（不管是当前已知的还是未来新增的）统一排在中间优先级，
+          组内按 created_at DESC 排序，返回最新的一条
+        （具体排序表达式见类级常量 _TASK_STATUS_PRIORITY_ORDER_BY）
+
         Args:
             platform: 平台名称
             media_id: 媒体ID
@@ -1579,19 +1603,14 @@ class CacheManager:
 
         try:
             with self._get_cursor() as cursor:
-                cursor.execute('''
+                # success 最高优先级；failed 垫底；其余状态居中按最新排序
+                cursor.execute(f'''
                     SELECT task_id, view_token, url, download_url, use_speaker_recognition, status,
                            title, author, platform, media_id, cache_id, created_at
                     FROM task_status
                     WHERE platform = ? AND media_id = ? AND use_speaker_recognition = ?
                     ORDER BY
-                        CASE status
-                            WHEN 'success' THEN 1
-                            WHEN 'processing' THEN 2
-                            WHEN 'queued' THEN 3
-                            ELSE 4
-                        END,
-                        created_at DESC
+                        {self._TASK_STATUS_PRIORITY_ORDER_BY}
                     LIMIT 1
                 ''', (platform, media_id, use_speaker_recognition))
 
