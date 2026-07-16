@@ -22,7 +22,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from ...transcriber.segments import parse_time_to_seconds
+from ...transcriber.segments import parse_time_to_seconds, sanitize_time_pair
 from ...utils.logging import setup_logger
 from ...utils.llm_status import ChaptersStatus
 from ..core.config import LLMConfig
@@ -110,7 +110,11 @@ class Chapter:
 
     若推导出 end_time < start_time（segments 时间乱序/脏数据导致），end_time
     会被诚实降级为 None，绝不产出非法区间；不改变 start_seg/end_seg 的顺序
-    语义——索引顺序仍是正文顺序，不做重排（见 `_sanitize_end_time`）。
+    语义——索引顺序仍是正文顺序，不做重排（见 `_sanitize_end_time`）。这层
+    校验捕获的是**跨** segment 的时间乱序；某条 segment **自身**的
+    start_time/end_time 若已经倒挂（如 start=240, end=200），在更早的入口
+    阶段就已经被 `_sanitize_segment_time_fields` 逐段清洗为 end=None
+    （gate-r23 P2），不会流入这里的反查结果。
     """
 
     index: int
@@ -182,6 +186,68 @@ def _to_seconds(value: Union[float, int, str, None]) -> Optional[float]:
     if seconds is None and value is not None:
         logger.warning(f"[CHAPTERS] Unparseable time value, treating as None: {value!r}")
     return seconds
+
+
+def _sanitize_segment_time_fields(seg: Dict[str, Any], orig_idx: int) -> Dict[str, Any]:
+    """对单条 segment **自身**的 start_time/end_time 做诚实清洗，返回新 dict
+    （浅拷贝，其余字段原样保留），供入口过滤之后、后续所有环节使用。
+
+    gate-r23 P2 修复背景：本处理器此前只在"章节级"做倒挂校验（用章节起始
+    segment 的 start_time 与章节末尾 segment 的 end_time 比较，见
+    `_sanitize_end_time`），却完全没有校验每条 segment **自身**的
+    start_time/end_time 是否倒挂。如果某条幸存 segment 自身的时间就已经
+    矛盾（如 start_time=240、end_time=200，同一条 segment 内部倒挂——这类
+    脏数据可能来自未经 `transcriber.segments.normalize_segments` 清洗、
+    直接被上游喂给本处理器的原始 dialogs），章节级校验可能完全看不出问题：
+    只要章节起始 segment 的 start_time（如 0）小于这条倒挂 segment 的
+    end_time（200），旧的章节级检查 "0 < 200" 依然成立、照常放行，但语义上
+    200 早于它自己所在 segment 的 start_time（240），是一段自相矛盾的区间
+    ——直接采用就会产出"章节结束时间早于其末段开始时间"的矛盾输出，且这个
+    矛盾不会被任何现有校验拦下。
+
+    修复：处理器入口过滤后，对每条幸存 segment 单独调用权威实现
+    `transcriber.segments.sanitize_time_pair`（负值置 None、end<start 时
+    end 置 None）清洗一遍，清洗后的时间用于后续所有环节——时间反查
+    （`_derive_times` 读取的 `segment_by_index`）、prompt 展示
+    （`_build_segment_lines`）、门控 2 的 `has_any_start_time` 判断等——与
+    `transcriber.segments.normalize_segments` 对每条 segment 的清洗口径
+    完全对齐。段内倒挂的 segment 一旦被选为某章的 end_seg，其 end_time 在
+    这一步就已经是 None，矛盾从根上消失，不再依赖章节级 `_sanitize_end_time`
+    兜底（章节级校验仍然保留，用于捕获跨 segment 的时间乱序，两者互补，
+    不是替代关系）。
+
+    **指纹例外**：`_compute_fingerprint` 必须继续使用清洗前的原始值（如实
+    反映输入内容本身，见 `ChaptersResult` 类文档）。本函数只返回一份新的
+    浅拷贝 dict，从不修改传入的 `seg` 原始对象——调用方对未经处理的原始
+    `filtered_pairs` 计算指纹时，拿到的仍是清洗前的原始时间值，不受本函数
+    影响。
+
+    Args:
+        seg: 单条幸存 segment（已通过入口过滤，text 非空）
+        orig_idx: 该 segment 的原始下标（过滤前的位置），仅用于清洗触发时
+            的日志定位
+
+    Returns:
+        Dict[str, Any]: seg 的浅拷贝，start_time/end_time 替换为清洗后的
+        秒数（float 或 None，已经过 `_to_seconds` 解析），其余字段（text/
+        speaker 等）原样保留
+    """
+    start = _to_seconds(seg.get("start_time"))
+    end = _to_seconds(seg.get("end_time"))
+    sanitized_start, sanitized_end = sanitize_time_pair(start, end)
+    if sanitized_end is None and end is not None:
+        # 到这里 start/end 都已经过 `_to_seconds`（负数已被解析为 None），
+        # sanitize_time_pair 唯一还能触发的规则就是"两者均非 None 且
+        # end < start"——即这条 segment 自身的时间倒挂,才会打印这条警告。
+        logger.warning(
+            f"[CHAPTERS] segment[{orig_idx}] end_time ({end}) < its own "
+            f"start_time ({start}), discarding this segment's end_time "
+            f"(segment-level time inversion, likely un-sanitized upstream dialogs)"
+        )
+    sanitized_seg = dict(seg)
+    sanitized_seg["start_time"] = sanitized_start
+    sanitized_seg["end_time"] = sanitized_end
+    return sanitized_seg
 
 
 def _compute_fingerprint(indexed_segments: List[Tuple[int, Dict[str, Any]]]) -> str:
@@ -617,9 +683,16 @@ def _derive_times(
     过滤，原始下标与过滤后列表的位置会分道扬镳，位置切片会静默取到错误的
     （在过滤跨度较大时甚至是越界的）segment。
 
+    调用方（`_process_impl`）传入的 `segment_by_index` 里每条 segment 的
+    start_time/end_time 已经过 `_sanitize_segment_time_fields` 逐段清洗
+    （gate-r23 P2）：自身倒挂（如 start=240, end=200）的 segment 在这里查到
+    的 end_time 已经是 None，不会把段内矛盾的时间值反查出来。本函数仍然会
+    再调用一次 `_to_seconds`，但对已经是 float/None 的清洗后取值而言这是
+    幂等操作，不做任何改变。
+
     Args:
         chapters: 已推导出 start_seg/end_seg 的章节列表（原地修改）
-        segment_by_index: 原始下标 -> 幸存 segment 字典的映射
+        segment_by_index: 原始下标 -> 幸存 segment（时间字段已逐段清洗）的映射
     """
     for chapter in chapters:
         chapter["start_time"] = _to_seconds(
@@ -874,23 +947,42 @@ class ChaptersProcessor:
                 error=None, fingerprint=None, segment_count=0,
             )
 
-        # 幸存原始下标列表（按原始顺序升序，enumerate 天然保证）与"原始下标 ->
-        # 幸存 segment"的映射，供后面语义校验（成员关系）、end_seg 推导（在
-        # 幸存序列中回退一位）、时间反查（按原始下标查表）复用，避免各处各自
-        # 重新计算、口径不一致。
+        # 幸存原始下标列表（按原始顺序升序，enumerate 天然保证），供后面语义
+        # 校验（成员关系）、end_seg 推导（在幸存序列中回退一位）复用，避免
+        # 各处各自重新计算、口径不一致。
         survived_indices: List[int] = [idx for idx, _ in filtered_pairs]
-        segment_by_index: Dict[int, Dict[str, Any]] = dict(filtered_pairs)
 
-        segment_count = len(segments)
-        full_text = "".join((seg.get("text") or "") for seg in segments)
+        segment_count = len(filtered_pairs)
+        full_text = "".join((seg.get("text") or "") for _, seg in filtered_pairs)
         # 指纹覆盖每条 segment 的原始下标 + text + 规范化后的 start_time/
         # end_time（细节见 `_compute_fingerprint`），而不是只哈希文本拼接
         # ——full_text 本身继续只用于下面的长度门控，不受指纹算法影响。传入
-        # filtered_pairs（原始下标, segment）而非 segments：原始下标必须
-        # 随过滤前的位置一并进入指纹，否则"幸存内容不变、但前面多插了一个
-        # 会被过滤掉的空白条目"这类导致原始下标整体平移的输入会被误判为
-        # 指纹未变（gate-r17 P2，详见 `_compute_fingerprint` 文档）。
+        # filtered_pairs（原始下标, segment）而非下面清洗后的 sanitized_pairs：
+        # 指纹必须如实反映输入本身，用清洗前的原始时间值，不能用
+        # `_sanitize_segment_time_fields` 清洗后的值（gate-r23 P2，详见该
+        # 函数文档的"指纹例外"说明）；原始下标同样必须随过滤前的位置一并
+        # 进入指纹，否则"幸存内容不变、但前面多插了一个会被过滤掉的空白
+        # 条目"这类导致原始下标整体平移的输入会被误判为指纹未变（gate-r17
+        # P2，详见 `_compute_fingerprint` 文档）。
         fingerprint = _compute_fingerprint(filtered_pairs)
+
+        # gate-r23 P2 修复：入口过滤只保证每条幸存 segment 有非空 text，并不
+        # 保证其 start_time/end_time 本身自洽——调用方可能直接喂进未经
+        # `transcriber.segments.normalize_segments` 清洗的原始 dialogs，
+        # 某条 segment 完全可能自身倒挂（如 start=240, end=200）。对每条幸存
+        # segment 单独跑一遍权威清洗 `sanitize_time_pair`（见
+        # `_sanitize_segment_time_fields` 文档），清洗后的时间用于下面
+        # has_any_start_time 判断、`_build_segment_lines` 构建 prompt、以及
+        # 后面 `_derive_times` 的时间反查——指纹已在上面用清洗前的
+        # filtered_pairs 算完，不受这一步影响。
+        sanitized_pairs: List[Tuple[int, Dict[str, Any]]] = [
+            (orig_idx, _sanitize_segment_time_fields(seg, orig_idx))
+            for orig_idx, seg in filtered_pairs
+        ]
+        segments = [seg for _, seg in sanitized_pairs]
+        # 原始下标 -> 清洗后 segment 的映射，供 end_seg 推导（在幸存序列中
+        # 回退一位）、时间反查（按原始下标查表）复用。
+        segment_by_index: Dict[int, Dict[str, Any]] = dict(sanitized_pairs)
 
         # 门控 2：segments 非空，但没有任何一条能解析出 start_time —— 章节功能
         # 的核心价值就是时间范围，完全没有时间信息时生成出来的章节也没有意义。
@@ -945,9 +1037,12 @@ class ChaptersProcessor:
         # 仅测量 full_text 会漏判，实际发送的 prompt 仍可能远超模型上限。
         # 注：门控 3（min_chapters_threshold）语义是"内容量是否值得分章"，与发送
         # 开销无关，继续用 full_text 测量，不受这里影响。
-        # 传入 filtered_pairs（原始下标, segment）而非 segments：编号必须用
-        # 原始下标，见 `_build_segment_lines` 文档。
-        segment_lines = _build_segment_lines(filtered_pairs)
+        # 传入 sanitized_pairs（原始下标, 已清洗时间的 segment）而非 segments：
+        # 编号必须用原始下标，见 `_build_segment_lines` 文档；时间戳展示同样
+        # 要用清洗后的值（gate-r23 P2），与 has_any_start_time 判断、
+        # `_derive_times` 时间反查口径一致，指纹已单独用清洗前的 filtered_pairs
+        # 算过，不受此处影响。
+        segment_lines = _build_segment_lines(sanitized_pairs)
 
         # title/author/description 同样会拼进 user prompt（见
         # `build_chapters_user_prompt`），门控 4 若只测 segment_lines 会漏算

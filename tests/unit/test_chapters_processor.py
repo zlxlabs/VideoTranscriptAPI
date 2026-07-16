@@ -1329,6 +1329,71 @@ class TestTimeHandling(ChaptersProcessorTestBase):
         self.assertIsNotNone(result.chapters[1].end_time)
 
 
+class TestSegmentLevelTimeInversion(ChaptersProcessorTestBase):
+    """gate-r23 P2: the processor may receive dialogs straight from a caller
+    that never ran them through transcriber.segments.normalize_segments --
+    so a single surviving segment's OWN start_time/end_time can be inverted
+    (e.g. start=240, end=200) even though every OTHER segment (including the
+    chapter's start_seg segment) is perfectly ordered. Before the fix, only
+    the chapter-level combination (start_seg's start_time vs end_seg's
+    end_time) was checked by _sanitize_end_time -- so a chapter starting at
+    a small time (e.g. 0.0) would let a later segment's already-self-broken
+    end_time (200) sail through, because "0 < 200" alone looks fine. The fix
+    runs the shared sanitize_time_pair per surviving segment right at the
+    entry, so a segment's own end_time is already None by the time any
+    chapter looks it up."""
+
+    def test_segment_self_inverted_end_time_becomes_none_even_when_chapter_level_check_would_pass(self):
+        segments = make_segments(10)
+        # segment 4 is internally inverted: its own end_time (200) is before
+        # its own start_time (240). Chapter 0 (start_seg=0, start_time=0.0)
+        # uses segment 4 as its end_seg -- the OLD chapter-level check
+        # ("0.0 < 200" passes) would have let end_time=200.0 through.
+        segments[4]["start_time"] = 240.0
+        segments[4]["end_time"] = 200.0
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+
+        with patch(
+            "video_transcript_api.llm.processors.chapters_processor.logger"
+        ) as mock_logger:
+            result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual(result.chapters[0].start_seg, 0)
+        self.assertEqual(result.chapters[0].end_seg, 4)
+        self.assertEqual(result.chapters[0].start_time, 0.0)
+        # Must be None, NOT 200.0 -- segment 4's own end_time was already
+        # discarded at the entry sanitization step before any chapter-level
+        # check ever ran.
+        self.assertIsNone(result.chapters[0].end_time)
+        warning_messages = [str(call.args[0]) for call in mock_logger.warning.call_args_list]
+        self.assertTrue(
+            any("end_time" in msg and "start_time" in msg for msg in warning_messages),
+            f"expected a segment-level time inversion warning, got: {warning_messages}",
+        )
+
+    def test_normal_ascending_segment_times_regression_unaffected(self):
+        """Regression check: entry-level per-segment sanitize_time_pair must
+        be a no-op for well-formed, ascending segment times -- chapters
+        derive exactly the same start_time/end_time as before this fix."""
+        segments = make_segments(10)
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual(result.chapters[0].start_time, 0.0)
+        self.assertEqual(result.chapters[0].end_time, 900.0)  # segments[4]["end_time"]
+        self.assertEqual(result.chapters[1].start_time, 900.0)  # segments[5]["start_time"]
+        self.assertEqual(result.chapters[1].end_time, 1800.0)  # segments[9]["end_time"]
+
+
 class TestFingerprint(ChaptersProcessorTestBase):
     def test_fingerprint_is_stable_across_calls(self):
         segments = make_segments(10)
@@ -1665,6 +1730,46 @@ class TestFingerprint(ChaptersProcessorTestBase):
 
         self.assertIsNotNone(result1.fingerprint)
         self.assertEqual(result1.fingerprint, result2.fingerprint)
+
+    def test_fingerprint_uses_raw_segment_times_not_entry_sanitized_values(self):
+        """gate-r23 P2: _compute_fingerprint must keep hashing the RAW,
+        pre-sanitization start_time/end_time of each segment -- per this
+        module's own docstring, fingerprint "如实反映输入内容本身". If the
+        fingerprint instead hashed the entry-sanitized values (see
+        `_sanitize_segment_time_fields`), a segment with a raw self-inverted
+        time pair (start=240, end=200) would produce the SAME fingerprint as
+        a segment that already carries the post-sanitization result
+        (start=240, end=None) -- because sanitize_time_pair maps both inputs
+        to the identical (240, None) output. The fingerprint must therefore
+        distinguish the two, even though both resolve to the exact same
+        downstream chapter behavior (end_time=None)."""
+        segments_raw_inverted = make_segments(10)
+        segments_raw_inverted[4]["start_time"] = 240.0
+        segments_raw_inverted[4]["end_time"] = 200.0  # raw self-inversion
+
+        segments_already_sanitized = make_segments(10)
+        segments_already_sanitized[4]["start_time"] = 240.0
+        segments_already_sanitized[4]["end_time"] = None  # sanitize_time_pair's own output
+
+        chapters_response = [
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ]
+        self.llm_client.call.return_value = mock_llm_response(chapters_response)
+        result_raw = self.processor.process(segments=segments_raw_inverted, title="T")
+
+        self.llm_client.call.return_value = mock_llm_response(chapters_response)
+        result_sanitized = self.processor.process(segments=segments_already_sanitized, title="T")
+
+        self.assertIsNotNone(result_raw.fingerprint)
+        self.assertIsNotNone(result_sanitized.fingerprint)
+        self.assertNotEqual(result_raw.fingerprint, result_sanitized.fingerprint)
+        # Both inputs still resolve to the SAME downstream chapter behavior
+        # (end_time discarded) even though their fingerprints differ.
+        self.assertEqual(result_raw.status, ChaptersStatus.GENERATED)
+        self.assertEqual(result_sanitized.status, ChaptersStatus.GENERATED)
+        self.assertIsNone(result_raw.chapters[0].end_time)
+        self.assertIsNone(result_sanitized.chapters[0].end_time)
 
 
 class TestIntegerSpeaker(ChaptersProcessorTestBase):
