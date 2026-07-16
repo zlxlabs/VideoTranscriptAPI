@@ -970,6 +970,66 @@ class TestFingerprint(ChaptersProcessorTestBase):
         self.assertIsNotNone(result_zero_time.fingerprint)
         self.assertNotEqual(result_none_time.fingerprint, result_zero_time.fingerprint)
 
+    def test_fingerprint_changes_with_speaker_correction(self):
+        """Same text and same start_time/end_time, but a corrected speaker
+        label (e.g. "Speaker 2" fixed to a real name after diarization
+        correction) must still change the fingerprint. Speaker is part of
+        what gets sent to the LLM (`[i] mm:ss speaker: text`), so if the
+        fingerprint only hashed text + times, a speaker-only correction
+        would collide and a downstream cache keyed on fingerprint could
+        keep serving chapter gists that reference the stale speaker."""
+        segs_original = [
+            {"text": "same text content here", "start_time": 0.0, "end_time": 10.0,
+             "speaker": "Speaker 2"},
+        ]
+        segs_speaker_fixed = [
+            {"text": "same text content here", "start_time": 0.0, "end_time": 10.0,
+             "speaker": "Alice"},
+        ]
+
+        result_original = self.processor.process(segments=segs_original, title="T")
+        result_speaker_fixed = self.processor.process(segments=segs_speaker_fixed, title="T")
+
+        self.assertIsNotNone(result_original.fingerprint)
+        self.assertIsNotNone(result_speaker_fixed.fingerprint)
+        self.assertNotEqual(result_original.fingerprint, result_speaker_fixed.fingerprint)
+
+    def test_fingerprint_distinguishes_missing_speaker_from_empty_speaker(self):
+        """A segment with no "speaker" key at all must not collide with one
+        whose speaker is an explicit empty string -- same rationale as the
+        None-time vs zero-time distinction: "no speaker info" and "speaker
+        is blank" are different states and must hash to different
+        fingerprints (locks in the fixed placeholder for missing speaker)."""
+        segs_missing_speaker = [
+            {"text": "same text content here", "start_time": 0.0, "end_time": 10.0},
+        ]
+        segs_empty_speaker = [
+            {"text": "same text content here", "start_time": 0.0, "end_time": 10.0,
+             "speaker": ""},
+        ]
+
+        result_missing = self.processor.process(segments=segs_missing_speaker, title="T")
+        result_empty = self.processor.process(segments=segs_empty_speaker, title="T")
+
+        self.assertIsNotNone(result_missing.fingerprint)
+        self.assertIsNotNone(result_empty.fingerprint)
+        self.assertNotEqual(result_missing.fingerprint, result_empty.fingerprint)
+
+    def test_fingerprint_stable_for_identical_input_including_speaker(self):
+        """Fully identical input (same text, times, AND speaker) across
+        repeated calls must still produce the exact same fingerprint now
+        that speaker is part of the hashed input."""
+        segs = [
+            {"text": "stable text", "start_time": 12.5, "end_time": 20.0, "speaker": "Alice"},
+            {"text": "more stable text", "start_time": 20.0, "end_time": 30.0, "speaker": "Bob"},
+        ]
+
+        result1 = self.processor.process(segments=segs, title="T1")
+        result2 = self.processor.process(segments=segs, title="T2 (different title)")
+
+        self.assertIsNotNone(result1.fingerprint)
+        self.assertEqual(result1.fingerprint, result2.fingerprint)
+
 
 class TestModelFallback(unittest.TestCase):
     """LLMConfig() constructed directly (bypassing from_dict, whose own defaulting

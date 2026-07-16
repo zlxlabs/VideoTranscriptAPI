@@ -91,11 +91,14 @@ _FINGERPRINT_ENTRY_SEP = "\x1f"
 # start_time / end_time 三个字段，故意选一个与条目间分隔符不同的不可见字符，
 # 避免"字段边界"和"条目边界"用同一个分隔符时可能出现的交叉拼接碰撞。
 _FINGERPRINT_FIELD_SEP = "\x1e"
-# start_time/end_time 缺失或无法解析（None）时的固定占位符：必须与任何合法
-# 秒数的 str() 输出（如 "0.0"）不可能重合，否则 start_time=None 会和
-# start_time=0 混同，让"完全没有时间轴"和"时间轴从 0 秒开始"产生同一个
-# 指纹片段。
-_FINGERPRINT_NONE_TIME_PLACEHOLDER = "\x00"
+# 字段缺失（None）时的固定占位符：用于 start_time/end_time 无法解析，以及
+# speaker 字段完全不存在这两种场景。必须与任何合法取值的字符串表示（如
+# 秒数的 "0.0"，或 speaker 的空字符串 ""）都不可能重合，否则"字段缺失"会
+# 与"字段恰好是这个值"混同——例如 start_time=None 与 start_time=0 混同，
+# 让"完全没有时间轴"和"时间轴从 0 秒开始"产生同一个指纹片段；speaker 缺失
+# 与 speaker="" 混同，让"没有说话人信息"和"说话人字段为空"产生同一个指纹
+# 片段。
+_FINGERPRINT_NONE_FIELD_PLACEHOLDER = "\x00"
 
 
 # ============================================================
@@ -133,13 +136,14 @@ class ChaptersResult:
     - 原文过长/LLM 异常/语义或结构校验不通过: chapters=[], status=FAILED, error 非空
     - 成功: chapters=完整列表, status=GENERATED
 
-    fingerprint 覆盖每条 segment 的 text + 规范化后的 start_time/end_time（而非
-    只哈希文本）：条目间用 "\x1f" 分隔符拼接，条目内 text/start_time/end_time
-    三个字段再用 "\x1e" 分隔符拼接，两级分隔符都避免拼接结果碰撞（如
-    ["ab","c"] 与 ["a","bc"] 文本相同拼接结果但分段不同）。同一段文本若时间轴
-    被修正（如时间戳纠错）但文本本身未变，指纹也会随之变化——这样上层若把
-    fingerprint 接入缓存层，就不会复用一份挂着旧时间戳的章节结果。详见
-    `_compute_fingerprint`。segments 为 None/空时该值为 None。
+    fingerprint 覆盖每条 segment 的 text + 规范化后的 start_time/end_time +
+    speaker（而非只哈希文本）：条目间用 "\x1f" 分隔符拼接，条目内
+    text/start_time/end_time/speaker 四个字段再用 "\x1e" 分隔符拼接，两级
+    分隔符都避免拼接结果碰撞（如 ["ab","c"] 与 ["a","bc"] 文本相同拼接结果
+    但分段不同）。同一段文本若时间轴被修正（如时间戳纠错）或说话人被修正
+    （如"说话人2"改成真实姓名）但文本本身未变，指纹也会随之变化——这样
+    上层若把 fingerprint 接入缓存层，就不会复用一份挂着旧时间戳/旧说话人
+    的章节结果。详见 `_compute_fingerprint`。segments 为 None/空时该值为 None。
     """
 
     chapters: List[Chapter]
@@ -185,40 +189,51 @@ def _to_seconds(value: Union[float, int, str, None]) -> Optional[float]:
 def _compute_fingerprint(segments: List[Dict[str, Any]]) -> str:
     """计算 segments 的指纹（sha1 十六进制摘要），用于上层判断"原文是否变化"。
 
-    指纹覆盖每条 segment 的 text + 规范化后的 start_time/end_time，而不是只
-    哈希文本——否则上游对同一段文本重新做时间轴修正（segment 分组不变，仅
-    start_time/end_time 变化）后指纹依然不变，未来若指纹被接入缓存层，会
-    导致复用一份挂着旧时间戳的章节结果，造成时间轴对不上的缓存脏读。
+    指纹覆盖每条 segment 的 text + 规范化后的 start_time/end_time + speaker，
+    而不是只哈希文本——否则上游对同一段文本重新做时间轴修正（segment 分组
+    不变，仅 start_time/end_time 变化）或说话人纠正（如"说话人2"改成真实
+    姓名，文本/时间不变）后指纹依然不变，未来若指纹被接入缓存层，会导致
+    复用一份挂着旧时间戳/旧说话人的章节结果——旧说话人尤其隐蔽：speaker
+    会拼进 LLM prompt（`[i] mm:ss speaker: text`，见 `_build_segment_lines`），
+    说话人纠正后章节梗概里引用的人名可能整段是错的，却因为指纹没变而被
+    缓存层静默判定为"原文未变"继续复用。
 
     两级分隔符都是正文几乎不可能出现的不可见字符，且互不相同：
     - 条目间用 `_FINGERPRINT_ENTRY_SEP`（"\\x1f"），避免 ["ab","c"] 与
       ["a","bc"] 这类不同分段但拼接结果相同的文本发生指纹碰撞；
-    - 条目内 text/start_time/end_time 三个字段再用 `_FINGERPRINT_FIELD_SEP`
-      （"\\x1e"）分隔，避免字段边界和条目边界共用同一分隔符时可能出现的
-      交叉拼接碰撞。
+    - 条目内 text/start_time/end_time/speaker 四个字段再用
+      `_FINGERPRINT_FIELD_SEP`（"\\x1e"）分隔，避免字段边界和条目边界共用
+      同一分隔符时可能出现的交叉拼接碰撞。
 
     start_time/end_time 在拼入前先用 `_to_seconds` 规范化（同一个时间不论用
-    float 还是 "HH:MM:SS" 字符串表示，指纹片段都一致）；解析失败或缺失时用
-    固定占位符 `_FINGERPRINT_NONE_TIME_PLACEHOLDER` 代替，而不是空字符串或
-    直接跳过——占位符与任何合法秒数的 str() 输出都不可能重合，从根上排除
-    "时间缺失" 与 "时间恰好是 0" 混同的歧义。
+    float 还是 "HH:MM:SS" 字符串表示，指纹片段都一致）；解析失败或缺失时、
+    以及 speaker 字段完全不存在时，统一用固定占位符
+    `_FINGERPRINT_NONE_FIELD_PLACEHOLDER` 代替，而不是空字符串或直接跳过——
+    占位符与任何合法秒数的 str() 输出、或合法（哪怕是空串）speaker 都不可能
+    重合，从根上排除"字段缺失"与"字段恰好是这个值"混同的歧义（时间缺失
+    vs 时间恰好是 0；说话人字段不存在 vs 说话人字段是空字符串）。
 
     Args:
         segments: 原始 segment 列表（未经任何处理），每条形如
-            {"text": str, "start_time": ..., "end_time": ..., ...}
+            {"text": str, "start_time": ..., "end_time": ..., "speaker": 可选, ...}
 
     Returns:
         str: sha1 十六进制摘要
     """
     def _time_field(value: Any) -> str:
         seconds = _to_seconds(value)
-        return str(seconds) if seconds is not None else _FINGERPRINT_NONE_TIME_PLACEHOLDER
+        return str(seconds) if seconds is not None else _FINGERPRINT_NONE_FIELD_PLACEHOLDER
+
+    def _speaker_field(seg: Dict[str, Any]) -> str:
+        speaker = seg.get("speaker")
+        return speaker if speaker is not None else _FINGERPRINT_NONE_FIELD_PLACEHOLDER
 
     entries = [
         _FINGERPRINT_FIELD_SEP.join((
             seg.get("text") or "",
             _time_field(seg.get("start_time")),
             _time_field(seg.get("end_time")),
+            _speaker_field(seg),
         ))
         for seg in segments
     ]
