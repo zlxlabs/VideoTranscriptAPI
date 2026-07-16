@@ -20,6 +20,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
 
+from ...transcriber.segments import parse_time_to_seconds
 from ...utils.logging import setup_logger
 from ...utils.llm_status import ChaptersStatus
 from ..core.config import LLMConfig
@@ -131,15 +132,19 @@ class ChaptersResult:
 def _to_seconds(value: Union[float, int, str, None]) -> Optional[float]:
     """将 segment 的 start_time/end_time 归一化为秒数（float）。
 
-    上游两种时间格式并存：数值型秒数，或 "HH:MM:SS"/"MM:SS" 字符串。
-    保持私有 —— 这是本处理器内部的一次性兼容 shim，将来与协调器合并时
-    会被替换为项目共享的时间转换工具，不对外暴露。
+    薄包装：全部解析与防御逻辑（数值/字符串两种输入、"HH:MM:SS"/"MM:SS" 时间
+    格式、非有限值/负数/OverflowError/非法段数等）都委托给项目共享实现
+    transcriber.segments.parse_time_to_seconds，不再自行重复实现。
 
-    负数一律视为非法时间，返回 None —— 与 transcriber/segments.py 的
-    parse_time_to_seconds 语义对齐（时间不可能为负）。不做这个校验会让
-    全负时间轴被误判为"有可用时间轴"照样调用 LLM，还会产出 start_time=-5
-    这类负数，与 prompt 里 _format_timestamp 展示的 00:00（clamp 到 0）
-    自相矛盾。
+    背景：本函数曾经手写一套几乎相同的解析逻辑（对时间字符串按 ":" split 后
+    累加 seconds*60+part），但没有像共享实现那样校验 split 出的段数必须是
+    2 或 3——导致 "00:00:00:41" 这类四段畸形时间被当成合法值解析出 41 秒，
+    与共享实现"len(parts) not in (2, 3) 一律拒绝"的语义产生分歧。委托给
+    共享实现从根上消除这种分歧，而不是在这里补一条针对性校验。
+
+    这里只保留一层薄薄的日志包装：解析失败时补一条 warning，方便定位上游
+    数据问题（共享实现本身不打日志，因为它同时服务于多个调用方，日志语义
+    应由各自调用方决定）。
 
     Args:
         value: 原始时间值，None/数值/字符串三种之一
@@ -147,50 +152,10 @@ def _to_seconds(value: Union[float, int, str, None]) -> Optional[float]:
     Returns:
         秒数（float，>= 0），无法解析或输入为 None 时返回 None
     """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        # bool 是 int 的子类，显式排除，避免 True/False 被当成 1/0 秒
-        return None
-    if isinstance(value, (int, float)):
-        try:
-            seconds = float(value)
-        except OverflowError:
-            # JSON 合法的超大整数（如 10**400）转 float 会因超出 double 可表示
-            # 范围抛 OverflowError，与本函数"绝不抛异常"的契约冲突，按非法
-            # 时间处理，与 transcriber/segments.py 的同款兜底保持一致。
-            logger.warning(f"[CHAPTERS] Time value overflows float, treating as None: {value!r}")
-            return None
-        if not math.isfinite(seconds):
-            logger.warning(f"[CHAPTERS] Non-finite time value, treating as None: {value!r}")
-            return None
-        if seconds < 0:
-            logger.warning(f"[CHAPTERS] Negative time value, treating as None: {value!r}")
-            return None
-        return seconds
-    if isinstance(value, str):
-        raw = value.strip()
-        if not raw:
-            return None
-        try:
-            # float() happily parses "inf"/"nan" without raising -- the isfinite
-            # check below is what actually rejects those, not this try/except.
-            parts = [float(p) for p in raw.split(":")]
-        except ValueError:
-            logger.warning(f"[CHAPTERS] Unparseable time value, treating as None: {value!r}")
-            return None
-        seconds = 0.0
-        for part in parts:
-            seconds = seconds * 60 + part
-        if not math.isfinite(seconds):
-            logger.warning(f"[CHAPTERS] Non-finite time value, treating as None: {value!r}")
-            return None
-        if seconds < 0:
-            logger.warning(f"[CHAPTERS] Negative time value, treating as None: {value!r}")
-            return None
-        return seconds
-    logger.warning(f"[CHAPTERS] Unexpected time value type {type(value)!r}, treating as None: {value!r}")
-    return None
+    seconds = parse_time_to_seconds(value)
+    if seconds is None and value is not None:
+        logger.warning(f"[CHAPTERS] Unparseable time value, treating as None: {value!r}")
+    return seconds
 
 
 def _format_timestamp(seconds: Optional[float]) -> str:

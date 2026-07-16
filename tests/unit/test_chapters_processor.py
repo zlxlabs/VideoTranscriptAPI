@@ -65,7 +65,19 @@ def mock_llm_response(chapters):
 
 
 class TestToSeconds(unittest.TestCase):
-    """Locks _to_seconds' handling of the two upstream time formats."""
+    """Locks _to_seconds' delegation to the shared implementation.
+
+    _to_seconds is a thin wrapper around
+    transcriber.segments.parse_time_to_seconds (see that function's own
+    docstring/tests for the full defense matrix: non-finite values, negative
+    numbers, OverflowError on astronomical ints, malformed segment counts,
+    garbage types, etc. -- all locked by TestParseTimeToSeconds in
+    tests/unit/test_segments_adapter.py). Duplicating that exhaustive case
+    list here would just be two tests guarding the same code path; this
+    class only checks a handful of representative inputs to confirm the
+    delegation itself works end to end, plus the specific historical
+    divergence bug below.
+    """
 
     def test_none_returns_none(self):
         self.assertIsNone(_to_seconds(None))
@@ -84,40 +96,16 @@ class TestToSeconds(unittest.TestCase):
     def test_unparseable_string_returns_none(self):
         self.assertIsNone(_to_seconds("not-a-time"))
 
-    def test_bool_returns_none(self):
-        """bool is a subclass of int in Python -- must not be silently treated as seconds."""
-        self.assertIsNone(_to_seconds(True))
-
-    def test_inf_returns_none(self):
-        """Non-finite numeric input must not silently become a fake timestamp."""
-        self.assertIsNone(_to_seconds(float("inf")))
-        self.assertIsNone(_to_seconds(float("-inf")))
-
-    def test_nan_returns_none(self):
-        self.assertIsNone(_to_seconds(float("nan")))
-
-    def test_inf_string_returns_none(self):
-        """float() happily parses "inf"/"nan" strings -- the ':'-split path must
-        also reject non-finite results instead of passing them through."""
-        self.assertIsNone(_to_seconds("inf"))
-
-    def test_negative_number_returns_none(self):
-        """Negative time is not a legal timestamp -- must align with
-        transcriber/segments.py's parse_time_to_seconds, which already rejects
-        negative values the same way."""
-        self.assertIsNone(_to_seconds(-5))
-        self.assertIsNone(_to_seconds(-5.0))
-        self.assertIsNone(_to_seconds("-5"))
-
-    def test_negative_hhmmss_string_returns_none(self):
-        self.assertIsNone(_to_seconds("-1:02:03"))
-
-    def test_huge_int_overflow_returns_none(self):
-        """JSON allows arbitrary-precision integers -- json.loads() can hand
-        back a Python int like 10**400. float(10**400) raises OverflowError
-        ("int too large to convert to float"), which would violate this
-        function's "never raises" contract if left uncaught."""
-        self.assertIsNone(_to_seconds(10 ** 400))
+    def test_four_segment_time_rejected(self):
+        """Regression test for a real divergence bug: the old private
+        implementation manually split on ':' and accumulated
+        seconds*60+part without validating the segment count, so a malformed
+        four-segment timestamp like "00:00:00:41" was silently parsed as 41
+        seconds instead of being rejected. Only "HH:MM:SS" (3 parts) and
+        "MM:SS" (2 parts) are legal -- delegating to the shared
+        parse_time_to_seconds implementation (which already validates this)
+        must reject it here too."""
+        self.assertIsNone(_to_seconds("00:00:00:41"))
 
 
 class TestFormatTimestamp(unittest.TestCase):
@@ -236,6 +224,21 @@ class TestGating(ChaptersProcessorTestBase):
         result = self.processor.process(segments=segments, title="T")
 
         self.assertEqual(result.status, ChaptersStatus.SKIPPED_NO_TIMELINE)
+        self.llm_client.call.assert_not_called()
+
+    def test_all_four_segment_time_skipped_no_timeline(self):
+        """Malformed four-segment timestamps (e.g. "00:00:00:41") must not be
+        silently accepted as a usable timeline -- when every segment uses this
+        illegal format, has_any_start_time must resolve False and the LLM must
+        never be called, same as the all-None / all-unparseable-string cases."""
+        segments = make_segments(10)
+        for seg in segments:
+            seg["start_time"] = "00:00:00:41"
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.SKIPPED_NO_TIMELINE)
+        self.assertEqual(result.chapters, [])
         self.llm_client.call.assert_not_called()
 
     def test_one_start_time_present_still_generates(self):

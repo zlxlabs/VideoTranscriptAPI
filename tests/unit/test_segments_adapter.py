@@ -63,6 +63,15 @@ class TestParseTimeToSeconds:
         assert parse_time_to_seconds(-5.0) is None
         assert parse_time_to_seconds("-5") is None
 
+    def test_negative_hhmmss_string_returns_none(self):
+        assert parse_time_to_seconds("-1:02:03") is None
+
+    def test_bool_returns_none(self):
+        # bool is a subclass of int in Python -- must not be silently
+        # treated as 1/0 seconds.
+        assert parse_time_to_seconds(True) is None
+        assert parse_time_to_seconds(False) is None
+
     def test_wrong_number_of_colon_parts_returns_none(self):
         assert parse_time_to_seconds("1:2:3:4") is None
         assert parse_time_to_seconds(":") is None
