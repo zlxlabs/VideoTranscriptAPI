@@ -1228,5 +1228,71 @@ class TestModelFallback(unittest.TestCase):
         self.assertEqual(call_kwargs.get("model"), "chapters-model")
 
 
+class TestNonDictSegmentFiltering(ChaptersProcessorTestBase):
+    """Regression tests for the gate-r13 P2 finding: a segments list mixed with
+    non-dict entries (e.g. JSON null -> None, or a bare string) must not crash
+    process() with AttributeError -- it must filter them out up front, the same
+    way transcriber.segments.normalize_segments skips non-dict entries."""
+
+    def test_non_dict_entries_are_filtered_then_generation_succeeds(self):
+        good = make_segments(2)  # two well-formed dict segments
+        segments = [None, good[0], "junk", good[1]]
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "gist a", "start_seg": 0},
+            {"title": "B", "gist": "gist b", "start_seg": 1},
+        ])
+
+        with patch("video_transcript_api.llm.processors.chapters_processor.logger") as mock_logger:
+            result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual(result.segment_count, 2)
+        self.llm_client.call.assert_called_once()
+
+        # A warning naming the filtered count (2: None + "junk") must be logged.
+        warning_messages = [str(call.args[0]) for call in mock_logger.warning.call_args_list]
+        self.assertTrue(
+            any("2" in msg and "non-dict" in msg.lower() for msg in warning_messages),
+            f"expected a filtered-count warning, got: {warning_messages}",
+        )
+
+    def test_all_non_dict_entries_skipped_no_timeline(self):
+        segments = [None, "junk", 123, ["nested"]]
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.SKIPPED_NO_TIMELINE)
+        self.assertEqual(result.chapters, [])
+        self.assertIsNone(result.error)
+        self.llm_client.call.assert_not_called()
+
+
+class TestUnexpectedExceptionSafety(ChaptersProcessorTestBase):
+    """Regression test for the gate-r13 P2 finding's second layer: process()
+    must never let an unforeseen internal exception escape -- it is the
+    processor contract ('honest status, never crash') that every caller
+    relies on. This is a deliberately-injected failure in an internal helper
+    (not reachable via any legitimate input) standing in for "some bug we
+    haven't found yet"."""
+
+    def test_internal_exception_is_caught_and_returns_failed(self):
+        segments = make_segments(10)
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+
+        with patch(
+            "video_transcript_api.llm.processors.chapters_processor._derive_times",
+            side_effect=RuntimeError("boom"),
+        ):
+            result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.FAILED)
+        self.assertEqual(result.chapters, [])
+        self.assertIsNotNone(result.error)
+        self.assertIn("boom", result.error)
+
+
 if __name__ == "__main__":
     unittest.main()
