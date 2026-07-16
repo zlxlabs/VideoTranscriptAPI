@@ -16,6 +16,7 @@
 """
 
 import hashlib
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
 
@@ -138,12 +139,18 @@ def _to_seconds(value: Union[float, int, str, None]) -> Optional[float]:
         # bool 是 int 的子类，显式排除，避免 True/False 被当成 1/0 秒
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        seconds = float(value)
+        if not math.isfinite(seconds):
+            logger.warning(f"[CHAPTERS] Non-finite time value, treating as None: {value!r}")
+            return None
+        return seconds
     if isinstance(value, str):
         raw = value.strip()
         if not raw:
             return None
         try:
+            # float() happily parses "inf"/"nan" without raising -- the isfinite
+            # check below is what actually rejects those, not this try/except.
             parts = [float(p) for p in raw.split(":")]
         except ValueError:
             logger.warning(f"[CHAPTERS] Unparseable time value, treating as None: {value!r}")
@@ -151,14 +158,23 @@ def _to_seconds(value: Union[float, int, str, None]) -> Optional[float]:
         seconds = 0.0
         for part in parts:
             seconds = seconds * 60 + part
+        if not math.isfinite(seconds):
+            logger.warning(f"[CHAPTERS] Non-finite time value, treating as None: {value!r}")
+            return None
         return seconds
     logger.warning(f"[CHAPTERS] Unexpected time value type {type(value)!r}, treating as None: {value!r}")
     return None
 
 
 def _format_timestamp(seconds: Optional[float]) -> str:
-    """把秒数格式化为 mm:ss（超过 1 小时则 h:mm:ss）；None 返回空字符串。"""
-    if seconds is None:
+    """把秒数格式化为 mm:ss（超过 1 小时则 h:mm:ss）；None 返回空字符串。
+
+    对 inf/nan 也返回空字符串——防御性兜底：正常流程下非有限值理应已被
+    _to_seconds 过滤掉，但 int(inf) 会抛 OverflowError、int(nan) 会抛
+    ValueError，一旦有调用方绕过 _to_seconds 直接传入非有限值就会崩溃，
+    这里独立做一次校验，不依赖上游已经过滤。
+    """
+    if seconds is None or not math.isfinite(seconds):
         return ""
     total = max(0, int(seconds))
     hours, remainder = divmod(total, 3600)

@@ -88,6 +88,19 @@ class TestToSeconds(unittest.TestCase):
         """bool is a subclass of int in Python -- must not be silently treated as seconds."""
         self.assertIsNone(_to_seconds(True))
 
+    def test_inf_returns_none(self):
+        """Non-finite numeric input must not silently become a fake timestamp."""
+        self.assertIsNone(_to_seconds(float("inf")))
+        self.assertIsNone(_to_seconds(float("-inf")))
+
+    def test_nan_returns_none(self):
+        self.assertIsNone(_to_seconds(float("nan")))
+
+    def test_inf_string_returns_none(self):
+        """float() happily parses "inf"/"nan" strings -- the ':'-split path must
+        also reject non-finite results instead of passing them through."""
+        self.assertIsNone(_to_seconds("inf"))
+
 
 class TestFormatTimestamp(unittest.TestCase):
     """Locks the compressed prompt timestamp format: mm:ss, or h:mm:ss past 1 hour."""
@@ -101,6 +114,15 @@ class TestFormatTimestamp(unittest.TestCase):
 
     def test_over_one_hour_uses_hmmss(self):
         self.assertEqual(_format_timestamp(3665), "1:01:05")
+
+    def test_inf_returns_empty_string_without_crashing(self):
+        """int(float('inf')) raises OverflowError -- must be guarded, not just rely on
+        _to_seconds() already filtering it out upstream (defense in depth)."""
+        self.assertEqual(_format_timestamp(float("inf")), "")
+
+    def test_nan_returns_empty_string_without_crashing(self):
+        """int(float('nan')) raises ValueError -- same defense-in-depth guard."""
+        self.assertEqual(_format_timestamp(float("nan")), "")
 
 
 class TestBuildSegmentLines(unittest.TestCase):
