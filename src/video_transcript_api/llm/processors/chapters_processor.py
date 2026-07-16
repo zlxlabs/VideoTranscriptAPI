@@ -91,6 +91,10 @@ class Chapter:
 
     start_seg/end_seg 是 segments 列表里的下标（闭区间）；start_time/end_time
     是反查对应 segment 的时间戳后转换出的秒数，上游缺失时间信息时可能为 None。
+
+    若推导出 end_time < start_time（segments 时间乱序/脏数据导致），end_time
+    会被诚实降级为 None，绝不产出非法区间；不改变 start_seg/end_seg 的顺序
+    语义——索引顺序仍是正文顺序，不做重排（见 `_sanitize_end_time`）。
     """
 
     index: int
@@ -333,6 +337,39 @@ def _derive_times(chapters: List[Dict[str, Any]], segments: List[Dict[str, Any]]
     for chapter in chapters:
         chapter["start_time"] = _to_seconds(segments[chapter["start_seg"]].get("start_time"))
         chapter["end_time"] = _to_seconds(segments[chapter["end_seg"]].get("end_time"))
+
+
+def _sanitize_end_time(
+    start_time: Optional[float], end_time: Optional[float], idx: int
+) -> Optional[float]:
+    """诚实降级：若 end_time < start_time，丢弃 end_time（置 None），不产出非法区间。
+
+    segments 时间乱序或坏数据会让反查出的 start_time/end_time 组合倒挂——
+    不论是单章内部（_derive_times 直接反查出的一对）还是相邻同名章节合并后
+    （`_merge_adjacent_same_title` 拼接首章 start_time 与末章 end_time）产生的
+    倒挂，都会在这里被拦下。不重排 segments、不改变 start_seg/end_seg，只是让
+    这一条的"结束时间"退化为"未知"（与部分 segment 缺时间戳同一等级的容忍），
+    状态仍然 GENERATED——这不是需要重试或判失败的语义错误，只是数据本身
+    不足以支撑一个合法的时间区间。
+
+    调用时机：必须在合并（`_merge_adjacent_same_title`）**之后**、最终构造
+    `Chapter` **之前**做，这样才能同时覆盖两类倒挂来源。
+
+    Args:
+        start_time: 章节 start_time（可能为 None）
+        end_time: 章节 end_time（可能为 None）
+        idx: 该章节在最终章节列表中的下标，仅用于日志定位
+
+    Returns:
+        原始 end_time；若两者均非 None 且 end_time < start_time 则返回 None
+    """
+    if start_time is not None and end_time is not None and end_time < start_time:
+        logger.warning(
+            f"[CHAPTERS] chapters[{idx}] end_time ({end_time}) < start_time "
+            f"({start_time}), discarding end_time (segments may be out of order)"
+        )
+        return None
+    return end_time
 
 
 def _merge_adjacent_same_title(chapters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -594,10 +631,14 @@ class ChaptersProcessor:
 
         _warn_if_density_out_of_range(merged)
 
-        # 步骤 7：title 长度规范化（软处理，超长截断）——必须放在合并与合并后
-        # 数量校验之后：截断是有损操作，若提前做，两个前 23 字相同但完整内容
-        # 不同的长标题会被截成同一字符串，被步骤 5 的合并逻辑误判成"同名"而
-        # 错误合并（见 `_normalize_title_length` 文档）。
+        # 步骤 7：构造最终 Chapter 列表——title 长度规范化（软处理，超长截断）
+        # 必须放在合并与合并后数量校验之后：截断是有损操作，若提前做，两个
+        # 前 23 字相同但完整内容不同的长标题会被截成同一字符串，被步骤 5 的
+        # 合并逻辑误判成"同名"而错误合并（见 `_normalize_title_length` 文档）。
+        # 同时对 end_time 做倒挂防御（见 `_sanitize_end_time`）：segments 时间
+        # 乱序/坏数据可能让某章 end_time < start_time（无论是单章内部反查
+        # 出来的，还是合并相邻同名章节拼出来的），这里统一诚实降级为 None，
+        # 不放行非法区间。
         final_chapters = [
             Chapter(
                 index=i,
@@ -606,7 +647,7 @@ class ChaptersProcessor:
                 start_seg=chapter["start_seg"],
                 end_seg=chapter["end_seg"],
                 start_time=chapter["start_time"],
-                end_time=chapter["end_time"],
+                end_time=_sanitize_end_time(chapter["start_time"], chapter["end_time"], i),
             )
             for i, chapter in enumerate(merged)
         ]

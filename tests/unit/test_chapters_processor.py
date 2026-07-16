@@ -802,6 +802,54 @@ class TestTimeHandling(ChaptersProcessorTestBase):
         # = "00:15:00" (4*180+180=900s), confirming HH:MM:SS strings parse correctly.
         self.assertEqual(result.chapters[0].end_time, 900.0)
 
+    def test_end_time_before_start_time_becomes_none_with_warning(self):
+        """Out-of-order / corrupt upstream segment timestamps can make a
+        derived chapter's end_time earlier than its own start_time -- an
+        illegal interval. Honest degradation: discard end_time (set to None)
+        and log a warning, but keep status GENERATED and do not reorder
+        segments (index order stays the body's order)."""
+        segments = make_segments(10)
+        segments[0]["start_time"] = 500.0  # chapter 0's start_seg (index 0)
+        segments[4]["end_time"] = 100.0    # chapter 0's end_seg (index 4) -- earlier
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+
+        with patch(
+            "video_transcript_api.llm.processors.chapters_processor.logger"
+        ) as mock_logger:
+            result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual(result.chapters[0].start_time, 500.0)
+        self.assertIsNone(result.chapters[0].end_time)
+        # segments themselves must not be reordered -- start_seg/end_seg
+        # indices are unchanged from what the LLM/derivation produced.
+        self.assertEqual(result.chapters[0].start_seg, 0)
+        self.assertEqual(result.chapters[0].end_seg, 4)
+        warning_messages = [str(call.args[0]) for call in mock_logger.warning.call_args_list]
+        self.assertTrue(
+            any("end_time" in msg and "start_time" in msg for msg in warning_messages),
+            f"expected an end_time-before-start_time warning, got: {warning_messages}",
+        )
+
+    def test_ascending_times_not_affected_by_end_before_start_guard(self):
+        """Sanity check for the other direction: normal ascending times must
+        pass through completely unaffected by the new guard."""
+        segments = make_segments(10)
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual(result.chapters[0].start_time, 0.0)
+        self.assertEqual(result.chapters[0].end_time, 900.0)
+        self.assertIsNotNone(result.chapters[1].end_time)
+
 
 class TestFingerprint(ChaptersProcessorTestBase):
     def test_fingerprint_is_stable_across_calls(self):
