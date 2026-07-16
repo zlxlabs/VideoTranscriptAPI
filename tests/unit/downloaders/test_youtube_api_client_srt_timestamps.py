@@ -108,6 +108,19 @@ SRT_BODY_ENDS_WITH_STANDALONE_DIGIT_LINE = (
     "42\n"
 )
 
+SRT_MIDDLE_CUE_MISSING_TIMELINE_ROW = (
+    "1\n"
+    "00:00:01,000 --> 00:00:02,000\n"
+    "First line\n"
+    "\n"
+    "42\n"
+    "Orphan body text\n"
+    "\n"
+    "3\n"
+    "00:00:05,000 --> 00:00:06,000\n"
+    "Third line\n"
+)
+
 SRT_EMPTY = ""
 
 
@@ -283,6 +296,29 @@ def test_standalone_digit_line_at_end_of_cue_with_no_following_line_is_kept():
     ]
     assert YouTubeApiClient.parse_srt_to_text(
         SRT_BODY_ENDS_WITH_STANDALONE_DIGIT_LINE
+    ) == result.text
+
+
+def test_middle_cue_missing_timeline_row_lands_as_orphan_segment():
+    """A cue whose timeline row is entirely absent (index line followed
+    directly by body text, no "-->" line at all -- e.g. "42\\nOrphan body
+    text\\n\\n") must not silently vanish from segments even though its text
+    still lands in result.text. Per the "text is never lost" invariant, once
+    segments is non-None (because the file does contain other real cues),
+    this orphan text must land as its own segment with start_time/end_time
+    both None, in its correct position between the surrounding cues."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(
+        SRT_MIDDLE_CUE_MISSING_TIMELINE_ROW
+    )
+
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": 2.0, "text": "First line"},
+        {"start_time": None, "end_time": None, "text": "Orphan body text"},
+        {"start_time": 5.0, "end_time": 6.0, "text": "Third line"},
+    ]
+    assert result.text == "First line Orphan body text Third line"
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_MIDDLE_CUE_MISSING_TIMELINE_ROW
     ) == result.text
 
 
