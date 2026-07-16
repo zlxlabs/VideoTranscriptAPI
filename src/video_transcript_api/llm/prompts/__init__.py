@@ -722,5 +722,83 @@ def build_speaker_inference_user_prompt(
 
 
 # ============================================================
+# 章节梗概生成任务 Prompt 模板
+# ============================================================
+
+CHAPTERS_SYSTEM_PROMPT = """你是专业的章节划分助手。你的任务是阅读带编号的转录文本，按内容主题的转折点将其划分为若干章节，并为每章撰写标题与梗概。
+
+## 划分规则
+
+1. **按主题转折切章**：每当话题发生实质性转换时开启新章节，每章通常对应一个完整的话题或环节
+2. **粒度参考**：每章大致对应 3-10 分钟的内容，过细（每句话都切）或过粗（整段只有一章）都应避免
+3. **覆盖全文、按编号顺序**：章节必须从第一条编号（0）开始，按编号顺序连续覆盖到最后一条，不得跳跃或遗漏中间内容
+4. **起点严格递增**：后一章的起始编号必须严格大于前一章，不允许重复或倒序
+
+## 输出字段要求
+
+- `title`：章节标题，不超过 20 个字，不要带"第 x 章"之类的序号前缀，直接概括这一段的主题
+- `gist`：章节梗概，用 2-3 句话说明这一段具体讲了什么、有什么值得听的亮点或结论，禁止"介绍了相关内容"这类空洞笼统的套话
+- `start_seg`：该章节在输入编号正文中的起始编号（整数）。**只需要给起始编号，不要给结束编号，也不要自己计算或输出任何时间戳**——时间信息由程序根据编号反查，你给出的时间大概率是错的
+
+## 输出格式
+
+必须输出 JSON 对象，格式为：
+```
+{"chapters": [{"title": "...", "gist": "...", "start_seg": 0}, ...]}
+```
+- 数组按 start_seg 升序排列
+- 只返回 JSON，不要包含任何解释、评论，也不要用 markdown 代码块包裹"""
+
+
+def build_chapters_user_prompt(
+    segment_lines: str,
+    video_title: str = "",
+    author: str = "",
+    description: str = "",
+    retry_hint: str = "",
+) -> str:
+    """构建章节梗概生成任务的 User Prompt
+
+    设计原则：动态内容放在末尾，最大化 KV Cache 前缀复用（与 build_calibrate_user_prompt
+    等保持一致的组织方式）。
+
+    Args:
+        segment_lines: 压缩后的编号正文，每行形如 "[i] mm:ss (speaker:)? text"
+            （由 ChaptersProcessor._build_segment_lines 生成）
+        video_title: 视频标题
+        author: 作者/频道
+        description: 视频描述
+        retry_hint: 上一次输出违反语义约束（start_seg 越界/未递增等）时的具体错误描述，
+            用于二次调用时引导模型修正，为空则不追加此段
+
+    Returns:
+        User prompt 字符串
+    """
+    parts = []
+
+    # 重试提示（如果有，放在最前面，与 build_calibrate_user_prompt 的 retry_hint 用法一致）
+    if retry_hint:
+        parts.append(f"**⚠️ 上一次输出有误，请修正**：{retry_hint}\n")
+
+    # 辅助信息（动态部分）
+    if video_title or author or description:
+        parts.append("**内容辅助信息**：")
+        if video_title:
+            parts.append(f"- 标题：{video_title}")
+        if author:
+            parts.append(f"- 作者/频道：{author}")
+        if description:
+            desc_truncated = description[:500] + ('...' if len(description) > 500 else '')
+            parts.append(f"- 描述：{desc_truncated}")
+        parts.append("")
+
+    # 编号正文（放在最后）
+    parts.append("**编号正文**（请基于以下编号划分章节）：")
+    parts.append(segment_lines)
+
+    return "\n".join(parts)
+
+
+# ============================================================
 # 注：分段总结功能已废弃，当前采用整体总结策略
 # ============================================================
