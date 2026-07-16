@@ -100,6 +100,22 @@ _RETRY_HINT_VALUE_TRUNCATE_TO = 199
 _RETRY_HINT_MAX_CHARS = 1000
 _RETRY_HINT_TRUNCATE_TO = 999
 
+# gate-r27 P3：`_generate_with_retry` 两次尝试（首次 + 单次语义重试）都失败
+# 后，`_process_impl` 会把最后一次的原始 raw_chapters（LLM 返回的整份
+# chapters 列表，未经任何截断）通过 repr 整体拼进最终 FAILED 结果的 error
+# 字段（同时原样写入 error 日志）。这条路径与上面的 retry_hint 两级防线是
+# 完全独立的："语义校验错误信息"（validation_error）只在命中第一处非法字段
+# 时提前返回、只回显一个被截断的值，本身已经有界；但这里拼的是"最后一次
+# 尝试的完整原始返回"，如果 LLM 两次都返回同一个超大非法 title/gist（如
+# 50 万字符垃圾），未经限长的 repr 会让 result.error 与日志膨胀到相同量级，
+# 拖慢下游消费方（前端展示、日志采集）并浪费存储。这里复用与 retry_hint
+# 同款截断策略（`_truncate_repr_for_hint`），但配一套独立的、更宽松的长度
+# 上限：终态错误面向人工排查，允许比"回显进下一次 LLM prompt"的 retry_hint
+# 单值（200 字符）更长的截断样本，但仍要有硬上限，不能放行"错误类别 +
+# 全量原文"意义上的无界拼接。
+_FINAL_ERROR_RAW_CHAPTERS_MAX_CHARS = 2000
+_FINAL_ERROR_RAW_CHAPTERS_TRUNCATE_TO = 1999
+
 
 # ============================================================
 # 结果类型
@@ -545,28 +561,42 @@ def _truncate_description(description: Optional[str]) -> str:
     return truncated
 
 
-def _truncate_repr_for_hint(value: Any) -> str:
-    """把即将拼进语义校验错误信息的不可信值转成安全长度的 repr（gate-r24 P2）。
+def _truncate_repr_for_hint(
+    value: Any,
+    max_chars: int = _RETRY_HINT_VALUE_MAX_CHARS,
+    truncate_to: int = _RETRY_HINT_VALUE_TRUNCATE_TO,
+) -> str:
+    """把即将拼进错误信息/日志的不可信值转成安全长度的 repr（gate-r24 P2，
+    gate-r27 P3 扩展为通用截断 helper）。
 
-    仅供 `_validate_and_normalize_start_segs` 内部拼错误信息时替代裸的
-    `{value!r}` 插值——value 是 LLM 返回的原始字段（start_seg 类型错误时
-    的整个值、title、gist），完全不受本服务控制，理论上可以长达数十万字符
-    （如 LLM 返回大段垃圾填充）。不做限长的话，这个 repr 会原样进入
-    `_validate_and_normalize_start_segs` 的返回值，最终拼进第二次调用的
-    retry_hint，让第二次 prompt 的长度失控。
+    原始动机（gate-r24 P2）：供 `_validate_and_normalize_start_segs` 内部拼
+    错误信息时替代裸的 `{value!r}` 插值——value 是 LLM 返回的原始字段
+    （start_seg 类型错误时的整个值、title、gist），完全不受本服务控制，
+    理论上可以长达数十万字符（如 LLM 返回大段垃圾填充）。不做限长的话，
+    这个 repr 会原样进入 `_validate_and_normalize_start_segs` 的返回值，
+    最终拼进第二次调用的 retry_hint，让第二次 prompt 的长度失控。
+
+    gate-r27 P3：`max_chars`/`truncate_to` 开放为可选参数（默认沿用原来的
+    retry-hint 单值上限，调用方不传时行为完全不变），供 `_process_impl`
+    终态失败 error 拼接 raw_chapters 时复用同一套"截断 + 省略号"策略、但配
+    一套更宽松的独立上限（`_FINAL_ERROR_RAW_CHAPTERS_MAX_CHARS` 等）——那
+    条路径与 retry_hint 无关（不会被回显进下一次 prompt），允许比 retry
+    单值场景更长的诊断样本，但同样需要硬上限，不能无界拼接全量原文。
 
     Args:
         value: 待展示的非法值，任意类型（未必是 str——start_seg 类型错误
             分支可能传入任意 JSON 类型）
+        max_chars: 不截断的长度上限，默认 `_RETRY_HINT_VALUE_MAX_CHARS`
+        truncate_to: 超限时保留的前缀长度，默认 `_RETRY_HINT_VALUE_TRUNCATE_TO`
 
     Returns:
-        str: repr(value) 的结果，长度 <= `_RETRY_HINT_VALUE_MAX_CHARS`
-            （超长时截断为前 `_RETRY_HINT_VALUE_TRUNCATE_TO` 字符 + "…"）
+        str: repr(value) 的结果，长度 <= max_chars
+            （超长时截断为前 truncate_to 字符 + "…"）
     """
     text = repr(value)
-    if len(text) <= _RETRY_HINT_VALUE_MAX_CHARS:
+    if len(text) <= max_chars:
         return text
-    return text[:_RETRY_HINT_VALUE_TRUNCATE_TO] + "…"
+    return text[:truncate_to] + "…"
 
 
 def _build_retry_hint(validation_error: str) -> str:
@@ -1195,7 +1225,19 @@ class ChaptersProcessor:
         if normalized is None:
             error = call_error or "chapters generation failed"
             if raw_chapters is not None:
-                error = f"{error} | raw={raw_chapters!r}"
+                # gate-r27 P3：raw_chapters 是 LLM 最后一次尝试的完整原始
+                # 返回，未经任何截断——两次尝试都返回超大非法 title/gist
+                # （如 50 万字符垃圾）时，裸 `{raw_chapters!r}` 会让这里的
+                # error（连带下面的日志）膨胀到同一量级。诊断留痕只需要
+                # "错误类别（error 本身）+ 截断样本"，不需要全量原文，复用
+                # `_truncate_repr_for_hint` 的截断策略，但配一套独立的、
+                # 更宽松的上限（终态诊断场景，不像 retry_hint 那样会被回显
+                # 进下一次 prompt），详见 `_FINAL_ERROR_RAW_CHAPTERS_MAX_CHARS`
+                # 文档。
+                error = (
+                    f"{error} | raw="
+                    f"{_truncate_repr_for_hint(raw_chapters, _FINAL_ERROR_RAW_CHAPTERS_MAX_CHARS, _FINAL_ERROR_RAW_CHAPTERS_TRUNCATE_TO)}"
+                )
             logger.error(f"[CHAPTERS] {error}")
             return ChaptersResult(
                 chapters=[], status=ChaptersStatus.FAILED,

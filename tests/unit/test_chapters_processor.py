@@ -30,6 +30,7 @@ from video_transcript_api.llm.processors.chapters_processor import (
     _build_retry_hint,
     _RETRY_HINT_VALUE_MAX_CHARS,
     _RETRY_HINT_MAX_CHARS,
+    _FINAL_ERROR_RAW_CHAPTERS_MAX_CHARS,
 )
 from video_transcript_api.llm.core.config import LLMConfig
 from video_transcript_api.utils.llm_status import ChaptersStatus
@@ -1180,6 +1181,61 @@ class TestRetryHintBounding(ChaptersProcessorTestBase):
         self.assertIsNone(normalized)
         self.assertIsNotNone(error)
         self.assertLess(len(error), 500)  # nowhere near the 500,000-char raw value
+
+
+class TestFinalErrorRawChaptersBounding(ChaptersProcessorTestBase):
+    """gate-r27 P3: when both attempts (first + the single semantic retry)
+    exhaust without producing a valid chapters list, `_process_impl` writes
+    the LAST attempt's raw_chapters into the FAILED result's error field
+    (and the accompanying error log) to aid debugging. This is a separate
+    code path from TestRetryHintBounding above -- that class covers the
+    *validation_error* string embedded mid-pipeline (bounded per-value via
+    _truncate_repr_for_hint inside _validate_and_normalize_start_segs, and
+    it always returns on the FIRST illegal field so it only ever carries one
+    truncated value). This class covers the outer `_process_impl` call site
+    that used to concatenate the ENTIRE raw_chapters repr with no bound at
+    all -- if the LLM returns the same huge garbage value on both attempts,
+    the untruncated repr used to make result.error (and the error log)
+    balloon to the same size as the garbage payload."""
+
+    def test_two_huge_garbage_attempts_yield_bounded_final_error_and_log(self):
+        """Both attempts return a chapters list containing a 500k-char blank
+        title (invalid -- fails the non-empty-after-strip check both times).
+        The retry is exhausted, so the processor gives up with FAILED. The
+        resulting error string (and the error-level log line built from it)
+        must stay bounded to roughly the _FINAL_ERROR_RAW_CHAPTERS_MAX_CHARS
+        budget, nowhere near the 500,000-char raw payload -- and must not
+        contain the full garbage text verbatim."""
+        segments = make_segments(10)
+        huge_garbage_title = " " * 500_000  # blank after strip -> invalid every time
+        bad = mock_llm_response([
+            {"title": huge_garbage_title, "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+        self.llm_client.call.side_effect = [bad, bad]
+
+        with patch("video_transcript_api.llm.processors.chapters_processor.logger") as mock_logger:
+            result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.FAILED)
+        self.assertEqual(self.llm_client.call.call_count, 2)
+        self.assertEqual(result.chapters, [])
+        self.assertIsNotNone(result.error)
+
+        # Nowhere near the 500,000-char garbage payload -- bounded to the
+        # validation-error prefix (already <500 chars, see
+        # TestRetryHintBounding.test_validate_and_normalize_embeds_truncated_repr_directly)
+        # plus the truncated raw-chapters sample (<= _FINAL_ERROR_RAW_CHAPTERS_MAX_CHARS).
+        self.assertLess(
+            len(result.error), _FINAL_ERROR_RAW_CHAPTERS_MAX_CHARS + 500
+        )
+        self.assertNotIn(huge_garbage_title, result.error)
+
+        error_log_messages = [str(call.args[0]) for call in mock_logger.error.call_args_list]
+        self.assertTrue(error_log_messages)
+        for msg in error_log_messages:
+            self.assertLess(len(msg), _FINAL_ERROR_RAW_CHAPTERS_MAX_CHARS + 500)
+            self.assertNotIn(huge_garbage_title, msg)
 
 
 class TestTitleTruncation(ChaptersProcessorTestBase):
