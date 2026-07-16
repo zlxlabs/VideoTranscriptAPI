@@ -128,11 +128,17 @@ def _to_seconds(value: Union[float, int, str, None]) -> Optional[float]:
     保持私有 —— 这是本处理器内部的一次性兼容 shim，将来与协调器合并时
     会被替换为项目共享的时间转换工具，不对外暴露。
 
+    负数一律视为非法时间，返回 None —— 与 transcriber/segments.py 的
+    parse_time_to_seconds 语义对齐（时间不可能为负）。不做这个校验会让
+    全负时间轴被误判为"有可用时间轴"照样调用 LLM，还会产出 start_time=-5
+    这类负数，与 prompt 里 _format_timestamp 展示的 00:00（clamp 到 0）
+    自相矛盾。
+
     Args:
         value: 原始时间值，None/数值/字符串三种之一
 
     Returns:
-        秒数（float），无法解析或输入为 None 时返回 None
+        秒数（float，>= 0），无法解析或输入为 None 时返回 None
     """
     if value is None:
         return None
@@ -143,6 +149,9 @@ def _to_seconds(value: Union[float, int, str, None]) -> Optional[float]:
         seconds = float(value)
         if not math.isfinite(seconds):
             logger.warning(f"[CHAPTERS] Non-finite time value, treating as None: {value!r}")
+            return None
+        if seconds < 0:
+            logger.warning(f"[CHAPTERS] Negative time value, treating as None: {value!r}")
             return None
         return seconds
     if isinstance(value, str):
@@ -161,6 +170,9 @@ def _to_seconds(value: Union[float, int, str, None]) -> Optional[float]:
             seconds = seconds * 60 + part
         if not math.isfinite(seconds):
             logger.warning(f"[CHAPTERS] Non-finite time value, treating as None: {value!r}")
+            return None
+        if seconds < 0:
+            logger.warning(f"[CHAPTERS] Negative time value, treating as None: {value!r}")
             return None
         return seconds
     logger.warning(f"[CHAPTERS] Unexpected time value type {type(value)!r}, treating as None: {value!r}")

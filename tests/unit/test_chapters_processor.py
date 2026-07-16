@@ -101,6 +101,17 @@ class TestToSeconds(unittest.TestCase):
         also reject non-finite results instead of passing them through."""
         self.assertIsNone(_to_seconds("inf"))
 
+    def test_negative_number_returns_none(self):
+        """Negative time is not a legal timestamp -- must align with
+        transcriber/segments.py's parse_time_to_seconds, which already rejects
+        negative values the same way."""
+        self.assertIsNone(_to_seconds(-5))
+        self.assertIsNone(_to_seconds(-5.0))
+        self.assertIsNone(_to_seconds("-5"))
+
+    def test_negative_hhmmss_string_returns_none(self):
+        self.assertIsNone(_to_seconds("-1:02:03"))
+
 
 class TestFormatTimestamp(unittest.TestCase):
     """Locks the compressed prompt timestamp format: mm:ss, or h:mm:ss past 1 hour."""
@@ -235,6 +246,21 @@ class TestGating(ChaptersProcessorTestBase):
 
         self.assertEqual(result.status, ChaptersStatus.GENERATED)
         self.llm_client.call.assert_called_once()
+
+    def test_all_negative_start_time_skipped_no_timeline(self):
+        """A fully negative timeline (e.g. a corrupt/relative-offset upstream source)
+        must be treated the same as 'no usable timeline' -- not proceed to call the
+        LLM and produce a chapter with a negative start_time that contradicts the
+        00:00 timestamp shown in the prompt (_format_timestamp clamps to 0)."""
+        segments = make_segments(10)
+        for i, seg in enumerate(segments):
+            seg["start_time"] = -(i + 1)  # every value negative, none valid
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.SKIPPED_NO_TIMELINE)
+        self.assertEqual(result.chapters, [])
+        self.llm_client.call.assert_not_called()
 
     def test_too_long_text_failed(self):
         tiny_config = LLMConfig(
@@ -583,6 +609,23 @@ class TestTimeHandling(ChaptersProcessorTestBase):
         self.assertEqual(result.status, ChaptersStatus.GENERATED)
         self.assertIsNone(result.chapters[0].start_time)
         self.assertIsNone(result.chapters[1].end_time)
+
+    def test_mixed_negative_and_valid_time_negative_entry_becomes_none(self):
+        """One negative start_time among otherwise-valid segments must not abort
+        the whole run (has_any_start_time is still True via the valid entries),
+        but the negative entry itself must resolve to None rather than a bogus
+        negative timestamp."""
+        segments = make_segments(10)
+        segments[0]["start_time"] = -5.0  # segment 0 is chapter 0's start_seg
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertIsNone(result.chapters[0].start_time)
 
     def test_hhmmss_string_time_is_converted(self):
         segments = make_segments(10, use_string_time=True)
