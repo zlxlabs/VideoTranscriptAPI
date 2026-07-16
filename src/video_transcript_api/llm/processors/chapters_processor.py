@@ -212,13 +212,13 @@ def _validate_and_normalize_start_segs(
 ) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
     """校验并规范化 LLM 返回的 chapters 列表的 start_seg 序列。
 
-    只校验 start_seg —— 这是 LLM 唯一被要求填写、也最容易出错的字段：
+    校验以下内容：
     1. 每项 start_seg 必须是 int（排除 bool）且落在 [0, segment_count) 范围内
     2. 按 start_seg 去重（保留首次出现），去重后的序列必须严格递增
     3. 去重后若首项 start_seg > 0，钳制为 0（覆盖开头；这是自动修正，不算校验失败）
-
-    title/gist 不参与本函数的合法性判断：LLM 偶尔漏填时用空字符串兜底即可，
-    不值得为此触发一次额外的重试往返——真正影响结果正确性的是 start_seg。
+    4. title、gist 必须是非空字符串（strip 后非空）——曾经缺失/非字符串/空白值
+       会被 `str(x or "").strip()` 强转成空串照样成章，导致章节标题/梗概为空。
+       与 start_seg 越界/重复同等对待：视为语义校验失败，触发重试。
 
     Args:
         raw_chapters: response.structured_output.get("chapters") 的原始返回
@@ -247,9 +247,21 @@ def _validate_and_normalize_start_segs(
                 f"chapters[{idx}].start_seg={start_seg} out of range [0, {segment_count})"
             )
 
+        raw_title = item.get("title")
+        if not isinstance(raw_title, str) or not raw_title.strip():
+            return None, (
+                f"chapters[{idx}].title is missing, not a string, or blank: {raw_title!r}"
+            )
+
+        raw_gist = item.get("gist")
+        if not isinstance(raw_gist, str) or not raw_gist.strip():
+            return None, (
+                f"chapters[{idx}].gist is missing, not a string, or blank: {raw_gist!r}"
+            )
+
         items.append({
-            "title": str(item.get("title") or "").strip(),
-            "gist": str(item.get("gist") or "").strip(),
+            "title": raw_title.strip(),
+            "gist": raw_gist.strip(),
             "start_seg": start_seg,
         })
 

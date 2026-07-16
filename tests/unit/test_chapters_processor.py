@@ -369,6 +369,76 @@ class TestSemanticRetry(ChaptersProcessorTestBase):
         self.assertEqual(result.chapters, [])
 
 
+class TestTitleGistValidation(ChaptersProcessorTestBase):
+    """title/gist must be non-empty strings after stripping -- a missing/non-string/
+    blank value used to be silently coerced to "" and still became a chapter. Now
+    it is treated the same as a bad start_seg: retry once with the error, FAILED
+    if still bad."""
+
+    def test_missing_title_retries_then_fails_if_still_bad(self):
+        segments = make_segments(10)
+        bad = mock_llm_response([
+            {"gist": "g", "start_seg": 0},  # title key missing entirely
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+        self.llm_client.call.side_effect = [bad, bad]
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.FAILED)
+        self.assertEqual(self.llm_client.call.call_count, 2)
+        self.assertEqual(result.chapters, [])
+        retry_prompt = self.llm_client.call.call_args_list[1][1]["user_prompt"]
+        self.assertIn("title", retry_prompt.lower())
+
+    def test_blank_gist_retries_then_fails_if_still_bad(self):
+        segments = make_segments(10)
+        bad = mock_llm_response([
+            {"title": "A", "gist": "   ", "start_seg": 0},  # whitespace-only gist
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+        self.llm_client.call.side_effect = [bad, bad]
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.FAILED)
+        self.assertEqual(self.llm_client.call.call_count, 2)
+        self.assertEqual(result.chapters, [])
+
+    def test_numeric_title_retries_then_fails_if_still_bad(self):
+        """title must be a str type, not merely str()-coercible."""
+        segments = make_segments(10)
+        bad = mock_llm_response([
+            {"title": 123, "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+        self.llm_client.call.side_effect = [bad, bad]
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.FAILED)
+        self.assertEqual(self.llm_client.call.call_count, 2)
+        self.assertEqual(result.chapters, [])
+
+    def test_bad_title_gist_retry_succeeds_when_corrected(self):
+        segments = make_segments(10)
+        bad = mock_llm_response([
+            {"title": "", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+        good = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+        self.llm_client.call.side_effect = [bad, good]
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual(self.llm_client.call.call_count, 2)
+        self.assertEqual(result.chapters[0].title, "A")
+
+
 class TestStructuralValidation(ChaptersProcessorTestBase):
     def test_too_few_chapters_fails(self):
         segments = make_segments(10)
