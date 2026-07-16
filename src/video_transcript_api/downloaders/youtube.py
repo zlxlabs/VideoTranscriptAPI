@@ -12,6 +12,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, VideoUnavailable, IpBlocked, NoTranscriptFound
 from .base import BaseDownloader
 from .models import VideoMetadata, DownloadInfo
+from .subtitle_types import SubtitleResult
 from ..utils.logging import setup_logger
 from ..utils import create_debug_dir
 from ..utils.ytdlp import YtdlpConfigBuilder
@@ -642,10 +643,26 @@ class YoutubeDownloader(BaseDownloader):
     
     def _get_subtitle_with_tikhub_api(self, url):
         """
-        使用原有的 TikHub API 获取字幕作为备用方案
+        使用原有的 TikHub API 获取字幕作为备用方案（向后兼容的纯文本入口）
+
+        内部委托给 _get_subtitle_result_with_tikhub_api()，只取其中的纯文本
+        部分，保持历史返回值（str | None）不变。
+        """
+        result = self._get_subtitle_result_with_tikhub_api(url)
+        return result.text if result else None
+
+    def _get_subtitle_result_with_tikhub_api(self, url):
+        """
+        使用原有的 TikHub API 获取字幕作为备用方案，保留时间戳分段信息
+
+        _get_subtitle_with_tikhub_api() 的完整版：那个方法只返回纯文本，这里
+        额外携带 SubtitleResult 中的 segments，供 get_subtitle_result() 使用。
 
         🆕 优化：复用实例缓存的 video_info，避免重复 TikHub API 请求
         （在同一任务内，get_video_info 通常已被调用）
+
+        返回:
+            SubtitleResult | None
         """
         try:
             video_id = self._extract_video_id(url)
@@ -660,31 +677,31 @@ class YoutubeDownloader(BaseDownloader):
                 video_info = self.get_video_info(url)
 
             subtitle_info = video_info.get("subtitle_info")
-            
+
             if not subtitle_info or not subtitle_info.get("url"):
                 logger.info(f"TikHub API 未找到字幕信息")
                 return None
-            
+
             # 下载字幕XML
             subtitle_url = subtitle_info["url"]
-            
+
             logger.info(f"从 TikHub API 下载字幕: {subtitle_url[:50]}...")
             response = requests.get(subtitle_url, timeout=30)
             response.raise_for_status()
-            
+
             xml_content = response.text
-            
+
             # 生成时间戳前缀
             timestamp_prefix = datetime.datetime.now().strftime("%y%m%d-%H%M%S")
-            
+
             # 保存字幕XML到文件，用于调试
             video_id = video_info.get("video_id")
             subtitle_file = os.path.join(DEBUG_DIR, f"{timestamp_prefix}_subtitle_youtube_{video_id}.xml")
             with open(subtitle_file, 'w', encoding='utf-8') as f:
                 f.write(xml_content)
             logger.debug(f"字幕内容已保存到: {subtitle_file}")
-            
-            # 解析XML字幕
+
+            # 解析XML字幕（含时间戳分段）
             return self._parse_youtube_subtitle_xml(xml_content)
         except Exception as e:
             logger.exception(f"TikHub API 获取字幕异常: {str(e)}")
@@ -693,40 +710,72 @@ class YoutubeDownloader(BaseDownloader):
     def _parse_youtube_subtitle_xml(self, xml_content):
         """
         解析YouTube字幕XML
-        
+
+        文本提取算法与历史版本逐字节兼容（按 start 排序后拼接）；时间戳分段
+        提取是独立的容错步骤，"start"/"dur" 属性缺失或格式错误时不会影响文本
+        拼接，只会让 segments 整体降级为 None（容错铁律：时间解析失败绝不能
+        影响文本提取）。
+
         参数:
             xml_content: XML字幕内容
-            
+
         返回:
-            str: 解析后的字幕文本
+            SubtitleResult | None: 解析成功返回 SubtitleResult（text 逐字节兼容
+            旧版，segments 可能为 None）；XML 本身无法解析时返回 None（与历史
+            行为一致）
         """
         try:
             root = ET.fromstring(xml_content)
-            
-            # 提取文本并按时间顺序排序
-            texts = []
+
+            # 提取文本内容与原始时间属性字符串。start/dur 在此处不做数值转换，
+            # 避免个别条目属性格式错误时连带影响文本提取（见下方独立的
+            # 时间戳分段提取步骤）。
+            raw_items = []
             for text_element in root.findall(".//text"):
-                start = float(text_element.get("start", "0"))
-                duration = float(text_element.get("dur", "0"))
-                content = text_element.text or ""
-                
-                texts.append({
-                    "start": start,
-                    "duration": duration,
-                    "content": content.strip()
+                raw_items.append({
+                    "start_raw": text_element.get("start", "0"),
+                    "dur_raw": text_element.get("dur", "0"),
+                    "content": (text_element.text or "").strip(),
                 })
-            
-            # 按开始时间排序
-            texts.sort(key=lambda x: x["start"])
-            
-            # 合并字幕文本
+
+            # 按开始时间排序；无法解析为数字的 start 视为 0，不影响排序继续
+            def _safe_start(item):
+                try:
+                    return float(item["start_raw"])
+                except (TypeError, ValueError):
+                    return 0.0
+
+            raw_items.sort(key=_safe_start)
+
+            # 合并字幕文本（与历史行为保持逐字节一致）
             merged_text = ""
-            for text in texts:
-                if text["content"]:
-                    merged_text += text["content"] + " "
-            
-            logger.info(f"成功解析YouTube字幕，共{len(texts)}段")
-            return merged_text.strip()
+            for item in raw_items:
+                if item["content"]:
+                    merged_text += item["content"] + " "
+            text = merged_text.strip()
+
+            # 独立提取时间戳分段：整体解析失败（如属性非数字）时降级为 None，
+            # 不影响上面已经算好的 text
+            segments = None
+            try:
+                candidate_segments = []
+                for item in raw_items:
+                    if not item["content"]:
+                        continue
+                    start = float(item["start_raw"])
+                    duration = float(item["dur_raw"])
+                    candidate_segments.append({
+                        "start_time": start,
+                        "end_time": start + duration,
+                        "text": item["content"],
+                    })
+                segments = candidate_segments or None
+            except Exception as e:
+                logger.warning(f"YouTube字幕XML时间戳解析失败，segments 置空: {e}")
+                segments = None
+
+            logger.info(f"成功解析YouTube字幕，共{len(raw_items)}段")
+            return SubtitleResult(text=text, segments=segments)
         except Exception as e:
             logger.exception(f"解析Youtube字幕XML异常: {str(e)}")
             return None
