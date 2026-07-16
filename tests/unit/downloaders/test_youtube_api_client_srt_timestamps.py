@@ -184,6 +184,30 @@ SRT_INVALID_MINUTES_COMPONENT = (
     "Hello world\n"
 )
 
+# gate-r24 P2: _SRT_TIMESTAMP_RANGE_PATTERN is used with .match(), which only
+# anchors the START of the line -- a fourth trailing millisecond digit past
+# the well-formed 3-digit field is simply left unconsumed and ignored, so the
+# loose match still "succeeds" and extracts a start/end time as if the line
+# were perfectly well-formed. This must now be treated the same as any other
+# corrupted timeline: the loose match still recognizes the line as a cue
+# boundary (so the cue's text is not lost, and legacy parse_srt_to_text's
+# output is completely unaffected -- that path is untouched), but the time
+# VALUES must come from a strict, fully-anchored match and fall back to None
+# when the line isn't exactly a well-formed timestamp range.
+SRT_TRAILING_EXTRA_MS_DIGIT = (
+    "1\n"
+    "00:00:01,000 --> 00:00:04,0000\n"
+    "Hello world\n"
+)
+
+# Same bug, different shape: arbitrary trailing garbage characters after an
+# otherwise perfectly well-formed timestamp range.
+SRT_TRAILING_GARBAGE_AFTER_TIMESTAMP = (
+    "1\n"
+    "00:00:01,000 --> 00:00:04,000 garbage\n"
+    "Hello world\n"
+)
+
 SRT_EMPTY = ""
 
 # gate-r16 P2: a UTF-8 BOM (U+FEFF) prepended to the file content (as many
@@ -537,6 +561,55 @@ def test_invalid_minutes_component_treated_as_corrupted_timeline():
     assert YouTubeApiClient.parse_srt_to_text(
         SRT_INVALID_MINUTES_COMPONENT
     ) == result.text
+
+
+def test_trailing_extra_ms_digit_treated_as_corrupted_timeline():
+    """gate-r24 P2: a fourth trailing millisecond digit ("...,0000" instead of
+    the well-formed 3-digit "...,000") must not be silently accepted as a
+    legal time -- the loose .match()-based cue-boundary detection still
+    recognizes the line as a timeline row (so the cue text is preserved and
+    legacy parse_srt_to_text output is unaffected), but the strict,
+    fully-anchored check used to extract the actual time VALUES must reject
+    it, falling back to start_time/end_time = None just like any other
+    corrupted timeline."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_TRAILING_EXTRA_MS_DIGIT)
+
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Hello world"},
+    ]
+    # legacy text path is untouched by this fix -- byte-identical output
+    assert YouTubeApiClient.parse_srt_to_text(SRT_TRAILING_EXTRA_MS_DIGIT) == result.text
+
+
+def test_trailing_garbage_after_timestamp_treated_as_corrupted_timeline():
+    """Same rule for arbitrary trailing garbage characters after an otherwise
+    well-formed timestamp range -- the loose match ignores everything after
+    the recognized prefix, but the strict full-line check must reject it."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(
+        SRT_TRAILING_GARBAGE_AFTER_TIMESTAMP
+    )
+
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Hello world"},
+    ]
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_TRAILING_GARBAGE_AFTER_TIMESTAMP
+    ) == result.text
+
+
+def test_normal_timeline_still_parses_after_strict_check_added():
+    """Regression: a perfectly well-formed timestamp range must still parse
+    to real start/end times under the new strict full-line check -- this is
+    covered implicitly by test_parse_srt_to_subtitle_result_normal_srt, but
+    is asserted explicitly here alongside the two adversarial cases above so
+    the three tests read as one coherent before/after/regression trio."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_NORMAL)
+
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": 4.0, "text": "Hello world"},
+        {"start_time": 5.0, "end_time": 8.0, "text": "This is a test"},
+    ]
+    assert YouTubeApiClient.parse_srt_to_text(SRT_NORMAL) == result.text
 
 
 def test_empty_srt_content():

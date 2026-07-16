@@ -588,6 +588,29 @@ class YouTubeApiClient:
     _SRT_TIMESTAMP_RANGE_PATTERN = re.compile(
         r"(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})"
     )
+    # 严格版时间戳正则，仅用于 segments 提取路径解析具体时间值（gate-r24
+    # P2）。`_SRT_TIMESTAMP_RANGE_PATTERN` 配合 `.match()` 只锚定开头、不要求
+    # 整行都被消耗——"00:00:01,000 --> 00:00:04,0000"（结尾多出一位毫秒数字）
+    # 或行尾带任意垃圾字符的行，仍能匹配出一段"合法"的时间前缀，被当作真实
+    # 时间收录进 segments，绕过了本该判定为"损坏时间轴"的分支。这条正则与
+    # `.fullmatch()` 搭配使用，专门校验一整行是否"恰好"就是一段时间轴声明：
+    # - 允许首尾空白（`\s*`）：调用处传入的 line 已经过 `.strip()`，这里的
+    #   `\s*` 只是防御性冗余，不依赖调用方一定已经 strip 过；
+    # - 毫秒放宽为 1-3 位数字（`\d{1,3}`）：覆盖标准的 3 位零填充写法，同时
+    #   不额外拒绝理论上合法但未零填充到 3 位的写法，但绝不允许 4 位及以上
+    #   的毫秒数字或任何行尾多余字符蒙混过关（fullmatch 的整行锚定会拦下）。
+    #
+    # 不能改动 `_SRT_TIMESTAMP_LINE_PATTERN`/`_SRT_TIMESTAMP_RANGE_PATTERN`
+    # 本身——`parse_srt_to_text`（文本提取路径）与 `_extract_srt_segments` 的
+    # cue 边界判定（is_timeline_attempt/next_is_timeline）都依赖它们现有的
+    # 宽松语义来判断"这是不是一条时间轴行"，收紧会改变 cue 切分结果，让
+    # `parse_srt_to_text` 的输出偏离历史行为（违反逐字节兼容契约）。这条新
+    # 正则只用于"已经确定是一条时间轴行之后，其数值是否可信"这一步，不参与
+    # cue 边界判定，因此不影响文本提取路径，也不改变哪一行被当作 cue 边界。
+    _SRT_TIMESTAMP_STRICT_PATTERN = re.compile(
+        r"\s*(\d{2}):(\d{2}):(\d{2})[,\.](\d{1,3})\s*-->\s*"
+        r"(\d{2}):(\d{2}):(\d{2})[,\.](\d{1,3})\s*"
+    )
     # "时间样式片段"宽松正则：只要求形如 "12:34" 的数字+冒号结构（不要求三段
     # 齐全、不要求毫秒），用于 _looks_like_timeline_attempt 判断一条格式已损坏
     # 的 "-->" 行是否至少有一侧"长得像"时间，从而把它和纯文本里偶然出现的
@@ -860,8 +883,15 @@ class YouTubeApiClient:
             flush_orphan_text()
             found_any_cue = True
 
-            if match:
-                h1, m1, s1, ms1, h2, m2, s2, ms2 = match.groups()
+            # 时间值解析改用严格锚定匹配（gate-r24 P2）：is_timeline_attempt
+            # 判定 cue 边界仍然用上面的宽松 match（不能改，见 cue 边界判定的
+            # 文档），但具体时间数值必须整行严格匹配才可信——宽松匹配成功但
+            # 严格匹配失败（如毫秒位数超标、行尾带垃圾字符），按既有的"损坏
+            # 时间轴"处理：文本保留，时间置 None，不静默放行一个只匹配了前缀
+            # 的"合法"时间。
+            strict_match = YouTubeApiClient._SRT_TIMESTAMP_STRICT_PATTERN.fullmatch(line)
+            if strict_match:
+                h1, m1, s1, ms1, h2, m2, s2, ms2 = strict_match.groups()
                 if has_valid_clock_components(m1, s1) and has_valid_clock_components(m2, s2):
                     start_time = to_seconds(h1, m1, s1, ms1)
                     end_time = to_seconds(h2, m2, s2, ms2)
@@ -877,8 +907,9 @@ class YouTubeApiClient:
                     start_time = None
                     end_time = None
             else:
-                # 时间轴行格式损坏（如缺位数字、分隔符错误），无法解析出具体
-                # 秒数，但仍需保留该 cue 的文本，时间字段置 None
+                # 时间轴行格式损坏（如缺位数字、分隔符错误、毫秒位数超标、
+                # 行尾带垃圾字符），无法解析出具体秒数，但仍需保留该 cue 的
+                # 文本，时间字段置 None
                 start_time = None
                 end_time = None
 
