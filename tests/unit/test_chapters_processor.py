@@ -277,6 +277,40 @@ class TestGating(ChaptersProcessorTestBase):
         self.assertIsNotNone(result.error)
         self.assertIn("too long", result.error.lower())
 
+    def test_numbering_overhead_pushes_over_max_when_bare_text_is_under(self):
+        """max_chapters_input_chars must gate on the actual numbered/timestamped
+        prompt text built by _build_segment_lines (what's really sent to the LLM),
+        not the bare concatenated segment text. Many short segments make the
+        '[i] mm:ss ' prefix overhead dominate: bare text can stay comfortably
+        under the cap while the real prompt blows past it."""
+        tiny_config = LLMConfig(
+            api_key="k", base_url="u",
+            calibrate_model="m", summary_model="s",
+            chapters_model="chap-model",
+            min_chapters_threshold=50,
+            max_chapters_input_chars=1000,
+        )
+        llm_client = Mock()
+        processor = ChaptersProcessor(llm_client=llm_client, config=tiny_config)
+
+        # 200 segments, 2 chars of text each -> bare full_text is only 400 chars,
+        # well under the 1000 cap. But each numbered/timestamped line is far
+        # longer than the 2-char payload it wraps, so the real prompt text
+        # blows well past 1000 chars.
+        segments = [
+            {"text": "hi", "start_time": float(i * 100), "end_time": float(i * 100 + 50)}
+            for i in range(200)
+        ]
+        full_text_len = sum(len(seg["text"]) for seg in segments)
+        self.assertLess(full_text_len, 1000)  # sanity: bare text alone would pass
+
+        result = processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.FAILED)
+        self.assertIsNotNone(result.error)
+        self.assertIn("too long", result.error.lower())
+        llm_client.call.assert_not_called()
+
 
 class TestHappyPath(ChaptersProcessorTestBase):
     def test_generates_chapters(self):

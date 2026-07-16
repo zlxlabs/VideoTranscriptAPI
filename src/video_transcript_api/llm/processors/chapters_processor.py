@@ -470,10 +470,18 @@ class ChaptersProcessor:
                 error=None, fingerprint=fingerprint, segment_count=segment_count,
             )
 
+        # 压缩为带编号的正文——门控 4 必须用这份"实际将发送给 LLM 的文本"来衡量
+        # 长度，而不是未编号的纯正文 full_text：大量短 segment 场景下，`[i]`
+        # 编号、mm:ss 时间戳、speaker 前缀的开销会让真实 prompt 远超纯正文长度，
+        # 仅测量 full_text 会漏判，实际发送的 prompt 仍可能远超模型上限。
+        # 注：门控 3（min_chapters_threshold）语义是"内容量是否值得分章"，与发送
+        # 开销无关，继续用 full_text 测量，不受这里影响。
+        segment_lines = _build_segment_lines(segments)
+
         # 门控 4：原文过长，直接判失败而不是把超大输入硬塞给模型
-        if len(full_text) > self.config.max_chapters_input_chars:
+        if len(segment_lines) > self.config.max_chapters_input_chars:
             error = (
-                f"Input too long for chapters: {len(full_text)} chars > "
+                f"Input too long for chapters: {len(segment_lines)} chars > "
                 f"max_chapters_input_chars={self.config.max_chapters_input_chars}"
             )
             logger.error(f"[CHAPTERS] {error}")
@@ -484,7 +492,7 @@ class ChaptersProcessor:
 
         logger.info(
             f"[CHAPTERS] Generating chapters for {segment_count} segments "
-            f"(text length: {len(full_text)})"
+            f"(text length: {len(full_text)}, prompt text length: {len(segment_lines)})"
         )
 
         # 步骤 1：选择模型
@@ -508,8 +516,8 @@ class ChaptersProcessor:
                 f"[CHAPTERS] chapters_model not configured, falling back to {model!r}"
             )
 
-        # 步骤 2：压缩输入 + 调用 LLM（内含语义校验失败时的单次重试）
-        segment_lines = _build_segment_lines(segments)
+        # 步骤 2：调用 LLM（内含语义校验失败时的单次重试）——segment_lines 已在
+        # 门控 4 处构建完毕，此处直接复用，避免重复压缩同一份输入。
         normalized, raw_chapters, call_error = self._generate_with_retry(
             segment_lines=segment_lines,
             title=title,
