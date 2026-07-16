@@ -19,7 +19,7 @@
 import json
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from ..utils.logging import setup_logger
 
@@ -116,6 +116,46 @@ def parse_time_to_seconds(value: Any) -> Optional[float]:
     return None
 
 
+def sanitize_time_pair(
+    start: Optional[float], end: Optional[float]
+) -> Tuple[Optional[float], Optional[float]]:
+    """校验一对时间戳的合理性，摘掉不合逻辑的值，但绝不影响调用方对文本的保留。
+
+    权威实现归位于此（时间解析工具的统一家，`parse_time_to_seconds` 也在这里）。
+    三条 YouTube 字幕解析路径（youtube-transcript-api 分段 / TikHub XML / SRT，
+    见 `downloaders/subtitle_types.py` 的历史文档）以及本模块自身的
+    `normalize_segments` 都要经过这同一道校验，统一"诚实降级"口径：宁可时间
+    字段是 None，也不能是一个误导下游的负数或倒挂区间。`downloaders/
+    subtitle_types.py` 从本模块导入并 re-export，保持既有 import 路径可用。
+
+    校验只做数值合理性判断，不做有限性 (isfinite) 检查——那一层容错由各调用方
+    在算出 start / end 之前（如经 `parse_time_to_seconds`）就已经做过。
+
+    规则（按顺序应用）：
+        1. start 为负数 -> start 置 None（负的起始时间没有物理意义，常见
+           于上游 start 字段本身就是脏数据）
+        2. end 为负数 -> end 置 None（常见于 end = start + duration 中
+           duration 为负、且求和结果本身也变成负数的情况）
+        3. start、end 均非 None 且 end < start（区间倒挂：duration 为负但
+           求和结果仍非负、或时间轴书写顺序颠倒）-> end 置 None
+
+    参数:
+        start: 起始时间（秒），None 表示不可用
+        end: 结束时间（秒），None 表示不可用
+
+    返回:
+        (start, end): 按上述规则校验后的元组；text 字段的保留完全不受
+        此函数影响，调用方应始终保留原文本
+    """
+    if start is not None and start < 0:
+        start = None
+    if end is not None and end < 0:
+        end = None
+    if start is not None and end is not None and end < start:
+        end = None
+    return start, end
+
+
 def normalize_segments(
     raw: Union[Dict[str, Any], List[Any], None]
 ) -> Optional[List[Dict[str, Any]]]:
@@ -127,6 +167,10 @@ def normalize_segments(
         若原始数据没有 speaker，绝不编造 "unknown" 之类占位值。
 
     字段名兼容 `start_time|start`、`end_time|end`（优先取 `_time` 后缀版本）。
+
+    解析出的 (start_time, end_time) 对会再经 `sanitize_time_pair` 清洗一遍——
+    与三条 YouTube 字幕解析路径同一口径：end < start 的倒挂区间会把 end_time
+    置 None，不放行给下游。
 
     核心不变式——文本永不丢失：只要 `text` 非空，即便时间解析失败，也保留该
     条目（时间置 None）；只有 `text` 缺失/为空（含纯空白）的条目才会被跳过。
@@ -162,9 +206,12 @@ def normalize_segments(
         start_raw = item.get("start_time", item.get("start"))
         end_raw = item.get("end_time", item.get("end"))
 
+        start_time, end_time = sanitize_time_pair(
+            parse_time_to_seconds(start_raw), parse_time_to_seconds(end_raw)
+        )
         entry: Dict[str, Any] = {
-            "start_time": parse_time_to_seconds(start_raw),
-            "end_time": parse_time_to_seconds(end_raw),
+            "start_time": start_time,
+            "end_time": end_time,
             "text": text,
         }
 

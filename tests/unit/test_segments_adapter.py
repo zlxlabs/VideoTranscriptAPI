@@ -17,6 +17,7 @@ from video_transcript_api.transcriber.segments import (
     load_segments,
     normalize_segments,
     parse_time_to_seconds,
+    sanitize_time_pair,
 )
 
 
@@ -245,6 +246,36 @@ class TestNormalizeSegments:
         raw = ["not a dict", {"start_time": 0.0, "end_time": 1.0, "text": "kept"}]
         result = normalize_segments(raw)
         assert result == [{"start_time": 0.0, "end_time": 1.0, "text": "kept"}]
+
+    def test_reversed_interval_nulls_end_time_via_sanitize_time_pair(self):
+        """The three subtitle-extraction paths (youtube-transcript-api /
+        TikHub XML / SRT) all run their start/end pair through
+        sanitize_time_pair before handing it off -- this central adapter
+        must apply the exact same cleaning, not let a reversed interval
+        (end < start) leak through to downstream consumers unchanged."""
+        raw = [{"start_time": 10, "end_time": 5, "text": "reversed interval"}]
+        result = normalize_segments(raw)
+        assert result == [
+            {"start_time": 10.0, "end_time": None, "text": "reversed interval"}
+        ]
+
+    def test_normal_interval_unaffected_by_sanitize_time_pair(self):
+        raw = [{"start_time": 1.0, "end_time": 4.0, "text": "normal"}]
+        result = normalize_segments(raw)
+        assert result == [{"start_time": 1.0, "end_time": 4.0, "text": "normal"}]
+
+
+# ---------------------------------------------------------------------------
+# sanitize_time_pair (authoritative home: this module; downloaders/
+# subtitle_types.py re-exports it for backward-compatible import paths)
+# ---------------------------------------------------------------------------
+
+class TestSanitizeTimePairLivesInSegmentsModule:
+    def test_importable_and_reverses_end_to_none(self):
+        assert sanitize_time_pair(5.0, 3.0) == (5.0, None)
+
+    def test_valid_pair_untouched(self):
+        assert sanitize_time_pair(1.0, 4.0) == (1.0, 4.0)
 
 
 # ---------------------------------------------------------------------------
