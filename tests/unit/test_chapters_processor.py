@@ -1349,6 +1349,80 @@ class TestNonDictSegmentFiltering(ChaptersProcessorTestBase):
         self.llm_client.call.assert_not_called()
 
 
+class TestBlankTextSegmentFiltering(ChaptersProcessorTestBase):
+    """Regression tests for the gate-r15 P2 finding: a blank/whitespace-only
+    (or missing/non-string) 'text' segment must not count toward
+    segment_count -- otherwise "one long real segment + one blank cue" slips
+    past the gate-r14 '< 2 usable segments' gate and could even seed an
+    empty chapter. Filtering must match transcriber.segments.normalize_segments'
+    'blank text has no retention value' rule, and happen before any gate is
+    evaluated."""
+
+    def test_blank_segment_plus_one_real_segment_is_skipped_no_timeline(self):
+        long_segment = make_segments(1, text_repeat=50)[0]
+        blank_segment = {"text": "   ", "start_time": 60.0, "end_time": 65.0}
+        segments = [long_segment, blank_segment]
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.SKIPPED_NO_TIMELINE)
+        self.assertEqual(result.chapters, [])
+        self.assertEqual(result.segment_count, 1)
+        self.llm_client.call.assert_not_called()
+
+    def test_blank_segment_among_two_normal_segments_generates_normally(self):
+        good = make_segments(2)
+        blank_segment = {"text": "", "start_time": 30.0, "end_time": 35.0}
+        segments = [blank_segment, good[0], good[1]]
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "gist a", "start_seg": 0},
+            {"title": "B", "gist": "gist b", "start_seg": 1},
+        ])
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual(result.segment_count, 2)
+        self.llm_client.call.assert_called_once()
+
+        # The numbered prompt text sent to the LLM must contain exactly the
+        # two real segments (indices 0 and 1) -- the blank segment must not
+        # occupy a numbered slot or otherwise appear in the prompt.
+        expected_segment_lines = _build_segment_lines(good)
+        user_prompt = self.llm_client.call.call_args.kwargs["user_prompt"]
+        self.assertTrue(user_prompt.endswith(expected_segment_lines))
+
+    def test_blank_text_filtering_logs_warning_with_count(self):
+        """Missing text key, non-string text, and whitespace-only text all
+        count as 'blank' and must all be filtered -- with a single warning
+        naming the total count, the same shape as the non-dict filtering
+        warning."""
+        good = make_segments(2)
+        segments = [
+            {"text": None, "start_time": 1.0, "end_time": 2.0},
+            {"start_time": 1.0, "end_time": 2.0},  # text key missing entirely
+            {"text": "   \n\t  ", "start_time": 1.0, "end_time": 2.0},  # whitespace only
+            good[0],
+            good[1],
+        ]
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "gist a", "start_seg": 0},
+            {"title": "B", "gist": "gist b", "start_seg": 1},
+        ])
+
+        with patch("video_transcript_api.llm.processors.chapters_processor.logger") as mock_logger:
+            result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual(result.segment_count, 2)
+
+        warning_messages = [str(call.args[0]) for call in mock_logger.warning.call_args_list]
+        self.assertTrue(
+            any("3" in msg and "blank" in msg.lower() for msg in warning_messages),
+            f"expected a filtered-blank-text-count warning, got: {warning_messages}",
+        )
+
+
 class TestUnexpectedExceptionSafety(ChaptersProcessorTestBase):
     """Regression test for the gate-r13 P2 finding's second layer: process()
     must never let an unforeseen internal exception escape -- it is the

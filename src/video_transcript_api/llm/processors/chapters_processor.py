@@ -630,24 +630,54 @@ class ChaptersProcessor:
                 error=None, fingerprint=None, segment_count=0,
             )
 
-        # 入口过滤：segments 混入非 dict 条目时（如 JSON null 反序列化成
-        # None，或上游脏数据混进裸字符串），下面所有逻辑都假设每条 segment
-        # 是 dict、可以 .get(...)，非 dict 条目会直接抛 AttributeError，
-        # 违反"处理器永远返回诚实状态、不崩溃"的契约。这里直接跳过非 dict
-        # 条目，语义与 transcriber.segments.normalize_segments 对非 dict
-        # 条目"直接跳过"保持一致，避免同一类脏数据在两处产生不同的容忍口径。
+        # 入口过滤：跳过两类没有留存价值的脏条目，过滤后才进入下面的门控/LLM
+        # 调用流程：
+        # 1. 非 dict 条目（如 JSON null 反序列化成 None，或上游脏数据混进裸
+        #    字符串）——下面所有逻辑都假设每条 segment 是 dict、可以
+        #    .get(...)，非 dict 条目会直接抛 AttributeError，违反"处理器
+        #    永远返回诚实状态、不崩溃"的契约。
+        # 2. text 缺失/非 str/strip 后为空（含纯空白）的条目——这类条目对
+        #    章节生成没有任何留存价值：不贡献任何可读正文，却仍会占用一个
+        #    编号、计入 segment_count。若不过滤，"一个长正文 segment + 一个
+        #    空白 cue"就能绕开门控 2.5（有效 segment 数 < 2 时跳过 LLM 调用）
+        #    ——空白 cue 让 segment_count 虚高到 2，实际只有一条有内容的
+        #    segment，同样没有可分章的内部边界；更进一步，即便侥幸通过门控
+        #    也可能被 LLM 选为某章的 start_seg，生成一个内容为空的"幽灵章节"。
+        #
+        # 两类过滤合并为一次遍历、共用同一份 warning 语义，与
+        # transcriber.segments.normalize_segments 对非 dict"直接跳过"、对
+        # 空文本"没有留存价值，跳过"的口径保持一致，避免同一类脏数据在两处
+        # 产生不同的容忍口径。
         original_count = len(segments)
-        segments = [seg for seg in segments if isinstance(seg, dict)]
-        filtered_count = original_count - len(segments)
-        if filtered_count > 0:
+        filtered_segments: List[Dict[str, Any]] = []
+        non_dict_count = 0
+        blank_text_count = 0
+        for seg in segments:
+            if not isinstance(seg, dict):
+                non_dict_count += 1
+                continue
+            text = seg.get("text")
+            if not isinstance(text, str) or not text.strip():
+                blank_text_count += 1
+                continue
+            filtered_segments.append(seg)
+        segments = filtered_segments
+
+        if non_dict_count > 0:
             logger.warning(
-                f"[CHAPTERS] Filtered {filtered_count} non-dict segment "
+                f"[CHAPTERS] Filtered {non_dict_count} non-dict segment "
                 f"entries out of {original_count} (upstream data quality issue)"
+            )
+        if blank_text_count > 0:
+            logger.warning(
+                f"[CHAPTERS] Filtered {blank_text_count} blank-text segment "
+                f"entries out of {original_count} (text missing, non-string, "
+                f"or blank after strip -- no retention value)"
             )
         if not segments:
             logger.info(
-                "[CHAPTERS] All segments were non-dict entries after "
-                "filtering, skipping (no timeline)"
+                "[CHAPTERS] All segments were filtered out (non-dict or "
+                "blank text), skipping (no timeline)"
             )
             return ChaptersResult(
                 chapters=[], status=ChaptersStatus.SKIPPED_NO_TIMELINE,
