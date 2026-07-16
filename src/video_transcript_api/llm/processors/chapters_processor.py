@@ -564,9 +564,66 @@ class ChaptersProcessor:
         """
         logger.info(f"[CHAPTERS] process() called: title={title!r}")
 
+        # 兜底防线：process() 是本处理器唯一的对外入口，契约是"永远返回诚实
+        # 状态、不崩溃"——下面的门控/校验/推导逻辑已经覆盖了所有已知的脏数据
+        # 场景，但这里仍然包一层 try/except 作为接线批完成前的最后一道防线，
+        # 只捕获"未预见的" bug（比如上游又混入了一种没考虑到的脏数据形态）。
+        # 已知分支（门控 1-4、语义/结构校验等）必须继续各自显式返回对应的
+        # 诚实状态（SKIPPED_*/FAILED/GENERATED），不能靠这层兜底代劳——这层
+        # 只是防线，不是正常控制流的一部分。
+        try:
+            return self._process_impl(segments, title, author, description, selected_models)
+        except Exception as exc:  # noqa: BLE001 - 有意宽泛捕获，见上方注释
+            logger.error(
+                f"[CHAPTERS] Unexpected error in process(): {exc}",
+                exc_info=True,
+            )
+            return ChaptersResult(
+                chapters=[], status=ChaptersStatus.FAILED,
+                error=f"unexpected error: {exc}", fingerprint=None, segment_count=0,
+            )
+
+    def _process_impl(
+        self,
+        segments: Optional[List[Dict[str, Any]]],
+        title: str,
+        author: str,
+        description: str,
+        selected_models: Optional[Dict[str, Any]],
+    ) -> ChaptersResult:
+        """process() 的实际实现：门控 -> LLM 调用 -> 校验 -> 构造结果。
+
+        从 process() 拆出来，纯粹是为了让 process() 能用一层 try/except 包住
+        整个主体（见 process() 文档的"兜底防线"说明），本身不是独立的公共
+        入口，不直接被外部调用。
+        """
         # 门控 1：没有可用的分段时间轴，无法生成章节（正常路径，非失败）
         if not segments:
             logger.info("[CHAPTERS] No segments provided, skipping (no timeline)")
+            return ChaptersResult(
+                chapters=[], status=ChaptersStatus.SKIPPED_NO_TIMELINE,
+                error=None, fingerprint=None, segment_count=0,
+            )
+
+        # 入口过滤：segments 混入非 dict 条目时（如 JSON null 反序列化成
+        # None，或上游脏数据混进裸字符串），下面所有逻辑都假设每条 segment
+        # 是 dict、可以 .get(...)，非 dict 条目会直接抛 AttributeError，
+        # 违反"处理器永远返回诚实状态、不崩溃"的契约。这里直接跳过非 dict
+        # 条目，语义与 transcriber.segments.normalize_segments 对非 dict
+        # 条目"直接跳过"保持一致，避免同一类脏数据在两处产生不同的容忍口径。
+        original_count = len(segments)
+        segments = [seg for seg in segments if isinstance(seg, dict)]
+        filtered_count = original_count - len(segments)
+        if filtered_count > 0:
+            logger.warning(
+                f"[CHAPTERS] Filtered {filtered_count} non-dict segment "
+                f"entries out of {original_count} (upstream data quality issue)"
+            )
+        if not segments:
+            logger.info(
+                "[CHAPTERS] All segments were non-dict entries after "
+                "filtering, skipping (no timeline)"
+            )
             return ChaptersResult(
                 chapters=[], status=ChaptersStatus.SKIPPED_NO_TIMELINE,
                 error=None, fingerprint=None, segment_count=0,
