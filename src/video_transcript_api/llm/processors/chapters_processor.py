@@ -148,7 +148,14 @@ def _to_seconds(value: Union[float, int, str, None]) -> Optional[float]:
         # bool 是 int 的子类，显式排除，避免 True/False 被当成 1/0 秒
         return None
     if isinstance(value, (int, float)):
-        seconds = float(value)
+        try:
+            seconds = float(value)
+        except OverflowError:
+            # JSON 合法的超大整数（如 10**400）转 float 会因超出 double 可表示
+            # 范围抛 OverflowError，与本函数"绝不抛异常"的契约冲突，按非法
+            # 时间处理，与 transcriber/segments.py 的同款兜底保持一致。
+            logger.warning(f"[CHAPTERS] Time value overflows float, treating as None: {value!r}")
+            return None
         if not math.isfinite(seconds):
             logger.warning(f"[CHAPTERS] Non-finite time value, treating as None: {value!r}")
             return None

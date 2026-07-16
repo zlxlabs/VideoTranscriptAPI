@@ -80,6 +80,13 @@ class TestParseTimeToSeconds:
         # float('inf')/nan must never be treated as a valid timestamp --
         # downstream int(inf) conversions would crash otherwise.
         assert parse_time_to_seconds(float("inf")) is None
+
+    def test_huge_int_overflow_returns_none(self):
+        # JSON allows integers of arbitrary precision -- json.loads() can hand
+        # back a Python int like 10**400. float(10**400) raises OverflowError
+        # ("int too large to convert to float"), which would violate this
+        # function's "never raises" contract if left uncaught.
+        assert parse_time_to_seconds(10 ** 400) is None
         assert parse_time_to_seconds(float("-inf")) is None
         assert parse_time_to_seconds(float("nan")) is None
 

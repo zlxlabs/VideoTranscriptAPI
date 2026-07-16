@@ -48,6 +48,10 @@ def parse_time_to_seconds(value: Any) -> Optional[float]:
     否则下游对时间做 `int()` 转换时会直接崩溃。用 `math.isfinite` 兜底，
     覆盖 int/float 直传和字符串解析两类入口。
 
+    JSON 允许任意精度整数，反序列化后可能拿到 `10**400` 这类超出 double 可
+    表示范围的 Python int——`float()` 转换会抛 `OverflowError`（而不是像
+    字符串解析那样静默变成 `inf`），同样按非法时间处理，返回 `None`。
+
     Args:
         value: 任意来源的原始时间值。
 
@@ -62,7 +66,13 @@ def parse_time_to_seconds(value: Any) -> Optional[float]:
         return None
 
     if isinstance(value, (int, float)):
-        seconds = float(value)
+        try:
+            seconds = float(value)
+        except OverflowError:
+            # JSON 允许任意精度整数，反序列化后可能拿到 10**400 这类天文数字的
+            # Python int；float() 转换会因超出 double 可表示范围抛
+            # OverflowError，与本函数"绝不抛异常"的契约冲突，按非法时间处理。
+            return None
         return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
     if isinstance(value, str):

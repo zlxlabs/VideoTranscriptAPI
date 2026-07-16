@@ -112,6 +112,13 @@ class TestToSeconds(unittest.TestCase):
     def test_negative_hhmmss_string_returns_none(self):
         self.assertIsNone(_to_seconds("-1:02:03"))
 
+    def test_huge_int_overflow_returns_none(self):
+        """JSON allows arbitrary-precision integers -- json.loads() can hand
+        back a Python int like 10**400. float(10**400) raises OverflowError
+        ("int too large to convert to float"), which would violate this
+        function's "never raises" contract if left uncaught."""
+        self.assertIsNone(_to_seconds(10 ** 400))
+
 
 class TestFormatTimestamp(unittest.TestCase):
     """Locks the compressed prompt timestamp format: mm:ss, or h:mm:ss past 1 hour."""
@@ -643,6 +650,22 @@ class TestTimeHandling(ChaptersProcessorTestBase):
         self.assertEqual(result.status, ChaptersStatus.GENERATED)
         self.assertIsNone(result.chapters[0].start_time)
         self.assertIsNone(result.chapters[1].end_time)
+
+    def test_process_does_not_raise_on_overflow_time_value(self):
+        """A JSON-legal but astronomically large integer time value (e.g.
+        10**400 surviving upstream deserialization) must not blow up process()
+        with an uncaught OverflowError -- it degrades to None like any other
+        unparseable time, same as the negative/None cases in this class."""
+        segments = make_segments(10)
+        segments[3]["start_time"] = 10 ** 400
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+
+        result = self.processor.process(segments=segments, title="T")  # must not raise
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
 
     def test_mixed_negative_and_valid_time_negative_entry_becomes_none(self):
         """One negative start_time among otherwise-valid segments must not abort
