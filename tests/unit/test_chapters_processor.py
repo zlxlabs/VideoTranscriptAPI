@@ -505,6 +505,23 @@ class TestStructuralValidation(ChaptersProcessorTestBase):
         self.assertEqual(result.status, ChaptersStatus.FAILED)
         self.assertIn("count", result.error.lower())
 
+    def test_merge_collapsing_below_minimum_fails(self):
+        """2 chapters pass the pre-merge count check ([2, 100]), but they share the
+        same title so adjacent-merge collapses them into 1 -- the 'at least 2
+        chapters' invariant must be re-checked AFTER merging, not just before."""
+        segments = make_segments(10)
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "Same Topic", "gist": "part one", "start_seg": 0},
+            {"title": "Same Topic", "gist": "part two", "start_seg": 5},
+        ])
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.FAILED)
+        self.assertEqual(result.chapters, [])
+        self.assertIsNotNone(result.error)
+        self.assertIn("合并后不足两章", result.error)
+
 
 class TestDensityWarning(ChaptersProcessorTestBase):
     def test_short_average_duration_logs_warning_but_keeps_result(self):

@@ -534,8 +534,25 @@ class ChaptersProcessor:
         _derive_end_segs(normalized, segment_count)
         _derive_times(normalized, segments)
 
-        # 步骤 5：合并相邻同名章节 + 密度 warning（基于合并后的最终章节计算）
+        # 步骤 5：合并相邻同名章节
         merged = _merge_adjacent_same_title(normalized)
+
+        # 步骤 6：合并后重新校验章节数下限——步骤 3 的校验发生在合并之前，
+        # LLM 返回两个同名相邻章节时能通过"至少 2 章"的检查，合并后却可能
+        # 只剩 1 章，突破了"至少 2 章"这个不变式。合并只会减少数量，不会
+        # 增加，所以这里只需要再查下限，不用重查上限。
+        if len(merged) < _MIN_CHAPTER_COUNT:
+            error = (
+                f"Chapter count dropped below minimum after merging adjacent "
+                f"duplicate titles: {len(merged)} < {_MIN_CHAPTER_COUNT} "
+                f"(合并后不足两章)"
+            )
+            logger.error(f"[CHAPTERS] {error}")
+            return ChaptersResult(
+                chapters=[], status=ChaptersStatus.FAILED,
+                error=error, fingerprint=fingerprint, segment_count=segment_count,
+            )
+
         _warn_if_density_out_of_range(merged)
 
         final_chapters = [
