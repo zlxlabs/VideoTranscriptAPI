@@ -100,7 +100,8 @@ class Chapter:
 class ChaptersResult:
     """章节生成结果："诚实状态模型"的载体，组织方式参考 SummaryResult。
 
-    - segments 为 None/空: chapters=[], status=SKIPPED_NO_TIMELINE
+    - segments 为 None/空，或非空但没有任何一条能解析出 start_time（完全没有可用
+      时间轴）: chapters=[], status=SKIPPED_NO_TIMELINE
     - 原文过短: chapters=[], status=SKIPPED_SHORT
     - 原文过长/LLM 异常/语义或结构校验不通过: chapters=[], status=FAILED, error 非空
     - 成功: chapters=完整列表, status=GENERATED
@@ -429,7 +430,24 @@ class ChaptersProcessor:
         full_text = "".join((seg.get("text") or "") for seg in segments)
         fingerprint = hashlib.sha1(full_text.encode("utf-8")).hexdigest()
 
-        # 门控 2：原文过短，未触发章节生成（正常路径，非失败）
+        # 门控 2：segments 非空，但没有任何一条能解析出 start_time —— 章节功能
+        # 的核心价值就是时间范围，完全没有时间信息时生成出来的章节也没有意义。
+        # 只要求"至少一条"，允许部分 segment 缺时间（下游 _derive_times 本就
+        # 容忍单条 None）。必须在调用 LLM 之前判定，不能等生成完了再发现没用。
+        has_any_start_time = any(
+            _to_seconds(seg.get("start_time")) is not None for seg in segments
+        )
+        if not has_any_start_time:
+            logger.info(
+                "[CHAPTERS] All segments lack a parseable start_time, "
+                "skipping (no usable timeline)"
+            )
+            return ChaptersResult(
+                chapters=[], status=ChaptersStatus.SKIPPED_NO_TIMELINE,
+                error=None, fingerprint=fingerprint, segment_count=segment_count,
+            )
+
+        # 门控 3：原文过短，未触发章节生成（正常路径，非失败）
         if len(full_text) < self.config.min_chapters_threshold:
             logger.info(
                 f"[CHAPTERS] Text too short for chapters: "
@@ -440,7 +458,7 @@ class ChaptersProcessor:
                 error=None, fingerprint=fingerprint, segment_count=segment_count,
             )
 
-        # 门控 3：原文过长，直接判失败而不是把超大输入硬塞给模型
+        # 门控 4：原文过长，直接判失败而不是把超大输入硬塞给模型
         if len(full_text) > self.config.max_chapters_input_chars:
             error = (
                 f"Input too long for chapters: {len(full_text)} chars > "

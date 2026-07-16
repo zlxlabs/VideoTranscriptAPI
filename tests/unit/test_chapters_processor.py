@@ -192,6 +192,50 @@ class TestGating(ChaptersProcessorTestBase):
         self.assertIsNone(result.error)
         self.llm_client.call.assert_not_called()
 
+    def test_all_start_time_none_skipped_no_timeline(self):
+        """Non-empty segments but every start_time is None -- there is no usable
+        timeline at all, so chapters (whose core value is the time range) must
+        skip before ever calling the LLM, not fall through to GENERATED."""
+        segments = make_segments(10)
+        for seg in segments:
+            seg["start_time"] = None
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.SKIPPED_NO_TIMELINE)
+        self.assertEqual(result.chapters, [])
+        self.assertIsNone(result.error)
+        self.assertEqual(result.segment_count, 10)
+        self.llm_client.call.assert_not_called()
+
+    def test_all_start_time_unparseable_skipped_no_timeline(self):
+        """Unparseable strings normalize to None via _to_seconds -- must count as
+        'no usable timeline' too, not just literal None."""
+        segments = make_segments(10)
+        for seg in segments:
+            seg["start_time"] = "not-a-time"
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.SKIPPED_NO_TIMELINE)
+        self.llm_client.call.assert_not_called()
+
+    def test_one_start_time_present_still_generates(self):
+        """A single parseable start_time among many None's is enough to proceed --
+        the rule is 'at least one', not 'all or nothing'."""
+        segments = make_segments(10)
+        for seg in segments[1:]:
+            seg["start_time"] = None
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+        ])
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.llm_client.call.assert_called_once()
+
     def test_too_long_text_failed(self):
         tiny_config = LLMConfig(
             api_key="k", base_url="u",
