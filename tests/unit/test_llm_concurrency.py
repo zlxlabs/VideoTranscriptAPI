@@ -40,6 +40,23 @@ class _DummyCacheManager:
         """
         yield
 
+    def invalidate_llm_status(self, platform, media_id, use_speaker_recognition):
+        """No-op stand-in for the write-ahead status-file revocation
+        (S1, PR3 review hardening): _save_llm_results calls this before
+        rewriting any product file so a mid-rewrite failure can't leave a
+        stale llm_status.json vouching for a torn result. This fake never
+        persisted a status file in the first place, so there is nothing to
+        return/delete -- an empty dict matches the real implementation's
+        "no prior status" case.
+
+        use_speaker_recognition (V1, PR3 review hardening): accepted (and
+        required, mirroring the real signature) purely so this fake stays
+        call-compatible with _save_llm_results -- the real parameter exists
+        to target the correct cache variant's directory, which this no-op
+        fake has no notion of.
+        """
+        return {}
+
     def save_llm_result(self, *, platform, media_id, use_speaker_recognition, llm_type, content):
         self.saved.append(
             {
@@ -49,6 +66,7 @@ class _DummyCacheManager:
                 "content": content,
             }
         )
+        return True
 
     def get_task_by_id(self, task_id):
         return {"view_token": f"token-{task_id}"}
@@ -67,7 +85,12 @@ class _DummyCacheManager:
         return True
 
     def update_task_status(self, task_id, status, **kwargs):
-        pass
+        # Real CacheManager.update_task_status is a compare-and-set that
+        # returns True on a genuine win (see H2 fix, local codex review
+        # round 7: _handle_llm_task now gates its completion notification
+        # on this return value). This double has no terminal-stickiness
+        # model of its own, so it always reports a win.
+        return True
 
 
 class _DummyNotifier:

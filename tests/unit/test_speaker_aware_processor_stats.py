@@ -62,6 +62,7 @@ class TestSpeakerAwareProcessorStats(unittest.TestCase):
                     "Speaker2": {"name": "Bob", "confidence": 0.3, "applied": False},
                 },
                 "low_confidence": ["Speaker2"],
+                "source": "llm",
             }
         )
 
@@ -103,6 +104,12 @@ class TestSpeakerAwareProcessorStats(unittest.TestCase):
         # And the flat mapping is what actually got applied to the dialog text.
         speakers_in_output = {d["speaker"] for d in result["structured_data"]["dialogs"]}
         self.assertEqual(speakers_in_output, {"Alice", "说话人2"})
+
+        # G4 (local codex review round 6): infer()'s "source" tag must be
+        # threaded through to stats too -- llm_ops._save_llm_results reads
+        # stats.speaker_inference_source to decide whether the "refresh
+        # existing display names" path is allowed to run at all.
+        self.assertEqual(result["stats"]["speaker_inference_source"], "llm")
 
 
 if __name__ == "__main__":

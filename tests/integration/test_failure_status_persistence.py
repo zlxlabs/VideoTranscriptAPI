@@ -193,6 +193,59 @@ class TestYoutubeApiFailurePersistsFailed:
         assert task["status"] == "failed"
         assert "unexpected error" in (task.get("error_message") or "")
 
+    def test_raising_notifier_does_not_block_failed_persistence(self, env, cm, monkeypatch):
+        """W5 (PR3 review hardening 二轮，顺手排查全仓同类站点后一并修复的
+        4 处下载/字幕失败分支之一): every early-return failure branch in
+        process_transcription used to call task_notifier.notify_task_status()
+        BEFORE cache_manager.update_task_status(..., FAILED, ...). If the
+        notifier itself raised (webhook timeout/rate-limit), that exception
+        would propagate straight out of process_transcription and skip the
+        FAILED write entirely -- the task stayed stuck in a non-terminal
+        status forever, exactly the class of bug this whole test module (see
+        the prod-incident docstring at the top of the file) exists to catch.
+
+        The shared _fail_task_and_notify() helper introduced by the fix
+        writes FAILED first and wraps the notify call in its own
+        try/except, so a raising notifier can no longer swallow the
+        terminal write. This drives that fix through the same
+        YouTubeApiError branch as test_api_error_persists_failed above, but
+        with a notifier that raises.
+
+        The stub only raises for the specific "下载失败" terminal
+        notification _fail_task_and_notify sends -- process_transcription
+        also fires several unguarded PROGRESS notifications elsewhere
+        (e.g. "开始处理 - ...") that are a separate, pre-existing concern
+        unrelated to the notify-vs-terminal-write ordering bug this test
+        targets; making those raise too would route through the outer
+        `except Exception` handler instead and no longer isolate the one
+        code path under test here."""
+        from video_transcript_api.downloaders.youtube_api_errors import YouTubeApiError
+
+        class RaisingRouter:
+            def notify_task_status(self, *args, **kwargs):
+                if kwargs.get("status") == "下载失败":
+                    raise RuntimeError("webhook timeout")
+                return {}
+
+        monkeypatch.setattr(svc, "get_notification_router", lambda: RaisingRouter())
+
+        task_id = cm.create_task(url=YOUTUBE_URL)["task_id"]
+        exc = YouTubeApiError("VIDEO_UNAVAILABLE", "Video unavailable")
+        monkeypatch.setattr(svc, "create_downloader", lambda u: _make_youtube_downloader(exc))
+
+        # Must not raise -- the notifier's RuntimeError must be contained
+        # inside _fail_task_and_notify, not propagate out of
+        # process_transcription (red on the pre-fix code: it would raise
+        # here instead of returning normally).
+        result = svc.process_transcription(task_id=task_id, url=YOUTUBE_URL)
+
+        assert result["status"] == "failed"
+        task = cm.get_task_by_id(task_id)
+        assert task["status"] == "failed", (
+            "FAILED must still be persisted even though the notifier raised"
+        )
+        assert "YouTube API Server error" in (task.get("error_message") or "")
+
 
 class TestOpaqueUrlSchemeSkipsMetadataProbe:
     """Regression for prod incident: an opaque, non-http(s) url (e.g. an

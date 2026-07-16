@@ -163,6 +163,55 @@ class TestTokenValidationEdgeCases:
         user = manager.validate_token("sk-admin-token")
         assert user.get("is_legacy") is None or user.get("is_legacy") is False
 
+    def test_validate_token_survives_concurrent_reload_toctou(self, manager, monkeypatch):
+        """validate_token must read self._users_data exactly once.
+
+        A prior implementation did `token in self._users_data` followed by a
+        separate `self._users_data[token]` lookup. If reload_config() swaps
+        the whole dict reference in between (e.g. the token's config entry
+        was just removed), the second read observes a different dict object
+        than the first and raises KeyError -- turning a normal "invalid
+        token" rejection into a 500 instead of a clean 401.
+
+        This is simulated with a data descriptor standing in for
+        `_users_data`: it returns the real (token-containing) dict on the
+        first two attribute reads and an empty dict from the third read
+        onward, mimicking a reload_config() swap landing between a
+        membership check and the value lookup that follows it. The fixed
+        implementation only ever performs one read (a single `.get(token)`
+        call), so it must both avoid raising and return the correct user
+        info regardless of where such a swap lands.
+        """
+
+        class SwappingUsersData:
+            """Data descriptor: real dict for the first 2 reads, then swaps."""
+
+            def __init__(self, live_data):
+                self._live_data = live_data
+                self.reads = 0
+
+            def __get__(self, obj, objtype=None):
+                self.reads += 1
+                return self._live_data if self.reads <= 2 else {}
+
+            def __set__(self, obj, value):
+                # Accept writes (e.g. from reload_config in other tests) but
+                # keep standing in as the descriptor for this test's manager.
+                self._live_data = value
+
+        descriptor = SwappingUsersData(manager._users_data)
+        # raising=False: UserManager only ever sets `_users_data` as an
+        # instance attribute, so the class itself has no such attribute for
+        # monkeypatch to snapshot before overriding it with our descriptor.
+        monkeypatch.setattr(type(manager), "_users_data", descriptor, raising=False)
+
+        # Must not raise KeyError; must still return the valid user found on
+        # the single read that actually happens.
+        user = manager.validate_token("sk-admin-token")
+        assert user is not None
+        assert user["user_id"] == "admin"
+        assert descriptor.reads == 1
+
 
 # ============================================================
 # User Lookup Tests

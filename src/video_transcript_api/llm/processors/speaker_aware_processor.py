@@ -64,6 +64,7 @@ class SpeakerAwareProcessor:
         media_id: str = "",
         selected_models: Optional[Dict] = None,
         skip_calibration: bool = False,
+        infer_speaker_names: bool = True,
     ) -> Dict:
         """处理有说话人文本
 
@@ -95,21 +96,27 @@ class SpeakerAwareProcessor:
         detected_language = detect_language(dialog_text_sample)
         logger.info(f"Detected language: {detected_language}")
 
-        # 步骤1: 提取关键信息
-        key_info = self.key_info_extractor.extract(
-            title=title,
-            author=author,
-            description=description,
-            platform=platform,
-            media_id=media_id,
-        )
+        # Key info only feeds calibration and speaker-name inference prompts.
+        # Skipping both must not make a hidden LLM call.
+        if skip_calibration and not infer_speaker_names:
+            key_info = KeyInfo([], [], [], [], [], [], [])
+        else:
+            key_info = self.key_info_extractor.extract(
+                title=title,
+                author=author,
+                description=description,
+                platform=platform,
+                media_id=media_id,
+            )
 
         # 步骤1.5: 说话人推断
-        speakers = list(
-            dict.fromkeys(
-                d.get("speaker", "") for d in base_dialogs if d.get("speaker")
-            )
-        )
+        # 统一用 SpeakerInferencer.extract_speaker_labels（本地 codex review 第 7 轮 H7）：
+        # 原本此处是独立手写的列表推导式，与下方 _coerce_dialogs 内部的别名链解析点同源但独立维护；
+        # base_dialogs 是 _coerce_dialogs 的输出（只剩 "speaker"/"text" 两个规范字段且 text 已保证非空），
+        # 在这份输入上与原来的列表推导式行为完全等价，但与
+        # 读侧（transcription.py 的分层缓存预检）共用同一个实现，不再因两处各自手写悄悄漂移再次拉出
+        # 经典读/写指纹不一致 bug。
+        speakers = SpeakerInferencer.extract_speaker_labels(base_dialogs)
         # 细化 stage=speaker_inference，仅覆盖本次说话人推断调用的审计标签，
         # 退出 with 块后自动恢复为外层的 calibration
         with set_context(stage="speaker_inference"):
@@ -122,9 +129,15 @@ class SpeakerAwareProcessor:
                 key_info=key_info,
                 platform=platform,
                 media_id=media_id,
+                allow_llm=infer_speaker_names,
             )
         speaker_mapping = speaker_inference_result.get("mapping", {})
         speaker_inference_meta = speaker_inference_result.get("meta", {})
+        # 本地 codex review 第 6 轮 G4：随 meta 一起把本轮映射的真实
+        # 来源传给下游（llm_ops._save_llm_results 的补层刷新判断），
+        # 区分 llm/cache_hit/identity_fallback——见
+        # SpeakerInferencer.infer() 顶部 docstring 的 "source" 一节。
+        speaker_inference_source = speaker_inference_result.get("source")
 
         # 结构化标准化（应用映射 + 合并连续同说话人 + 时间字段规范化）
         normalized_dialogs = self._normalize_and_merge_dialogs(
@@ -200,6 +213,7 @@ class SpeakerAwareProcessor:
                 "chunk_count": len(chunks),
                 "calibration_stats": calibration_stats,
                 "speaker_inference": speaker_inference_meta,
+                "speaker_inference_source": speaker_inference_source,
             }
         }
 
@@ -210,17 +224,18 @@ class SpeakerAwareProcessor:
             if not isinstance(dialog, dict):
                 continue
 
-            speaker = dialog.get("speaker")
-            if not speaker:
-                speaker = dialog.get("spk") or dialog.get("speaker_id")
+            # 别名链解析委托给 SpeakerInferencer.resolve_dialog_speaker/
+            # resolve_dialog_text（本地 codex review 第 7 轮 H7），与
+            # speaker_inferencer.input_fingerprint、transcription.py 的
+            # 预检读侧共用同一份实现——三处此前各自手写同一段 if/for 链，
+            # 任何一处改动都可能忘了同步另外两处（is not None 判定错写成
+            # 别的判定条件会把数字 0 的说话人折叠成 "unknown"，空文本判定
+            # 口径不一致会让两侧算出的说话人集合分叉），统一实现从根上
+            # 避免这类漂移。
+            speaker = SpeakerInferencer.resolve_dialog_speaker(dialog)
+            text = SpeakerInferencer.resolve_dialog_text(dialog)
 
-            text = dialog.get("text")
-            if text is None:
-                text = dialog.get("content")
-            if text is None:
-                text = dialog.get("transcript")
-
-            if not text:
+            if text in (None, ""):
                 continue
 
             coerced.append(
@@ -251,7 +266,7 @@ class SpeakerAwareProcessor:
             if not normalized_dialog:
                 continue
 
-            if current and current.get("speaker") == normalized_dialog.get("speaker"):
+            if current and current.get("speaker_id") == normalized_dialog.get("speaker_id"):
                 current["text"] = f"{current.get('text', '')} {normalized_dialog.get('text', '')}".strip()
                 if normalized_dialog.get("end_time"):
                     current["end_time"] = normalized_dialog["end_time"]
@@ -281,7 +296,8 @@ class SpeakerAwareProcessor:
         self, dialog: Dict, speaker_mapping: Dict[str, str]
     ) -> tuple:
         """规范化单条对话，返回(对话, start_seconds, end_seconds)"""
-        speaker = dialog.get("speaker", "unknown")
+        raw_speaker = dialog.get("speaker", "unknown")
+        speaker = raw_speaker
         text = dialog.get("text", "")
         if not text:
             return None, None, None
@@ -320,6 +336,7 @@ class SpeakerAwareProcessor:
             "end_time": end_time,
             "duration": duration,
             "speaker": speaker,
+            "speaker_id": raw_speaker,
             "text": text,
         }
 
@@ -824,6 +841,14 @@ class SpeakerAwareProcessor:
                     "end_time": original.get("end_time", "00:00:00"),
                     "duration": original.get("duration", 0),
                     "speaker": original.get("speaker", "unknown"),
+                    # speaker_id 是原始说话人标签（由 _normalize_dialog 构建），
+                    # 之前这里重建 dialog dict 时漏掉了它——本地
+                    # codex review 第 5 轮 F4：llm_ops.py::
+                    # _refresh_speaker_names_in_existing_structured_artifact 的
+                    # 姓名补层刷新依赖这个字段来精确
+                    # 定位每条 dialog 对应的原始标签，丢掉后
+                    # 会误判为旧 schema（无 speaker_id）不做刷新。
+                    "speaker_id": original.get("speaker_id"),
                     "text": text,
                     "original_text": original_text,
                 }

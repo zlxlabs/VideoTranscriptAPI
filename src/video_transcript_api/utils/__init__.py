@@ -9,38 +9,41 @@ import os
 from .logging import setup_logger, load_config, ensure_dir
 
 
-def create_debug_dir() -> str:
+class _LazyConfiguredDir(os.PathLike):
+    """Resolve and create a configured directory only when first used."""
+
+    def __init__(self, field: str, default: str):
+        self.field = field
+        self.default = default
+
+    def __fspath__(self) -> str:
+        config = load_config()
+        path = config.get("log", {}).get(self.field, self.default)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def __str__(self) -> str:
+        return self.__fspath__()
+
+
+def create_debug_dir() -> os.PathLike:
     """
     从配置文件读取并创建 debug 日志目录。
 
     Returns:
         str: debug 目录的完整路径
     """
-    config = load_config()
-    log_config = config.get("log", {})
-    debug_dir = log_config.get("debug_dir", "./data/logs/debug")
-
-    if not os.path.exists(debug_dir):
-        os.makedirs(debug_dir, exist_ok=True)
-
-    return debug_dir
+    return _LazyConfiguredDir("debug_dir", "./data/logs/debug")
 
 
-def get_llm_debug_dir() -> str:
+def get_llm_debug_dir() -> os.PathLike:
     """
     从配置文件读取并创建 LLM debug 日志目录。
 
     Returns:
         str: LLM debug 目录的完整路径
     """
-    config = load_config()
-    log_config = config.get("log", {})
-    llm_debug_dir = log_config.get("llm_debug_dir", "./data/logs/llm_debug")
-
-    if not os.path.exists(llm_debug_dir):
-        os.makedirs(llm_debug_dir, exist_ok=True)
-
-    return llm_debug_dir
+    return _LazyConfiguredDir("llm_debug_dir", "./data/logs/llm_debug")
 
 
 __all__ = ["setup_logger", "load_config", "ensure_dir", "create_debug_dir", "get_llm_debug_dir"]

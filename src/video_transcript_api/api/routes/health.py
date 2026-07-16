@@ -10,10 +10,10 @@ from typing import Dict, Any
 
 from fastapi import APIRouter
 
-from ..context import get_cache_manager, get_config, get_logger
+from ..context import get_cache_manager, get_config, get_logger, lazy_resource
 
-logger = get_logger()
-config = get_config()
+logger = lazy_resource(get_logger)
+config = lazy_resource(get_config)
 
 router = APIRouter(tags=["health"])
 

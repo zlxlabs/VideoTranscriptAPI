@@ -24,7 +24,7 @@ class LLMCoordinator:
     负责场景路由，统一入口接口，集成两个处理器
     """
 
-    def __init__(self, config_dict: dict, cache_dir: str):
+    def __init__(self, config_dict: dict, cache_dir: str, media_cache_manager=None):
         """初始化协调器
 
         Args:
@@ -57,7 +57,7 @@ class LLMCoordinator:
 
         self.speaker_inferencer = SpeakerInferencer(
             llm_client=self.llm_client,
-            cache_manager=self.cache_manager,
+            cache_manager=media_cache_manager or self.cache_manager,
             model=self.config.speaker_model or self.config.calibrate_model,
             reasoning_effort=self.config.speaker_reasoning_effort,
             samples_per_speaker=self.config.speaker_samples_per_speaker,
@@ -111,6 +111,7 @@ class LLMCoordinator:
         skip_summary: bool = False,
         skip_calibration: bool = False,
         speaker_count_hint: Optional[int] = None,
+        infer_speaker_names: bool = True,
     ) -> Dict:
         """处理文本（统一入口）
 
@@ -171,6 +172,7 @@ class LLMCoordinator:
                 media_id=media_id,
                 selected_models=selected_models,
                 skip_calibration=skip_calibration,
+                infer_speaker_names=infer_speaker_names,
             )
 
         # 提取校对文本和说话人信息
@@ -254,6 +256,7 @@ class LLMCoordinator:
         media_id: str,
         selected_models: Dict,
         skip_calibration: bool = False,
+        infer_speaker_names: bool = True,
     ) -> Dict:
         """路由到对应的校对处理器
 
@@ -295,6 +298,7 @@ class LLMCoordinator:
                 media_id=media_id,
                 selected_models=selected_models,
                 skip_calibration=skip_calibration,
+                infer_speaker_names=infer_speaker_names,
             )
         elif isinstance(content, dict):
             # 如果传入字典，尝试提取 segments 字段
@@ -313,6 +317,7 @@ class LLMCoordinator:
                     media_id=media_id,
                     selected_models=selected_models,
                     skip_calibration=skip_calibration,
+                    infer_speaker_names=infer_speaker_names,
                 )
             else:
                 raise ValueError(

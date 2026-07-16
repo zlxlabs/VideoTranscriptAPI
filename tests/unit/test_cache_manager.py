@@ -123,6 +123,109 @@ class TestSaveCache:
 
 
 # ---------------------------------------------------------------------------
+# save_cache -- atomic write (G5, local codex review round 6)
+# ---------------------------------------------------------------------------
+
+class TestSaveCacheAtomicWrite:
+    """save_cache's three transcript writes (transcript_funasr.json,
+    transcript_capswriter.txt, transcript_capswriter.json) used to `open(path,
+    "w")` straight at the final path -- truncating any pre-existing file
+    before the new content was fully written. A crash/exception between
+    truncation and completion (disk full, process killed) would permanently
+    destroy an otherwise-intact prior transcript. The fix writes to a
+    same-directory temp file first and only replaces the final path via
+    os.replace() once the write has fully succeeded -- mocking os.replace()
+    to fail proves the final path is never touched until the new content is
+    completely ready."""
+
+    def test_funasr_json_replace_failure_preserves_existing_file(
+        self, cm, cache_dir, monkeypatch
+    ):
+        _save_sample_funasr(cm)
+        target = next(cache_dir.rglob("transcript_funasr.json"))
+        original_bytes = target.read_bytes()
+
+        monkeypatch.setattr(
+            cache_manager_module.os, "replace",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+        )
+
+        result = cm.save_cache(
+            platform="bilibili",
+            url="https://example.com/vid2",
+            media_id="vid2",
+            use_speaker_recognition=True,
+            transcript_data={"speakers": ["Corrupted"], "segments": []},
+            transcript_type="funasr",
+        )
+
+        assert result is None
+        assert target.read_bytes() == original_bytes, (
+            "a failed os.replace() must never leave the original transcript truncated"
+        )
+        assert list(target.parent.glob(".transcript_funasr.json.*.tmp")) == []
+
+    def test_capswriter_txt_replace_failure_preserves_existing_file(
+        self, cm, cache_dir, monkeypatch
+    ):
+        _save_sample_capswriter(cm)
+        target = next(cache_dir.rglob("transcript_capswriter.txt"))
+        original_bytes = target.read_bytes()
+
+        monkeypatch.setattr(
+            cache_manager_module.os, "replace",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+        )
+
+        result = cm.save_cache(
+            platform="youtube",
+            url="https://example.com/vid1",
+            media_id="vid1",
+            use_speaker_recognition=False,
+            transcript_data="corrupted replacement text",
+            transcript_type="capswriter",
+        )
+
+        assert result is None
+        assert target.read_bytes() == original_bytes
+        assert list(target.parent.glob(".transcript_capswriter.txt.*.tmp")) == []
+
+    def test_extra_json_data_replace_failure_preserves_existing_file(
+        self, cm, cache_dir, monkeypatch
+    ):
+        cm.save_cache(
+            platform="youtube",
+            url="https://example.com/extra2",
+            media_id="extra2",
+            use_speaker_recognition=False,
+            transcript_data="text content",
+            transcript_type="capswriter",
+            extra_json_data={"compat": True, "segments": []},
+        )
+        target = next(cache_dir.rglob("transcript_capswriter.json"))
+        original_bytes = target.read_bytes()
+
+        monkeypatch.setattr(
+            cache_manager_module.os, "replace",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+        )
+
+        result = cm.save_cache(
+            platform="youtube",
+            url="https://example.com/extra2",
+            media_id="extra2",
+            use_speaker_recognition=False,
+            transcript_data="text content 2",
+            transcript_type="capswriter",
+            extra_json_data={"compat": False, "segments": ["corrupted"]},
+        )
+
+        assert result is None
+        assert target.read_bytes() == original_bytes
+        assert list(target.parent.glob(".transcript_capswriter.json.*.tmp")) == []
+
+
+# ---------------------------------------------------------------------------
 # get_cache
 # ---------------------------------------------------------------------------
 
@@ -271,6 +374,112 @@ class TestSaveLLMResult:
         assert result["llm_calibrated"] == "Calibrated."
         assert "llm_summary" in result
         assert result["llm_summary"] == "Summary."
+
+
+# ---------------------------------------------------------------------------
+# save_llm_result -- atomic write (G5, local codex review round 6)
+# ---------------------------------------------------------------------------
+
+class TestSaveLLMResultAtomicWrite:
+    """save_llm_result's three writes (llm_calibrated.txt, llm_summary.txt,
+    llm_processed.json) used to `open(path, "w")` straight at the final
+    path -- truncating any pre-existing, fully-processed result before the
+    new content was fully written. A crash/exception mid-write (disk full,
+    process killed) would permanently destroy an otherwise-complete prior
+    result. The fix writes to a same-directory temp file first and only
+    replaces the final path via os.replace() once the write has fully
+    succeeded."""
+
+    def test_structured_write_failure_preserves_existing_file(
+        self, cm, cache_dir, monkeypatch
+    ):
+        """The exact scenario named in the review: json.dump() itself raises
+        partway through -- proving the target llm_processed.json (which
+        still holds a complete, real result from an earlier run) is left
+        byte-for-byte untouched, not truncated to empty/partial JSON."""
+        _save_sample_capswriter(cm)
+        ok = cm.save_llm_result(
+            platform="youtube",
+            media_id="vid1",
+            use_speaker_recognition=False,
+            llm_type="structured",
+            content={"sections": [{"title": "Original", "content": "Good real result"}]},
+        )
+        assert ok is True
+        target = next(cache_dir.rglob("llm_processed.json"))
+        original_bytes = target.read_bytes()
+
+        monkeypatch.setattr(
+            cache_manager_module.json, "dump",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk full mid-write")),
+        )
+
+        ok2 = cm.save_llm_result(
+            platform="youtube",
+            media_id="vid1",
+            use_speaker_recognition=False,
+            llm_type="structured",
+            content={"sections": [{"title": "Corrupted", "content": "should never land"}]},
+        )
+
+        assert ok2 is False
+        assert target.read_bytes() == original_bytes, (
+            "a json.dump() failure mid-write must not truncate/corrupt the "
+            "existing llm_processed.json"
+        )
+        assert list(target.parent.glob(".llm_processed.json.*.tmp")) == [], (
+            "no orphaned temp file should be left behind either"
+        )
+
+    def test_calibrated_write_failure_preserves_existing_file(
+        self, cm, cache_dir, monkeypatch
+    ):
+        _save_sample_capswriter(cm)
+        cm.save_llm_result(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            llm_type="calibrated", content="Original good calibrated text.",
+        )
+        target = next(cache_dir.rglob("llm_calibrated.txt"))
+        original_bytes = target.read_bytes()
+
+        monkeypatch.setattr(
+            cache_manager_module.os, "replace",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+        )
+
+        ok = cm.save_llm_result(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            llm_type="calibrated", content="corrupted replacement",
+        )
+
+        assert ok is False
+        assert target.read_bytes() == original_bytes
+        assert list(target.parent.glob(".llm_calibrated.txt.*.tmp")) == []
+
+    def test_summary_write_failure_preserves_existing_file(
+        self, cm, cache_dir, monkeypatch
+    ):
+        _save_sample_capswriter(cm)
+        cm.save_llm_result(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            llm_type="summary", content="Original good summary.",
+        )
+        target = next(cache_dir.rglob("llm_summary.txt"))
+        original_bytes = target.read_bytes()
+
+        monkeypatch.setattr(
+            cache_manager_module.os, "replace",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+        )
+
+        ok = cm.save_llm_result(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            llm_type="summary", content="corrupted replacement",
+        )
+
+        assert ok is False
+        assert target.read_bytes() == original_bytes
+        assert list(target.parent.glob(".llm_summary.txt.*.tmp")) == []
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +791,138 @@ class TestGetTaskByViewToken:
         assert result["task_id"] != queued_task["task_id"]
 
 
+class TestGetTaskByViewTokenSkipsExpiredCandidates:
+    """K4（本地 codex review 第 8 轮）：get_task_by_view_token 此前只取排序后
+    的第一条候选，一旦它的审计快照标记 content_expired 就直接整体返回
+    None——同一 view_token 下若还有排序更靠后、仍然有效（未过期）的兄弟
+    任务，会被这条过期候选连带遮蔽（例如清理流程在"标记过期"与"物理删除"
+    之间崩溃残留、或新任务复用了同一 view_token）。修复后应跳过过期候选，
+    继续看排序更靠后的下一条，全部过期才整体返回 None。
+    """
+
+    def _create_task_at_time(self, cm, url, status, timestamp, media_id="vid1", platform="youtube"):
+        """同 TestGetTaskByViewToken._create_task_at_time：同一 url 重复调用
+        会复用同一个 view_token（不同 task_id）。"""
+        task_info = cm.create_task(url=url, platform=platform, media_id=media_id)
+        task_id = task_info["task_id"]
+        cm.update_task_status(task_id, status, platform=platform, media_id=media_id)
+        with cm._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE task_status SET created_at = ? WHERE task_id = ?",
+                (timestamp, task_id),
+            )
+        return task_info
+
+    def test_expired_success_does_not_shadow_valid_processing_sibling(self, cm):
+        """过期的 success 候选（排序最优先）应该被跳过，转而返回仍有效的
+        processing 兄弟任务，而不是整体误判为"任务不存在"。"""
+        url = "https://example.com/vid-expired-sibling"
+        expired_success = self._create_task_at_time(
+            cm, url, TaskStatus.SUCCESS, "2026-01-01 00:00:00"
+        )
+        valid_processing = self._create_task_at_time(
+            cm, url, TaskStatus.PROCESSING, "2026-01-01 01:00:00"
+        )
+
+        class _FakeAuditLogger:
+            def get_task_snapshot(self, task_id):
+                if task_id == expired_success["task_id"]:
+                    return {"content_expired": True}
+                return None
+
+        cm.audit_logger = _FakeAuditLogger()
+
+        result = cm.get_task_by_view_token(expired_success["view_token"])
+
+        assert result is not None
+        assert result["task_id"] == valid_processing["task_id"]
+
+    def test_all_expired_candidates_return_none(self, cm):
+        """同一 view_token 下所有候选都过期时，才整体返回 None（既有的
+        "拒绝已撤销 view_token" 语义保留，只是判定粒度从"第一条候选"
+        收紧到"全部候选"）。"""
+        url = "https://example.com/vid-all-expired"
+        task_a = self._create_task_at_time(
+            cm, url, TaskStatus.SUCCESS, "2026-01-01 00:00:00"
+        )
+        task_b = self._create_task_at_time(
+            cm, url, TaskStatus.PROCESSING, "2026-01-01 01:00:00"
+        )
+        expired_ids = {task_a["task_id"], task_b["task_id"]}
+
+        class _FakeAuditLogger:
+            def get_task_snapshot(self, task_id):
+                if task_id in expired_ids:
+                    return {"content_expired": True}
+                return None
+
+        cm.audit_logger = _FakeAuditLogger()
+
+        result = cm.get_task_by_view_token(task_a["view_token"])
+
+        assert result is None
+
+
+class TestListTasksByViewTokenSkipsExpiredCandidates:
+    """R1（PR3 review hardening）：list_tasks_by_view_token 此前无条件返回
+    task_status 表里同一 view_token 下的全部行，不检查审计快照的
+    content_expired 状态——撤销（expire_task_snapshot）只清空
+    task_audit_snapshots 里对应行的 view_token/置 content_expired=1，不触碰
+    cache.db 的 task_status 行（那是清理流程"归档->撤销 capability->物理
+    删除"三步中的第三步，可能因为进程崩溃而没有执行到）。routes/audit.py
+    的 check_view_token_ownership 把这个方法的返回值当"正面归属证据"
+    采信，若不过滤，已撤销任务的原提交者能凭这行残留证据继续对同一
+    view_token 下别人仍然有效的任务判定为"拥有"。
+
+    修复：与 get_task_by_view_token 的 K4 修复同一处理方式——逐行查一次
+    audit_logger.get_task_snapshot，content_expired 为真的行直接跳过，不
+    出现在返回列表里。
+    """
+
+    def _create_task(self, cm, url, *, submitted_by, media_id="vid1", platform="youtube"):
+        return cm.create_task(
+            url=url, platform=platform, media_id=media_id, submitted_by=submitted_by,
+        )
+
+    def test_expired_candidate_excluded_valid_sibling_kept(self, cm):
+        """A 的任务已被撤销（content_expired=True），B 的任务仍然有效且
+        共享同一个 view_token：返回列表里只应该有 B，不能再包含 A——否则
+        A 会被 check_view_token_ownership 误判为对该 view_token 拥有正面
+        归属证据。"""
+        url = "https://example.com/vid-r1-shared"
+        task_a = self._create_task(cm, url, submitted_by="user-a")
+        task_b = self._create_task(cm, url, submitted_by="user-b")
+
+        class _FakeAuditLogger:
+            def get_task_snapshot(self, task_id):
+                if task_id == task_a["task_id"]:
+                    return {"content_expired": True}
+                return None
+
+        cm.audit_logger = _FakeAuditLogger()
+
+        result = cm.list_tasks_by_view_token(task_a["view_token"])
+
+        result_task_ids = {row["task_id"] for row in result}
+        assert task_a["task_id"] not in result_task_ids
+        assert task_b["task_id"] in result_task_ids
+        assert {row["task_id"]: row["submitted_by"] for row in result} == {
+            task_b["task_id"]: "user-b",
+        }
+
+    def test_no_audit_logger_wired_returns_all_rows_unfiltered(self, cm):
+        """cache_manager.audit_logger 为 None（未接线，如部分测试/工具脚本
+        场景）时不过滤，保留此前的行为——与 get_task_by_view_token 对
+        audit_logger 缺失场景的处理方式一致，不新增第二套语义。"""
+        url = "https://example.com/vid-r1-no-audit-logger"
+        task_a = self._create_task(cm, url, submitted_by="user-a")
+
+        assert cm.audit_logger is None
+        result = cm.list_tasks_by_view_token(task_a["view_token"])
+
+        assert {row["task_id"] for row in result} == {task_a["task_id"]}
+
+
 # ---------------------------------------------------------------------------
 # get_existing_task_by_url 排序优先级
 # ---------------------------------------------------------------------------
@@ -850,7 +1191,8 @@ class TestSaveLLMStatus:
             },
             summary_status="generated",
         )
-        assert ok is True
+        assert ok["calibration_status"] == "full"
+        assert ok["summary_status"] == "generated"
         files = list(cache_dir.rglob("llm_status.json"))
         assert len(files) == 1
         data = json.loads(files[0].read_text(encoding="utf-8"))
@@ -879,12 +1221,12 @@ class TestSaveLLMStatus:
         assert data["calibration_status"] == "partial"
         assert data["summary_status"] == "generated"
 
-    def test_returns_false_when_cache_missing(self, cm):
-        ok = cm.save_llm_status(
-            platform="youtube", media_id="does-not-exist",
-            use_speaker_recognition=False, calibration_status="full",
-        )
-        assert ok is False
+    def test_raises_when_cache_missing(self, cm):
+        with pytest.raises(FileNotFoundError):
+            cm.save_llm_status(
+                platform="youtube", media_id="does-not-exist",
+                use_speaker_recognition=False, calibration_status="full",
+            )
 
     def test_concurrent_updates_to_different_fields_do_not_lose_either(
         self, cm, cache_dir, monkeypatch
@@ -1051,7 +1393,7 @@ class TestSaveLLMStatus:
             platform="youtube", media_id="vid1", use_speaker_recognition=False,
             summary_status="generated",
         )
-        assert ok is True
+        assert ok["summary_status"] == "generated"
         data = json.loads(status_files[0].read_text(encoding="utf-8"))
         assert data["summary_status"] == "generated"
 
@@ -1070,6 +1412,187 @@ class TestSaveLLMStatus:
         result = cm.get_cache(platform="youtube", media_id="vid1")
         assert result is not None
         assert "llm_status" not in result
+
+
+class TestInvalidateLLMStatus:
+    """Tests for invalidate_llm_status: the write-ahead revocation primitive
+    _save_llm_results (llm_ops.py, S1 PR3 review hardening) calls before
+    rewriting any product file, so a mid-rewrite failure can never leave a
+    stale llm_status.json vouching for a torn combination of old/new
+    products."""
+
+    def test_returns_old_content_and_deletes_file(self, cm, cache_dir):
+        _save_sample_capswriter(cm)
+        cm.save_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            calibration_status="full",
+            calibration_stats={"total_segments": 2},
+            summary_status="generated",
+        )
+        status_files = list(cache_dir.rglob("llm_status.json"))
+        assert len(status_files) == 1
+
+        old = cm.invalidate_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+        )
+
+        assert old["calibration_status"] == "full"
+        assert old["summary_status"] == "generated"
+        assert old["calibration_stats"]["total_segments"] == 2
+        assert not status_files[0].exists()
+
+    def test_no_existing_status_file_returns_empty_dict(self, cm, cache_dir):
+        """Cache exists but no llm_status.json has ever been written (first
+        LLM pass for this media) -- nothing to revoke, no error."""
+        _save_sample_capswriter(cm)
+        old = cm.invalidate_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+        )
+        assert old == {}
+
+    def test_no_cache_record_returns_empty_dict(self, cm):
+        """No video_cache row at all for this platform/media_id -- treated as
+        "nothing to invalidate", not an error (mirrors invalidate_speaker_mapping's
+        precedent for the same situation)."""
+        old = cm.invalidate_llm_status(
+            platform="youtube", media_id="does-not-exist", use_speaker_recognition=False,
+        )
+        assert old == {}
+
+    def test_deletion_failure_raises_and_leaves_file_untouched(
+        self, cm, cache_dir, monkeypatch
+    ):
+        """A real deletion failure (e.g. permission error) must propagate so
+        the caller aborts the rewrite instead of proceeding with a status
+        file that could not actually be revoked."""
+        _save_sample_capswriter(cm)
+        cm.save_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            calibration_status="full", summary_status="generated",
+        )
+        status_files = list(cache_dir.rglob("llm_status.json"))
+        assert len(status_files) == 1
+
+        def _raising_unlink(self, *args, **kwargs):
+            raise OSError("permission denied (simulated)")
+
+        monkeypatch.setattr(cache_manager_module.Path, "unlink", _raising_unlink)
+
+        with pytest.raises(OSError):
+            cm.invalidate_llm_status(
+                platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            )
+
+        # The mocked unlink never actually removed the file.
+        assert status_files[0].exists()
+
+
+class TestInvalidateLLMStatusVariantTargeting:
+    """V1 (PR3 review hardening): invalidate_llm_status must target the
+    variant directory using the SAME filter formula as
+    get_cache()/save_llm_result()/save_llm_status() (which all resolve via
+    get_cache(platform, media_id, use_speaker_recognition=...)):
+    use_speaker_recognition=True strictly requires a matching
+    use_speaker_recognition=1 row; False has no extra filter (by design --
+    see get_cache's own "不要求说话人识别时，可以使用任何缓存" precedent,
+    a plain request may reuse a richer speaker-recognition cache row when
+    one exists for the same platform/media_id).
+
+    Root cause / where the divergence is actually observable: the old
+    _speaker_artifact_dir() had no use_speaker_recognition parameter at
+    all, so its query was unconditionally "ORDER BY use_speaker_recognition
+    DESC LIMIT 1" -- identical to get_cache()'s own False-branch query, but
+    critically NOT identical to its True-branch query (which adds `AND
+    use_speaker_recognition = 1`). When only a plain-variant row exists
+    (no speaker-recognition row has ever been created for this
+    platform/media_id) and the caller asks to invalidate the
+    speaker-recognition variant specifically, get_cache(True) correctly
+    reports "no such cache" (None) while the old _speaker_artifact_dir
+    silently fell back to the only row that existed -- the UNRELATED plain
+    variant -- and both read its old status (misreporting it as the
+    speaker variant's) and deleted its file, corrupting a variant that was
+    never meant to be touched this round.
+    """
+
+    def test_true_intent_does_not_fall_back_to_unrelated_plain_variant(
+        self, cm, cache_dir
+    ):
+        """RED on the unfixed code: only a plain-variant row/status file
+        exists; invalidating the speaker-recognition variant (which does
+        not exist yet) must report "nothing to invalidate" and leave the
+        unrelated plain variant's status file untouched. The old
+        _speaker_artifact_dir(), lacking any use_speaker_recognition
+        filter, would instead resolve to the plain variant's directory
+        (the only row that exists) and both return its content as if it
+        belonged to the speaker variant AND delete it -- collateral damage
+        to a variant this round never touches."""
+        _save_sample_capswriter(cm, media_id="vid1", platform="youtube")
+        cm.save_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            calibration_status="full",
+            calibration_stats={"total_segments": 1, "variant": "plain"},
+            summary_status="generated",
+        )
+        status_files = list(cache_dir.rglob("llm_status.json"))
+        assert len(status_files) == 1
+
+        old = cm.invalidate_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=True,
+        )
+
+        assert old == {}, (
+            "no speaker-recognition variant exists yet -- nothing to invalidate, "
+            "must not silently borrow the unrelated plain variant's status"
+        )
+        assert status_files[0].exists(), (
+            "the unrelated plain variant's status file must survive untouched"
+        )
+        plain_cache = cm.get_cache("youtube", "vid1", use_speaker_recognition=False)
+        assert plain_cache["llm_status"]["calibration_stats"]["variant"] == "plain"
+
+    def test_speaker_variant_invalidated_correctly_when_it_is_the_only_row(
+        self, cm, cache_dir
+    ):
+        """Sanity/regression lock (mirrors the plain-variant case below):
+        when the speaker-recognition variant is the only row for this
+        platform/media_id, asking to invalidate it must hit its own status
+        file -- both before and after the V1 fix, since DESC-first already
+        agreed with the strict filter whenever only one row exists."""
+        _save_sample_funasr(cm, media_id="vid1", platform="youtube")
+        cm.save_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=True,
+            calibration_status="full",
+            calibration_stats={"total_segments": 1, "variant": "speaker"},
+            summary_status="generated",
+        )
+
+        old = cm.invalidate_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=True,
+        )
+
+        assert old["calibration_stats"]["variant"] == "speaker"
+        assert not list(cache_dir.rglob("llm_status.json"))
+
+    def test_plain_variant_invalidated_correctly_when_it_is_the_only_row(
+        self, cm, cache_dir
+    ):
+        """Same sanity check for the plain variant: False's lenient (no
+        extra filter) resolution must still correctly find and revoke its
+        own status file when it is the only row present."""
+        _save_sample_capswriter(cm, media_id="vid1", platform="youtube")
+        cm.save_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            calibration_status="full",
+            calibration_stats={"total_segments": 1, "variant": "plain"},
+            summary_status="generated",
+        )
+
+        old = cm.invalidate_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+        )
+
+        assert old["calibration_stats"]["variant"] == "plain"
+        assert not list(cache_dir.rglob("llm_status.json"))
 
 
 # ---------------------------------------------------------------------------

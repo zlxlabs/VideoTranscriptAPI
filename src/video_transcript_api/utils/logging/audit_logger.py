@@ -7,6 +7,8 @@ API调用审计日志模块
 
 import sqlite3
 import threading
+import json
+from contextlib import nullcontext
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,7 +18,7 @@ from .logger import setup_logger
 logger = setup_logger("audit_logger")
 
 # Schema 版本号，每次表结构变更时递增
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 
 class AuditLogger:
@@ -41,6 +43,12 @@ class AuditLogger:
 
         self.db_path = str(db_path)
         self._local = threading.local()
+        # Keyset（seek）分页游标：上一轮 repair_task_snapshots 扫到的最后一条
+        # 记录的 (completed_at, task_id)；None 表示从头开始（见
+        # repair_task_snapshots 与 CacheManager.list_terminal_tasks 的详细
+        # 动机说明——取代此前的持久 OFFSET，避免并发删除导致的跳页/饥饿）。
+        self._repair_after: Optional[tuple] = None
+        self.repair_scan_complete = False
         self._init_database()
         logger.info(f"审计日志记录器初始化完成，数据库路径: {self.db_path}")
 
@@ -54,6 +62,13 @@ class AuditLogger:
             except sqlite3.OperationalError:
                 logger.warning("WAL mode not supported, using default journal mode")
         return self._local.connection
+
+    def close(self) -> None:
+        """Close the connection owned by the current runtime thread."""
+        connection = getattr(self._local, "connection", None)
+        if connection is not None:
+            connection.close()
+            del self._local.connection
 
     @contextmanager
     def _get_cursor(self):
@@ -126,6 +141,9 @@ class AuditLogger:
         if version < 3:
             self._migrate_v3(cursor)
 
+        if version < 4:
+            self._migrate_v4(cursor)
+
         if version < CURRENT_SCHEMA_VERSION:
             self._set_schema_version(cursor, CURRENT_SCHEMA_VERSION)
             logger.info(f"Schema 迁移完成: v{version} -> v{CURRENT_SCHEMA_VERSION}")
@@ -193,6 +211,220 @@ class AuditLogger:
         cursor.execute(
             'CREATE INDEX IF NOT EXISTS idx_llm_usage_created_at ON llm_usage(created_at)'
         )
+
+    def _migrate_v4(self, cursor):
+        """Create audit-owned immutable task metadata snapshots."""
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS task_audit_snapshots (
+                task_id TEXT PRIMARY KEY,
+                view_token TEXT,
+                title TEXT,
+                author TEXT,
+                platform TEXT,
+                status TEXT NOT NULL,
+                calibration_status TEXT,
+                summary_status TEXT,
+                submitted_by TEXT,
+                processing_options TEXT,
+                completed_at TEXT,
+                content_expired INTEGER NOT NULL DEFAULT 0,
+                archived_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_task_id ON api_audit_logs(task_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_user_time "
+            "ON api_audit_logs(user_id, request_time DESC)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_snapshot_platform ON task_audit_snapshots(platform)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_snapshot_author ON task_audit_snapshots(author)"
+        )
+
+    def archive_task_snapshot(self, task: Dict[str, Any]) -> None:
+        """Idempotently copy task metadata without reviving revoked capabilities."""
+        self._write_task_snapshot(task, revive_expired=False)
+
+    def restore_live_task_snapshot(self, task: Dict[str, Any]) -> None:
+        """Compensate a failed deletion after confirming the task still exists."""
+        self._write_task_snapshot(task, revive_expired=True)
+
+    def _write_task_snapshot(
+        self, task: Dict[str, Any], *, revive_expired: bool
+    ) -> None:
+        task_id = task.get("task_id")
+        if not task_id:
+            raise ValueError("task snapshot requires task_id")
+        options = task.get("processing_options")
+        if options is not None and not isinstance(options, str):
+            options = json.dumps(options, ensure_ascii=False, sort_keys=True)
+        if revive_expired:
+            view_token_update = "excluded.view_token"
+            expired_update = "0"
+        else:
+            view_token_update = (
+                "CASE WHEN task_audit_snapshots.content_expired=1 "
+                "THEN NULL ELSE excluded.view_token END"
+            )
+            expired_update = "task_audit_snapshots.content_expired"
+        with self._get_cursor() as cursor:
+            cursor.execute(f'''
+                INSERT INTO task_audit_snapshots
+                (task_id, view_token, title, author, platform, status,
+                 calibration_status, summary_status, submitted_by,
+                 processing_options, completed_at, content_expired, archived_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    view_token={view_token_update},
+                    title=excluded.title,
+                    author=excluded.author,
+                    platform=excluded.platform,
+                    status=excluded.status,
+                    calibration_status=excluded.calibration_status,
+                    summary_status=excluded.summary_status,
+                    submitted_by=excluded.submitted_by,
+                    processing_options=excluded.processing_options,
+                    completed_at=excluded.completed_at,
+                    content_expired={expired_update},
+                    archived_at=CURRENT_TIMESTAMP
+            ''', (
+                task_id, task.get("view_token"), task.get("title"), task.get("author"),
+                task.get("platform"), task.get("status") or "unknown",
+                task.get("calibration_status"), task.get("summary_status"),
+                task.get("submitted_by"), options, task.get("completed_at"),
+            ))
+
+    def expire_task_snapshot(self, task_id: str) -> bool:
+        """Remove the live capability before deleting its task row.
+
+        Z2 (PR3 review hardening, this round): the WHERE clause now
+        requires the snapshot to still be live (COALESCE(content_expired,
+        0) = 0), and the return value reports whether *this call* actually
+        performed the live -> expired transition (rowcount > 0) versus a
+        no-op on an already-expired (or nonexistent) row. This call used
+        to be unconditional and void -- cache_manager.py's cleanup loop
+        set `expired_this_attempt = True` right after calling it,
+        regardless of whether a real transition happened. On a retried
+        cleanup attempt where a task's snapshot had already been expired
+        by an earlier, crash-interrupted run (task_status row still
+        present, content_expired already 1), this call is a pure no-op,
+        but the caller still believed *this* attempt was the one that
+        revoked the capability. If the subsequent DELETE FROM task_status
+        then failed too, the failure-compensation branch would call
+        restore_live_task_snapshot(revive_expired=True) and resurrect a
+        capability that was legitimately already dead -- breaking
+        revocation monotonicity. Callers must use this return value (not
+        just "no exception raised") to decide whether compensation is
+        appropriate.
+
+        Returns:
+            bool: True if this call transitioned the snapshot from live to
+            expired; False if it was already expired or the row doesn't
+            exist (idempotent no-op).
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE task_audit_snapshots "
+                "SET view_token=NULL, content_expired=1 "
+                "WHERE task_id=? AND COALESCE(content_expired, 0) = 0",
+                (task_id,),
+            )
+            return cursor.rowcount > 0
+
+    def get_task_snapshot(self, task_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM task_audit_snapshots WHERE task_id=?", (task_id,)
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            columns = [description[0] for description in cursor.description]
+        result = dict(zip(columns, row))
+        if result.get("processing_options"):
+            result["processing_options"] = json.loads(result["processing_options"])
+        result["content_expired"] = bool(result["content_expired"])
+        return result
+
+    def repair_task_snapshots(self, cache_manager, limit: int = 500) -> int:
+        """Idempotently archive a bounded batch of terminal tasks.
+
+        跨进程复活过期 view_token 的窗口（本地 codex review 追加发现，见
+        docs/sessions/260716-pr3x-gate/REVIEW-LOG.md 的核实结论）：`tasks`
+        由上面 `list_terminal_tasks` 一次性拉取，其中每个 task dict 都是
+        "那一刻" cache.db 的快照。若在本方法遍历这批任务、真正调用
+        `archive_task_snapshot` 之前的这段时间里，另一个进程/协程已经完整
+        跑完 `cache_manager.cleanup_task_status`（归档→expire→删除 task_status
+        行）*并且* `cleanup_old_logs` 的墓碑清理也已把这个 task_id 的
+        `task_audit_snapshots` 行彻底删除（该行确实会被删——见
+        `AuditLogger.cleanup_old_logs`，`content_expired=1` 不是永久保留，
+        只是多一层 `task_exists` 门槛），那么这里 `get_task_snapshot` 会看到
+        `None`（而不是一条 `content_expired=1` 的墓碑），从而误判"从未归档过"，
+        用手里这份过时的 task dict（仍带着已被吊销的 view_token）重新
+        INSERT 出一条 `content_expired=0` 的快照——复活一个已经吊销的
+        view_token。
+
+        修复：不再信任 `list_terminal_tasks` 早先拉取的 task dict，归档前
+        用 `cache_manager.get_task_by_id` 重新确认任务此刻是否仍然存在。
+        cache.db/audit.db 是两个独立文件，做不到真正跨库事务，这里只能
+        把"过时快照"的窗口从"整批任务的遍历耗时"收紧到"这一条任务归档前的
+        一次重新查询"——重新查询后仍可能存在极小的 TOCTOU 窗口，但这已经是
+        跨数据库场景下能做到的最小正确修法（与 cleanup_task_status 自身
+        "归档前重新 SELECT 一次任务行"的既有模式一致）。若重新查询发现任务
+        已经不存在，直接跳过：任务已被删除意味着它的快照要么已经被
+        cleanup_task_status 正确归档+expire 过，要么本来就不需要被归档。
+
+        跳页/饥饿（本地 codex review 第 4 轮 T3）：`_repair_after` 是一个
+        keyset（seek）游标——上一轮最后一条记录的 (排序键, task_id)，不是
+        行号。`cleanup_task_status` 与本方法按同一个顺序（排序键, task_id
+        升序）扫描，且总是删除排在前面（更旧）的行；keyset 游标只表达
+        "排在这个值之后"，与游标之前的行是否被删除无关，因此不会像持久
+        OFFSET 那样因为集合整体左移而把一整批尚未扫描过的任务永久跳过
+        （详见 CacheManager.list_terminal_tasks 的 docstring）。500 上限与
+        "snapshot 已存在即跳过归档"的既有语义不变；一轮扫完（返回行数 <
+        limit）后游标归零，下一次从头重新扫描。
+
+        游标取值不能是原始 completed_at（本地 codex review 第 5 轮 F1
+        修复）：completed_at 允许 NULL（历史遗留行），若直接用它构造游标，
+        某一页恰好在 completed_at IS NULL 的行结束时会存下 (None,
+        task_id)——下一轮 CacheManager.list_terminal_tasks 的 SQL 行值
+        比较遇到 NULL 恒为 unknown，返回空集，被误判为"整轮扫描完成"，
+        导致这条 NULL 行之后的所有终态任务永久饿死（错误证据/回归测试见
+        test_repair_keyset_cursor_survives_null_completed_at）。这里改用
+        `completed_at or created_at or ""`，与 CacheManager 侧
+        `COALESCE(completed_at, created_at, '')` 是同一个排序键表达式的
+        Python 等价写法——两处任何一处单独修都不足以根治：只修 SQL 侧，
+        游标本身仍可能是 None，一样触发上述空集误判；只修游标构造，
+        SQL 比较仍用原始 completed_at 列，其余 NULL 行依旧会被永久排除。
+        """
+        lock_factory = getattr(cache_manager, "terminal_archive_lock", None)
+        with lock_factory() if lock_factory else nullcontext():
+            bounded = min(max(limit, 1), 500)
+            tasks = cache_manager.list_terminal_tasks(
+                limit=bounded, after=self._repair_after
+            )
+            archived = 0
+            for task in tasks:
+                task_id = task["task_id"]
+                snapshot = self.get_task_snapshot(task_id)
+                if snapshot is None:
+                    current_task = cache_manager.get_task_by_id(task_id)
+                    if current_task is not None:
+                        self.archive_task_snapshot(current_task)
+                        archived += 1
+            if len(tasks) < bounded:
+                self._repair_after = None
+                self.repair_scan_complete = True
+            else:
+                last_task = tasks[-1]
+                sort_key = last_task.get("completed_at") or last_task.get("created_at") or ""
+                self._repair_after = (sort_key, last_task["task_id"])
+                self.repair_scan_complete = False
+            return archived
 
     def _mask_api_key(self, api_key: str) -> str:
         """
@@ -424,7 +656,7 @@ class AuditLogger:
             logger.error(f"获取最近API调用记录失败: {str(e)}")
             return []
 
-    def cleanup_old_logs(self, days: int = 90) -> int:
+    def cleanup_old_logs(self, days: int = 90, task_exists=None) -> int:
         """
         清理指定天数之前的日志记录（api_audit_logs + llm_usage，同一 cutoff）
 
@@ -442,32 +674,104 @@ class AuditLogger:
             int: 删除的记录数量（两张表合计）
         """
         try:
-            # 使用 Python 计算截止日期，避免 SQL 格式化注入
             cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+            audit_deleted = 0
+            usage_deleted = 0
+            snapshots_deleted = 0
 
-            with self._get_cursor() as cursor:
-                cursor.execute('''
-                    DELETE FROM api_audit_logs
-                    WHERE request_time < ?
-                ''', (cutoff_date,))
-                audit_deleted = cursor.rowcount
+            # Bound every transaction so cleanup does not monopolize audit.db.
+            for table, time_column in (
+                ("api_audit_logs", "request_time"),
+                ("llm_usage", "created_at"),
+            ):
+                while True:
+                    with self._get_cursor() as cursor:
+                        cursor.execute(
+                            f"DELETE FROM {table} WHERE id IN ("
+                            f"SELECT id FROM {table} WHERE {time_column} < ? LIMIT 500)",
+                            (cutoff_date,),
+                        )
+                        count = cursor.rowcount
+                    if table == "api_audit_logs":
+                        audit_deleted += count
+                    else:
+                        usage_deleted += count
+                    if count < 500:
+                        break
 
-                cursor.execute('''
-                    DELETE FROM llm_usage
-                    WHERE created_at < ?
-                ''', (cutoff_date,))
-                usage_deleted = cursor.rowcount
+            # A snapshot belongs to audit history and is also the tombstone
+            # that revokes a view capability across an interrupted cache
+            # deletion, so its deletion must respect the same retention
+            # cutoff as api_audit_logs/llm_usage above -- gated, again, by
+            # the task_exists() check below (a task that's still alive is
+            # never touched).
+            #
+            # This used to be two independently-triggered branches:
+            #   1. content_expired=1 (properly tombstoned by
+            #      cleanup_task_status) with no remaining api_audit_logs
+            #      reference -- unbounded by age.
+            #   2. archived_at older than cutoff, regardless of
+            #      content_expired (H5, local codex review round 7): catches
+            #      snapshots that never got properly tombstoned (content_
+            #      expired stuck at 0).
+            # M1 (local codex review round 10): branch 1 being age-unbounded
+            # was a retention bypass -- a task whose audit-log write failed
+            # (never referenced in api_audit_logs to begin with, the exact
+            # scenario the G1 fix protects) could have its snapshot
+            # tombstoned and then deleted via branch 1 within moments of
+            # being archived, long before storage.audit_log_retention_days
+            # elapses. The fix requires branch 1 to also respect the
+            # retention cutoff -- at which point it becomes a strict subset
+            # of branch 2 (which already ignores content_expired/ref state
+            # and only checks the cutoff), so the two branches collapse into
+            # a single age check: content_expired and the api_audit_logs
+            # reference no longer gate snapshot deletion at all, only
+            # archived_at vs. the retention cutoff does. Keeping the old
+            # OR'd-but-now-redundant condition around would just be dead
+            # weight that misleads future readers into thinking tombstoned
+            # snapshots can still be deleted early.
+            snapshot_offset = 0
+            while True:
+                with self._get_cursor() as cursor:
+                    cursor.execute('''
+                        SELECT s.task_id
+                        FROM task_audit_snapshots s
+                        WHERE s.archived_at < ?
+                        ORDER BY s.task_id
+                        LIMIT 500 OFFSET ?
+                    ''', (cutoff_date, snapshot_offset))
+                    candidates = [row[0] for row in cursor.fetchall()]
+                if not candidates:
+                    break
+                removable = (
+                    [task_id for task_id in candidates if not task_exists(task_id)]
+                    if task_exists is not None
+                    else []
+                )
+                if removable:
+                    placeholders = ",".join("?" for _ in removable)
+                    with self._get_cursor() as cursor:
+                        cursor.execute(
+                            f"DELETE FROM task_audit_snapshots "
+                            f"WHERE task_id IN ({placeholders})",
+                            removable,
+                        )
+                        snapshots_deleted += cursor.rowcount
+                snapshot_offset += len(candidates) - len(removable)
+                if len(candidates) < 500:
+                    break
 
-            deleted_count = audit_deleted + usage_deleted
+            deleted_count = audit_deleted + usage_deleted + snapshots_deleted
             logger.info(
                 f"清理了 {audit_deleted} 条超过 {days} 天的审计日志记录、"
-                f"{usage_deleted} 条超过 {days} 天的 LLM 用量记录"
+                f"{usage_deleted} 条超过 {days} 天的 LLM 用量记录、"
+                f"{snapshots_deleted} 条无引用任务快照"
             )
             return deleted_count
 
         except Exception as e:
             logger.error(f"清理审计日志失败: {str(e)}")
-            return 0
+            raise
 
 
 # 全局审计日志记录器实例

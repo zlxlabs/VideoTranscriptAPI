@@ -41,6 +41,12 @@ def _chunk(n):
     return [
         {
             "speaker": f"S{i % 2}",
+            # speaker_id is the raw, pre-mapping label SpeakerAwareProcessor.
+            # _normalize_dialog always attaches alongside "speaker" in real
+            # pipeline output (distinct value here so tests can tell the two
+            # fields apart instead of accidentally passing via a coincidental
+            # match).
+            "speaker_id": f"raw_S{i % 2}",
             "text": f"raw {i}",
             "start_time": f"00:00:0{i}",
             "end_time": f"00:00:1{i}",
@@ -114,6 +120,35 @@ class TestApplyCorrectionsById(unittest.TestCase):
             self.assertEqual(d["speaker"], chunk[idx]["speaker"])
             self.assertEqual(d["start_time"], chunk[idx]["start_time"])
             self.assertEqual(d["end_time"], chunk[idx]["end_time"])
+
+    def test_speaker_id_preserved_through_merge(self):
+        """Local codex review round 5, F4: _apply_corrections_by_id rebuilds
+        a brand-new dialog dict per merged row, copying only time/speaker/
+        text/original_text -- it used to silently drop "speaker_id" (the
+        raw, pre-mapping label SpeakerAwareProcessor._normalize_dialog
+        attaches to every dialog it produces). Any real calibration run
+        (which always goes through this function) therefore emitted
+        dialogs indistinguishable from the pre-schema-migration legacy
+        format, and llm_ops.py's
+        _refresh_speaker_names_in_existing_structured_artifact would treat
+        a freshly-produced, real artifact as "no raw label to key off",
+        skip the name refresh, and log a stale warning about legacy data --
+        even though the schema had already moved on. Locks in that
+        speaker_id survives verbatim through the merge for every id bucket
+        (applied via correction AND kept-original), not just the "text"
+        field the pre-existing tests above already cover."""
+        p = _make_processor()
+        chunk = _chunk(3)
+        # id 1 is intentionally omitted so this also covers the
+        # kept_original branch, not just the corrected/applied one.
+        corr = [{"id": 0, "text": "fixed 0"}, {"id": 2, "text": "fixed 2"}]
+        merged, counts = p._apply_corrections_by_id(corr, chunk)
+        self.assertEqual(
+            [d["speaker_id"] for d in merged],
+            [c["speaker_id"] for c in chunk],
+        )
+        self.assertEqual(counts["applied"], 2)
+        self.assertEqual(counts["kept_original"], 1)
 
     def test_malformed_text_rejected(self):
         """Empty/whitespace text, echoed [id][spk] tag, or non-str -> malformed,

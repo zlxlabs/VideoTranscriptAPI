@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 
-from ..context import get_logger, get_user_manager
+from ..context import get_logger, get_user_manager, lazy_resource
 from ..services.transcription import TranscribeResponse, verify_token
 
-logger = get_logger()
-user_manager = get_user_manager()
+logger = lazy_resource(get_logger)
+user_manager = lazy_resource(get_user_manager)
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 

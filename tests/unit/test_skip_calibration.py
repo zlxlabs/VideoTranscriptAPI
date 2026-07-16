@@ -200,7 +200,33 @@ class TestCoordinatorSkipCalibration:
 
         _, kwargs = coordinator.speaker_aware_processor.process.call_args
         assert kwargs["skip_calibration"] is True
+        assert kwargs["infer_speaker_names"] is True
         assert result["stats"]["calibration_status"] == CalibrationStatus.DISABLED
+
+    def test_speaker_name_switch_is_independent(self, coordinator):
+        coordinator.speaker_aware_processor.process = Mock(
+            return_value={
+                "calibrated_text": "S1: hi",
+                "key_info": {},
+                "stats": {
+                    "calibration_stats": {
+                        "total_chunks": 0,
+                        "calibration_status": CalibrationStatus.DISABLED,
+                    },
+                },
+                "structured_data": {"dialogs": [], "speaker_mapping": {"S1": "S1"}},
+            }
+        )
+        coordinator.process(
+            content=[{"speaker": "S1", "text": "hi"}],
+            title="t",
+            skip_calibration=True,
+            skip_summary=True,
+            infer_speaker_names=False,
+        )
+        assert coordinator.speaker_aware_processor.process.call_args.kwargs[
+            "infer_speaker_names"
+        ] is False
 
     def test_default_skip_calibration_is_false(self, coordinator):
         """Backward compatibility: omitting skip_calibration must behave exactly

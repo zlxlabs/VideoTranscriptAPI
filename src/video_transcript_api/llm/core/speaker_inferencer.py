@@ -7,6 +7,8 @@
 "说话人N" 占位符，避免把低置信度的猜测当作确定结论展示给用户。
 """
 
+import hashlib
+import json
 import re
 from typing import Dict, List, Optional, Tuple
 
@@ -28,6 +30,98 @@ class SpeakerInferencer:
 
     # 单条采样文本的截断上限（字符数）。未纳入外部配置——过细粒度，固定即可。
     _MAX_CHARS_PER_SAMPLE = 120
+
+    @staticmethod
+    def resolve_dialog_speaker(dialog: Dict) -> Optional[object]:
+        """解析单条 dialog 的说话人标签，遍历 speaker/spk/speaker_id 别名链，
+        is not None 判定（保留数字 0 这种合法但 falsy 的说话人 ID，不会被
+        误判成"无标签"）。未命中任何别名字段时返回 None。
+
+        供本类 input_fingerprint/extract_speaker_labels 与
+        SpeakerAwareProcessor._coerce_dialogs 共用同一份别名解析逻辑（本地
+        codex review 第 7 轮 H7），避免三处各自手写同一段 if/for 链、未来
+        改动其中一处忘了同步另外两处。
+        """
+        for field in ("speaker", "spk", "speaker_id"):
+            if field in dialog and dialog[field] is not None:
+                return dialog[field]
+        return None
+
+    @staticmethod
+    def resolve_dialog_text(dialog: Dict) -> Optional[object]:
+        """解析单条 dialog 的文本内容，遍历 text/content/transcript 别名链。
+        未命中任何别名字段时返回 None。与 resolve_dialog_speaker 同一用途
+        说明（本地 codex review 第 7 轮 H7）。
+        """
+        text = dialog.get("text")
+        if text is None:
+            text = dialog.get("content")
+        if text is None:
+            text = dialog.get("transcript")
+        return text
+
+    @staticmethod
+    def extract_speaker_labels(dialogs: List[Dict]) -> List[str]:
+        """从原始（未经 SpeakerAwareProcessor._coerce_dialogs 规范化的）
+        对话列表提取稳定的说话人标签集合，按首次出现顺序去重。
+
+        跳过空文本 dialog（本地 codex review 第 7 轮 H7）：判定口径
+        `resolve_dialog_text(...) in (None, "")` 与 _coerce_dialogs（写侧/
+        落盘路径，SpeakerAwareProcessor.process() 用 _coerce_dialogs 之后
+        的结果推导 speakers 列表）完全一致——否则同一份 dialogs 在读侧
+        （本方法，供 transcription.py 的分层缓存预检计算 input_fingerprint
+        用）与写侧算出的说话人集合会不一致：某个说话人只在空文本 dialog
+        里出现时，读侧此前会把它算进去、写侧因为空文本先被过滤掉不会，
+        两侧的 input_fingerprint 永久不同——同一份输入的预检天然判定为
+        "从未出现过"，本该命中缓存的请求每次都重新触发一轮说话人推断
+        LLM 调用，并用这轮结果覆写已经落盘的产物。
+
+        也是写侧（SpeakerAwareProcessor.process()）在拿到 _coerce_dialogs
+        结果后推导 speakers 列表的同一个实现：coerce 后的 dialog 只剩
+        "speaker"/"text" 两个规范字段且 text 已保证非空，本方法在这份
+        输入上的行为与直接从 coerced 列表取 "speaker" 字段完全等价，
+        统一成单一实现供两侧调用，不再各自维护一份可能悄悄漂移的逻辑。
+
+        Returns:
+            list[str]: 按首次出现顺序去重的说话人标签（已 str() 转换）。
+        """
+        labels = []
+        for item in dialogs:
+            if not isinstance(item, dict):
+                continue
+            text = SpeakerInferencer.resolve_dialog_text(item)
+            if text in (None, ""):
+                continue
+            speaker = SpeakerInferencer.resolve_dialog_speaker(item)
+            if speaker is not None:
+                labels.append(str(speaker))
+        return list(dict.fromkeys(labels))
+
+    @staticmethod
+    def input_fingerprint(speakers: List[str], dialogs: List[Dict]) -> str:
+        """Hash the diarization inputs that make a mapping reusable."""
+        normalized_dialogs = []
+        for value in dialogs:
+            if not isinstance(value, dict):
+                continue
+            speaker = SpeakerInferencer.resolve_dialog_speaker(value)
+            text = SpeakerInferencer.resolve_dialog_text(value)
+            if text in (None, ""):
+                continue
+            normalized_dialogs.append({
+                "speaker": str(speaker) if speaker is not None else "unknown",
+                "text": str(text),
+                "start_time": value.get("start_time", value.get("start")),
+                "end_time": value.get("end_time", value.get("end")),
+            })
+        canonical = {
+            "speakers": [str(value) for value in speakers],
+            "dialogs": normalized_dialogs,
+        }
+        encoded = json.dumps(
+            canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     def __init__(
         self,
@@ -76,6 +170,7 @@ class SpeakerInferencer:
         key_info: Optional[KeyInfo] = None,
         platform: str = "",
         media_id: str = "",
+        allow_llm: bool = True,
     ) -> Dict:
         """推断说话人真实姓名
 
@@ -95,20 +190,46 @@ class SpeakerInferencer:
                 "mapping": {label: 展示名},          # 实际应用的映射，低置信度已降级为"说话人N"
                 "meta": {label: {"name", "confidence", "applied", "sampled"}},  # 每个 label 的推断细节
                 "low_confidence": [label, ...],       # 被降级/未采样的 label 列表
+                "source": "llm" | "cache_hit" | "identity_fallback",  # 本轮映射的真实来源
             }
             meta 中 "sampled" 标记该 label 是否被实际采样并送入 LLM 判断过：
             False 表示预算裁剪或无有效发言，从未获得任何推断依据，"name"
             即原始标签本身；True 表示送入过 LLM，"applied"/"confidence"
             才反映真实的置信度门控结果。
+
+            "source"（本地 codex review 第 6 轮 G4）：调用方（llm_ops.
+            _refresh_speaker_names_in_existing_structured_artifact，"补层
+            刷新"）需要区分本轮映射是不是一次真实、可信的更新，才能决定是否
+            用它覆盖既有展示产物里已经有的好名字：
+            - "llm"：本轮真实调用 LLM 并成功产出了新映射（已经落盘到
+              speaker_mapping.json，见下方 save_speaker_mapping 调用）。只有
+              这个来源才应当触发下游的展示刷新。
+            - "cache_hit"：命中此前已持久化的映射（本身也是历史上某次
+              "llm"来源的产物，见 CacheManager.get_speaker_mapping 的读侧
+              校验——非 "llm" 来源的缓存文件已被当缓存未命中处理），本轮
+              没有发起任何新的 LLM 调用。既有展示产物理论上早已与它一致，
+              不需要因为一次缓存命中就重新刷新一遍。
+            - "identity_fallback"：没有任何真实推断依据——说话人列表为空、
+              allow_llm=False、没有有效发言样本可采样、或 LLM 调用本身抛出
+              异常（网络抖动/限流/超时等瞬时故障）。这几种情况原始产出都
+              退化为"标签本身"，绝不能被下游拿来覆盖既有的好名字——瞬时
+              故障不该把已经展示的真名替换成「说话人1」占位符。
         """
         if not speakers:
             logger.warning("Speaker list is empty, skipping inference")
-            return {"mapping": {}, "meta": {}, "low_confidence": []}
+            return self._identity_fallback(speakers)
+
+        input_fingerprint = self.input_fingerprint(speakers, dialogs)
 
         # 缓存命中校验：缓存 mapping 必须覆盖当前 speakers 集合才能复用，
         # 否则说明本次转录出现了缓存里没有的新说话人，必须重新推断。
         if self.cache_manager and platform and media_id:
-            cached = self.cache_manager.get_speaker_mapping(platform, media_id)
+            cached = self.cache_manager.get_speaker_mapping(
+                platform,
+                media_id,
+                input_fingerprint=input_fingerprint,
+                speakers=speakers,
+            )
             if cached:
                 normalized_cache = self._normalize_cached_result(cached)
                 if normalized_cache and set(normalized_cache["mapping"].keys()) >= set(speakers):
@@ -135,16 +256,24 @@ class SpeakerInferencer:
                         speaker: cached_meta[speaker].get("sampled", True)
                         for speaker in speakers
                     }
-                    return self._apply_confidence_gate(
+                    cache_hit_result = self._apply_confidence_gate(
                         speakers=speakers,
                         raw_mapping=raw_mapping,
                         confidence_by_speaker=confidence_by_speaker,
                         sampled=sampled,
                     )
+                    # 命中缓存、未发起新的 LLM 调用——不是本轮真实推断，见
+                    # infer() 顶部 docstring "source" 一节。
+                    cache_hit_result["source"] = "cache_hit"
+                    return cache_hit_result
                 logger.info(
                     f"Cached speaker_mapping does not cover current speakers "
                     f"({platform}/{media_id}), ignoring stale cache and re-inferring"
                 )
+
+        if not allow_llm:
+            logger.info("Speaker name inference disabled; using generic labels")
+            return self._identity_fallback(speakers)
 
         # 按说话人采样：每人取全时间轴上的前 K 条发言 + 首次出场上下文
         sample_groups = self._extract_sample_dialogs(dialogs, speakers)
@@ -210,11 +339,19 @@ class SpeakerInferencer:
                 confidence_by_speaker=confidence_by_speaker,
                 sampled=sampled,
             )
+            # 本轮真实调用了 LLM 并成功产出新映射——见 infer() 顶部 docstring
+            # "source" 一节，唯一允许下游"补层刷新"触碰既有展示产物的来源。
+            inference_result["source"] = "llm"
 
             # 缓存结果（新格式：mapping + meta + low_confidence）
             if self.cache_manager and platform and media_id:
                 self.cache_manager.save_speaker_mapping(
-                    platform, media_id, inference_result
+                    platform,
+                    media_id,
+                    inference_result,
+                    input_fingerprint=input_fingerprint,
+                    speakers=speakers,
+                    source="llm",
                 )
                 logger.info(f"Speaker_mapping cached: {platform}/{media_id}")
 
@@ -677,6 +814,15 @@ class SpeakerInferencer:
         保持形状一致——虽然这两条路径的结果目前都不会被写入缓存（调用方
         没有传 platform/media_id 走到这里，或者是异常兜底），但形状统一
         能避免未来读取 meta 的代码要额外处理"某些路径没有这个 key"。
+
+        统一在这里标记 "source": "identity_fallback"（本地 codex review
+        第 6 轮 G4），而不是让 infer() 的每个调用点各自补一遍：这个方法是
+        speakers 为空、allow_llm=False、无有效采样样本、LLM 调用异常这
+        四条路径唯一共用的出口，集中标记既不遗漏也不会几处代码各写一遍、
+        将来漂移。调用方（llm_ops._refresh_speaker_names_in_existing_
+        structured_artifact）据此拒绝用这类没有真实推断依据的结果覆盖既有
+        展示产物——尤其是"LLM 调用异常"这条路径，瞬时故障不该把已经展示的
+        真名替换成占位符。
         """
         return {
             "mapping": {speaker: speaker for speaker in speakers},
@@ -690,6 +836,7 @@ class SpeakerInferencer:
                 for speaker in speakers
             },
             "low_confidence": list(speakers),
+            "source": "identity_fallback",
         }
 
     # ------------------------------------------------------------------
