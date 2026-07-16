@@ -78,6 +78,25 @@ class TestParseTimeToSeconds:
         for value in (object(), b"bytes", float("nan"), float("inf")):
             parse_time_to_seconds(value)
 
+    def test_non_finite_float_returns_none(self):
+        # float('inf')/nan must never be treated as a valid timestamp --
+        # downstream int(inf) conversions would crash otherwise.
+        assert parse_time_to_seconds(float("inf")) is None
+        assert parse_time_to_seconds(float("-inf")) is None
+        assert parse_time_to_seconds(float("nan")) is None
+
+    def test_non_finite_string_returns_none(self):
+        assert parse_time_to_seconds("inf") is None
+        assert parse_time_to_seconds("-inf") is None
+        assert parse_time_to_seconds("nan") is None
+
+    def test_overflowing_numeric_string_returns_none(self):
+        # float("1e309") silently overflows to inf in Python (no exception);
+        # must be caught by the finiteness check rather than accepted as a
+        # huge-but-valid timestamp.
+        assert parse_time_to_seconds("1e309") is None
+        assert parse_time_to_seconds("-1e309") is None
+
 
 # ---------------------------------------------------------------------------
 # normalize_segments

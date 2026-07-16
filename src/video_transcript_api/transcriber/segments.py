@@ -17,6 +17,7 @@
 """
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -42,11 +43,16 @@ def parse_time_to_seconds(value: Any) -> Optional[float]:
     非数字类型等）一律返回 `None`，绝不抛异常——调用方无需 try/except 包裹。
     负数被视为非法时间（时间不可能为负），同样返回 `None`。
 
+    非有限值同样视为非法时间，一律返回 `None`：`float("inf")`、`nan`、
+    以及会因溢出变成 `inf` 的超大数字字符串（如 `"1e309"`）都不例外——
+    否则下游对时间做 `int()` 转换时会直接崩溃。用 `math.isfinite` 兜底，
+    覆盖 int/float 直传和字符串解析两类入口。
+
     Args:
         value: 任意来源的原始时间值。
 
     Returns:
-        解析成功返回秒数（float，>= 0）；解析失败返回 None。
+        解析成功返回秒数（float，>= 0 且为有限值）；解析失败返回 None。
     """
     if value is None:
         return None
@@ -57,7 +63,7 @@ def parse_time_to_seconds(value: Any) -> Optional[float]:
 
     if isinstance(value, (int, float)):
         seconds = float(value)
-        return seconds if seconds >= 0 else None
+        return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
     if isinstance(value, str):
         text = value.strip()
@@ -72,19 +78,21 @@ def parse_time_to_seconds(value: Any) -> Optional[float]:
                 numbers = [float(p) for p in parts]
             except ValueError:
                 return None
+            if not all(math.isfinite(n) for n in numbers):
+                return None
             if len(numbers) == 2:
                 hours = 0.0
                 minutes, seconds_part = numbers
             else:
                 hours, minutes, seconds_part = numbers
             total = hours * 3600 + minutes * 60 + seconds_part
-            return total if total >= 0 else None
+            return total if math.isfinite(total) and total >= 0 else None
 
         try:
             seconds = float(text)
         except ValueError:
             return None
-        return seconds if seconds >= 0 else None
+        return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
     # 其他类型（list/dict/自定义对象等）一律视为垃圾值
     return None
