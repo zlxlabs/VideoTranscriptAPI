@@ -177,3 +177,54 @@ def test_empty_transcript_falls_back_to_none():
     result = downloader._fetch_youtube_transcript_result("video123")
 
     assert result is None
+
+
+def test_astronomically_large_start_overflows_to_none_start_time():
+    """A JSON-legal but astronomically large integer time value (e.g. 10**400,
+    which can survive upstream deserialization as a legit Python int) makes
+    float() raise OverflowError instead of returning inf or raising
+    ValueError/TypeError. Before the fix this propagated out of the per-item
+    try/except, was caught by the outer broad `except Exception` in
+    _fetch_youtube_transcript_result, and silently lost the ENTIRE subtitle
+    path (not just the one bad timestamp) -- every priority + fallback
+    language attempt failed, returning None. After the fix, this degrades to
+    start_time=None for just the offending snippet -- consistent with any
+    other unparseable time -- and the rest of the batch (including its own
+    text) is untouched."""
+    downloader = _make_downloader()
+    downloader.ytt_api = Mock()
+    downloader.ytt_api.list = Mock(return_value=[FakeTranscriptListing("en")])
+    downloader.ytt_api.fetch = Mock(return_value=[
+        FakeSnippet("Hello", 10 ** 400, 1.5),
+        FakeSnippet("world", 1.5, 2.0),
+    ])
+
+    result = downloader._fetch_youtube_transcript_result("video123")
+
+    assert isinstance(result, SubtitleResult)
+    assert result.text == "Hello world"
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Hello"},
+        {"start_time": 1.5, "end_time": 3.5, "text": "world"},
+    ]
+
+
+def test_astronomically_large_duration_overflows_to_none_end_time():
+    """Same OverflowError risk applies to item.duration (used to compute
+    end_time = start + duration): an astronomically large duration must not
+    blow up the whole language attempt either. Only this snippet's end_time
+    is nulled out; start_time and text stay intact."""
+    downloader = _make_downloader()
+    downloader.ytt_api = Mock()
+    downloader.ytt_api.list = Mock(return_value=[FakeTranscriptListing("en")])
+    downloader.ytt_api.fetch = Mock(return_value=[
+        FakeSnippet("Hello", 0.0, 10 ** 400),
+    ])
+
+    result = downloader._fetch_youtube_transcript_result("video123")
+
+    assert isinstance(result, SubtitleResult)
+    assert result.text == "Hello"
+    assert result.segments == [
+        {"start_time": 0.0, "end_time": None, "text": "Hello"},
+    ]

@@ -120,6 +120,19 @@ class TestDownloadInfoMapping:
         with pytest.raises(ResolverResponseError):
             dl.get_download_info("https://www.douyin.com/video/7123")
 
+    def test_astronomically_large_duration_degrades_to_none_without_raising(self):
+        """A JSON-legal but astronomically large integer duration (e.g.
+        10**400, which can survive response.json() deserialization as a
+        legit Python int -- json.loads has no size limit on integers) makes
+        float() raise OverflowError instead of the TypeError/ValueError this
+        call site already guards against. get_metadata() must not blow up on
+        a malformed/adversarial resolver response -- it should degrade
+        duration to None like any other unparseable value."""
+        data = dict(DOUYIN_DATA, duration=10 ** 400)
+        dl = make_downloader([data])
+        md = dl.get_metadata("https://www.douyin.com/video/7123")  # must not raise
+        assert md.duration is None
+
 
 # --------------------------------------------------------------------------- #
 # P0-2: SSRF validation on resolver-returned video_url

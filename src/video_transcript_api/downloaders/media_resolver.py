@@ -134,7 +134,11 @@ class MediaResolverDownloader(BaseDownloader):
         duration = data.get("duration")
         try:
             duration = float(duration) if duration is not None else None
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError: resolver 响应经 response.json() 反序列化，JSON 整数无
+            # 精度上限，恶意/畸形响应可能带一个如 10**400 的天文数字 int——
+            # float() 转换会抛 OverflowError（而非静默变 inf），与既有的
+            # TypeError/ValueError 同等对待，diagnostic 记 duration=None
             duration = None
         return VideoMetadata(
             video_id=str(data.get("video_id") or video_id or ""),

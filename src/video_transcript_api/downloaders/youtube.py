@@ -770,23 +770,27 @@ class YoutubeDownloader(BaseDownloader):
 
         candidate_segments = []
         for item in raw_items:
-            # start_time 单独解析：缺失属性 / 非数字 / 非有限值（inf、nan）
-            # 都视为该条时间不可用，置 None，但绝不影响 text 的保留
+            # start_time 单独解析：缺失属性 / 非数字 / 非有限值（inf、nan）/
+            # 超出 float 可表示范围的天文数字（如反序列化后的 10**400，
+            # float() 转换会抛 OverflowError 而不是静默变成 inf——因为
+            # int->float 与 str->float 走不同的转换路径，只有前者会溢出
+            # 抛异常）都视为该条时间不可用，置 None，但绝不影响 text 的保留
             try:
                 start_time = float(item.start)
                 if not math.isfinite(start_time):
                     start_time = None
-            except (AttributeError, TypeError, ValueError):
+            except (AttributeError, TypeError, ValueError, OverflowError):
                 start_time = None
 
-            # end_time 依赖 start_time + duration，两者任一不可用则整体置 None
+            # end_time 依赖 start_time + duration，两者任一不可用则整体置 None；
+            # duration 同样可能是天文数字，同上需要捕获 OverflowError
             end_time = None
             if start_time is not None:
                 try:
                     duration = float(item.duration)
                     if math.isfinite(duration):
                         end_time = start_time + duration
-                except (AttributeError, TypeError, ValueError):
+                except (AttributeError, TypeError, ValueError, OverflowError):
                     end_time = None
 
             candidate_segments.append({
