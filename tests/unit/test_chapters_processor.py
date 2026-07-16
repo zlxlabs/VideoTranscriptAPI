@@ -137,6 +137,27 @@ class TestToSeconds(unittest.TestCase):
         purely by virtue of the delegation, with no code of its own."""
         self.assertIsNone(_to_seconds("01:-01:00"))
 
+    def test_non_digit_clock_component_rejected(self):
+        """gate-r25 P2 delegation-side regression assertion: the shared
+        parse_time_to_seconds implementation now requires clock components
+        (other than the trailing seconds component) to be plain digit
+        strings, rejecting anything float() alone would accept -- decimals
+        ("0.5:00:00"), scientific notation ("1e2:00"), and PEP 515
+        underscore digit grouping ("1_0:00"). Full case matrix lives in
+        TestParseTimeToSeconds in tests/unit/test_segments_adapter.py;
+        _to_seconds is a thin delegating wrapper, so it must reject these
+        too purely by virtue of the delegation, with no code of its own."""
+        self.assertIsNone(_to_seconds("0.5:00:00"))
+        self.assertIsNone(_to_seconds("1e2:00"))
+        self.assertIsNone(_to_seconds("1_0:00"))
+
+    def test_trailing_seconds_component_with_decimal_fraction_is_valid(self):
+        """Delegation-side regression assertion for the one deliberate
+        exception to the digit-only rule above: the trailing seconds
+        component may carry a decimal fraction. "00:01:23.4" must still
+        resolve to 83.4 through the delegating wrapper."""
+        self.assertEqual(_to_seconds("00:01:23.4"), 83.4)
+
 
 class TestFormatTimestamp(unittest.TestCase):
     """Locks the compressed prompt timestamp format: mm:ss, or h:mm:ss past 1 hour."""

@@ -166,6 +166,45 @@ class TestParseTimeToSeconds:
         assert parse_time_to_seconds("1e309") is None
         assert parse_time_to_seconds("-1e309") is None
 
+    # -- gate-r25 P2: clock components must be plain digit strings, not --
+    # -- anything float() happens to accept (decimals / sci-notation /  --
+    # -- underscore digit grouping) -- except the trailing seconds      --
+    # -- component, which may carry an optional decimal fraction.      --
+
+    def test_decimal_hours_component_returns_none(self):
+        # "0.5:00:00" -- a non-last (hours) component with a decimal point.
+        # float("0.5") happily parses to 0.5, so before this fix this
+        # silently became 0.5*3600 = 1800.0 seconds -- a fabricated time from
+        # a component that is not the legal trailing "seconds" position.
+        assert parse_time_to_seconds("0.5:00:00") is None
+
+    def test_scientific_notation_component_returns_none(self):
+        # "1e2:00" -- a non-last (minutes) component in scientific notation.
+        # float("1e2") == 100.0, so before this fix this silently became
+        # 100*60 = 6000.0 seconds.
+        assert parse_time_to_seconds("1e2:00") is None
+
+    def test_underscore_digit_grouping_component_returns_none(self):
+        # "1_0:00" -- Python's float() accepts PEP 515 digit-grouping
+        # underscores in numeric strings (float("1_0") == 10.0), so before
+        # this fix this silently became 10*60 = 600.0 seconds.
+        assert parse_time_to_seconds("1_0:00") is None
+
+    def test_trailing_seconds_component_with_decimal_fraction_is_valid(self):
+        # The one deliberate exception: the last (seconds) component may
+        # carry a decimal fraction -- "00:01:23.4" is a legitimate
+        # sub-second-precision timestamp and must still resolve to 83.4,
+        # not be rejected by the new stricter per-component check.
+        assert parse_time_to_seconds("00:01:23.4") == 83.4
+
+    def test_non_last_component_with_decimal_fraction_still_rejected(self):
+        # The decimal-fraction exception is scoped to the trailing
+        # (seconds) component only -- "01:23.4:00" (decimal in the middle
+        # "minutes" slot of a 3-part HH:MM:SS string) must still be
+        # rejected, confirming the exception isn't accidentally applied to
+        # every component.
+        assert parse_time_to_seconds("01:23.4:00") is None
+
 
 # ---------------------------------------------------------------------------
 # normalize_segments

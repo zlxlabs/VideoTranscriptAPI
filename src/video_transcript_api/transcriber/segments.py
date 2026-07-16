@@ -18,6 +18,7 @@
 
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -28,6 +29,15 @@ logger = setup_logger("segments_adapter")
 # 允许作为"时间片段来源文件"的候选文件名，按优先级从高到低排列。
 # funasr 原生输出优先；capswriter 的 FunASR 兼容 JSON（无 speaker 字段）次之。
 _SEGMENT_SOURCE_FILENAMES = ("transcript_funasr.json", "transcript_capswriter.json")
+
+# "HH:MM:SS"/"MM:SS" 字符串里，非末位分量（小时/分钟）合法的写法：纯数字。
+# 用于在 float() 转换之前拒绝 float() 能接受、但时钟分量不该出现的写法——
+# 小数（"0.5"）、科学计数法（"1e2"）、PEP 515 数字分组下划线（"1_0"）——
+# 见 parse_time_to_seconds 中的用法说明（gate-r25 P2）。
+_CLOCK_INTEGER_COMPONENT_PATTERN = re.compile(r"\d+")
+# 末位分量（秒）额外放宽：允许一个可选的小数部分，兼容 "00:01:23.4" 这类
+# 带小数秒精度的合法写法——秒是唯一可以合法带小数的时钟单位。
+_CLOCK_SECONDS_COMPONENT_PATTERN = re.compile(r"\d+(\.\d+)?")
 
 
 def parse_time_to_seconds(value: Any) -> Optional[float]:
@@ -91,14 +101,29 @@ def parse_time_to_seconds(value: Any) -> Optional[float]:
             parts = [p.strip() for p in text.split(":")]
             if len(parts) not in (2, 3):
                 return None
-            # 逐分量校验负号，而不是只看最终总秒数的正负：像 "01:-01:00" 这样
-            # 单个分量为负、但 hours*3600+minutes*60+seconds 累加后总和恰好仍
-            # 是正数的畸形时间，之前会被总和校验放过。这里在数值转换前先按
-            # 字符串前缀判断——不能等 float() 转换完再用 `n < 0` 判断，因为
-            # "-00" 会被解析成 -0.0，而 -0.0 < 0 在 IEEE 754 下为 False（-0.0
-            # 与 0.0 数值相等），会漏掉这类"看起来负、数值上不负"的分量。
-            if any(p.startswith("-") for p in parts):
-                return None
+            # 逐分量校验格式，而不是等 float() 转换完再兜底（gate-r25 P2）：
+            # float() 能接受的写法比"时钟分量"该有的写法宽得多——小数
+            # ("0.5")、科学计数法（"1e2"）、PEP 515 数字分组下划线
+            # ("1_0")——这些对小时/分钟这类整数时钟单位而言都是非法输入，
+            # 不能被静默接受成合法时间（如 "0.5:00:00"、"1e2:00"、"1_0:00"
+            # 均须判定为非法）。唯一例外是末位分量（秒）：额外放宽允许一个
+            # 可选的小数部分，兼容 "00:01:23.4" 这类带小数秒的合法写法。
+            #
+            # 这层校验同时覆盖了负号分量的拒绝：像 "01:-01:00" 这样单个分量
+            # 为负、但 hours*3600+minutes*60+seconds 累加后总和恰好仍是正数
+            # 的畸形时间，之前需要专门的字符串前缀判断（不能等 float() 转换
+            # 完再用 `n < 0` 判断，因为 "-00" 会被解析成 -0.0，而 -0.0 < 0
+            # 在 IEEE 754 下为 False）——纯数字正则天然不匹配任何带 "-" 前缀
+            # 的分量，因此这条规则不需要再单独写一遍。
+            for idx, part in enumerate(parts):
+                is_seconds_component = idx == len(parts) - 1
+                component_pattern = (
+                    _CLOCK_SECONDS_COMPONENT_PATTERN
+                    if is_seconds_component
+                    else _CLOCK_INTEGER_COMPONENT_PATTERN
+                )
+                if not component_pattern.fullmatch(part):
+                    return None
             try:
                 numbers = [float(p) for p in parts]
             except ValueError:

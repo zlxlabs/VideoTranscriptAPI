@@ -208,6 +208,25 @@ SRT_TRAILING_GARBAGE_AFTER_TIMESTAMP = (
     "Hello world\n"
 )
 
+# gate-r25 P2: _SRT_TIMESTAMP_STRICT_PATTERN's millisecond groups were
+# `\d{1,3}` (1-3 digits), while the standard SRT millisecond field is always
+# exactly 3 digits (zero-padded, e.g. "000"). A non-standard digit count
+# (1 or 2 digits) is a corrupted timestamp, not a legitimately-formatted
+# alternative -- it must be treated the same as any other corrupted
+# timeline (text preserved, start_time/end_time = None), not silently
+# accepted as a real time.
+SRT_SINGLE_DIGIT_MILLISECOND = (
+    "1\n"
+    "00:00:01,1 --> 00:00:04,000\n"
+    "Hello world\n"
+)
+
+SRT_TWO_DIGIT_MILLISECOND = (
+    "1\n"
+    "00:00:01,12 --> 00:00:04,000\n"
+    "Hello world\n"
+)
+
 SRT_EMPTY = ""
 
 # gate-r16 P2: a UTF-8 BOM (U+FEFF) prepended to the file content (as many
@@ -595,6 +614,35 @@ def test_trailing_garbage_after_timestamp_treated_as_corrupted_timeline():
     assert YouTubeApiClient.parse_srt_to_text(
         SRT_TRAILING_GARBAGE_AFTER_TIMESTAMP
     ) == result.text
+
+
+def test_single_digit_millisecond_treated_as_corrupted_timeline():
+    """gate-r25 P2: a millisecond field with only 1 digit ("...,1" instead of
+    the standard zero-padded 3-digit "...,000") must not be silently accepted
+    as a legal time -- the loose cue-boundary detection (via the "-->"-based
+    fallback, since the digit count also fails the fixed-width loose/range
+    patterns) still recognizes the line as a timeline row, but the strict
+    check used to extract the actual time VALUES must reject any millisecond
+    field that isn't exactly 3 digits, falling back to
+    start_time/end_time = None just like any other corrupted timeline."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_SINGLE_DIGIT_MILLISECOND)
+
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Hello world"},
+    ]
+    # legacy text path is untouched by this fix -- byte-identical output
+    assert YouTubeApiClient.parse_srt_to_text(SRT_SINGLE_DIGIT_MILLISECOND) == result.text
+
+
+def test_two_digit_millisecond_treated_as_corrupted_timeline():
+    """Same rule for a 2-digit millisecond field ("...,12") -- also
+    non-standard, must be rejected the same way as the 1-digit case above."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_TWO_DIGIT_MILLISECOND)
+
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Hello world"},
+    ]
+    assert YouTubeApiClient.parse_srt_to_text(SRT_TWO_DIGIT_MILLISECOND) == result.text
 
 
 def test_normal_timeline_still_parses_after_strict_check_added():
