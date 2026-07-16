@@ -65,6 +65,22 @@ SRT_MIXED_VALID_AND_BROKEN_TIMELINE = (
     "Trailing valid cue\n"
 )
 
+SRT_BODY_TEXT_WITH_ARROW = (
+    "1\n"
+    "00:00:01,000 --> 00:00:04,000\n"
+    "Go to Settings --> Privacy to change\n"
+)
+
+SRT_BODY_TEXT_WITH_ARROW_THEN_NEXT_CUE = (
+    "1\n"
+    "00:00:01,000 --> 00:00:04,000\n"
+    "Go to Settings --> Privacy to change\n"
+    "\n"
+    "2\n"
+    "00:00:05,000 --> 00:00:08,000\n"
+    "Next cue text\n"
+)
+
 SRT_EMPTY = ""
 
 
@@ -145,6 +161,35 @@ def test_mixed_valid_and_broken_timeline_keeps_all_cue_text_in_segments():
     # Every cue's text must be present in segments -- nothing silently dropped.
     segment_texts = {seg["text"] for seg in result.segments}
     assert segment_texts == {"Hello world", "Broken timestamp cue", "Trailing valid cue"}
+
+
+def test_body_text_containing_arrow_stays_in_cue_text_and_segments():
+    """A plain-text line that merely contains "-->" (e.g. a UI navigation hint
+    like "Settings --> Privacy") must not be mistaken for a (corrupted)
+    timeline boundary. The loose "-->"-based fallback added to recognize
+    corrupted timelines only applies to lines in the expected timeline
+    position (immediately following a pure-digit index line) -- a "-->" line
+    encountered while collecting a cue's body text, whose previous line is
+    not a pure-digit index line, is always treated as ordinary text."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_BODY_TEXT_WITH_ARROW)
+
+    assert result.text == "Go to Settings --> Privacy to change"
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": 4.0, "text": "Go to Settings --> Privacy to change"},
+    ]
+    assert YouTubeApiClient.parse_srt_to_text(SRT_BODY_TEXT_WITH_ARROW) == result.text
+
+
+def test_body_text_containing_arrow_does_not_break_next_cue_boundary():
+    """The same stray "-->" body line must not throw off detection of the
+    following, genuinely well-formed cue either."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_BODY_TEXT_WITH_ARROW_THEN_NEXT_CUE)
+
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": 4.0, "text": "Go to Settings --> Privacy to change"},
+        {"start_time": 5.0, "end_time": 8.0, "text": "Next cue text"},
+    ]
+    assert YouTubeApiClient.parse_srt_to_text(SRT_BODY_TEXT_WITH_ARROW_THEN_NEXT_CUE) == result.text
 
 
 def test_empty_srt_content():

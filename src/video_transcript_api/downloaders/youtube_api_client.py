@@ -673,7 +673,7 @@ class YouTubeApiClient:
         return SubtitleResult(text=text, segments=segments)
 
     @staticmethod
-    def _looks_like_timeline_attempt(line: str) -> bool:
+    def _looks_like_timeline_attempt(line: str, prev_line: str) -> bool:
         """
         判断某一行是否"像"一条 SRT 时间轴声明行，即使其数字格式已经损坏
 
@@ -683,13 +683,22 @@ class YouTubeApiClient:
         能被识别为"这里本应是一条时间轴"，从而正确切出 cue 边界，避免把下一条
         cue 的内容错误地拼接为当前 cue 的文本（反之亦然）。
 
+        但这个宽松匹配不能无条件生效：字幕正文本身偶尔会出现 "-->"（如操作
+        指引 "Settings --> Privacy"），若不加约束会被误判成下一条 cue 的时间
+        轴，导致该文本行从当前 cue 的文本里静默丢失。SRT 的标准结构是
+        "索引行(纯数字) -> 时间轴行 -> 文本行... -> 空行分隔"，因此只有当
+        "-->" 行紧跟在一个纯数字索引行之后（即处于"预期时间轴位置"）时，才
+        当作（哪怕格式已损坏的）时间轴声明；否则一律当作普通正文。
+
         Args:
             line: 已经 strip 过的单行文本
+            prev_line: 已经 strip 过的上一行文本，用于判断当前行是否紧跟在
+                纯数字索引行之后
 
         Returns:
             bool: 是否应被当作一条时间轴声明（不论格式是否合法）
         """
-        return "-->" in line
+        return "-->" in line and prev_line.isdigit()
 
     @staticmethod
     def _extract_srt_segments(lines: list) -> list:
@@ -718,12 +727,19 @@ class YouTubeApiClient:
 
         segments = []
         i = 0
+        # 上一行（已 strip），用于判断当前行是否紧跟纯数字索引行——只有处于
+        # "预期时间轴位置" 的 "-->" 行才可能是（损坏的）时间轴，正文中偶然
+        # 出现的 "-->" 一律当普通文本，见 _looks_like_timeline_attempt。
+        prev_line = ""
         while i < len(lines):
             line = lines[i].strip()
             match = YouTubeApiClient._SRT_TIMESTAMP_RANGE_PATTERN.match(line)
-            is_timeline_attempt = bool(match) or YouTubeApiClient._looks_like_timeline_attempt(line)
+            is_timeline_attempt = bool(match) or YouTubeApiClient._looks_like_timeline_attempt(
+                line, prev_line
+            )
 
             if not is_timeline_attempt:
+                prev_line = line
                 i += 1
                 continue
 
@@ -738,18 +754,21 @@ class YouTubeApiClient:
                 end_time = None
 
             # 收集该时间轴对应的文本行，直到遇到空行/序号行/下一个时间轴行
-            # （下一个时间轴行同样按"宽松判定"处理，避免误吞下一条 cue）
+            # （下一个时间轴行同样按"宽松判定"处理，避免误吞下一条 cue；判定
+            # 时同样要求紧跟纯数字索引行，正文里的 "-->" 不会被当作边界）
             text_lines = []
             j = i + 1
+            prev_candidate = line  # 时间轴行本身作为文本收集循环的"上一行"
             while j < len(lines):
                 candidate = lines[j].strip()
-                if (
-                    not candidate
-                    or candidate.isdigit()
-                    or YouTubeApiClient._looks_like_timeline_attempt(candidate)
-                ):
+                candidate_match = YouTubeApiClient._SRT_TIMESTAMP_RANGE_PATTERN.match(candidate)
+                candidate_is_timeline_attempt = bool(
+                    candidate_match
+                ) or YouTubeApiClient._looks_like_timeline_attempt(candidate, prev_candidate)
+                if not candidate or candidate.isdigit() or candidate_is_timeline_attempt:
                     break
                 text_lines.append(re.sub(r"<[^>]+>", "", candidate))
+                prev_candidate = candidate
                 j += 1
 
             segment_text = " ".join(t for t in text_lines if t).strip()
@@ -760,6 +779,7 @@ class YouTubeApiClient:
                     "text": segment_text,
                 })
 
+            prev_line = lines[j - 1].strip()
             i = j
 
         return segments
