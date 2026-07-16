@@ -619,6 +619,87 @@ class TestGating(ChaptersProcessorTestBase):
             f"expected a description truncation warning, got: {warning_messages}",
         )
 
+    def test_description_under_2000_chars_sent_in_full_not_cut_at_old_500_limit(self):
+        """gate-r22 P2 regression: build_chapters_user_prompt used to carry its
+        own leftover 500-char description truncation from an earlier
+        implementation, independent of (and inconsistent with)
+        _truncate_description's 2000-char cap and gate 4's length
+        measurement (which counts the *post-truncation* description). For a
+        501-2000 char description, gate 4 would correctly count the full
+        length and let it through, but build_chapters_user_prompt would then
+        silently drop everything past char 500 when actually building the
+        prompt -- gate measured one thing, the LLM received another. A
+        1500-char description must now reach the LLM in full, with no
+        internal re-truncation."""
+        segments = make_segments(5)
+        description = "x" * 1500
+
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "gist a", "start_seg": 0},
+            {"title": "B", "gist": "gist b", "start_seg": 3},
+        ])
+        # self.config.max_chapters_input_chars defaults to 100000 -- comfortably
+        # fits segment_lines + title + a 1500-char description.
+        result = self.processor.process(segments=segments, title="T", description=description)
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        user_prompt = self.llm_client.call.call_args[1]["user_prompt"]
+        # all 1500 'x' characters must reach the LLM -- not just the first 500
+        self.assertEqual(user_prompt.count("x"), 1500)
+        self.assertNotIn("...", user_prompt)
+
+    def test_description_over_2000_chars_truncated_and_gate_counts_truncated_length(self):
+        """gate-r22 P2 regression (single-truncation-point invariant): a
+        description beyond _DESCRIPTION_MAX_CHARS (2000) must be truncated to
+        exactly 2000 chars by _truncate_description -- the *only* truncation
+        point -- and gate 4's length measurement must match that same
+        2000-char boundary exactly, not the pre-truncation 2500-char raw
+        length and not an internal 500-char cut inside
+        build_chapters_user_prompt. Proven two ways: (1) a cap sized to fit
+        exactly segment_lines + title + a 2000-char description passes and
+        the LLM receives exactly 2000 'x' characters; (2) a cap one char
+        smaller than that fails the gate -- showing the gate is counting the
+        truncated 2000-char length precisely, not something smaller (500) or
+        larger (2500)."""
+        segments = make_segments(5)
+        bare_segment_lines_len = len(_build_segment_lines(_indexed(segments)))
+        title = "T"
+        description = "x" * 2500
+        exact_cap = bare_segment_lines_len + len(title) + 2000
+
+        fitting_llm_client = Mock()
+        fitting_llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "gist a", "start_seg": 0},
+            {"title": "B", "gist": "gist b", "start_seg": 3},
+        ])
+        fitting_config = LLMConfig(
+            api_key="k", base_url="u",
+            calibrate_model="m", summary_model="s",
+            chapters_model="chap-model",
+            min_chapters_threshold=10,
+            max_chapters_input_chars=exact_cap,
+        )
+        fitting_processor = ChaptersProcessor(llm_client=fitting_llm_client, config=fitting_config)
+        result = fitting_processor.process(segments=segments, title=title, description=description)
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        user_prompt = fitting_llm_client.call.call_args[1]["user_prompt"]
+        self.assertEqual(user_prompt.count("x"), 2000)
+
+        too_small_llm_client = Mock()
+        too_small_config = LLMConfig(
+            api_key="k", base_url="u",
+            calibrate_model="m", summary_model="s",
+            chapters_model="chap-model",
+            min_chapters_threshold=10,
+            max_chapters_input_chars=exact_cap - 1,
+        )
+        too_small_processor = ChaptersProcessor(llm_client=too_small_llm_client, config=too_small_config)
+        result_too_small = too_small_processor.process(segments=segments, title=title, description=description)
+
+        self.assertEqual(result_too_small.status, ChaptersStatus.FAILED)
+        too_small_llm_client.call.assert_not_called()
+
 
 class TestMetadataFlatteningPreventsForgery(ChaptersProcessorTestBase):
     """gate-r21 P2: title/author/description come from external platforms
