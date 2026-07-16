@@ -297,15 +297,26 @@ def load_segments(cache_dir: Path) -> Optional[List[Dict[str, Any]]]:
                 continue
             with file_path.open("r", encoding="utf-8") as f:
                 raw = json.load(f)
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
-            # UnicodeDecodeError 是 ValueError 的子类而非 OSError，必须单独列出，
-            # 否则遇到非法 UTF-8 字节（如生产环境偶发的编码损坏文件）会绕过这个
-            # except 直接抛出，违反本模块"从不抛异常"的契约。RecursionError 同理
-            # 是 RuntimeError 的子类而非 OSError/ValueError——病态深度嵌套的 JSON
-            # （如构造攻击或损坏导出文件里的 "[[[[...]]]]"）会让 json.load() 的
-            # 递归下降解析器超出 Python 默认递归深度抛出 RecursionError，同样必须
-            # 单独列出。三者与 OSError/JSONDecodeError 同等对待：记 warning，
-            # 尝试下一优先级来源。PermissionError 是 OSError 子类，同样被覆盖。
+        except (OSError, ValueError, RecursionError) as exc:
+            # 用 ValueError（而非只列 json.JSONDecodeError）兜底，覆盖三类子类
+            # 场景，缺一都会破坏本模块"从不抛异常"的契约：
+            #   - json.JSONDecodeError 本身就是 ValueError 子类，JSON 语法损坏
+            #     （如截断的 "{not valid json"）走这条路径。
+            #   - UnicodeDecodeError 也是 ValueError 子类（经 UnicodeError），
+            #     非法 UTF-8 字节（如生产环境偶发的编码损坏文件）会触发它。
+            #   - gate-r26 P2：Python 3.11+ 对 int<->str 转换设了 4300 位数字
+            #     上限（sys.set_int_max_str_digits），json.load() 解析含超长
+            #     整数（如损坏导出文件里被污染成天文数字的时间字段）的 JSON
+            #     时，会在 int() 解析内部抛出一个**裸** ValueError——它不是
+            #     json.JSONDecodeError 的实例，之前只列 json.JSONDecodeError
+            #     的 except 元组会漏接它，导致 load_segments() 直接崩溃而不是
+            #     按现有语义降级到下一优先级来源。三者统一用 ValueError 兜底，
+            #     不必再逐个子类列出。
+            # RecursionError 是 RuntimeError 的子类而非 OSError/ValueError——
+            # 病态深度嵌套的 JSON（如构造攻击或损坏导出文件里的 "[[[[...]]]]"）
+            # 会让 json.load() 的递归下降解析器超出 Python 默认递归深度抛出
+            # RecursionError，同样必须单独列出。四者同等对待：记 warning，尝试
+            # 下一优先级来源。PermissionError 是 OSError 子类，同样被覆盖。
             logger.warning(f"读取时间片段文件失败，尝试下一优先级来源: {file_path} ({exc})")
             continue
 

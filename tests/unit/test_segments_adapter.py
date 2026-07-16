@@ -459,6 +459,42 @@ class TestLoadSegments:
         result = load_segments(tmp_path)
         assert result == [{"start_time": 0.0, "end_time": 1.0, "text": "fallback ok"}]
 
+    def test_int_digit_limit_value_error_falls_back_to_valid_capswriter(self, tmp_path):
+        # gate-r26 P2: Python 3.11+ enforces a 4300-digit limit on int<->str
+        # conversion (bpo-95778 / sys.set_int_max_str_digits). json.load() on
+        # a document containing an integer literal with more digits than
+        # that raises a BARE ValueError deep inside int() parsing -- NOT a
+        # json.JSONDecodeError, even though JSONDecodeError is itself a
+        # ValueError subclass. An except tuple that only lists
+        # json.JSONDecodeError (rather than the broader ValueError) misses
+        # this case entirely, so it used to propagate uncaught and break
+        # this module's "never raises, fall back to the next source"
+        # contract. The corrupted primary source must be treated the same
+        # as any other malformed one: fall back to the next-priority source.
+        huge_digits = "9" * 5000
+        (tmp_path / "transcript_funasr.json").write_text(
+            '{"segments": [{"start_time": ' + huge_digits + ', "end_time": 1.0, "text": "huge int"}]}',
+            encoding="utf-8",
+        )
+        capswriter_data = {
+            "segments": [{"start_time": 0.0, "end_time": 1.0, "text": "fallback ok"}]
+        }
+        (tmp_path / "transcript_capswriter.json").write_text(
+            json.dumps(capswriter_data, ensure_ascii=False), encoding="utf-8"
+        )
+        result = load_segments(tmp_path)
+        assert result == [{"start_time": 0.0, "end_time": 1.0, "text": "fallback ok"}]
+
+    def test_int_digit_limit_value_error_only_returns_none_without_raising(self, tmp_path):
+        # Same trigger as above, but with no fallback source available: must
+        # degrade to None rather than raising.
+        huge_digits = "9" * 5000
+        (tmp_path / "transcript_funasr.json").write_text(
+            '{"segments": [{"start_time": ' + huge_digits + ', "end_time": 1.0, "text": "huge int"}]}',
+            encoding="utf-8",
+        )
+        assert load_segments(tmp_path) is None
+
     def test_unreadable_cache_dir_returns_none_without_raising(self, tmp_path):
         # gate-r19 P2: Path.exists() only silently swallows ENOENT/ENOTDIR-style
         # errors -- it re-raises PermissionError (EACCES). The previous
