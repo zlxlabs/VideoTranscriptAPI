@@ -618,8 +618,10 @@ class YouTubeApiClient:
 
         文本提取算法与历史版本的 parse_srt_to_text 完全一致（逐字节兼容，未识别
         为时间轴的行会和以前一样被当作普通文本保留）；时间戳分段提取是独立的
-        容错步骤，解析失败或没有可用时间轴时 segments 会被置为 None，绝不会
-        影响 text 字段（容错铁律）。
+        容错步骤，绝不会影响 text 字段（容错铁律）。segments 一旦非 None，
+        所有 cue 的文本必须都在其中——单条 cue 的时间轴格式损坏时，只会让该
+        条的 start_time/end_time 置为 None，不会把整条 cue 从 segments 里丢
+        掉；只有整段 SRT 完全没有任何可识别的 cue 时，segments 才会是 None。
 
         Args:
             srt_content: SRT 格式的字幕内容
@@ -671,19 +673,44 @@ class YouTubeApiClient:
         return SubtitleResult(text=text, segments=segments)
 
     @staticmethod
+    def _looks_like_timeline_attempt(line: str) -> bool:
+        """
+        判断某一行是否"像"一条 SRT 时间轴声明行，即使其数字格式已经损坏
+
+        用箭头符号 "-->" 作为宽松判定依据：正常 SRT 里只有时间轴行会包含这个
+        符号，字幕正文几乎不会出现。这样即便一条 cue 的时间轴因为格式错误
+        (缺位数字、分隔符错误等) 匹配不上 `_SRT_TIMESTAMP_RANGE_PATTERN`，也
+        能被识别为"这里本应是一条时间轴"，从而正确切出 cue 边界，避免把下一条
+        cue 的内容错误地拼接为当前 cue 的文本（反之亦然）。
+
+        Args:
+            line: 已经 strip 过的单行文本
+
+        Returns:
+            bool: 是否应被当作一条时间轴声明（不论格式是否合法）
+        """
+        return "-->" in line
+
+    @staticmethod
     def _extract_srt_segments(lines: list) -> list:
         """
         从 SRT 文本行中提取时间戳分段信息
 
-        仅在遇到形如 "HH:MM:SS,mmm --> HH:MM:SS,mmm" 的时间轴行时才会生成分段；
-        无法识别的时间轴行（缺失、格式错误）不会产生分段，也不会抛出异常影响
-        上层的文本提取。
+        核心不变式（文本永不丢失）：只要一条 cue 有非空文本，就必须出现在
+        返回的 segments 里——哪怕它的时间轴行格式已经损坏无法解析。此时该
+        条目的 start_time / end_time 会被置为 None，但 text 依旧完整保留，
+        下游按 segments 消费不会静默丢字。只有当整段 SRT 里完全没有任何可
+        识别的 cue（既没有合法时间轴，也没有看起来像时间轴的行）时，才会
+        返回空列表（由调用方转换为 None）。
+
+        任何异常都不会向上抛出影响文本提取（由调用方 try/except 兜底）。
 
         Args:
             lines: parse_srt_to_subtitle_result 已经按行 split 好的原始行列表
 
         Returns:
-            list[dict]: 每项形如 {"start_time": float, "end_time": float, "text": str}
+            list[dict]: 每项形如
+                {"start_time": float|None, "end_time": float|None, "text": str}
         """
 
         def to_seconds(hours: str, minutes: str, seconds: str, millis: str) -> float:
@@ -694,21 +721,33 @@ class YouTubeApiClient:
         while i < len(lines):
             line = lines[i].strip()
             match = YouTubeApiClient._SRT_TIMESTAMP_RANGE_PATTERN.match(line)
+            is_timeline_attempt = bool(match) or YouTubeApiClient._looks_like_timeline_attempt(line)
 
-            if not match:
+            if not is_timeline_attempt:
                 i += 1
                 continue
 
-            h1, m1, s1, ms1, h2, m2, s2, ms2 = match.groups()
-            start_time = to_seconds(h1, m1, s1, ms1)
-            end_time = to_seconds(h2, m2, s2, ms2)
+            if match:
+                h1, m1, s1, ms1, h2, m2, s2, ms2 = match.groups()
+                start_time = to_seconds(h1, m1, s1, ms1)
+                end_time = to_seconds(h2, m2, s2, ms2)
+            else:
+                # 时间轴行格式损坏（如缺位数字、分隔符错误），无法解析出具体
+                # 秒数，但仍需保留该 cue 的文本，时间字段置 None
+                start_time = None
+                end_time = None
 
             # 收集该时间轴对应的文本行，直到遇到空行/序号行/下一个时间轴行
+            # （下一个时间轴行同样按"宽松判定"处理，避免误吞下一条 cue）
             text_lines = []
             j = i + 1
             while j < len(lines):
                 candidate = lines[j].strip()
-                if not candidate or candidate.isdigit() or YouTubeApiClient._SRT_TIMESTAMP_LINE_PATTERN.match(candidate):
+                if (
+                    not candidate
+                    or candidate.isdigit()
+                    or YouTubeApiClient._looks_like_timeline_attempt(candidate)
+                ):
                     break
                 text_lines.append(re.sub(r"<[^>]+>", "", candidate))
                 j += 1

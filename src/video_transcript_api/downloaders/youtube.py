@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import math
 import time
 import datetime
 import xml.etree.ElementTree as ET
@@ -746,8 +747,12 @@ class YoutubeDownloader(BaseDownloader):
         将 youtube-transcript-api 返回的字幕条目转换为 SubtitleResult
 
         文本拼接逻辑（item.text.strip() 后用空格 join）与历史版本逐字节一致；
-        时间戳（item.start / item.duration）提取是独立的容错步骤，条目缺少
-        这些属性或数值非法时，segments 整体降级为 None，不影响 text 字段。
+        时间戳（item.start / item.duration）提取是独立的容错步骤，按条目
+        (per-item) 容错：单条 snippet 的 .start / .duration 缺失或数值非法，
+        只会让该条的 start_time / end_time 置为 None，不会连累其余条目、也
+        不会让整个 segments 降级为 None（文本永不丢失的不变式：segments 一旦
+        非 None，所有条目的文本必须都在其中）。只有全部条目都没有文本时，
+        segments 才会是 None。
 
         参数:
             fetched_transcript: 可迭代的字幕条目（每项需有 .text 属性，
@@ -763,19 +768,34 @@ class YoutubeDownloader(BaseDownloader):
         text_parts = [item.text.strip() for item in raw_items]
         text = ' '.join(text_parts)
 
-        segments = None
-        try:
-            segments = [
-                {
-                    "start_time": float(item.start),
-                    "end_time": float(item.start) + float(item.duration),
-                    "text": item.text.strip(),
-                }
-                for item in raw_items
-            ] or None
-        except Exception as e:
-            logger.warning(f"字幕时间戳解析失败，segments 置空: {e}")
-            segments = None
+        candidate_segments = []
+        for item in raw_items:
+            # start_time 单独解析：缺失属性 / 非数字 / 非有限值（inf、nan）
+            # 都视为该条时间不可用，置 None，但绝不影响 text 的保留
+            try:
+                start_time = float(item.start)
+                if not math.isfinite(start_time):
+                    start_time = None
+            except (AttributeError, TypeError, ValueError):
+                start_time = None
+
+            # end_time 依赖 start_time + duration，两者任一不可用则整体置 None
+            end_time = None
+            if start_time is not None:
+                try:
+                    duration = float(item.duration)
+                    if math.isfinite(duration):
+                        end_time = start_time + duration
+                except (AttributeError, TypeError, ValueError):
+                    end_time = None
+
+            candidate_segments.append({
+                "start_time": start_time,
+                "end_time": end_time,
+                "text": item.text.strip(),
+            })
+
+        segments = candidate_segments or None
 
         return SubtitleResult(text=text, segments=segments)
 
@@ -850,9 +870,11 @@ class YoutubeDownloader(BaseDownloader):
         解析YouTube字幕XML
 
         文本提取算法与历史版本逐字节兼容（按 start 排序后拼接）；时间戳分段
-        提取是独立的容错步骤，"start"/"dur" 属性缺失或格式错误时不会影响文本
-        拼接，只会让 segments 整体降级为 None（容错铁律：时间解析失败绝不能
-        影响文本提取）。
+        提取是独立的容错步骤，按条目 (per-item) 容错："start"/"dur" 属性缺失
+        或格式错误只会让该条的 start_time / end_time 置为 None，不会连累其余
+        条目、也不会让整个 segments 降级为 None（容错铁律：时间解析失败绝不
+        能影响文本提取；文本永不丢失：segments 一旦非 None，所有有文本的条目
+        必须都在其中）。
 
         参数:
             xml_content: XML字幕内容
@@ -892,19 +914,39 @@ class YoutubeDownloader(BaseDownloader):
                     merged_text += item["content"] + " "
             text = merged_text.strip()
 
-            # 独立提取时间戳分段：整体解析失败（如属性非数字）时降级为 None，
-            # 不影响上面已经算好的 text
+            # 独立提取时间戳分段：按条目容错，单条 start/dur 属性非法只影响
+            # 该条的时间字段，不影响上面已经算好的 text，也不连累其余条目；
+            # 外层 try/except 是最后一道防线，兜底任何未预料的异常，同样只让
+            # segments 降级为 None，绝不影响 text
             segments = None
             try:
                 candidate_segments = []
                 for item in raw_items:
                     if not item["content"]:
                         continue
-                    start = float(item["start_raw"])
-                    duration = float(item["dur_raw"])
+
+                    # start_time 单独解析：非数字 / 非有限值（inf、nan）都视为
+                    # 该条时间不可用，置 None，但绝不影响文本的保留
+                    try:
+                        start = float(item["start_raw"])
+                        if not math.isfinite(start):
+                            start = None
+                    except (TypeError, ValueError):
+                        start = None
+
+                    # end_time 依赖 start + duration，两者任一不可用则整体置 None
+                    end = None
+                    if start is not None:
+                        try:
+                            duration = float(item["dur_raw"])
+                            if math.isfinite(duration):
+                                end = start + duration
+                        except (TypeError, ValueError):
+                            end = None
+
                     candidate_segments.append({
                         "start_time": start,
-                        "end_time": start + duration,
+                        "end_time": end,
                         "text": item["content"],
                     })
                 segments = candidate_segments or None

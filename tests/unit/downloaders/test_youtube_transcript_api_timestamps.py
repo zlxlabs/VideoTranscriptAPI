@@ -10,7 +10,9 @@ entirely. These tests lock down:
   space, each item.text.strip()).
 - segments carries start_time/end_time (seconds, start + duration) / text.
 - Timestamp extraction failures (missing/non-numeric .start or .duration on
-  a snippet) never break text: segments falls back to None, text unaffected.
+  a snippet) never break text, and never drop that snippet from segments
+  either ("text is never lost" invariant): only the offending snippet's
+  start_time/end_time is nulled out; the rest of the batch is untouched.
 - Existing control-flow sentinels (IP_BLOCKED / TRANSCRIPTS_DISABLED / None)
   are preserved as plain string / None, only the success path now returns a
   SubtitleResult.
@@ -92,7 +94,10 @@ def test_backward_compatible_entry_still_returns_plain_text():
     assert isinstance(text, str)
 
 
-def test_missing_duration_attribute_falls_back_to_none_segments_text_unaffected():
+def test_missing_duration_attribute_keeps_snippet_with_none_end_time():
+    """A snippet missing .duration must still land in segments (text is
+    never lost) -- only its end_time is nulled out, since end_time depends
+    on both start and duration."""
     downloader = _make_downloader()
     downloader.ytt_api = Mock()
     downloader.ytt_api.list = Mock(return_value=[FakeTranscriptListing("en")])
@@ -103,7 +108,32 @@ def test_missing_duration_attribute_falls_back_to_none_segments_text_unaffected(
     result = downloader._fetch_youtube_transcript_result("video123")
 
     assert result.text == "Hello world"
-    assert result.segments is None
+    assert result.segments == [
+        {"start_time": 0.0, "end_time": None, "text": "Hello world"},
+    ]
+
+
+def test_mixed_valid_and_broken_snippets_keep_all_text_in_segments():
+    """Mixed batch: a normal snippet, one missing .duration, and another
+    normal one. All three must appear in segments -- the broken one with
+    end_time = None -- and text stays byte-identical to the legacy join."""
+    downloader = _make_downloader()
+    downloader.ytt_api = Mock()
+    downloader.ytt_api.list = Mock(return_value=[FakeTranscriptListing("en")])
+    downloader.ytt_api.fetch = Mock(return_value=[
+        FakeSnippet("Hello", 0.0, 1.5),
+        FakeSnippetMissingDuration("Broken timing", 1.5),
+        FakeSnippet("world", 3.5, 1.0),
+    ])
+
+    result = downloader._fetch_youtube_transcript_result("video123")
+
+    assert result.text == "Hello Broken timing world"
+    assert result.segments == [
+        {"start_time": 0.0, "end_time": 1.5, "text": "Hello"},
+        {"start_time": 1.5, "end_time": None, "text": "Broken timing"},
+        {"start_time": 3.5, "end_time": 4.5, "text": "world"},
+    ]
 
 
 def test_ip_blocked_sentinel_preserved():

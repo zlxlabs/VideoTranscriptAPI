@@ -11,8 +11,12 @@ timestamp lines entirely. These tests lock down:
 - parse_srt_to_subtitle_result() (new) returns a SubtitleResult whose text
   matches parse_srt_to_text() exactly, plus segments with start_time /
   end_time (seconds) / text extracted from the SRT timestamp lines.
-- Malformed/missing timestamps never break text extraction: segments falls
-  back to None while text stays normal (fault tolerance rule).
+- Malformed/missing timestamps never break text extraction: text stays
+  normal regardless (fault tolerance rule).
+- "Text is never lost" invariant: once segments is non-None, every cue's
+  text must appear in it. A cue whose timeline is malformed still gets a
+  segment entry (start_time/end_time = None, text preserved); segments only
+  falls back to None when the whole SRT has no recognizable cue at all.
 - Empty subtitle content: text == "" and segments is None.
 
 All console output must be in English only (no emoji, no Chinese).
@@ -45,6 +49,20 @@ SRT_BAD_TIMESTAMP_FORMAT = (
     "1\n"
     "0:00:01,000 --> 00:00:04,000\n"
     "Hello world\n"
+)
+
+SRT_MIXED_VALID_AND_BROKEN_TIMELINE = (
+    "1\n"
+    "00:00:01,000 --> 00:00:04,000\n"
+    "Hello world\n"
+    "\n"
+    "2\n"
+    "0:00:05,000 --> 00:00:08,000\n"
+    "Broken timestamp cue\n"
+    "\n"
+    "3\n"
+    "00:00:09,000 --> 00:00:10,000\n"
+    "Trailing valid cue\n"
 )
 
 SRT_EMPTY = ""
@@ -89,15 +107,44 @@ def test_missing_timestamp_falls_back_to_none_segments_text_unaffected():
     assert YouTubeApiClient.parse_srt_to_text(SRT_MISSING_TIMESTAMP) == result.text
 
 
-def test_malformed_timestamp_format_falls_back_to_none_segments_text_unaffected():
-    """Malformed timestamp (single-digit hour) is not recognized: segments None,
-    text extraction proceeds exactly like the legacy parser (the unrecognized
-    timestamp line is treated as literal text, same as before this change)."""
+def test_malformed_timestamp_format_keeps_cue_in_segments_with_none_time():
+    """Malformed timestamp (single-digit hour) is not recognized as a valid
+    range, but it still contains the "-->" arrow, so it is recognized as a
+    (broken) cue boundary. Per the "text is never lost" invariant, the cue's
+    text must still land in segments, just with start_time/end_time = None.
+    Text extraction itself proceeds exactly like the legacy parser (the
+    unrecognized timestamp line is treated as literal text, unchanged)."""
     result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_BAD_TIMESTAMP_FORMAT)
 
-    assert result.segments is None
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Hello world"},
+    ]
     assert result.text == "0:00:01,000 --> 00:00:04,000 Hello world"
     assert YouTubeApiClient.parse_srt_to_text(SRT_BAD_TIMESTAMP_FORMAT) == result.text
+
+
+def test_mixed_valid_and_broken_timeline_keeps_all_cue_text_in_segments():
+    """Mixed SRT: a valid cue, a cue with a corrupted timeline, and another
+    valid cue. All three cues' text must appear in segments (the corrupted
+    one with start_time/end_time = None) -- a downstream consumer iterating
+    segments must never silently lose the corrupted cue's text. The plain
+    text output is completely unaffected (byte-identical to legacy)."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_MIXED_VALID_AND_BROKEN_TIMELINE)
+
+    assert result.text == (
+        "Hello world 0:00:05,000 --> 00:00:08,000 "
+        "Broken timestamp cue Trailing valid cue"
+    )
+    assert YouTubeApiClient.parse_srt_to_text(SRT_MIXED_VALID_AND_BROKEN_TIMELINE) == result.text
+
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": 4.0, "text": "Hello world"},
+        {"start_time": None, "end_time": None, "text": "Broken timestamp cue"},
+        {"start_time": 9.0, "end_time": 10.0, "text": "Trailing valid cue"},
+    ]
+    # Every cue's text must be present in segments -- nothing silently dropped.
+    segment_texts = {seg["text"] for seg in result.segments}
+    assert segment_texts == {"Hello world", "Broken timestamp cue", "Trailing valid cue"}
 
 
 def test_empty_srt_content():

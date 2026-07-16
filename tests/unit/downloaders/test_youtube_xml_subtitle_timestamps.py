@@ -11,7 +11,9 @@ timing information entirely. These tests lock down:
 - The new return type is a SubtitleResult carrying segments with
   start_time / end_time (seconds) / text.
 - Timestamp parsing failures (malformed "start"/"dur" attributes) never
-  break text extraction: segments falls back to None, text stays normal.
+  break text extraction, and never drop that entry from segments either
+  ("text is never lost" invariant): only the offending entry's
+  start_time/end_time is nulled out; the rest of the batch is untouched.
 - Empty subtitle XML (no <text> elements): text == "" and segments is None.
 - Fully invalid XML still returns None (unchanged from before).
 
@@ -40,6 +42,14 @@ XML_MISSING_DUR = (
 
 XML_BAD_START_ATTR = (
     '<transcript><text start="not-a-number" dur="2.0">Bad start segment</text></transcript>'
+)
+
+XML_MIXED_VALID_AND_BROKEN = (
+    '<transcript>'
+    '<text start="0.0" dur="2.5">Hello first</text>'
+    '<text start="not-a-number" dur="2.0">Bad start segment</text>'
+    '<text start="5.0" dur="3.0">World second</text>'
+    '</transcript>'
 )
 
 XML_EMPTY = "<transcript></transcript>"
@@ -72,14 +82,34 @@ def test_missing_dur_attribute_defaults_to_zero_duration():
     ]
 
 
-def test_malformed_start_attribute_falls_back_to_none_segments_text_unaffected():
-    """A malformed 'start' attribute must not break text extraction."""
+def test_malformed_start_attribute_keeps_entry_with_none_time():
+    """A malformed 'start' attribute must not break text extraction, and the
+    entry must still land in segments (text is never lost) with both time
+    fields nulled out (end_time depends on a valid start)."""
     downloader = _make_downloader()
 
     result = downloader._parse_youtube_subtitle_xml(XML_BAD_START_ATTR)
 
     assert result.text == "Bad start segment"
-    assert result.segments is None
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Bad start segment"},
+    ]
+
+
+def test_mixed_valid_and_broken_start_attribute_keeps_all_text_in_segments():
+    """Mixed batch: two valid entries and one with a malformed 'start'. All
+    three must appear in segments -- the broken one with both time fields
+    None -- and text stays byte-identical to the legacy sorted-merge join."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_MIXED_VALID_AND_BROKEN)
+
+    assert result.text == "Hello first Bad start segment World second"
+    assert result.segments == [
+        {"start_time": 0.0, "end_time": 2.5, "text": "Hello first"},
+        {"start_time": None, "end_time": None, "text": "Bad start segment"},
+        {"start_time": 5.0, "end_time": 8.0, "text": "World second"},
+    ]
 
 
 def test_empty_subtitle_xml():

@@ -24,9 +24,16 @@ class SubtitleResult:
     属性:
         text: 拼接后的纯文本字幕（与历史行为保持逐字节一致）
         segments: 分段时间戳信息，列表中每个元素形如：
-            {"start_time": float, "end_time": float, "text": str}
+            {"start_time": float|None, "end_time": float|None, "text": str}
             （单位：秒；字幕来源没有说话人信息，因此不含 speaker 字段）
-            当时间戳解析失败或没有可用分段时为 None，不影响 text 字段。
+            当没有任何可用分段（如整段字幕都无法识别出时间轴结构）时，
+            segments 整体为 None，不影响 text 字段。
+
+            文本永不丢失的不变式：segments 一旦非 None，所有有文本的 cue /
+            条目都必须出现在其中——单条时间轴解析失败（格式损坏、属性缺失
+            等）只会让该条的 start_time / end_time 置为 None，绝不会把这条
+            连同它的文本一起从 segments 中丢弃。下游按 segments 消费文本时
+            无需担心因为个别时间戳损坏而静默丢字。
     """
 
     text: str
