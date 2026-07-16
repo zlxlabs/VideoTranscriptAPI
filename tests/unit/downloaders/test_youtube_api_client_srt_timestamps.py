@@ -168,6 +168,24 @@ SRT_CORRUPTED_TIMELINE_WITH_LETTER = (
 
 SRT_EMPTY = ""
 
+# gate-r16 P2: a UTF-8 BOM (U+FEFF) prepended to the file content (as many
+# editors/exporters do) lands on the very first index line, turning "1" into
+# "﻿1". str.strip() does NOT remove U+FEFF (it is not whitespace by
+# Python's definition), so the segments-extraction path's index-row
+# recognition ("﻿1".isdigit() is False) used to misclassify it as
+# ordinary orphan body text instead of a real index row -- producing a bogus
+# leading segment (text="﻿1", start_time/end_time=None) ahead of the
+# real first cue.
+SRT_WITH_BOM = (
+    "﻿1\n"
+    "00:00:01,000 --> 00:00:04,000\n"
+    "Hello world\n"
+    "\n"
+    "2\n"
+    "00:00:05,000 --> 00:00:08,000\n"
+    "This is a test\n"
+)
+
 
 def test_parse_srt_to_text_unchanged_for_normal_srt():
     """parse_srt_to_text keeps its historical plain-text output."""
@@ -477,3 +495,36 @@ def test_empty_srt_content():
     assert result.text == ""
     assert result.segments is None
     assert YouTubeApiClient.parse_srt_to_text(SRT_EMPTY) == ""
+
+
+def test_bom_prefixed_srt_first_cue_parses_cleanly_with_no_bogus_segment():
+    """gate-r16 P2 regression: a BOM on the first index line ("﻿1") must not
+    produce a leading bogus segment (text="﻿1", start_time/end_time=None)
+    ahead of the real first cue. The segments-extraction path must recognize
+    "﻿1" as a genuine index row (BOM-tolerant isdigit check) and skip it,
+    same as an ordinary "1" -- leaving segments with exactly the two real
+    cues, correct start/end times, no extra entry."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_WITH_BOM)
+
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": 4.0, "text": "Hello world"},
+        {"start_time": 5.0, "end_time": 8.0, "text": "This is a test"},
+    ]
+
+
+def test_bom_prefixed_srt_legacy_parse_srt_to_text_keeps_historical_quirk():
+    """The BOM-tolerance fix is scoped to the segments-extraction path only.
+    parse_srt_to_text() (and the `text` field of parse_srt_to_subtitle_result)
+    must stay byte-identical to main's historical behavior, quirk included:
+    main's line-by-line text loop never strips BOM, so "﻿1" fails its
+    strict `line.isdigit()` check and gets kept as literal body text (the
+    BOM character embedded in it) rather than being recognized and skipped
+    as an index row. This divergence between the two paths (segments: BOM
+    tolerant / text: BOM-naive legacy quirk) is intentional -- the task's
+    hard constraint is that legacy text output must never change, even
+    though it means text and segments briefly disagree on how cue 1's index
+    line should be classified."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_WITH_BOM)
+
+    assert result.text == "﻿1 Hello world This is a test"
+    assert YouTubeApiClient.parse_srt_to_text(SRT_WITH_BOM) == result.text

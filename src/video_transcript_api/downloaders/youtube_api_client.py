@@ -594,6 +594,38 @@ class YouTubeApiClient:
     # "-->"（如 "Settings --> Privacy"）区分开。
     _TIME_STYLE_FRAGMENT_PATTERN = re.compile(r"\d{1,2}:\d{2}")
 
+    # UTF-8 BOM（U+FEFF）字符。部分编辑器/导出工具会在文件最开头写入这个不可见
+    # 字符——它不是 Python str.strip() 会移除的空白字符，一旦出现在 SRT 首个
+    # 索引行开头（如 "﻿1"），会让该行的 isdigit() 判断失真，见
+    # `_strip_bom` 与 `_extract_srt_segments` 的说明。
+    _UTF8_BOM = "﻿"
+
+    @staticmethod
+    def _strip_bom(line: str) -> str:
+        """去掉行首可能存在的 UTF-8 BOM 字符，仅供 segments 提取路径在做
+        "是不是纯数字索引行" 判断前使用（见 `_extract_srt_segments`/
+        `_looks_like_timeline_attempt`）。
+
+        背景：str.strip() 不会移除 U+FEFF（它按 Unicode 定义不是空白字符），
+        所以文件开头若带 BOM，第一个索引行 "1" 实际会是 "﻿1"——
+        "﻿1".isdigit() 为 False，导致 segments 提取路径把这一行误判成
+        普通正文（孤儿文本），产出一条"内容是序号、时间为空"的伪 segment，
+        真正的第一条 cue 反而被顶到 segments 第二位。
+
+        这个函数只服务于 segments 提取路径，绝不能应用到 `parse_srt_to_text`/
+        `parse_srt_to_subtitle_result` 里计算 `text` 字段的那个主循环——那个
+        主循环对 BOM 文件的历史行为就是把 "﻿1" 当成普通正文保留（BOM
+        字符本身也会原样嵌入输出文本），这是需要逐字节保持的向后兼容契约，
+        不是待修的 bug。
+
+        Args:
+            line: 已经 strip() 过的单行文本
+
+        Returns:
+            str: 去掉行首 BOM 后的文本；不含 BOM 时原样返回
+        """
+        return line.lstrip(YouTubeApiClient._UTF8_BOM)
+
     @staticmethod
     def parse_srt_to_text(srt_content: str) -> str:
         """
@@ -707,6 +739,11 @@ class YouTubeApiClient:
         仍判定为损坏的时间轴；"Settings --> Privacy" 两侧都不含任何时间样式
         片段，判定为普通正文，交由调用方的孤儿文本路径（R6）兜底收集。
 
+        BOM 容忍：prev_line 的纯数字判断用 `_strip_bom` 剥掉可能存在的行首
+        UTF-8 BOM 后再做 isdigit() 检查——否则文件开头带 BOM 时，第一条 cue
+        真实的时间轴行（紧跟在 "﻿1" 这个被 BOM 污染的索引行之后）会因为
+        `prev_line.isdigit()` 误判为 False 而漏判，详见 `_strip_bom` 文档。
+
         Args:
             line: 已经 strip 过的单行文本
             prev_line: 已经 strip 过的上一行文本，用于判断当前行是否紧跟在
@@ -715,7 +752,7 @@ class YouTubeApiClient:
         Returns:
             bool: 是否应被当作一条时间轴声明（不论格式是否合法）
         """
-        if "-->" not in line or not prev_line.isdigit():
+        if "-->" not in line or not YouTubeApiClient._strip_bom(prev_line).isdigit():
             return False
         left, _, right = line.partition("-->")
         return bool(
@@ -790,11 +827,17 @@ class YouTubeApiClient:
                 if not line:
                     # 空行：块边界，把已缓冲的孤儿文本落地成一条 segment
                     flush_orphan_text()
-                elif not line.isdigit():
+                elif not YouTubeApiClient._strip_bom(line).isdigit():
                     # 非空、非纯数字：与主文本提取的规则一致，当作正文内容
                     # 缓冲起来（纯数字行按索引行无条件跳过，不计入文本；这
                     # 里不做 R4 式 lookahead——那只在已确认的 cue 内部文本
-                    # 收集里生效，孤儿区没有"当前 cue"可言）
+                    # 收集里生效，孤儿区没有"当前 cue"可言）。BOM 容忍：
+                    # 剥掉行首 UTF-8 BOM 后再判断是否纯数字，否则文件开头
+                    # 带 BOM 时第一条索引行 "﻿1" 会被误判成孤儿正文，产出
+                    # 一条"内容是序号、时间为空"的伪 segment（见 `_strip_bom`
+                    # 文档）。这里只是跳过判断，不修改 line 本身——真落进
+                    # orphan_text_parts 的分支仍然用原始（含 BOM）的 line，
+                    # 不影响任何真实正文内容的保留。
                     orphan_text_parts.append(re.sub(r"<[^>]+>", "", line))
                 prev_line = line
                 i += 1
@@ -832,12 +875,15 @@ class YouTubeApiClient:
                 if not candidate:
                     break
 
-                if candidate.isdigit():
+                if YouTubeApiClient._strip_bom(candidate).isdigit():
                     # 纯数字行本身可能是真正的"下一条 cue 的索引行"，也可能只是
                     # 正文里恰好出现的一个数字（如歌词/台词就是个数字 "42"）。
                     # 只有它的下一行"像"一条时间轴（含损坏时间轴的宽松尝试）时，
                     # 才当作索引行、结束当前 cue 的文本收集；否则按普通正文继续
                     # 收集，避免把该行之后的正文从这条 cue 的 segments 里丢掉。
+                    # BOM 容忍：同上，剥掉行首 BOM 后再判断是否纯数字（对称覆盖
+                    # BOM 理论上出现在非首行的边界情况，虽然实践中 BOM 只会出现
+                    # 在文件最开头）。
                     next_line = lines[j + 1].strip() if j + 1 < len(lines) else ""
                     next_is_timeline = bool(
                         YouTubeApiClient._SRT_TIMESTAMP_RANGE_PATTERN.match(next_line)
