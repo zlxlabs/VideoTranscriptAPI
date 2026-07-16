@@ -84,6 +84,14 @@ def parse_time_to_seconds(value: Any) -> Optional[float]:
             parts = [p.strip() for p in text.split(":")]
             if len(parts) not in (2, 3):
                 return None
+            # 逐分量校验负号，而不是只看最终总秒数的正负：像 "01:-01:00" 这样
+            # 单个分量为负、但 hours*3600+minutes*60+seconds 累加后总和恰好仍
+            # 是正数的畸形时间，之前会被总和校验放过。这里在数值转换前先按
+            # 字符串前缀判断——不能等 float() 转换完再用 `n < 0` 判断，因为
+            # "-00" 会被解析成 -0.0，而 -0.0 < 0 在 IEEE 754 下为 False（-0.0
+            # 与 0.0 数值相等），会漏掉这类"看起来负、数值上不负"的分量。
+            if any(p.startswith("-") for p in parts):
+                return None
             try:
                 numbers = [float(p) for p in parts]
             except ValueError:

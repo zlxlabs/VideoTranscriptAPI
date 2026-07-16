@@ -107,6 +107,16 @@ class TestToSeconds(unittest.TestCase):
         must reject it here too."""
         self.assertIsNone(_to_seconds("00:00:00:41"))
 
+    def test_mixed_sign_component_with_positive_total_rejected(self):
+        """Delegation-side regression assertion for the component-level
+        negative-sign fix in parse_time_to_seconds (full case matrix lives in
+        TestParseTimeToSeconds in tests/unit/test_segments_adapter.py):
+        "01:-01:00" sums to a positive total (3540s) despite one negative
+        component, so a total-only sign check would wrongly accept it.
+        _to_seconds is a thin delegating wrapper, so it must reject this too
+        purely by virtue of the delegation, with no code of its own."""
+        self.assertIsNone(_to_seconds("01:-01:00"))
+
 
 class TestFormatTimestamp(unittest.TestCase):
     """Locks the compressed prompt timestamp format: mm:ss, or h:mm:ss past 1 hour."""

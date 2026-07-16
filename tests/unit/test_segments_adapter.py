@@ -66,6 +66,31 @@ class TestParseTimeToSeconds:
     def test_negative_hhmmss_string_returns_none(self):
         assert parse_time_to_seconds("-1:02:03") is None
 
+    def test_mixed_sign_component_with_positive_total_returns_none(self):
+        """A malformed timestamp with one negative component can still sum to
+        a positive total ("01:-01:00" -> 3600 - 60 + 0 = 3540s) and previously
+        slipped through a total-only sign check. Each component must be
+        validated individually -- any component carrying a literal minus
+        sign is illegal, regardless of the resulting total's sign."""
+        assert parse_time_to_seconds("01:-01:00") is None
+
+    def test_negative_leading_zero_component_returns_none(self):
+        """"-00" parses to -0.0, which is numerically NOT less than 0 under
+        IEEE 754 (-0.0 == 0.0), so a naive per-component `value < 0` check
+        after float() conversion would miss it -- the minus sign must be
+        detected before/independent of the numeric comparison (e.g. at the
+        string level). Regression guard: this component-level fix must not
+        regress this already-illegal-looking timestamp back to being
+        accepted."""
+        assert parse_time_to_seconds("-00:01:00") is None
+
+    def test_negative_seconds_component_mm_ss_returns_none(self):
+        """MM:SS form with a negative seconds component: total-sum check
+        already rejects these (regression lock, unaffected by the
+        component-level fix)."""
+        assert parse_time_to_seconds("00:-1") is None
+        assert parse_time_to_seconds("00:-01") is None
+
     def test_bool_returns_none(self):
         # bool is a subclass of int in Python -- must not be silently
         # treated as 1/0 seconds.
