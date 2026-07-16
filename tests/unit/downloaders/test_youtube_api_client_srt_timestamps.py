@@ -121,6 +121,32 @@ SRT_MIDDLE_CUE_MISSING_TIMELINE_ROW = (
     "Third line\n"
 )
 
+SRT_REVERSED_TIMELINE = (
+    "1\n"
+    "00:00:10,000 --> 00:00:05,000\n"
+    "Reversed timeline\n"
+)
+
+SRT_REVERSED_TIMELINE_THEN_NEXT_CUE = (
+    "1\n"
+    "00:00:10,000 --> 00:00:05,000\n"
+    "Reversed timeline\n"
+    "\n"
+    "2\n"
+    "00:00:06,000 --> 00:00:09,000\n"
+    "Next cue text\n"
+)
+
+SRT_ALL_NUMERIC_BODY = (
+    "1\n"
+    "00:00:01,000 --> 00:00:04,000\n"
+    "42\n"
+    "\n"
+    "2\n"
+    "00:00:05,000 --> 00:00:08,000\n"
+    "100\n"
+)
+
 SRT_EMPTY = ""
 
 
@@ -320,6 +346,60 @@ def test_middle_cue_missing_timeline_row_lands_as_orphan_segment():
     assert YouTubeApiClient.parse_srt_to_text(
         SRT_MIDDLE_CUE_MISSING_TIMELINE_ROW
     ) == result.text
+
+
+def test_reversed_timeline_yields_none_end_time_start_kept():
+    """A well-formed but reversed SRT timeline (end before start, e.g. an
+    authoring mistake) must null end_time via the shared sanitize_time_pair
+    rule -- start_time (valid on its own) and the cue's text are preserved.
+
+    Note: negative start/end values are NOT separately tested here because
+    the SRT timestamp regex (\\d{2}:\\d{2}:\\d{2}[,.]\\d{3}) only ever
+    captures digits -- a negative timestamp cannot survive a successful
+    regex match in the first place. That branch of sanitize_time_pair is
+    covered directly in test_subtitle_types.py."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_REVERSED_TIMELINE)
+
+    assert result.text == "Reversed timeline"
+    assert result.segments == [
+        {"start_time": 10.0, "end_time": None, "text": "Reversed timeline"},
+    ]
+
+
+def test_reversed_timeline_does_not_break_next_cue_boundary():
+    """The reversed-timeline cue's sanitized end_time must not throw off
+    detection of the following, genuinely well-formed cue."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(
+        SRT_REVERSED_TIMELINE_THEN_NEXT_CUE
+    )
+
+    assert result.segments == [
+        {"start_time": 10.0, "end_time": None, "text": "Reversed timeline"},
+        {"start_time": 6.0, "end_time": 9.0, "text": "Next cue text"},
+    ]
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_REVERSED_TIMELINE_THEN_NEXT_CUE
+    ) == result.text
+
+
+def test_all_numeric_body_cues_yield_empty_text_but_populated_segments():
+    """When every cue's body is itself a bare digit line (e.g. a spoken
+    number like "42"), the legacy line-by-line text extraction mistakes each
+    body line for the *next* cue's index line (its `line.isdigit()` skip
+    rule cannot tell the two apart) and drops all of them -- text ends up
+    "" even though every cue had real content. The lookahead-based segments
+    extraction correctly recognizes these as body text (their *next* line is
+    not a timeline), so segments stays fully populated. This is exactly the
+    case get_subtitle_result()'s validity check (text OR segments) must
+    accept as "has subtitles" -- see test_youtube_get_subtitle_result.py."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_ALL_NUMERIC_BODY)
+
+    assert result.text == ""
+    assert YouTubeApiClient.parse_srt_to_text(SRT_ALL_NUMERIC_BODY) == ""
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": 4.0, "text": "42"},
+        {"start_time": 5.0, "end_time": 8.0, "text": "100"},
+    ]
 
 
 def test_empty_srt_content():

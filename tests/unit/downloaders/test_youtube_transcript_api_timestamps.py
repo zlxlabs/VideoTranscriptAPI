@@ -258,3 +258,62 @@ def test_start_plus_duration_sum_overflow_yields_none_end_time():
         {"start_time": 1e308, "end_time": None, "text": "Overflowing"},
         {"start_time": 1.5, "end_time": 3.5, "text": "world"},
     ]
+
+
+def test_negative_start_becomes_none_text_and_other_snippets_unaffected():
+    """A negative item.start (e.g. upstream library returning garbage data)
+    has no physical meaning -- start_time must be nulled, but the snippet's
+    text must still be preserved in segments, and the rest of the batch must
+    be untouched."""
+    downloader = _make_downloader()
+    downloader.ytt_api = Mock()
+    downloader.ytt_api.list = Mock(return_value=[FakeTranscriptListing("en")])
+    downloader.ytt_api.fetch = Mock(return_value=[
+        FakeSnippet("Negative start", -5.0, 2.0),
+        FakeSnippet("world", 1.5, 2.0),
+    ])
+
+    result = downloader._fetch_youtube_transcript_result("video123")
+
+    assert result.text == "Negative start world"
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Negative start"},
+        {"start_time": 1.5, "end_time": 3.5, "text": "world"},
+    ]
+
+
+def test_negative_duration_yields_none_end_time():
+    """A negative duration large enough to push end_time itself negative
+    must null end_time (start_time, which is valid on its own, is kept)."""
+    downloader = _make_downloader()
+    downloader.ytt_api = Mock()
+    downloader.ytt_api.list = Mock(return_value=[FakeTranscriptListing("en")])
+    downloader.ytt_api.fetch = Mock(return_value=[
+        FakeSnippet("Negative duration", 5.0, -10.0),
+    ])
+
+    result = downloader._fetch_youtube_transcript_result("video123")
+
+    assert result.text == "Negative duration"
+    assert result.segments == [
+        {"start_time": 5.0, "end_time": None, "text": "Negative duration"},
+    ]
+
+
+def test_reversed_interval_end_before_start_yields_none_end_time():
+    """A small negative duration whose sum with start is still non-negative
+    (end >= 0) but ends up before start (end < start, an inverted interval)
+    must null end_time -- start_time is kept, text is unaffected."""
+    downloader = _make_downloader()
+    downloader.ytt_api = Mock()
+    downloader.ytt_api.list = Mock(return_value=[FakeTranscriptListing("en")])
+    downloader.ytt_api.fetch = Mock(return_value=[
+        FakeSnippet("Reversed interval", 5.0, -2.0),
+    ])
+
+    result = downloader._fetch_youtube_transcript_result("video123")
+
+    assert result.text == "Reversed interval"
+    assert result.segments == [
+        {"start_time": 5.0, "end_time": None, "text": "Reversed interval"},
+    ]

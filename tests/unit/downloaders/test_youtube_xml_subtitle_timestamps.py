@@ -186,6 +186,60 @@ XML_START_PLUS_DUR_OVERFLOWS = (
 )
 
 
+XML_NEGATIVE_START = (
+    '<transcript><text start="-5.0" dur="2.0">Negative start</text></transcript>'
+)
+
+XML_NEGATIVE_DURATION = (
+    '<transcript><text start="5.0" dur="-10.0">Negative duration</text></transcript>'
+)
+
+XML_REVERSED_INTERVAL = (
+    '<transcript><text start="5.0" dur="-2.0">Reversed interval</text></transcript>'
+)
+
+
+def test_negative_start_attribute_yields_none_start_and_end_time():
+    """A negative "start" attribute has no physical meaning -- start_time
+    must be nulled. end_time, computed from this same (now invalid) start,
+    is also nulled since it depends on a valid start. Text is unaffected."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_NEGATIVE_START)
+
+    assert result.text == "Negative start"
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Negative start"},
+    ]
+
+
+def test_negative_duration_attribute_yields_none_end_time():
+    """A negative "dur" large enough to push end_time itself negative must
+    null end_time; start_time (valid on its own) is kept."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_NEGATIVE_DURATION)
+
+    assert result.text == "Negative duration"
+    assert result.segments == [
+        {"start_time": 5.0, "end_time": None, "text": "Negative duration"},
+    ]
+
+
+def test_reversed_interval_end_before_start_yields_none_end_time():
+    """A small negative "dur" whose sum with start is still non-negative but
+    ends up before start (end < start) must null end_time; start_time is
+    kept, text is unaffected."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_REVERSED_INTERVAL)
+
+    assert result.text == "Reversed interval"
+    assert result.segments == [
+        {"start_time": 5.0, "end_time": None, "text": "Reversed interval"},
+    ]
+
+
 def test_start_plus_dur_sum_overflow_yields_none_end_time():
     """"start" and "dur" are each individually finite (1e308 parses fine and
     passes math.isfinite() on its own), so neither raises ValueError/TypeError.

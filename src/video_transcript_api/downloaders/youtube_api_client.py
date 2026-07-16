@@ -15,7 +15,7 @@ from typing import Optional
 import requests
 
 from ..utils.logging import setup_logger
-from .subtitle_types import SubtitleResult
+from .subtitle_types import SubtitleResult, sanitize_time_pair
 from .youtube_api_errors import (
     YouTubeApiError,
     YouTubeApiTimeoutError,
@@ -786,6 +786,10 @@ class YouTubeApiClient:
                 h1, m1, s1, ms1, h2, m2, s2, ms2 = match.groups()
                 start_time = to_seconds(h1, m1, s1, ms1)
                 end_time = to_seconds(h2, m2, s2, ms2)
+                # 区间倒挂校验（如时间轴顺序写反）一律诚实降级为 None，绝不
+                # 影响文本保留（详见 sanitize_time_pair 文档）。数字捕获组
+                # 本身不可能为负，因此这里实际只会触发"end < start"这条规则
+                start_time, end_time = sanitize_time_pair(start_time, end_time)
             else:
                 # 时间轴行格式损坏（如缺位数字、分隔符错误），无法解析出具体
                 # 秒数，但仍需保留该 cue 的文本，时间字段置 None

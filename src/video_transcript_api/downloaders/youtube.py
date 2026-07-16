@@ -13,7 +13,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, VideoUnavailable, IpBlocked, NoTranscriptFound
 from .base import BaseDownloader
 from .models import VideoMetadata, DownloadInfo
-from .subtitle_types import SubtitleResult
+from .subtitle_types import SubtitleResult, sanitize_time_pair
 from ..utils.logging import setup_logger
 from ..utils import create_debug_dir
 from ..utils.ytdlp import YtdlpConfigBuilder
@@ -522,7 +522,13 @@ class YoutubeDownloader(BaseDownloader):
 
                 try:
                     subtitle_result = self._youtube_api_client.fetch_transcript_result(video_id)
-                    if subtitle_result and subtitle_result.text and subtitle_result.text.strip():
+                    # 有效性判定：text 非空 或 segments 非空 即视为"有字幕"。
+                    # 旧的逐字节兼容文本提取（parse_srt_to_text）会把纯数字
+                    # 正文行误判为 SRT 序号行而跳过，导致 text 为空；而新的
+                    # segments 提取用 lookahead 正确识别并保留了这些内容。
+                    # 只看 text 会把这种"文本丢了但时间轴还在"的结果连同
+                    # segments 一起当成"没有字幕"整体丢弃
+                    if subtitle_result and (subtitle_result.text.strip() or subtitle_result.segments):
                         logger.info(
                             f"[字幕获取] youtube_api_server 成功: "
                             f"length={len(subtitle_result.text)} chars"
@@ -560,7 +566,9 @@ class YoutubeDownloader(BaseDownloader):
                 elif transcript_result == "TRANSCRIPTS_DISABLED":
                     logger.info(f"[字幕获取] 视频字幕已被禁用: {video_id}")
                     return None
-                elif isinstance(transcript_result, SubtitleResult) and transcript_result.text.strip():
+                elif isinstance(transcript_result, SubtitleResult) and (
+                    transcript_result.text.strip() or transcript_result.segments
+                ):
                     logger.info(
                         f"[字幕获取] 本地方案成功: length={len(transcript_result.text)} chars"
                     )
@@ -800,6 +808,11 @@ class YoutubeDownloader(BaseDownloader):
                 except (AttributeError, TypeError, ValueError, OverflowError):
                     end_time = None
 
+            # 负值与区间倒挂校验：负 start / 负 duration（体现为负 end 或
+            # end < start）一律诚实降级为 None，绝不影响文本保留（详见
+            # sanitize_time_pair 文档）
+            start_time, end_time = sanitize_time_pair(start_time, end_time)
+
             candidate_segments.append({
                 "start_time": start_time,
                 "end_time": end_time,
@@ -966,6 +979,11 @@ class YoutubeDownloader(BaseDownloader):
                                     end = candidate_end
                         except (TypeError, ValueError):
                             end = None
+
+                    # 负值与区间倒挂校验：负 start / 负 duration（体现为负
+                    # end 或 end < start）一律诚实降级为 None，绝不影响文本
+                    # 保留（详见 sanitize_time_pair 文档）
+                    start, end = sanitize_time_pair(start, end)
 
                     candidate_segments.append({
                         "start_time": start,
