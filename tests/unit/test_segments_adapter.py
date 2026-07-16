@@ -12,6 +12,7 @@ per project convention.
 """
 
 import json
+import os
 
 from video_transcript_api.transcriber.segments import (
     load_segments,
@@ -418,3 +419,39 @@ class TestLoadSegments:
         )
         result = load_segments(tmp_path)
         assert result == [{"start_time": 0.0, "end_time": 1.0, "text": "fallback ok"}]
+
+    def test_unreadable_cache_dir_returns_none_without_raising(self, tmp_path):
+        # gate-r19 P2: Path.exists() only silently swallows ENOENT/ENOTDIR-style
+        # errors -- it re-raises PermissionError (EACCES). The previous
+        # implementation called `file_path.exists()` OUTSIDE the try block, so
+        # a cache directory whose parent lacks the execute bit (unreadable by
+        # this process, e.g. a permissions misconfiguration in production)
+        # would make load_segments() raise PermissionError instead of
+        # returning None, violating this module's "never raises" contract.
+        locked_dir = tmp_path / "locked_cache"
+        locked_dir.mkdir()
+        # A file need not actually exist inside locked_dir -- the point is
+        # that *stat'ing* anything under it fails once the directory itself
+        # is inaccessible (its execute/search bit is required to resolve any
+        # path beneath it).
+        os.chmod(locked_dir, 0o000)
+        try:
+            probe = locked_dir / "transcript_funasr.json"
+            try:
+                probe.exists()
+            except PermissionError:
+                pass
+            else:
+                # chmod 0o000 did not actually block traversal in this
+                # environment (e.g. running as root, where the kernel's
+                # permission checks are bypassed) -- the experiment is moot,
+                # skip rather than reporting a false pass.
+                pytest.skip(
+                    "chmod 0o000 did not block directory access in this "
+                    "environment (likely running as root); cannot exercise "
+                    "the PermissionError path"
+                )
+            assert load_segments(locked_dir) is None
+        finally:
+            # Restore access so pytest's tmp_path cleanup can remove the dir.
+            os.chmod(locked_dir, 0o755)

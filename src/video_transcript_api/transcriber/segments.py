@@ -261,10 +261,15 @@ def load_segments(cache_dir: Path) -> Optional[List[Dict[str, Any]]]:
 
     for filename in _SEGMENT_SOURCE_FILENAMES:
         file_path = cache_dir / filename
-        if not file_path.exists():
-            continue
 
         try:
+            # `exists()` 也纳入这同一个 try：pathlib 只静默 ENOENT/ENOTDIR 之类
+            # "路径本就不存在"的错误，但当缓存目录的父目录缺少执行位（EACCES，
+            # 如生产环境权限配置错误）时会重抛 PermissionError（OSError 子类）。
+            # 若 `exists()` 留在 try 之外，这种权限问题会让本函数破坏"从不抛
+            # 异常"的契约，直接崩溃给调用方，而非按现有语义降级到下一来源。
+            if not file_path.exists():
+                continue
             with file_path.open("r", encoding="utf-8") as f:
                 raw = json.load(f)
         except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
@@ -275,7 +280,7 @@ def load_segments(cache_dir: Path) -> Optional[List[Dict[str, Any]]]:
             # （如构造攻击或损坏导出文件里的 "[[[[...]]]]"）会让 json.load() 的
             # 递归下降解析器超出 Python 默认递归深度抛出 RecursionError，同样必须
             # 单独列出。三者与 OSError/JSONDecodeError 同等对待：记 warning，
-            # 尝试下一优先级来源。
+            # 尝试下一优先级来源。PermissionError 是 OSError 子类，同样被覆盖。
             logger.warning(f"读取时间片段文件失败，尝试下一优先级来源: {file_path} ({exc})")
             continue
 
