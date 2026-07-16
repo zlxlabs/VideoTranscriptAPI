@@ -606,16 +606,39 @@ class YouTubeApiClient:
     #   None），不能被静默当成一个（换算方式还含糊不清的）合法时间收录。
     #
 
+    # gate-r26 P2：起止两侧独立校验。之前用一条覆盖整行的严格正则
+    # （`\s*HH:MM:SS,mmm\s*-->\s*HH:MM:SS,mmm\s*`）配合 `.fullmatch()`——只要
+    # 有一侧格式损坏（如 "00:00:01,000 --> 00:99:04,000" 的结束分钟越界，或
+    # 结束毫秒不是恰好 3 位），整行 fullmatch 失败，起止两侧会被一起判定为
+    # "损坏时间轴"，start_time 也被连带置 None。但合法的 start 恰恰是章节
+    # 锚定最需要的信息——不能因为 end 一侧的损坏而陪葬。因此改为对 "-->"
+    # 两侧分别单独套用同一份"单侧时间戳"正则（下方 `_SRT_TIMESTAMP_SIDE_
+    # STRICT_PATTERN`）配合 `.fullmatch()`：哪一侧不能恰好匹配（含毫秒非 3
+    # 位、分钟/秒时钟分量越界、行尾带垃圾字符等），就把哪一侧置 None；只有
+    # 两侧都无法匹配时才等同于旧版"整条时间轴损坏"的效果（均为 None）。
+    #
+    # 单侧校验沿用旧整行正则相同的设计取舍：毫秒固定 3 位数字（`\d{3}`，
+    # gate-r25 P2）——SRT 标准毫秒字段就是恰好 3 位零填充写法（如 "000"）。
+    # 1-2 位毫秒、结尾多出一位毫秒数字、行尾带垃圾字符本质上是同一类问题：
+    # 格式不是恰好合法的样子，因此必须同等对待——fullmatch 失败，该侧置
+    # None，不能被静默当成一个合法时间收录。分钟/秒时钟分量是否 < 60 由
+    # `has_valid_clock_components` 在 fullmatch 成功之后再单独校验（该正则
+    # 本身只按数字位数匹配，不校验数值范围）。
+    #
+    # 调用处对已经命中 "-->" 的时间轴行做 `str.partition("-->")` 并对两侧
+    # 各自 `.strip()`，天然吸收了旧整行正则里 `\s*` 负责的首尾空白容忍，
+    # 因此单侧正则本身不需要再写 `\s*`。
+    #
     # 不能改动 `_SRT_TIMESTAMP_LINE_PATTERN`/`_SRT_TIMESTAMP_RANGE_PATTERN`
     # 本身——`parse_srt_to_text`（文本提取路径）与 `_extract_srt_segments` 的
     # cue 边界判定（is_timeline_attempt/next_is_timeline）都依赖它们现有的
     # 宽松语义来判断"这是不是一条时间轴行"，收紧会改变 cue 切分结果，让
     # `parse_srt_to_text` 的输出偏离历史行为（违反逐字节兼容契约）。这条新
-    # 正则只用于"已经确定是一条时间轴行之后，其数值是否可信"这一步，不参与
-    # cue 边界判定，因此不影响文本提取路径，也不改变哪一行被当作 cue 边界。
-    _SRT_TIMESTAMP_STRICT_PATTERN = re.compile(
-        r"\s*(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})\s*-->\s*"
-        r"(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})\s*"
+    # 正则只用于"已经确定是一条时间轴行之后，其某一侧数值是否可信"这一步，
+    # 不参与 cue 边界判定，因此不影响文本提取路径，也不改变哪一行被当作
+    # cue 边界。
+    _SRT_TIMESTAMP_SIDE_STRICT_PATTERN = re.compile(
+        r"(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})"
     )
     # "时间样式片段"宽松正则：只要求形如 "12:34" 的数字+冒号结构（不要求三段
     # 齐全、不要求毫秒），用于 _looks_like_timeline_attempt 判断一条格式已损坏
@@ -889,35 +912,45 @@ class YouTubeApiClient:
             flush_orphan_text()
             found_any_cue = True
 
-            # 时间值解析改用严格锚定匹配（gate-r24 P2）：is_timeline_attempt
-            # 判定 cue 边界仍然用上面的宽松 match（不能改，见 cue 边界判定的
-            # 文档），但具体时间数值必须整行严格匹配才可信——宽松匹配成功但
-            # 严格匹配失败（如毫秒位数超标、行尾带垃圾字符），按既有的"损坏
-            # 时间轴"处理：文本保留，时间置 None，不静默放行一个只匹配了前缀
-            # 的"合法"时间。
-            strict_match = YouTubeApiClient._SRT_TIMESTAMP_STRICT_PATTERN.fullmatch(line)
-            if strict_match:
-                h1, m1, s1, ms1, h2, m2, s2, ms2 = strict_match.groups()
-                if has_valid_clock_components(m1, s1) and has_valid_clock_components(m2, s2):
+            # 时间值解析改用严格锚定匹配（gate-r24 P2），并对起止两侧独立
+            # 校验（gate-r26 P2）：is_timeline_attempt 判定 cue 边界仍然用
+            # 上面的宽松 match（不能改，见 cue 边界判定的文档），但具体时间
+            # 数值必须每一侧各自严格匹配才可信——宽松匹配成功但某一侧严格
+            # 匹配失败（如该侧毫秒位数超标、时钟分量越界、行尾带垃圾字符），
+            # 只把那一侧置 None，不连累另一侧本来合法的时间（如 start）；只
+            # 有两侧都无法解析时，效果才等同旧版"整条时间轴损坏"（均为
+            # None）。不静默放行一个只匹配了前缀或跨到另一侧的"合法"时间。
+            start_part, _, end_part = line.partition("-->")
+            start_match = YouTubeApiClient._SRT_TIMESTAMP_SIDE_STRICT_PATTERN.fullmatch(
+                start_part.strip()
+            )
+            end_match = YouTubeApiClient._SRT_TIMESTAMP_SIDE_STRICT_PATTERN.fullmatch(
+                end_part.strip()
+            )
+
+            start_time = None
+            if start_match:
+                h1, m1, s1, ms1 = start_match.groups()
+                # 数字位数齐全（正则能匹配），但分钟/秒分量超出合法时钟范围
+                # （如 "00:99:00,000" 的分钟分量 99）——与格式彻底损坏的时间
+                # 同等对待：该侧置 None，不静默换算出一个虚假秒数（见
+                # has_valid_clock_components 文档）。
+                if has_valid_clock_components(m1, s1):
                     start_time = to_seconds(h1, m1, s1, ms1)
+
+            end_time = None
+            if end_match:
+                h2, m2, s2, ms2 = end_match.groups()
+                if has_valid_clock_components(m2, s2):
                     end_time = to_seconds(h2, m2, s2, ms2)
-                    # 区间倒挂校验（如时间轴顺序写反）一律诚实降级为 None，绝不
-                    # 影响文本保留（详见 sanitize_time_pair 文档）。数字捕获组
-                    # 本身不可能为负，因此这里实际只会触发"end < start"这条规则
-                    start_time, end_time = sanitize_time_pair(start_time, end_time)
-                else:
-                    # 数字位数齐全（正则能匹配），但分钟/秒分量超出合法时钟
-                    # 范围（如 "00:00:99,000" 的秒分量 99）——与格式彻底损坏
-                    # 的时间轴同等对待：文本保留，时间置 None，不静默换算出
-                    # 一个虚假秒数（见 has_valid_clock_components 文档）。
-                    start_time = None
-                    end_time = None
-            else:
-                # 时间轴行格式损坏（如缺位数字、分隔符错误、毫秒位数超标、
-                # 行尾带垃圾字符），无法解析出具体秒数，但仍需保留该 cue 的
-                # 文本，时间字段置 None
-                start_time = None
-                end_time = None
+
+            # 区间倒挂校验（如时间轴顺序写反）一律诚实降级为 None，绝不影响
+            # 文本保留（详见 sanitize_time_pair 文档）。两侧各自独立解析后
+            # 仍需经过这一步统一收口：即便两侧各自"合法"，仍可能出现
+            # end < start 的倒挂区间；而当某一侧本就是 None 时，该函数的
+            # "仅当两侧均非 None 才判定倒挂"规则保证另一侧的合法值不会被
+            # 无谓牵连（如 start=None、end=4.0 时原样保留 end）。
+            start_time, end_time = sanitize_time_pair(start_time, end_time)
 
             # 收集该时间轴对应的文本行，直到遇到空行/下一条 cue 的索引行/下一个
             # 时间轴行（下一个时间轴行同样按"宽松判定"处理，避免误吞下一条
