@@ -854,6 +854,29 @@ def _derive_legacy_calibration_status(cal_stats: Dict[str, Any]) -> str:
     return CalibrationStatus.PARTIAL
 
 
+def _page_has_dialog_anchors(cache_dir_path: Path) -> bool:
+    """True only when the success page will emit ``id=\"dlg-{i}\"`` anchors.
+
+    Structured dialog rendering (``llm_processed.json`` with non-empty dialogs)
+    is the only path that writes those ids. Timeline-only sources (YouTube
+    subtitle / CapsWriter sidecar) can still produce chapters cards, but
+    linking to ``#dlg-N`` would be a dead jump on the public view page.
+    """
+    import json
+
+    processed_file = cache_dir_path / "llm_processed.json"
+    if not processed_file.exists():
+        return False
+    try:
+        with open(processed_file, "r", encoding="utf-8") as f:
+            processed_data = json.load(f)
+        dialogs = processed_data.get("dialogs") if isinstance(processed_data, dict) else None
+        return isinstance(dialogs, list) and len(dialogs) > 0
+    except Exception as exc:
+        logger.warning(f"Failed to inspect llm_processed.json for dlg anchors: {exc}")
+        return False
+
+
 def _load_chapters_anchor_source(cache_dir_path: Path) -> list:
     """Load the current chapters anchor source for fingerprint re-check.
 
@@ -1038,10 +1061,20 @@ def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
                             stored_fp = source.get("fingerprint")
                     current_segments = _load_chapters_anchor_source(cache_dir_path)
                     current_fp = _compute_anchor_fingerprint(current_segments)
-                    fingerprint_ok = bool(
+                    fingerprint_match = bool(
                         stored_fp and current_fp and stored_fp == current_fp
                     )
-                    if stored_fp and current_fp and not fingerprint_ok:
+                    # Jump targets require structured dialog anchors on the page
+                    # (id="dlg-{i}"). Timeline-only sources may fingerprint-match
+                    # but still have no anchors — do not emit dead #dlg links.
+                    has_dlg_anchors = _page_has_dialog_anchors(cache_dir_path)
+                    fingerprint_ok = fingerprint_match and has_dlg_anchors
+                    if fingerprint_match and not has_dlg_anchors:
+                        logger.info(
+                            "Chapters fingerprint matches but page has no dlg anchors; "
+                            "rendering chapter cards without jump links"
+                        )
+                    elif stored_fp and current_fp and not fingerprint_match:
                         logger.info(
                             "Chapters fingerprint mismatch; rendering without jump links "
                             f"(stored={stored_fp[:12]}..., current={current_fp[:12]}...)"

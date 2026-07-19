@@ -282,6 +282,46 @@ class TestPrepareSuccessViewChapters:
         assert "<script>" not in html_out
         assert "<img src=x" not in html_out
 
+    def test_timeline_only_without_structured_dialogs_drops_jump_links(
+        self, tmp_path: Path
+    ):
+        """YouTube/CapsWriter timeline can fingerprint-match segments, but the
+        page only emits id=\"dlg-{i}\" for structured dialogs. Without dialogs,
+        jump links would be dead anchors — must render cards without href."""
+        from video_transcript_api.api.routes.views import _prepare_success_view
+        from video_transcript_api.llm.processors.chapters_processor import (
+            _compute_fingerprint,
+        )
+
+        segs = [
+            {"start_time": 0.0, "end_time": 1.0, "text": "hello one"},
+            {"start_time": 1.0, "end_time": 2.0, "text": "hello two"},
+        ]
+        pairs = list(enumerate(segs))
+        fp = _compute_fingerprint(pairs)
+        (tmp_path / "transcript_capswriter.txt").write_text(
+            "hello one hello two", encoding="utf-8"
+        )
+        (tmp_path / "transcript_capswriter.json").write_text(
+            json.dumps({"segments": segs}, ensure_ascii=False), encoding="utf-8"
+        )
+        (tmp_path / "llm_calibrated.txt").write_text(
+            "hello one hello two", encoding="utf-8"
+        )
+        # No llm_processed.json → no #dlg-* anchors on the page.
+        (tmp_path / "llm_chapters.json").write_text(
+            json.dumps(_chapters_payload(fp), ensure_ascii=False), encoding="utf-8"
+        )
+        self._write_status(tmp_path, ChaptersStatus.GENERATED)
+
+        view_data = {"cache_dir": str(tmp_path), "summary": None}
+        _prepare_success_view(view_data)
+        chapters_html = view_data.get("chapters_html") or ""
+        assert chapters_html, "chapters cards should still render"
+        assert "Intro" in chapters_html
+        assert 'href="#dlg-' not in chapters_html
+        assert 'data-jump-ok="0"' in chapters_html
+
 
 # ---------------------------------------------------------------------------
 # floating-toc.js: DOM API / no HTML string concat of user titles
