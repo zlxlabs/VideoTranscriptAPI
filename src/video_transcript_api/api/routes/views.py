@@ -19,11 +19,12 @@ from ..context import (
 from ...utils.rendering import (
     get_base_url,
     render_calibrated_content_smart,
+    render_chapters_html,
     render_markdown_to_html,
     render_transcript_content,
 )
 from ...utils.timeutil import format_datetime_for_display
-from ...utils.llm_status import CalibrationStatus
+from ...utils.llm_status import CalibrationStatus, ChaptersStatus
 
 logger = lazy_resource(get_logger)
 cache_manager = lazy_resource(get_cache_manager)
@@ -853,12 +854,78 @@ def _derive_legacy_calibration_status(cal_stats: Dict[str, Any]) -> str:
     return CalibrationStatus.PARTIAL
 
 
+def _load_chapters_anchor_source(cache_dir_path: Path) -> list:
+    """Load the current chapters anchor source for fingerprint re-check.
+
+    Priority mirrors generation (coordinator / llm_ops input gradient):
+    1. ``llm_processed.json`` dialogs (structured calibration output)
+    2. timeline segments via ``load_segments`` (FunASR / CapsWriter JSON)
+
+    Returns an empty list when nothing usable is found.
+    """
+    import json
+
+    processed_file = cache_dir_path / "llm_processed.json"
+    if processed_file.exists():
+        try:
+            with open(processed_file, "r", encoding="utf-8") as f:
+                processed_data = json.load(f)
+            dialogs = processed_data.get("dialogs") if isinstance(processed_data, dict) else None
+            if isinstance(dialogs, list) and dialogs:
+                return dialogs
+        except Exception as exc:
+            logger.warning(f"Failed to read llm_processed.json for chapters fingerprint: {exc}")
+
+    try:
+        from ...transcriber.segments import load_segments
+
+        segments = load_segments(cache_dir_path)
+        if isinstance(segments, list) and segments:
+            return segments
+    except Exception as exc:
+        logger.warning(f"Failed to load timeline segments for chapters fingerprint: {exc}")
+
+    return []
+
+
+def _compute_anchor_fingerprint(segments: list) -> Optional[str]:
+    """Recompute chapters fingerprint from the current anchor source.
+
+    Uses the same filter + sha1 algorithm as ChaptersProcessor so a match
+    means start_seg / #dlg-{i} still point at the same content.
+    """
+    if not segments:
+        return None
+    try:
+        from ...llm.processors.chapters_processor import _compute_fingerprint
+    except Exception as exc:
+        logger.warning(f"Cannot import chapters fingerprint helper: {exc}")
+        return None
+
+    filtered_pairs = []
+    for orig_idx, seg in enumerate(segments):
+        if not isinstance(seg, dict):
+            continue
+        text = seg.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        filtered_pairs.append((orig_idx, seg))
+    if not filtered_pairs:
+        return None
+    try:
+        return _compute_fingerprint(filtered_pairs)
+    except Exception as exc:
+        logger.warning(f"Failed to recompute chapters fingerprint: {exc}")
+        return None
+
+
 def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     成功任务的视图准备：渲染 HTML、统计各阶段文本字数。
 
     包含大量同步文件读取与 Markdown 渲染，调用方需通过线程池执行，
-    避免阻塞事件循环。会就地修改 view_data（summary_html / calibrated_html），返回 stats。
+    避免阻塞事件循环。会就地修改 view_data（summary_html / calibrated_html /
+    chapters_html），返回 stats。
     """
     import json
 
@@ -867,8 +934,11 @@ def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
 
     cache_dir = view_data.get("cache_dir")
     stats: Dict[str, Any] = {"original_length": 0, "calibrated_length": 0, "summary_length": 0}
+    # Default: no chapters block (only GENERATED + file renders).
+    view_data["chapters_html"] = None
 
     cache_dir_path = Path(cache_dir) if cache_dir else None
+    chapters_status: Optional[str] = None
     if cache_dir_path and cache_dir_path.exists():
         # 1. 计算原始转录字数
         funasr_file = cache_dir_path / "transcript_funasr.json"
@@ -932,6 +1002,9 @@ def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
                 cal_stats = status_data.get("calibration_stats")
                 if cal_stats:
                     stats["calibration_stats"] = cal_stats
+                chapters_status = status_data.get("chapters_status")
+                if chapters_status is not None:
+                    stats["chapters_status"] = chapters_status
             except Exception as exc:
                 logger.error(f"读取 llm_status.json 失败: {exc}")
         else:
@@ -948,6 +1021,46 @@ def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
                         ) or _derive_legacy_calibration_status(cal_stats)
                 except Exception as exc:
                     logger.error(f"读取校准统计失败: {exc}")
+
+        # 5. Chapters outline block (T7): only when status is GENERATED and
+        # llm_chapters.json exists. Fingerprint mismatch keeps the cards but
+        # drops #dlg-{start_seg} jump links so we never silently mis-jump.
+        if chapters_status == ChaptersStatus.GENERATED or chapters_status == "generated":
+            chapters_file = cache_dir_path / "llm_chapters.json"
+            if chapters_file.exists():
+                try:
+                    with open(chapters_file, "r", encoding="utf-8") as f:
+                        chapters_payload = json.load(f)
+                    stored_fp = None
+                    if isinstance(chapters_payload, dict):
+                        source = chapters_payload.get("source") or {}
+                        if isinstance(source, dict):
+                            stored_fp = source.get("fingerprint")
+                    current_segments = _load_chapters_anchor_source(cache_dir_path)
+                    current_fp = _compute_anchor_fingerprint(current_segments)
+                    fingerprint_ok = bool(
+                        stored_fp and current_fp and stored_fp == current_fp
+                    )
+                    if stored_fp and current_fp and not fingerprint_ok:
+                        logger.info(
+                            "Chapters fingerprint mismatch; rendering without jump links "
+                            f"(stored={stored_fp[:12]}..., current={current_fp[:12]}...)"
+                        )
+                    elif not current_fp:
+                        logger.info(
+                            "Chapters fingerprint cannot be recomputed; rendering without jump links"
+                        )
+                    view_data["chapters_html"] = render_chapters_html(
+                        chapters_payload if isinstance(chapters_payload, dict) else None,
+                        fingerprint_ok=fingerprint_ok,
+                    ) or None
+                except Exception as exc:
+                    logger.error(f"Failed to render chapters block: {exc}")
+                    view_data["chapters_html"] = None
+            else:
+                logger.debug(
+                    "chapters_status=generated but llm_chapters.json missing; skip block"
+                )
 
     # 简化渲染逻辑：直接调用 render_with_cache_analysis
     view_data["calibrated_html"] = render_calibrated_content_smart(cache_dir)
