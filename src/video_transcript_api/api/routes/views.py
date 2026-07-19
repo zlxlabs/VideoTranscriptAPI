@@ -854,13 +854,20 @@ def _derive_legacy_calibration_status(cal_stats: Dict[str, Any]) -> str:
     return CalibrationStatus.PARTIAL
 
 
-def _page_has_dialog_anchors(cache_dir_path: Path) -> bool:
+def _page_has_dialog_anchors(
+    cache_dir_path: Path, plain_structured_enabled: bool = False
+) -> bool:
     """True only when the success page will emit ``id=\"dlg-{i}\"`` anchors.
 
     Structured dialog rendering (``llm_processed.json`` with non-empty dialogs)
     is the only path that writes those ids. Timeline-only sources (YouTube
     subtitle / CapsWriter sidecar) can still produce chapters cards, but
     linking to ``#dlg-N`` would be a dead jump on the public view page.
+
+    The gate must mirror the rendering strategy: a plain-source structured
+    artifact (top-level ``"mode": "plain_structured"``) is ignored when the
+    ``llm.structured_calibration_for_plain`` switch is off, so the body falls
+    back to plain rendering without anchors — chapter links would be dead.
     """
     import json
 
@@ -870,7 +877,14 @@ def _page_has_dialog_anchors(cache_dir_path: Path) -> bool:
     try:
         with open(processed_file, "r", encoding="utf-8") as f:
             processed_data = json.load(f)
-        dialogs = processed_data.get("dialogs") if isinstance(processed_data, dict) else None
+        if not isinstance(processed_data, dict):
+            return False
+        if (
+            not plain_structured_enabled
+            and processed_data.get("mode") == "plain_structured"
+        ):
+            return False
+        dialogs = processed_data.get("dialogs")
         return isinstance(dialogs, list) and len(dialogs) > 0
     except Exception as exc:
         logger.warning(f"Failed to inspect llm_processed.json for dlg anchors: {exc}")
@@ -959,6 +973,18 @@ def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
     stats: Dict[str, Any] = {"original_length": 0, "calibrated_length": 0, "summary_length": 0}
     # Default: no chapters block (only GENERATED + file renders).
     view_data["chapters_html"] = None
+
+    # T8 开关：plain 源结构化校对。开关关时渲染策略忽略 plain_structured 产物
+    # （走原 plain 渲染），章节锚点判定必须遵守同一门控，否则会发出死链。
+    # layering：renderer 不自己读配置，由 views 读好后传入。
+    try:
+        _llm_cfg = get_config().get("llm") or {}
+        plain_structured_enabled = bool(
+            _llm_cfg.get("structured_calibration_for_plain", False)
+        )
+    except Exception as exc:
+        logger.warning(f"Failed to read llm.structured_calibration_for_plain: {exc}")
+        plain_structured_enabled = False
 
     cache_dir_path = Path(cache_dir) if cache_dir else None
     chapters_status: Optional[str] = None
@@ -1067,7 +1093,9 @@ def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
                     # Jump targets require structured dialog anchors on the page
                     # (id="dlg-{i}"). Timeline-only sources may fingerprint-match
                     # but still have no anchors — do not emit dead #dlg links.
-                    has_dlg_anchors = _page_has_dialog_anchors(cache_dir_path)
+                    has_dlg_anchors = _page_has_dialog_anchors(
+                        cache_dir_path, plain_structured_enabled
+                    )
                     fingerprint_ok = fingerprint_match and has_dlg_anchors
                     if fingerprint_match and not has_dlg_anchors:
                         logger.info(
@@ -1096,7 +1124,9 @@ def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
                 )
 
     # 简化渲染逻辑：直接调用 render_with_cache_analysis
-    view_data["calibrated_html"] = render_calibrated_content_smart(cache_dir)
+    view_data["calibrated_html"] = render_calibrated_content_smart(
+        cache_dir, plain_structured_enabled
+    )
     return stats
 
 
