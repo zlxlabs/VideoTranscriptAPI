@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-`POST /api/transcribe` 支持 `processing_options` 参数，按任务控制处理深度：只转录、转录+校对、或完整流程（转录+校对+总结）。配合分层缓存，重复提交同一视频只会补跑"缺失且被请求"的层，不会重新下载或重新转录。
+`POST /api/transcribe` 支持 `processing_options` 参数，按任务控制处理深度：只转录、转录+校对、总结、章节梗概等。配合分层缓存，重复提交同一视频只会补跑"缺失且被请求"的层，不会重新下载或重新转录。
 
 ## API 参数说明
 
@@ -15,7 +15,8 @@
   "processing_options": {
     "calibrate": true,
     "summarize": true,
-    "infer_speaker_names": true
+    "infer_speaker_names": true,
+    "chapters": true
   }
 }
 ```
@@ -28,8 +29,11 @@
 | `processing_options.calibrate` | boolean | 否 | `true` | 是否执行 LLM 校对 |
 | `processing_options.summarize` | boolean | 否 | `true` | 是否生成内容总结 |
 | `processing_options.infer_speaker_names` | boolean | 否 | `true` | 是否把说话人占位标签推断为真实姓名；仅在启用说话人识别时生效 |
+| `processing_options.chapters` | boolean \| 省略 | 否 | **跟随 `summarize`** | 是否生成章节梗概。请求体**未出现**该字段时，规范化后等于生效的 `summarize` 值；显式 `true`/`false` 原样保留。**禁止**理解为「默认恒 true」——老客户端 `{calibrate:false, summarize:false}` 不会意外触发章节 |
 
-唯一的规范化模型定义在 `src/video_transcript_api/api/processing_options.py::ProcessingOptions`。三个字段只接受 JSON boolean；缺省时统一规范化为三个 `true`；未知或拼错的字段会直接返回校验错误，不会静默忽略后按默认值启用功能。
+唯一的规范化模型定义在 `src/video_transcript_api/api/processing_options.py::ProcessingOptions`。`calibrate` / `summarize` / `infer_speaker_names` 只接受 JSON boolean；`chapters` 可省略（模型字段为 `null`），由 `normalize_processing_options()` 填成跟随 summarize 后的布尔值。未知或拼错的字段会直接返回校验错误，不会静默忽略后按默认值启用功能。
+
+章节层的分层满足判定是**状态敏感**的（`generated`+文件 / `skipped_*` 满足；`failed`/`disabled`/不一致可重跑），详见 [chapters.md](./chapters.md)。仅 `chapters=true` **不会**单独触发 LLM 标题生成。
 
 ### 开关组合语义
 
@@ -55,15 +59,20 @@
 命中判定发生在 `process_transcription()`（`src/video_transcript_api/api/services/transcription.py`）的缓存检测分支：
 
 ```
-calibrated_layer_satisfied = 已有 llm_calibrated 文件 AND 该文件的 calibration_status != DISABLED
+calibrated_layer_satisfied = 已有 llm_calibrated 文件 AND 该文件的 calibration_status != DISABLED/NONE 且 status 已确认
 need_calibrated = 本次请求 calibrate=True AND NOT calibrated_layer_satisfied
 need_summary    = 本次请求 summarize=True AND NOT 已有 llm_summary 文件
+need_chapters   = 本次请求 chapters=True AND NOT chapters_layer_satisfied
+  其中 chapters_layer_satisfied：
+    - chapters_status==generated 且 llm_chapters.json 存在 → 是
+    - chapters_status in {skipped_short, skipped_no_timeline} → 是
+    - failed / disabled / 缺省 / 仅文件或仅状态 → 否
 
-若 need_calibrated 和 need_summary 都为 False -> 全命中，直接返回，不产生任何 LLM 任务
-否则                                            -> 部分命中，只把 {calibrate: need_calibrated, summarize: need_summary} 重新入队
+若 need_calibrated、need_summary、need_chapters（及 need_speaker_names）都为 False -> 全命中，直接返回
+否则 -> 部分命中，只把需要的层重新入队
 ```
 
-`calibrated` 层的"已满足"判定不能只看文件是否存在——如果上一轮请求 `calibrate=false`，`llm_calibrated.txt` 仍会被写入（内容是本地格式化的原文，`calibration_status=disabled`），此时若本轮请求 `calibrate=true`，必须视为"缺失"以触发真实校对，而不是把 disabled 占位文本当成已完成的校对结果直接返回。`summary` 层没有这个问题：`disabled`/`failed` 都不落盘 `llm_summary.txt`，因此文件存在即代表该层已有确定性产物（`generated` 或 `skipped_short`）。
+`calibrated` 层的"已满足"判定不能只看文件是否存在——如果上一轮请求 `calibrate=false`，`llm_calibrated.txt` 仍会被写入（内容是本地格式化的原文，`calibration_status=disabled`），此时若本轮请求 `calibrate=true`，必须视为"缺失"以触发真实校对，而不是把 disabled 占位文本当成已完成的校对结果直接返回。`summary` 层：`disabled`/`failed` 都不落盘 `llm_summary.txt`，因此文件存在即代表该层已有确定性产物。`chapters` 层**不要**抄 summary 的「有文件即满足」——必须看 `chapters_status`（见上表与 [chapters.md](./chapters.md)）。
 
 ### 命中矩阵
 
