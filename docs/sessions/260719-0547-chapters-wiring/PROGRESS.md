@@ -47,6 +47,12 @@
 
 已完成 YouTube 字幕 / FunASR 分层 / CapsWriter 真转录（见 NOTES）。死链修复已 commit。
 
+## 延后
+
+- **校对文本上的章节跳转（CW/YouTube）**：用户确认延后；说明见 `DEFERRED-chapter-jump-calibrated-text.md`。
+
 ## 未 push / 未合并 main
 
 按 HANDOFF：全程不 push、不合并 main，除非用户明确授权。
+
+**合并注意**：`feat/chapters-wiring` 叠在未 push 的 `feat/chapters-foundation` 之上；合 main 时通常 foundation+wiring 一起进，或先合 foundation 再合 wiring。
