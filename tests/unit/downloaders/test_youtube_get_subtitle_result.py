@@ -231,22 +231,37 @@ def test_get_subtitle_end_to_end_unchanged_while_get_subtitle_result_carries_seg
     ]
 
 
-def test_get_subtitle_api_server_all_numeric_srt_still_returns_none_unchanged():
-    """Locks the historical str-only semantics of get_subtitle() (API Server
-    branch): it calls YouTubeApiClient.fetch_transcript() (str-returning,
-    driven by parse_srt_to_text -- a completely separate code path from
-    fetch_transcript_result()/parse_srt_to_subtitle_result()). For an
-    all-numeric-body SRT, parse_srt_to_text() has always returned "" (each
-    body line is mistaken for the next cue's index line), so get_subtitle()
-    must keep returning None exactly as before -- this fix only changes
-    get_subtitle_result()'s validity check, never get_subtitle()'s."""
+def test_get_subtitle_api_server_all_numeric_srt_empty_text_with_segments():
+    """get_subtitle() now thin-delegates to get_subtitle_result().
+
+    When the API Server path returns a SubtitleResult with empty text but
+    non-empty segments (all-numeric-body SRT edge case), get_subtitle_result
+    treats it as valid subtitle and get_subtitle returns result.text ("").
+    When both text and segments are empty/None, the result is treated as no
+    subtitle and get_subtitle returns None -- no TikHub fallback.
+    """
     downloader = _make_downloader()
     downloader.config["youtube_api_server"] = {"enabled": True, "base_url": "http://x", "api_key": "k"}
     downloader._youtube_api_client = Mock()
-    downloader._youtube_api_client.fetch_transcript = Mock(return_value="")
-    downloader._get_subtitle_with_tikhub_api = Mock()
+    # Empty text + no segments => no subtitle
+    downloader._youtube_api_client.fetch_transcript_result = Mock(
+        return_value=SubtitleResult(text="", segments=None)
+    )
+    downloader._get_subtitle_result_with_tikhub_api = Mock()
 
     result = downloader.get_subtitle("https://www.youtube.com/watch?v=test")
 
     assert result is None
-    assert not downloader._get_subtitle_with_tikhub_api.called
+    assert not downloader._get_subtitle_result_with_tikhub_api.called
+
+    # Empty text + segments => get_subtitle returns the empty text string
+    # (delegation returns result.text; callers that need timeline should use
+    # get_subtitle_result directly).
+    downloader._youtube_api_client.fetch_transcript_result = Mock(
+        return_value=SubtitleResult(
+            text="",
+            segments=[{"start_time": 1.0, "end_time": 2.0, "text": "42"}],
+        )
+    )
+    result_with_segments = downloader.get_subtitle("https://www.youtube.com/watch?v=test")
+    assert result_with_segments == ""

@@ -1583,8 +1583,17 @@ def process_transcription(
                     if not api_result["need_transcription"]:
                         # 有平台字幕，直接使用
                         transcript = api_result["transcript"]
+                        # fetch_for_transcription 在解析 SRT 时尽力保留
+                        # segments；缺省时诚实降级（extra_json_data=None）
+                        yt_api_segments = api_result.get("transcript_segments")
+                        yt_api_extra_json = (
+                            {"segments": yt_api_segments}
+                            if yt_api_segments
+                            else None
+                        )
                         logger.info(
-                            f"[youtube-api] Using platform transcript, length={len(transcript)}"
+                            f"[youtube-api] Using platform transcript, length={len(transcript)}, "
+                            f"segments={len(yt_api_segments) if yt_api_segments else 0}"
                         )
 
                         task_notifier.notify_task_status(
@@ -1605,6 +1614,7 @@ def process_transcription(
                             title=video_title,
                             author=author,
                             description=description,
+                            extra_json_data=yt_api_extra_json,
                         )
                         if not cache_result:
                             error_msg = "[youtube-api] 转录结果保存到缓存失败"
@@ -1717,6 +1727,9 @@ def process_transcription(
                                 )
                                 transcript = transcription_result.get("transcript", "")
 
+                                # CapsWriter timeline：Transcriber 已从
+                                # *_funasr.json 读入 funasr_json_data，接通
+                                # extra_json_data 落盘为 transcript_capswriter.json
                                 cache_result = cache_manager.save_cache(
                                     platform=platform,
                                     url=url,
@@ -1727,6 +1740,9 @@ def process_transcription(
                                     title=video_title,
                                     author=author,
                                     description=description,
+                                    extra_json_data=transcription_result.get(
+                                        "funasr_json_data"
+                                    ),
                                 )
 
                         if not cache_result:
@@ -1821,7 +1837,10 @@ def process_transcription(
                 is_from_generic = (platform == 'generic')
 
             # 根据 use_speaker_recognition 参数决定处理优先级
+            # YouTube 平台字幕走 get_subtitle_result 保留 timeline segments；
+            # 其它路径仍用纯文本 subtitle（兼容非 YouTube 下载器）。
             subtitle = None
+            subtitle_extra_json = None
 
             if has_separate_download_url:
                 # 提供了 download_url，说明用户已有下载地址
@@ -1837,16 +1856,37 @@ def process_transcription(
                 subtitle = None
             else:
                 # 只有在不需要说话人识别时，才尝试获取平台字幕
+                yt_downloader = None
                 if metadata_downloader and metadata_downloader.__class__.__name__ == "YoutubeDownloader":
-                    logger.info(f"不需要说话人识别，尝试获取YouTube平台字幕: {url}")
-                    subtitle = metadata_downloader.get_subtitle(url)
+                    yt_downloader = metadata_downloader
                 elif not download_url and original_downloader:
                     if original_downloader.__class__.__name__ == "YoutubeDownloader":
-                        logger.info(f"不需要说话人识别，尝试获取YouTube平台字幕: {url}")
-                        subtitle = original_downloader.get_subtitle(url)
+                        yt_downloader = original_downloader
 
-            if subtitle:
-                # 如果有字幕，直接使用
+                if yt_downloader is not None:
+                    logger.info(f"不需要说话人识别，尝试获取YouTube平台字幕: {url}")
+                    # 权威入口：保留 segments 时间戳；无字幕时返回 None
+                    subtitle_result = yt_downloader.get_subtitle_result(url)
+                    if subtitle_result and (
+                        subtitle_result.text.strip() or subtitle_result.segments
+                    ):
+                        subtitle = subtitle_result.text
+                        if subtitle_result.segments:
+                            # FunASR 兼容形态：{"segments": [...]}
+                            subtitle_extra_json = {
+                                "segments": subtitle_result.segments
+                            }
+                        logger.info(
+                            f"YouTube subtitle result: "
+                            f"text_len={len(subtitle)}, "
+                            f"segments={len(subtitle_result.segments) if subtitle_result.segments else 0}"
+                        )
+
+            if subtitle is not None and (
+                (isinstance(subtitle, str) and subtitle.strip())
+                or subtitle_extra_json is not None
+            ):
+                # 如果有字幕（文本或仅有 segments），直接使用
                 logger.info(f"使用平台提供的字幕: {url}")
 
                 task_notifier.notify_task_status(
@@ -1856,17 +1896,18 @@ def process_transcription(
                     author=author,
                 )
 
-                # 使用新的缓存系统保存平台字幕
+                # 使用新的缓存系统保存平台字幕（有 segments 则写侧车 JSON）
                 cache_result = cache_manager.save_cache(
                     platform=platform,
                     url=url,
                     media_id=video_id,
                     use_speaker_recognition=False,  # 平台字幕没有说话人识别
-                    transcript_data=subtitle,
+                    transcript_data=subtitle if subtitle is not None else "",
                     transcript_type="capswriter",  # 平台字幕按文本格式保存
                     title=video_title,
                     author=author,
                     description=description,
+                    extra_json_data=subtitle_extra_json,
                 )
 
                 if not cache_result:
@@ -2079,7 +2120,8 @@ def process_transcription(
                             )
                             transcript = transcription_result.get("transcript", "")
 
-                            # 使用新缓存系统保存
+                            # CapsWriter timeline：接通 funasr_json_data 落盘
+                            # 为 transcript_capswriter.json（缺省时 None 诚实降级）
                             cache_result = cache_manager.save_cache(
                                 platform=platform,
                                 url=url,
@@ -2090,6 +2132,9 @@ def process_transcription(
                                 title=video_title,
                                 author=author,
                                 description=description,
+                                extra_json_data=transcription_result.get(
+                                    "funasr_json_data"
+                                ),
                             )
 
                             if not cache_result:

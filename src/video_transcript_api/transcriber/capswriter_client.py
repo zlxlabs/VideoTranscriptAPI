@@ -10,6 +10,7 @@ import os
 import sys
 import json
 import base64
+import math
 import time
 import asyncio
 import re
@@ -25,6 +26,8 @@ from loguru import logger
 # 添加项目根目录到系统路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ..utils.logging import load_config
+# 时间解析唯一权威：禁止在本模块另起一套 isfinite/parse 逻辑
+from .segments import parse_time_to_seconds
 
 
 class Config:
@@ -197,8 +200,25 @@ def _optimize_segment_lengths(
     return final
 
 
+def _finite_time_or_none(value: Any) -> Optional[float]:
+    """把任意时间值规整为有限 float，否则 None。
+
+    复用 transcriber.segments.parse_time_to_seconds（唯一权威时间解析），
+    其内部已用 math.isfinite 拒绝 NaN/Inf；本函数再对已是 float 的路径
+    做一层防御，避免上游直接传入非有限值时写出 NaN/Inf 到下游 JSON。
+    """
+    parsed = parse_time_to_seconds(value)
+    if parsed is None:
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
 def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str, Any]]:
-    """在次级标点处分割超长句子"""
+    """在次级标点处分割超长句子。
+
+    时间插值必须拒绝非有限值：start_time / duration 任一非有限时，诚实
+    降级为 start_time=end_time=None，文本照常切分、永不丢字。
+    """
     text = segment["text"]
     secondary_punct = r"([，,；;])"
     parts = re.split(secondary_punct, text)
@@ -208,8 +228,16 @@ def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str,
 
     split_segments = []
     current = ""
-    start_time = segment["start_time"]
-    duration = segment["end_time"] - segment["start_time"]
+    orig_start = _finite_time_or_none(segment.get("start_time"))
+    orig_end = _finite_time_or_none(segment.get("end_time"))
+    # 仅当两端时间都有限且区间非负时才做线性插值；否则全程 None
+    times_usable = (
+        orig_start is not None
+        and orig_end is not None
+        and math.isfinite(orig_end - orig_start)
+    )
+    start_time = orig_start if times_usable else None
+    duration = (orig_end - orig_start) if times_usable else None
     total_len = segment["length"]
 
     for part in parts:
@@ -217,28 +245,44 @@ def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str,
             current += part
         else:
             if current:
-                progress = len(current) / total_len
-                end_time = start_time + duration * progress
+                if times_usable and total_len > 0 and start_time is not None:
+                    progress = len(current) / total_len
+                    end_time = start_time + duration * progress
+                    if not math.isfinite(end_time):
+                        end_time = None
+                        start_for_seg = None
+                    else:
+                        start_for_seg = round(start_time, 2)
+                        end_time = round(end_time, 2)
+                        start_time = end_time
+                else:
+                    start_for_seg = None
+                    end_time = None
 
                 split_segments.append(
                     {
-                        "start_time": round(start_time, 2),
-                        "end_time": round(end_time, 2),
+                        "start_time": start_for_seg,
+                        "end_time": end_time,
                         "text": current,
                         "length": len(current),
                     }
                 )
 
-                start_time = end_time
                 current = part
             else:
                 current = part
 
     if current:
+        if times_usable and start_time is not None and orig_end is not None:
+            final_start = round(start_time, 2) if math.isfinite(start_time) else None
+            final_end = round(orig_end, 2) if math.isfinite(orig_end) else None
+        else:
+            final_start = None
+            final_end = None
         split_segments.append(
             {
-                "start_time": round(start_time, 2),
-                "end_time": round(segment["end_time"], 2),
+                "start_time": final_start,
+                "end_time": final_end,
                 "text": current,
                 "length": len(current),
             }

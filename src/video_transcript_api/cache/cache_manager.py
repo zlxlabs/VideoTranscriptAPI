@@ -874,6 +874,21 @@ class CacheManager:
                     except (OSError, json.JSONDecodeError) as processed_exc:
                         logger.warning(f"读取 llm_processed.json 失败，忽略: {processed_exc}")
 
+                # Timeline segments 侧车：经统一适配器 load_segments 读回
+                # transcript_funasr.json / transcript_capswriter.json。权威读法
+                # 仍是 load_segments(cache_dir)；这里附带是为方便调用方。缺
+                # 失或坏数据时诚实降级（不塞字段），不阻断缓存命中。
+                try:
+                    from video_transcript_api.transcriber.segments import load_segments
+
+                    segments = load_segments(file_path)
+                    if segments is not None:
+                        cache_data["segments"] = segments
+                except Exception as segments_exc:
+                    # load_segments 自身契约是"不抛异常"；这里再兜一层，避免
+                    # 未来改动破坏 get_cache 主路径。
+                    logger.warning(f"读取 timeline segments 失败，忽略: {segments_exc}")
+
                 cache_data['file_path'] = str(file_path)
                 
                 logger.info(f"缓存命中: {platform}/{media_id}, 说话人识别: {cache_data['use_speaker_recognition']}")
