@@ -1,8 +1,8 @@
 # 长逐字稿章节梗概（chapters）功能设计 v2.1.1
 
 - **日期**：2026-07-16（v2.1）；**接线规格修订 2026-07-19（v2.1.1）**
-- **状态**：**安全批已完成并通过 Codex gate**（30 轮，R29+R30 连续两轮无实质新意见）；**pr3（#12/#13/#14）已合入 origin/main**；接线批（T1/T6–T10）待开工。全量 Eng Review **不重跑**（架构仍 CLEAR）；仅按 §5.7 修订接线落点。
-- **分支**：`feat/chapters-foundation`（安全批基于旧 main@ee092d1；rebase 到含 pr3 的 origin/main 后开工）
+- **状态**：**安全批已完成并通过 Codex gate**（30 轮，R29+R30 连续两轮无实质新意见）；**pr3（#12/#13/#14）已合入 origin/main**；**2026-07-19 已 rebase 到 origin/main**（无冲突，unit+llm 2292 passed）；接线批（T1/T6–T10）可开工。全量 Eng Review **不重跑**（架构仍 CLEAR）；接线按 §5.7。
+- **分支**：`feat/chapters-foundation`（已含 pr3 基线 + 安全批 + v2.1.1 文档；未 push）
 - **依据**：三份代码调研 + 关键路径逐行核验 + Codex 独立复核；2026-07-19 对照 origin/main 只读核对 §5.x
 - **任务卡**：`docs/sessions/260719-0513-chapters/TASKS.md`；交接：`docs/sessions/260719-0513-chapters/HANDOFF.md`
 
@@ -286,4 +286,4 @@ NO UNRESOLVED DECISIONS
 - **范围**：对照 origin/main（含 pr3）与本计划 §5.x / §12。
 - **结论**：架构与 D1–D6 仍成立；全量 Eng Review **不重跑**。
 - **产出**：v2.1.1 修订（§5.1 need 表、§5.2 Options 路径与默认值建模、§5.4 recalibrate 差异、§5.5 路径表、**§5.7 十条接线约束**）+ `TASKS.md` 任务卡。
-- **剩余前置**：`feat/chapters-foundation` rebase 到 origin/main 后跑基线测试，再按 T1→T6 开工。
+- **剩余前置**：~~rebase + 基线测试~~ ✅ 2026-07-19（无冲突，2292 passed）。下一步按 T1→T6 开工。

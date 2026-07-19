@@ -4,7 +4,7 @@
 > 更新：2026-07-19 — 计划升 v2.1.1、任务卡落地；pr3 已合入 origin/main  
 > 来源仓库：`/home/zlx/projects/personal/VideoTranscriptAPI`  
 > 安全批分支：`feat/chapters-foundation`  
-> 状态：安全批（T2/T3/T4/T5）完成并通过 30 轮 Codex gate；**接线规格已按 pr3 修订（v2.1.1）**；接线批（T1/T6–T10）待 rebase 后开工
+> 状态：安全批（T2/T3/T4/T5）完成并通过 30 轮 Codex gate；**接线规格 v2.1.1**；**已 rebase origin/main（无冲突，2292 unit+llm 绿）**；接线批（T1/T6–T10）可开工
 
 ## 权威文档
 
@@ -30,7 +30,7 @@
 
 ## 接线批开工顺序
 
-1. 确认 `feat/chapters-foundation` 已 rebase 到最新 `origin/main` 且单测基线绿  
+1. ~~确认 rebase~~ ✅ 2026-07-19：`origin/main` 已是祖先；`uv run pytest tests/unit tests/llm` → 2292 passed  
 2. **T1** → **T6** → **T7 ∥ T8** → T9 / T10  
 3. 详见 `TASKS.md`
 
