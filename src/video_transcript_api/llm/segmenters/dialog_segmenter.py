@@ -4,7 +4,7 @@
 """
 
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from ...utils.logging import setup_logger
 from ..core.config import LLMConfig
@@ -15,16 +15,31 @@ logger = setup_logger(__name__)
 class DialogSegmenter:
     """有说话人文本分段器"""
 
-    def __init__(self, config: LLMConfig):
+    def __init__(
+        self,
+        config: LLMConfig,
+        preferred_chunk_length: Optional[int] = None,
+        max_chunk_length: Optional[int] = None,
+    ):
         """初始化对话分段器
 
         Args:
             config: LLM 配置
+            preferred_chunk_length: 理想块长覆盖（None 时取
+                config.preferred_chunk_length）。无说话人（plain 源）模式
+                用独立分块参数覆盖，has_speaker=True 路径不传、行为不变。
+            max_chunk_length: 最大块长覆盖（None 时取 config.max_chunk_length）
         """
         self.config = config
         self.min_chunk_length = config.min_chunk_length
-        self.max_chunk_length = config.max_chunk_length
-        self.preferred_chunk_length = config.preferred_chunk_length
+        self.max_chunk_length = (
+            max_chunk_length if max_chunk_length is not None else config.max_chunk_length
+        )
+        self.preferred_chunk_length = (
+            preferred_chunk_length
+            if preferred_chunk_length is not None
+            else config.preferred_chunk_length
+        )
 
     def segment(self, dialogs: List[Dict]) -> List[List[Dict]]:
         """对对话列表进行智能分块
