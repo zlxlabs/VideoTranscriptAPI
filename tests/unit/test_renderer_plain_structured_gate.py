@@ -10,6 +10,9 @@ Covers:
   key) are unaffected.
 - ``views._page_has_dialog_anchors`` applies the same gate so chapter cards
   never emit dead ``#dlg-N`` links when the body renders as plain text.
+- Paragraphs whose ``start_time``/``end_time`` are None must still render
+  with ``id="dlg-{i}"`` anchors and must NOT be stamped with a fallback
+  ``00:00:00`` time tag (T8 review R1 F7).
 
 Console output must be pure English (no emoji, no Chinese).
 """
@@ -338,3 +341,80 @@ class TestPrepareSuccessViewGateIntegration:
         assert 'href="#dlg-0"' in chapters_html
         calibrated_html = view_data.get("calibrated_html") or ""
         assert 'id="dlg-0"' in calibrated_html
+
+
+# ---------------------------------------------------------------------------
+# None timestamps: paragraphs without timing still render jumpable anchors
+# ---------------------------------------------------------------------------
+
+
+class TestRenderNoneTimeParagraphs:
+    """T8 review R1 F7: plain_structured paragraphs may carry
+    ``start_time=None`` / ``end_time=None`` (timeless segments). They must
+    render through the real DialogRenderer without raising, keep their
+    ``id="dlg-{i}"`` chapter anchors, and must NOT be stamped with the old
+    ``00:00:00`` fallback time tag."""
+
+    def test_none_time_paragraphs_render_anchors_without_time_tags(
+        self, tmp_path: Path
+    ):
+        dialogs = [
+            {"text": "First timeless paragraph.", "start_time": None, "end_time": None},
+            {"text": "Second timeless paragraph.", "start_time": None, "end_time": None},
+        ]
+        _write_processed(tmp_path, dialogs, mode="plain_structured")
+        _write_plain_sidecars(tmp_path)
+
+        renderer = DialogRenderer()
+        # Sanity: the structured strategy is really selected (the anchors
+        # below must come from _render_from_structured_data, not a fallback).
+        assert (
+            renderer._get_optimal_rendering_strategy(
+                str(tmp_path), plain_structured_enabled=True
+            )
+            == "structured"
+        )
+
+        # Full entry path with the T8 switch on: strategy gate + structured
+        # render. A raised exception inside would be swallowed into a
+        # fallback body without anchors, so the anchor assertions below also
+        # pin "does not raise".
+        html_out = renderer.render_calibrated_content_smart(
+            str(tmp_path), plain_structured_enabled=True
+        )
+
+        assert html_out is not None
+        assert 'id="dlg-0"' in html_out
+        assert 'id="dlg-1"' in html_out
+        assert "00:00:00" not in html_out
+        assert "time-tag" not in html_out
+        assert "data-start-time" not in html_out
+        assert "First timeless paragraph." in html_out
+        assert "Second timeless paragraph." in html_out
+
+    def test_mixed_none_and_timed_paragraphs(self, tmp_path: Path):
+        """A timed paragraph keeps its real time tag while the timeless one
+        next to it stays tag-less -- and no ``00:00:00`` appears anywhere."""
+        dialogs = [
+            {"text": "Timeless paragraph.", "start_time": None, "end_time": None},
+            {
+                "text": "Timed paragraph.",
+                "start_time": "00:00:05",
+                "end_time": "00:00:11",
+            },
+        ]
+        _write_processed(tmp_path, dialogs, mode="plain_structured")
+        _write_plain_sidecars(tmp_path)
+
+        html_out = DialogRenderer().render_calibrated_content_smart(
+            str(tmp_path), plain_structured_enabled=True
+        )
+
+        assert html_out is not None
+        assert 'id="dlg-0"' in html_out
+        assert 'id="dlg-1"' in html_out
+        # The timed paragraph keeps its real timestamp...
+        assert 'data-start-time="00:00:05"' in html_out
+        assert "00:00:05" in html_out
+        # ...while the None-time paragraph is NOT stamped with "00:00:00".
+        assert "00:00:00" not in html_out
