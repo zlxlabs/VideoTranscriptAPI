@@ -43,6 +43,10 @@
 - 关键子集：`test_chapters_pipeline_wiring` / `test_chapters_frontend` / `test_cache_timeline_wiring` / `test_processing_options`：144 passed  
 - 离线 e2e 冒烟：3 条核心路径全部 OK（见 NOTES）
 
+## 真机 e2e
+
+已完成 YouTube 字幕 / FunASR 分层 / CapsWriter 真转录（见 NOTES）。死链修复已 commit。
+
 ## 未 push / 未合并 main
 
 按 HANDOFF：全程不 push、不合并 main，除非用户明确授权。

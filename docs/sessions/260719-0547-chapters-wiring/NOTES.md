@@ -24,23 +24,30 @@
 | B4 | R1-P2 | 离开 GENERATED 时旧 `llm_chapters.json` 残留 | T7 **仅认 status=GENERATED** 挡住公开展示；分层会重跑 |
 | B5 | R1-P2 | T1 未断言 transcription 各 save_cache 点 | 契约测覆盖 save/load；调用点 mock 可后续补 |
 | B6 | R1-P2 | `source.kind` 把 cached_dialogs 标成 segments | 可观测性，不影响生成正确性 |
-| B7 | R2-P2 | 无 structured `#dlg-*` 时 fingerprint 命中仍发跳转 | 死链 UX，非 XSS/错误正文；阶段二/structured 路径正常。后续：仅当页面确有 dlg 锚点才 jump_ok |
+| B7 | R2-P2 | 无 structured `#dlg-*` 时 fingerprint 命中仍发跳转 | **已修（真机 e2e）**：`_page_has_dialog_anchors`，仅 dialogs 存在才 jump_ok |
 | B8 | R2-P3 | TOC 章节样式类缺 CSS | 装饰性 |
 | B9 | R2-P3 | 渲染侧 `int(True)==1` 对损坏 JSON | 生成侧已拒 bool |
 
-## 离线 e2e 冒烟（完成标准）
+## 离线契约冒烟
 
-在 worktree 内 `PYTHONPATH=src uv run python`：
+临时目录脚本：options / timeline / save+render — PASSED。
 
-1. **PATH1** — `normalize_processing_options` 跟随 summarize；仅 chapters 不触发 `_requires_llm_title`  
-2. **PATH2** — CapsWriter `extra_json_data` → `transcript_capswriter.json` → `load_segments` / `get_cache["segments"]`  
-3. **PATH3** — 写 `llm_chapters.json` + GENERATED；XSS 转义；fingerprint 去链接；FAILED 不渲染；`_save_llm_results` 落盘 roundtrip  
+## 真机端到端（2026-07-19，`127.0.0.1:8010`）
 
-全部 PASSED。
+配置：主仓 secrets 合并进 wiring 兼容 config（补 `concurrent.llm_max_workers` 等），独立 worktree `data/`。
+
+| 路径 | 样本 | 结果 | 本地 view |
+|------|------|------|-----------|
+| YouTube 平台字幕 | `Q8Fkpi18QXU` Terence Tao | success；2338 segments 侧车；17 章 generated；summary OK | `/view/view_2n6H1Tl4jHM15NSHjFnkCiXvfxbORTQEN6UPtdUdPO0` |
+| FunASR 分层 | 小宇宙 `6991f276…` 杨攀（seed 历史缓存） | success；仅补 15 章；145 个 `dlg-*` 跳转全有效 | `/view/view_h9JHdrC0zTJ4-CqkQHxGOnzjFPfKEDoHrOY-RevkmiY` |
+| CapsWriter 真转录 | SoundHelix MP3 | success；侧车落盘；1 seg/24 字 → `skipped_no_timeline`（诚实） | `/view/view_01xgKI-VPs95oHzJrspLVKt-JEujODVN4-3W_21njKo` |
+| FunASR 离线真 LLM | 同上 181 segs | processor 直接 11 章 generated | `data/e2e_offline_funasr_chapters.json` |
+
+真机发现并已修：YouTube 无 structured 时死链 → commit `6b7498a`。
 
 ## 契约速查（T7 依赖）
 
 - 文件：`llm_chapters.json`  
-- `start_seg` / `end_seg`：原始输入列表下标 → 锚点 `#dlg-{i}`  
+- `start_seg` / `end_seg`：原始输入列表下标 → 锚点 `#dlg-{i}`（**仅 structured dialogs 页有 id**）  
 - 仅 `chapters_status=GENERATED` 且文件存在才渲染  
-- fingerprint 不一致：展示卡片，去掉跳转  
+- fingerprint 不一致 **或** 无 dlg 锚点：展示卡片，去掉跳转  
