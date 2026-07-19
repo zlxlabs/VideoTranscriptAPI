@@ -40,16 +40,14 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
+# Runtime directories change rarely; keep them before application source.
+RUN mkdir -p data/cache data/temp data/workspace data/logs config
+
 # ============================================================
 # 6. Application source code
 # ============================================================
 COPY src/ ./src/
 COPY main.py ./
-
-# ============================================================
-# 7. Create runtime directories (overridden by bind mount)
-# ============================================================
-RUN mkdir -p data/cache data/temp data/workspace data/logs config
 
 # ============================================================
 # 8. GIT_SHA: 供 zlx-ops-sdk 拼 release=repo@<sha>，GlitchTip 按版本聚合错误
@@ -62,5 +60,8 @@ ENV GIT_SHA=$GIT_SHA
 # 9. Runtime configuration
 # ============================================================
 EXPOSE 8000
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=6 \
+  CMD curl --fail --silent http://127.0.0.1:8000/livez >/dev/null || exit 1
 
 ENTRYPOINT ["uv", "run", "python", "main.py", "--start"]

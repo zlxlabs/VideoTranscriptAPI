@@ -63,20 +63,36 @@ cp config/config.example.jsonc config/config.jsonc
 uv run python main.py --start
 ```
 
+可在启动前执行无副作用配置预检；该命令不会连接外部服务、迁移数据库或启动线程：
+
+```bash
+uv run python main.py --check-config --config config/config.jsonc
+```
+
 ### Docker 部署
 
 ```bash
 # 准备配置
 cp config/config.example.jsonc config/config.jsonc
 
-# 启动
+# 本地构建并启动（使用固定的 dev 标签，不用于生产部署）
 cd docker/
-docker compose up -d
+docker compose up -d --build
 ```
 
 **Docker 镜像**：[`ghcr.io/zj1123581321/video-transcript-api`](https://ghcr.io/zj1123581321/video-transcript-api)
 
 镜像内置 ffmpeg、BBDown、yt-dlp，无需额外安装。
+
+生产部署禁止使用 `latest`。构建脚本会拒绝包含已跟踪或未跟踪修改的脏工作区，只从干净提交以 12 位 Git SHA 生成唯一 tag；部署脚本拉取该 tag 后按同一镜像仓库解析并固定 registry digest。候选镜像会先运行 `--check-config`，失败时不重启当前服务，启动后健康检查失败则恢复上一个 digest：
+
+```bash
+./docker/push_to_ghcr.sh
+# 在 docker/deploy_targets.json 指定的 n305:/opt/media/VideoTranscriptAPI 上执行：
+./docker/pull_and_deploy.sh ghcr.io/zj1123581321/video-transcript-api:<git-sha>
+```
+
+本仓库只提供部署能力；脚本不会自行 SSH 或自动上线。服务器首次运行会从 `docker/docker-compose.deploy.yml` 生成根目录 `docker-compose.yml`，配置文件位于 `<deploy-dir>/config/config.jsonc`，成功使用的 digest 记录在 `<deploy-dir>/.deploy-image`。同一项目目录的部署由 `.deploy.lock` 串行化；所有 Compose 操作固定使用部署根目录作为 project directory，并与候选预检加载同一份根目录 `.env`。重启前还会确认现有 Compose 文件确实把服务渲染为候选 digest。旧 Compose 不兼容时会先备份为 `docker-compose.yml.pre-digest.bak`，再迁移到仓库模板；候选失败回滚时会恢复原 Compose，并叠加仅覆盖镜像的配置把旧版本固定到记录的 digest。首次切换硬化脚本时，旧容器即使由 tag 启动也会先按原仓库解析为可回滚 digest；若旧镜像还没有 Docker `HEALTHCHECK`，回滚验证会改用容器内 `/livez` 探测。候选镜像启动失败、健康检查失败、启动后脚本被中断或成功 digest 状态文件无法原子提交时，脚本都会恢复旧 digest 并确认旧版本重新健康后才退出。
 
 > **注意**：CapsWriter / FunASR 需单独部署，配置中的服务地址不能用 `localhost`，需改为宿主机 IP 或 `host.docker.internal`。
 
@@ -98,7 +114,7 @@ curl -X POST "http://localhost:8000/api/transcribe" \
 
 ### 只转录不校对/不总结
 
-通过 `processing_options` 按任务控制处理深度，`calibrate`/`summarize` 均默认 `true`（等价历史行为）：
+通过 `processing_options` 按任务控制处理深度，`calibrate`、`summarize`、`infer_speaker_names` 均默认 `true`（等价历史行为）：
 
 ```bash
 curl -X POST "http://localhost:8000/api/transcribe" \
@@ -108,12 +124,13 @@ curl -X POST "http://localhost:8000/api/transcribe" \
     "url": "https://www.youtube.com/watch?v=xxx",
     "processing_options": {
       "calibrate": false,
-      "summarize": false
+      "summarize": false,
+      "infer_speaker_names": false
     }
   }'
 ```
 
-分层缓存产物只增不减：后续若对同一视频提交 `calibrate: true` 的请求，只会补跑缺失的校对层，已存在的转录不会重新下载。完整语义见 [处理深度开关功能文档](docs/features/processing_options.md)。
+三个开关全部为 `false` 时不会调用 LLM。分层缓存产物只增不减：后续若对同一视频提交 `calibrate: true` 或 `infer_speaker_names: true` 的请求，只会补跑缺失且有效性校验未通过的层，已存在的转录不会重新下载。完整语义见 [处理深度开关功能文档](docs/features/processing_options.md)。
 
 ### 查询任务状态
 
@@ -125,7 +142,7 @@ curl -X GET "http://localhost:8000/api/task/{task_id}" \
 ### Web 界面
 
 - **提交任务**：`GET /add_task_by_web`
-- **查看结果**：`GET /view/{view_token}`
+- **查看结果**：`GET /view/{view_token}` — 不可猜测的公开只读分享 capability；写操作仍需认证
 - **任务历史**：`GET /static/history.html` — 支持按日期、平台、频道、关键词搜索，已读追踪，摘要预览
 - **导出文件**：`GET /export/{view_token}/{type}`（支持 `calibrated`、`summary`、`transcript`）
 
@@ -138,7 +155,7 @@ curl -X GET "http://localhost:8000/api/task/{task_id}" \
 | `/api/recalibrate` | POST | 重新校对（唯一强制重做例外，忽略分层缓存保护） |
 | `/api/audit/stats` | GET | 调用统计，含 LLM token 用量聚合（按阶段汇总 prompt/completion/total tokens） |
 | `/api/audit/calls` | GET | 调用记录 |
-| `/api/audit/history` | GET | 任务历史查询（支持多条件过滤、分页、关键词搜索），含 `calibration_status`/`summary_status` 状态字段 |
+| `/api/audit/history` | GET | audit.db 独立终态任务历史（状态仅支持 `success`、`failed`、`all`；支持过滤、分页、关键词搜索），含处理状态与 `content_expired` |
 | `/api/audit/filter-options` | GET | 获取过滤选项（webhook/平台/频道列表） |
 | `/api/audit/summary` | GET | 任务摘要预览（前 300 字），基于诚实状态模型返回 `summary_status` |
 | `/api/users/profile` | GET | 当前用户信息 |

@@ -110,11 +110,9 @@ tests/unit/data
 # Docker
 docker/data/
 docker/export/
-docker/deploy_targets.json
+.deploy-image
 docker/push_to_acr.bat
 docker/push_to_acr.sh
-docker/push_to_ghcr.sh
-docker/pull_and_deploy.sh
 # Tools
 .cx-index.db
 graphify-out/
