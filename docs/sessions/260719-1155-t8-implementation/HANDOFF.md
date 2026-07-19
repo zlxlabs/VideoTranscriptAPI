@@ -30,18 +30,46 @@ S3 提交时 `uv run pytest tests/unit` 全绿（exit 0，约 2400 项；warning
 
 ## 待办（按序）
 
-1. **S4 — llm_ops 接线**（`api/services/llm_ops.py`，当前未接线，grep 无
-   `plain_structured`/`has_speaker` 痕迹）：
+> **2026-07-19 收工**：**T8 实施全部完成，review 循环关闭（gate 达成）。**
+> S4=`1126d4e`，S6=`6ca788a`，R1 补测=`7d4935f`。
+> Review：R1（PASS，0 P1，F1/F7 补测关闭、5 项 P3 接受）→ R2（PASS，0 新增 P1，
+> N1~N3 三项 P3 接受）——连续两轮无新增 P1，gate 满足，详见 REVIEW-LOG.md。
+> `unknown_id` 键两轮独立裁决均为 P3 接受不修；措辞修订建议移交 T10 doc pass。
+> tests/unit 全绿（exit 0）；tests/integration 的失败经 6512dac 基线复跑证明全部
+> 为既有/环境性（layered_cache + youtube_priority），T8 零新增回归。
+> **后续（非本 session 范围）**：T9 真实样本验收通过后再翻开关默认 true，并决定是否
+> 启动 v2 语义段落化；观测项（chunk 数/墙钟/token 对比）留待 T9 记录。
+>
+> <details><summary>S4/S6 实现要点（归档）</summary>
+>
+> S4（commit `1126d4e`，`uv run pytest tests/unit` exit 0）：
+> 实现要点：`_prepare_llm_content` 保持 3 参签名，内部推导开关+calibrate；
+> segments 来源梯度 = transcription_data → 缓存侧车（`get_cache(use_speaker_recognition=False)`，
+> 命中 funasr 行防护返回 None）；`plain_structured_active = 非 speaker + content 为 list`
+> 透传 `_save_llm_results`；落盘 gate 放宽 + 顶层打 `"mode": "plain_structured"`（双条件防误标）；
+> 姓名恢复两块维持 speaker 门控（plain 产物天然 no-op）。新增 16 个单测于
+> tests/unit/test_llm_ops_helpers.py。
+>
+> S6（commit `6ca788a`）：新增
+> tests/integration/test_t8_plain_structured_chain.py（3 用例：开关开全链路 /
+> 开关关回归 / 无 segments 诚实降级），新文件 3 passed；tests/unit exit 0；
+> tests/integration exit 1 但仅 test_youtube_transcript_priority.py 5 条无关既有
+> 失败（排除新文件后复现，环境相关，未修）。`calibration_stats` 的 `"unknown_id"`
+> 键问题 → 已经 review 两轮裁决为 P3 接受不修（见 REVIEW-LOG.md）。
+>
+> </details>
+
+1. ~~**S4 — llm_ops 接线**~~（已完成 `1126d4e`） 原描述：（`api/services/llm_ops.py`）：
    - `_prepare_llm_content`：**仅 `calibrate_requested=True`**（含 recalibrate）且
      plain 源有 segments → 返回 list（协调器 isinstance 路由自然生效）；
      calibrate=false 补层任务维持纯文本（防指纹永久 mismatch → 永久 nolink）；
    - structured 落盘 gate（现仅 `use_speaker_recognition`）扩展到本模式；
    - plain 结构化产物写 provenance `"mode": "plain_structured"`；
    - `llm_calibrated.txt` 继续生成（无前缀变体，保 export/raw 兼容）。
-2. **S6 — 集成测试**：开关开全链路（plain 源 → llm_processed.json 落盘 →
+2. ~~**S6 — 集成测试**~~（已完成 `6ca788a`）：开关开全链路（plain 源 → llm_processed.json 落盘 →
    渲染带 `dlg-{i}` 锚点 → 章节 fingerprint 匹配 → `jump_ok=1`）；
    开关关回归（plain 路径行为与现状一致）。验收全集见 TASKS.md T8「完成标准」。
-3. **review 循环**：独立 subagent review ≤20 轮；P1 必修，P2/P3 可判「接受不修」
+3. ~~**review 循环**~~（已关闭，gate 达成：R1/R2 连续两轮无新增 P1）：独立 subagent review ≤20 轮；P1 必修，P2/P3 可判「接受不修」
    记 `REVIEW-LOG.md` backlog；gate = 连续 2 轮无新增 P1。
 
 ## 纪律提醒
