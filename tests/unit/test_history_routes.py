@@ -92,6 +92,7 @@ def db_pair(tmp_path):
     def insert_task(task_id, view_token, platform="youtube", title="Test Title",
                     author="Test Author", status="success",
                     calibration_status=None, summary_status=None,
+                    chapters_status=None,
                     submitted_by=None):
         al.archive_task_snapshot({
             "task_id": task_id,
@@ -102,6 +103,7 @@ def db_pair(tmp_path):
             "status": status,
             "calibration_status": calibration_status,
             "summary_status": summary_status,
+            "chapters_status": chapters_status,
             "submitted_by": submitted_by,
         })
 
@@ -527,14 +529,20 @@ class TestHistoryEndpoint:
         insert = setup["insert_task"]
 
         _log(al, "task-status")
-        insert("task-status", "vt-status", calibration_status="partial",
-               summary_status="generated")
+        insert(
+            "task-status",
+            "vt-status",
+            calibration_status="partial",
+            summary_status="generated",
+            chapters_status="generated",
+        )
 
         resp = client.get("/api/audit/history")
         assert resp.status_code == 200
         item = next(i for i in resp.json()["data"]["items"] if i["task_id"] == "task-status")
         assert item["calibration_status"] == "partial"
         assert item["summary_status"] == "generated"
+        assert item["chapters_status"] == "generated"
 
     def test_calibration_and_summary_status_null_when_not_set(self, history_client):
         """Tasks without these columns populated must not break the response (None, not KeyError)."""
@@ -550,6 +558,7 @@ class TestHistoryEndpoint:
         item = next(i for i in resp.json()["data"]["items"] if i["task_id"] == "task-nostatus")
         assert item["calibration_status"] is None
         assert item["summary_status"] is None
+        assert item["chapters_status"] is None
 
     def test_disabled_status_values_pass_through_without_error(self, history_client):
         """The per-task processing-depth feature introduces a new 'disabled'

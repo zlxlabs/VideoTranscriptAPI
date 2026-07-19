@@ -18,7 +18,7 @@ from .logger import setup_logger
 logger = setup_logger("audit_logger")
 
 # Schema 版本号，每次表结构变更时递增
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 
 class AuditLogger:
@@ -144,6 +144,9 @@ class AuditLogger:
         if version < 4:
             self._migrate_v4(cursor)
 
+        if version < 5:
+            self._migrate_v5(cursor)
+
         if version < CURRENT_SCHEMA_VERSION:
             self._set_schema_version(cursor, CURRENT_SCHEMA_VERSION)
             logger.info(f"Schema 迁移完成: v{version} -> v{CURRENT_SCHEMA_VERSION}")
@@ -245,6 +248,16 @@ class AuditLogger:
             "CREATE INDEX IF NOT EXISTS idx_snapshot_author ON task_audit_snapshots(author)"
         )
 
+    def _migrate_v5(self, cursor):
+        """v5: task_audit_snapshots.chapters_status for chapter outline honesty model."""
+        logger.info("执行 schema 迁移 v5: task_audit_snapshots.chapters_status")
+        cursor.execute("PRAGMA table_info(task_audit_snapshots)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if "chapters_status" not in columns:
+            cursor.execute(
+                "ALTER TABLE task_audit_snapshots ADD COLUMN chapters_status TEXT"
+            )
+
     def archive_task_snapshot(self, task: Dict[str, Any]) -> None:
         """Idempotently copy task metadata without reviving revoked capabilities."""
         self._write_task_snapshot(task, revive_expired=False)
@@ -275,9 +288,9 @@ class AuditLogger:
             cursor.execute(f'''
                 INSERT INTO task_audit_snapshots
                 (task_id, view_token, title, author, platform, status,
-                 calibration_status, summary_status, submitted_by,
+                 calibration_status, summary_status, chapters_status, submitted_by,
                  processing_options, completed_at, content_expired, archived_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
                 ON CONFLICT(task_id) DO UPDATE SET
                     view_token={view_token_update},
                     title=excluded.title,
@@ -286,6 +299,7 @@ class AuditLogger:
                     status=excluded.status,
                     calibration_status=excluded.calibration_status,
                     summary_status=excluded.summary_status,
+                    chapters_status=excluded.chapters_status,
                     submitted_by=excluded.submitted_by,
                     processing_options=excluded.processing_options,
                     completed_at=excluded.completed_at,
@@ -295,6 +309,7 @@ class AuditLogger:
                 task_id, task.get("view_token"), task.get("title"), task.get("author"),
                 task.get("platform"), task.get("status") or "unknown",
                 task.get("calibration_status"), task.get("summary_status"),
+                task.get("chapters_status"),
                 task.get("submitted_by"), options, task.get("completed_at"),
             ))
 

@@ -281,6 +281,7 @@ async def get_history(
                 s.status AS status,
                 s.calibration_status AS calibration_status,
                 s.summary_status AS summary_status,
+                s.chapters_status AS chapters_status,
                 s.content_expired AS content_expired
             FROM task_audit_snapshots s
             LEFT JOIN api_audit_logs a ON a.task_id = s.task_id AND {join_sql}
@@ -301,6 +302,7 @@ async def get_history(
                 'unknown' AS status,
                 NULL AS calibration_status,
                 NULL AS summary_status,
+                NULL AS chapters_status,
                 0 AS content_expired
             FROM api_audit_logs a
             WHERE a.user_id = ?
@@ -363,7 +365,7 @@ async def get_history(
         SELECT
             task_id, video_url, wechat_webhook, request_time, api_key_masked,
             view_token, title, author, platform, status,
-            calibration_status, summary_status, content_expired
+            calibration_status, summary_status, chapters_status, content_expired
         FROM combined
         WHERE {where_clause}
         ORDER BY request_time DESC
@@ -405,7 +407,8 @@ async def get_history(
                     # 诚实状态模型字段：前端本次不强制消费，供后续 UI 迭代使用
                     "calibration_status": row[10],
                     "summary_status": row[11],
-                    "content_expired": bool(row[12]),
+                    "chapters_status": row[12],
+                    "content_expired": bool(row[13]),
                 })
             return total, items
         finally:
