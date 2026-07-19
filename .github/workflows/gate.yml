@@ -14,10 +14,5 @@ jobs:
       runner: self
       has_ui: false
       design_doc: ""
-      # PR3 加固是 2.8 万+ patch 行的巨型 PR：串行分片审查实测 44+ 分钟，
-      # 且分片数超过默认 8 上限（需 9 片）。以下两项是对这个已商定要完成的
-      # 巨型首方 PR 的一次性适配，待其合入后移除、回落默认值。
-      timeout_minutes: 75
-      max_review_shards: 12
     secrets:
       FEISHU_CI_WEBHOOK: ${{ secrets.FEISHU_CI_WEBHOOK }}
