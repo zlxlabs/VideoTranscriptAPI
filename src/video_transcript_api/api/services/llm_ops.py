@@ -92,34 +92,40 @@ def _resolve_chapters_timeline_segments(
         return task_segments, "segments"
 
     if platform and media_id:
-        cache_snapshot = cache_manager.get_cache(
-            platform,
-            media_id,
-            use_speaker_recognition=use_speaker_recognition,
-        )
-        if cache_snapshot:
-            processed = cache_snapshot.get("llm_processed") or {}
-            if isinstance(processed, dict):
-                cached_dialogs = processed.get("dialogs")
-                if isinstance(cached_dialogs, list) and cached_dialogs:
-                    return cached_dialogs, "cached_dialogs"
+        get_cache = getattr(cache_manager, "get_cache", None)
+        if callable(get_cache):
+            try:
+                cache_snapshot = get_cache(
+                    platform,
+                    media_id,
+                    use_speaker_recognition=use_speaker_recognition,
+                )
+            except Exception as exc:
+                logger.warning(f"get_cache failed for chapters gradient: {exc}")
+                cache_snapshot = None
+            if cache_snapshot:
+                processed = cache_snapshot.get("llm_processed") or {}
+                if isinstance(processed, dict):
+                    cached_dialogs = processed.get("dialogs")
+                    if isinstance(cached_dialogs, list) and cached_dialogs:
+                        return cached_dialogs, "cached_dialogs"
 
-            segs = cache_snapshot.get("segments")
-            if isinstance(segs, list) and segs:
-                return segs, "segments"
+                segs = cache_snapshot.get("segments")
+                if isinstance(segs, list) and segs:
+                    return segs, "segments"
 
-            file_path = cache_snapshot.get("file_path")
-            if file_path:
-                try:
-                    from ...transcriber.segments import load_segments
+                file_path = cache_snapshot.get("file_path")
+                if file_path:
+                    try:
+                        from ...transcriber.segments import load_segments
 
-                    loaded = load_segments(file_path)
-                    if isinstance(loaded, list) and loaded:
-                        return loaded, "segments"
-                except Exception as exc:
-                    logger.warning(
-                        f"load_segments failed for chapters gradient: {exc}"
-                    )
+                        loaded = load_segments(file_path)
+                        if isinstance(loaded, list) and loaded:
+                            return loaded, "segments"
+                    except Exception as exc:
+                        logger.warning(
+                            f"load_segments failed for chapters gradient: {exc}"
+                        )
 
     return None, "none"
 
