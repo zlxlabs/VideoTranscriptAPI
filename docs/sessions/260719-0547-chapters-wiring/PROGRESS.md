@@ -56,3 +56,14 @@
 按 HANDOFF：全程不 push、不合并 main，除非用户明确授权。
 
 **合并注意**：`feat/chapters-wiring` 叠在未 push 的 `feat/chapters-foundation` 之上；合 main 时通常 foundation+wiring 一起进，或先合 foundation 再合 wiring。
+
+## 本地清理（2026-07-19）
+
+- **保留分支**：`feat/chapters-wiring`（含 foundation + 接线批全部提交，未 push）
+- **删除 worktree**：`chapters-foundation`、`chapters-wiring`
+- **删除本地分支**（内容已在 wiring 历史中，多为 rebase 前平行 tip）：
+  - `feat/chapters-foundation`
+  - `feat/chap-t2-youtube` / `feat/chap-t3-segments` / `feat/chap-t5-processor`
+  - `fix/gate-r1-chapters` / `fix/gate-r1-downloaders`
+- **不**合并 main、**不** push、**不**开 PR
+- 本地 `data/`、`config/config.jsonc`、`users.json` 仅存在于已移除 worktree 目录（若磁盘仍残留可手删）
