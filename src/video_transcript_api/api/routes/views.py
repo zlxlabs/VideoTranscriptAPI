@@ -12,6 +12,7 @@ from ..context import (
     get_cache_manager,
     get_config,
     get_logger,
+    lazy_resource,
     get_static_dir,
     get_templates,
 )
@@ -24,8 +25,8 @@ from ...utils.rendering import (
 from ...utils.timeutil import format_datetime_for_display
 from ...utils.llm_status import CalibrationStatus
 
-logger = get_logger()
-cache_manager = get_cache_manager()
+logger = lazy_resource(get_logger)
+cache_manager = lazy_resource(get_cache_manager)
 templates = get_templates()
 static_dir = get_static_dir()
 

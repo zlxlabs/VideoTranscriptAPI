@@ -21,6 +21,7 @@ from video_transcript_api.api.services.llm_ops import (
     _should_backfill_summary,
     _save_llm_results,
     _restore_cached_summary_for_notification,
+    _replace_speaker_labels_in_text,
 )
 from video_transcript_api.utils.llm_status import CalibrationStatus, SummaryStatus
 
@@ -1067,3 +1068,77 @@ class TestRestoreCachedSummaryForNotification:
 
         assert result_dict["内容总结"] is None
         assert result_dict["skip_summary"] is True
+
+
+class TestReplaceSpeakerLabelsInText:
+    """Y2 (PR3 review hardening 加固轮): _replace_speaker_labels_in_text must
+    do a single-pass replacement (no cascading between old_label -> new_name
+    pairs) and must never interpret backslash/group-reference syntax that
+    happens to appear inside a replacement name."""
+
+    def test_no_cascading_when_a_new_name_equals_another_old_label(self):
+        """Chained mapping: "S1" -> "Speaker2" and "Speaker2" -> "Alice".
+        Each occurrence in the original text must land on exactly the name
+        assigned to its own original label -- the freshly substituted
+        "Speaker2" produced for S1's lines must NOT be re-matched and
+        re-substituted into "Alice" by the Speaker2 rule in the same call.
+        """
+        text = "S1：你好\n\nSpeaker2：在的"
+        name_replacements = {"S1": "Speaker2", "Speaker2": "Alice"}
+
+        result = _replace_speaker_labels_in_text(text, name_replacements)
+
+        assert result == "Speaker2：你好\n\nAlice：在的"
+
+    def test_replacement_name_containing_backslash_is_not_interpreted(self):
+        """A literal backslash (or a "\\1"-shaped group reference) inside
+        new_name must appear verbatim in the output, not be interpreted by
+        re.sub as an escape/backreference (which would corrupt the text or
+        raise re.error for a malformed group reference)."""
+        text = "Speaker1：你好"
+        name_replacements = {"Speaker1": r"Zhang\1San"}
+
+        result = _replace_speaker_labels_in_text(text, name_replacements)
+
+        assert result == "Zhang\\1San：你好"
+
+    def test_replacement_name_with_group_reference_syntax_does_not_raise(self):
+        text = "Speaker1：你好"
+        name_replacements = {"Speaker1": r"\g<name>"}
+
+        # Must not raise re.error and must substitute the literal string.
+        result = _replace_speaker_labels_in_text(text, name_replacements)
+
+        assert result == r"\g<name>：你好"
+
+    def test_longer_label_is_not_shadowed_by_a_shorter_prefix_label(self):
+        """If both "S1" and "S10" are keys, a line starting with "S10："
+        must match the "S10" rule, not be cut short by "S1" matching just
+        the first two characters and leaving a stray "0：" behind."""
+        text = "S10：你好\n\nS1：在的"
+        name_replacements = {"S1": "Alice", "S10": "Bob"}
+
+        result = _replace_speaker_labels_in_text(text, name_replacements)
+
+        assert result == "Bob：你好\n\nAlice：在的"
+
+    def test_only_line_start_labels_are_replaced_not_mid_text_mentions(self):
+        text = "Speaker1：Speaker1 提到了 Speaker2"
+        name_replacements = {"Speaker1": "Alice", "Speaker2": "Bob"}
+
+        result = _replace_speaker_labels_in_text(text, name_replacements)
+
+        assert result == "Alice：Speaker1 提到了 Speaker2"
+
+    def test_identity_and_empty_label_entries_are_skipped(self):
+        text = "Speaker1：你好"
+        name_replacements = {"Speaker1": "Speaker1", "": "Ignored"}
+
+        result = _replace_speaker_labels_in_text(text, name_replacements)
+
+        assert result == text
+
+    def test_empty_text_or_empty_mapping_returns_input_unchanged(self):
+        assert _replace_speaker_labels_in_text("", {"A": "B"}) == ""
+        assert _replace_speaker_labels_in_text("A：hi", {}) == "A：hi"
+        assert _replace_speaker_labels_in_text(None, {"A": "B"}) is None

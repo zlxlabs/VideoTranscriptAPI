@@ -2,6 +2,8 @@
 
 import json
 import datetime
+import os
+import uuid
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -85,7 +87,14 @@ class CacheManager:
 
     # 说话人映射缓存
 
-    def get_speaker_mapping(self, platform: str, media_id: str) -> Optional[Dict]:
+    def get_speaker_mapping(
+        self,
+        platform: str,
+        media_id: str,
+        *,
+        input_fingerprint: Optional[str] = None,
+        speakers: Optional[list[str]] = None,
+    ) -> Optional[Dict]:
         """获取说话人映射缓存
 
         Args:
@@ -101,14 +110,37 @@ class CacheManager:
         if mapping_file.exists():
             try:
                 with open(mapping_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    payload = json.load(f)
+                # Old callers can still read legacy payloads. New speaker
+                # inference always supplies validation inputs and only accepts
+                # the versioned artifact envelope.
+                if input_fingerprint is None or speakers is None:
+                    if payload.get("schema_version") == 1:
+                        result = payload.get("result")
+                        return result if isinstance(result, dict) else None
+                    return payload
+                if (
+                    payload.get("schema_version") != 1
+                    or payload.get("input_fingerprint") != input_fingerprint
+                    or set(payload.get("speakers") or []) != set(speakers)
+                    or payload.get("source") != "llm"
+                ):
+                    return None
+                return payload.get("result")
             except Exception as e:
                 logger.warning(f"Failed to load speaker_mapping cache {mapping_file}: {e}")
                 return None
         return None
 
     def save_speaker_mapping(
-        self, platform: str, media_id: str, speaker_mapping: Dict
+        self,
+        platform: str,
+        media_id: str,
+        speaker_mapping: Dict,
+        *,
+        input_fingerprint: Optional[str] = None,
+        speakers: Optional[list[str]] = None,
+        source: str = "llm",
     ):
         """保存说话人映射缓存
 
@@ -122,8 +154,25 @@ class CacheManager:
 
         mapping_file = cache_dir / "speaker_mapping.json"
         try:
-            with open(mapping_file, "w", encoding="utf-8") as f:
-                json.dump(speaker_mapping, f, ensure_ascii=False, indent=2)
+            payload = speaker_mapping
+            if input_fingerprint is not None and speakers is not None:
+                payload = {
+                    "schema_version": 1,
+                    "input_fingerprint": input_fingerprint,
+                    "speakers": list(speakers),
+                    "source": source,
+                    "result": speaker_mapping,
+                }
+            temp_file = mapping_file.with_name(
+                f".{mapping_file.name}.{uuid.uuid4().hex}.tmp"
+            )
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
+            os.replace(temp_file, mapping_file)
             logger.debug(f"Speaker mapping cache saved: {mapping_file}")
         except Exception as e:
             logger.error(f"Failed to save speaker_mapping cache {mapping_file}: {e}")
+            raise
+        finally:
+            if "temp_file" in locals():
+                temp_file.unlink(missing_ok=True)

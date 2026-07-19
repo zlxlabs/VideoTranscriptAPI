@@ -99,6 +99,12 @@ def mock_user_manager():
 def mock_cache_manager():
     """Patch cache_manager used in tasks and views routes."""
     mock = MagicMock()
+    # P1 (local codex review round 12): /api/transcribe now pre-generates
+    # task_id via cache_manager.generate_task_id() *before* calling
+    # create_task(task_id=...), so the two must agree on the same fixed id
+    # -- mirrors the pattern test_recalibrate.py already uses
+    # (monkeypatch.setattr(cache_manager, "generate_task_id", lambda: ...)).
+    mock.generate_task_id.return_value = "task-abc-123"
     mock.create_task.return_value = {
         "task_id": "task-abc-123",
         "view_token": "vt-xyz-789",
@@ -314,6 +320,406 @@ class TestTranscribeEndpoint:
             json={"url": "https://www.youtube.com/watch?v=abc123"},
         )
         assert mock_audit_logger.log_api_call.call_count >= 2
+
+
+class TestTranscribeQueueBackpressure:
+    """M2 (local codex review round 10, finding a): task_queue is an
+    asyncio.Queue, and `await queue.put(...)` waits forever for a free slot
+    instead of raising -- the previously-declared `except asyncio.QueueFull`
+    branch could never fire, dead code masquerading as backpressure. Fixed
+    by switching to put_nowait, which does raise QueueFull immediately.
+
+    Finding c (shared with recalibrate, see TestRecalibrateQueueBackpressure
+    in test_recalibrate.py): once queue-full is actually reachable, the
+    task_status row create_task() already wrote (status='queued') must be
+    CAS'd to failed before the 503 goes out, otherwise the client is left
+    polling a task_id that will never be picked up by any worker.
+    """
+
+    def test_queue_full_returns_503_and_marks_task_failed(
+        self, mock_cache_manager, mock_audit_logger, mock_user_manager,
+        mock_send_notification, mock_base_url,
+    ):
+        from video_transcript_api.utils.task_status import TaskStatus
+
+        full_queue = asyncio.Queue(maxsize=1)
+        full_queue.put_nowait({"placeholder": True})  # pre-fill: next put_nowait raises QueueFull
+
+        with patch(
+            "video_transcript_api.api.routes.tasks.get_task_queue",
+            return_value=full_queue,
+        ):
+            app = _build_test_app()
+            resp = TestClient(app).post(
+                "/api/transcribe",
+                json={"url": "https://www.youtube.com/watch?v=abc123"},
+            )
+
+        assert resp.status_code == 503
+        mock_cache_manager.update_task_status.assert_called_once()
+        call = mock_cache_manager.update_task_status.call_args
+        assert call.args[0] == "task-abc-123"  # mock_cache_manager.create_task's fixed task_id
+        assert call.args[1] == TaskStatus.FAILED
+        assert "队列已满" in call.kwargs["error_message"]
+
+    def test_queue_full_cleanup_write_failure_still_returns_503(
+        self, mock_cache_manager, mock_audit_logger, mock_user_manager,
+        mock_send_notification, mock_base_url,
+    ):
+        """The failed-status CAS write is itself best-effort: if it raises
+        (e.g. cache.db momentarily locked), that must be logged and
+        swallowed, not let it mask the original queue-full 503 behind a
+        generic 500.
+
+        K1 (CI review round 3, major): this is exactly the double-failure
+        request-path scenario -- the response must surface the fact that
+        terminal-state cleanup itself failed (via a marker appended to
+        detail), and the in-flight registry slot must still be released by
+        the existing unconditional finally, not leaked."""
+        from video_transcript_api.api.context import _InflightTaskRegistry
+        from video_transcript_api.api.routes.tasks import _TERMINAL_WRITE_FAILURE_NOTE
+
+        mock_cache_manager.update_task_status.side_effect = RuntimeError("db locked")
+
+        full_queue = asyncio.Queue(maxsize=1)
+        full_queue.put_nowait({"placeholder": True})
+        registry = _InflightTaskRegistry({"transcription": 5, "llm": 5})
+
+        with patch(
+            "video_transcript_api.api.routes.tasks.get_task_queue",
+            return_value=full_queue,
+        ), patch(
+            "video_transcript_api.api.routes.tasks.get_inflight_registry",
+            return_value=registry,
+        ):
+            app = _build_test_app()
+            resp = TestClient(app).post(
+                "/api/transcribe",
+                json={"url": "https://www.youtube.com/watch?v=abc123"},
+            )
+
+        assert resp.status_code == 503
+        assert _TERMINAL_WRITE_FAILURE_NOTE in resp.json()["detail"], (
+            "the double failure must be surfaced through the response body, "
+            "not just logged server-side"
+        )
+        assert registry.size("transcription") == 0, (
+            "the in-flight quota must still be released even when the "
+            "terminal-state cleanup write itself failed"
+        )
+
+    def test_queue_with_room_still_returns_202(
+        self, client, mock_cache_manager,
+    ):
+        """Regression guard: put_nowait must not change behavior when the
+        queue has room (mirrors test_transcribe_success but names the
+        put_nowait switch explicitly as the thing under test here)."""
+        resp = client.post(
+            "/api/transcribe",
+            json={"url": "https://www.youtube.com/watch?v=abc123"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["code"] == 202
+        mock_cache_manager.update_task_status.assert_not_called()
+
+    def test_queue_full_writes_real_failed_row_with_snapshot(self, tmp_path, monkeypatch):
+        """End-to-end against a real CacheManager (not the MagicMock used by
+        the other tests in this class): confirms the task row actually
+        lands in cache.db as failed with a populated terminal_snapshot, not
+        just that update_task_status was called with the right mock args."""
+        from video_transcript_api.api.routes import tasks as tasks_route
+        from video_transcript_api.api.services.transcription import verify_token
+        from video_transcript_api.cache.cache_manager import CacheManager
+        from video_transcript_api.utils.task_status import TaskStatus
+
+        cache_manager = CacheManager(str(tmp_path / "cache"))
+        try:
+            monkeypatch.setattr(tasks_route, "cache_manager", cache_manager)
+            monkeypatch.setattr(tasks_route, "audit_logger", MagicMock())
+
+            full_queue = asyncio.Queue(maxsize=1)
+            full_queue.put_nowait({"placeholder": True})
+            monkeypatch.setattr(
+                tasks_route, "get_task_queue", lambda: full_queue,
+            )
+
+            app = FastAPI()
+            app.include_router(tasks_route.router)
+            app.dependency_overrides[verify_token] = _fake_verify_token
+
+            resp = TestClient(app).post(
+                "/api/transcribe",
+                json={"url": "https://www.youtube.com/watch?v=abc123"},
+            )
+
+            assert resp.status_code == 503
+
+            rows = cache_manager.list_terminal_tasks(limit=10)
+            assert len(rows) == 1, "the task create_task() wrote must have landed as a terminal row"
+            new_task = cache_manager.get_task_by_id(rows[0]["task_id"])
+            assert new_task["status"] == TaskStatus.FAILED
+            assert "队列已满" in new_task["error_message"]
+            snapshot = new_task.get("terminal_snapshot")
+            assert snapshot is not None, "failed terminal write must carry a snapshot"
+            assert snapshot["status"] == TaskStatus.FAILED
+        finally:
+            cache_manager.close()
+
+
+class TestTranscribeGenericQueueException:
+    """T1 (local codex review round 14): the window between the task row
+    landing (create_task -> status='queued') and the queue handing the task
+    off to a consumer (put_nowait succeeding) previously only CAS'd the row
+    to failed for the asyncio.QueueFull branch (see
+    TestTranscribeQueueBackpressure above). Any *other* exception raised
+    while enqueueing (e.g. an unexpected error from the queue object itself)
+    fell through to the generic `except Exception as queue_exc` clause,
+    which only returned 500 without ever touching the already-created task
+    row -- leaving the client polling a task_id no worker will ever pick up
+    until the 24h reconciliation sweep catches it. Mirrors the QueueFull
+    class's three tests but for this generic branch."""
+
+    def test_generic_enqueue_exception_returns_500_and_marks_task_failed(
+        self, mock_cache_manager, mock_audit_logger, mock_user_manager,
+        mock_send_notification, mock_base_url,
+    ):
+        from video_transcript_api.utils.task_status import TaskStatus
+
+        broken_queue = MagicMock()
+        broken_queue.put_nowait.side_effect = RuntimeError("unexpected enqueue failure")
+
+        with patch(
+            "video_transcript_api.api.routes.tasks.get_task_queue",
+            return_value=broken_queue,
+        ):
+            app = _build_test_app()
+            resp = TestClient(app).post(
+                "/api/transcribe",
+                json={"url": "https://www.youtube.com/watch?v=abc123"},
+            )
+
+        assert resp.status_code == 500
+        mock_cache_manager.update_task_status.assert_called_once()
+        call = mock_cache_manager.update_task_status.call_args
+        assert call.args[0] == "task-abc-123"  # mock_cache_manager.create_task's fixed task_id
+        assert call.args[1] == TaskStatus.FAILED
+        assert "任务加入队列失败" in call.kwargs["error_message"]
+
+    def test_generic_enqueue_exception_cleanup_write_failure_still_returns_500(
+        self, mock_cache_manager, mock_audit_logger, mock_user_manager,
+        mock_send_notification, mock_base_url,
+    ):
+        """The failed-status CAS write is itself best-effort: if it raises
+        (e.g. cache.db momentarily locked), that must be logged and
+        swallowed, not let it mask the original enqueue-failure 500 behind
+        an unrelated error -- the 24h reconciliation sweep is the only
+        remaining backstop, so the original response must not regress.
+
+        K1 (CI review round 3, major): this is exactly the double-failure
+        request-path scenario -- the response must surface the fact that
+        terminal-state cleanup itself failed (via a marker appended to
+        detail), and the in-flight registry slot must still be released by
+        the existing unconditional finally, not leaked."""
+        from video_transcript_api.api.context import _InflightTaskRegistry
+        from video_transcript_api.api.routes.tasks import _TERMINAL_WRITE_FAILURE_NOTE
+
+        mock_cache_manager.update_task_status.side_effect = RuntimeError("db locked")
+
+        broken_queue = MagicMock()
+        broken_queue.put_nowait.side_effect = RuntimeError("unexpected enqueue failure")
+        registry = _InflightTaskRegistry({"transcription": 5, "llm": 5})
+
+        with patch(
+            "video_transcript_api.api.routes.tasks.get_task_queue",
+            return_value=broken_queue,
+        ), patch(
+            "video_transcript_api.api.routes.tasks.get_inflight_registry",
+            return_value=registry,
+        ):
+            app = _build_test_app()
+            resp = TestClient(app).post(
+                "/api/transcribe",
+                json={"url": "https://www.youtube.com/watch?v=abc123"},
+            )
+
+        assert resp.status_code == 500
+        assert _TERMINAL_WRITE_FAILURE_NOTE in resp.json()["detail"], (
+            "the double failure must be surfaced through the response body, "
+            "not just logged server-side"
+        )
+        assert registry.size("transcription") == 0, (
+            "the in-flight quota must still be released even when the "
+            "terminal-state cleanup write itself failed"
+        )
+
+    def test_generic_enqueue_exception_writes_real_failed_row_with_snapshot(
+        self, tmp_path, monkeypatch,
+    ):
+        """End-to-end against a real CacheManager (not the MagicMock used by
+        the other tests in this class): confirms the task row actually
+        lands in cache.db as failed with a populated terminal_snapshot, not
+        just that update_task_status was called with the right mock args."""
+        from video_transcript_api.api.routes import tasks as tasks_route
+        from video_transcript_api.api.services.transcription import verify_token
+        from video_transcript_api.cache.cache_manager import CacheManager
+        from video_transcript_api.utils.task_status import TaskStatus
+
+        cache_manager = CacheManager(str(tmp_path / "cache"))
+        try:
+            monkeypatch.setattr(tasks_route, "cache_manager", cache_manager)
+            monkeypatch.setattr(tasks_route, "audit_logger", MagicMock())
+
+            broken_queue = MagicMock()
+            broken_queue.put_nowait.side_effect = RuntimeError("unexpected enqueue failure")
+            monkeypatch.setattr(tasks_route, "get_task_queue", lambda: broken_queue)
+
+            app = FastAPI()
+            app.include_router(tasks_route.router)
+            app.dependency_overrides[verify_token] = _fake_verify_token
+
+            resp = TestClient(app).post(
+                "/api/transcribe",
+                json={"url": "https://www.youtube.com/watch?v=abc123"},
+            )
+
+            assert resp.status_code == 500
+
+            rows = cache_manager.list_terminal_tasks(limit=10)
+            assert len(rows) == 1, "the task create_task() wrote must have landed as a terminal row"
+            new_task = cache_manager.get_task_by_id(rows[0]["task_id"])
+            assert new_task["status"] == TaskStatus.FAILED
+            assert "任务加入队列失败" in new_task["error_message"]
+            snapshot = new_task.get("terminal_snapshot")
+            assert snapshot is not None, "failed terminal write must carry a snapshot"
+            assert snapshot["status"] == TaskStatus.FAILED
+        finally:
+            cache_manager.close()
+
+
+class TestTranscribeInflightRegistryAdmission:
+    """P1 (local codex review round 12): the queue-occupancy check above
+    (TestTranscribeQueueBackpressure) only bounds items sitting in
+    task_queue -- process_task_queue's consumer dequeues and immediately
+    submits to an unbounded executor, freeing the queue slot before the
+    work even starts (transcription.py:305/361/377). The fix moves the cap
+    to admission: try_register before create_task/enqueue, release when the
+    worker's future completes (see test_inflight_registry.py for the
+    mechanism itself; these tests cover the /api/transcribe route's wiring
+    to it)."""
+
+    def test_registry_full_returns_503_without_creating_task_row(
+        self, mock_cache_manager, mock_audit_logger, mock_user_manager,
+        mock_send_notification, mock_base_url,
+    ):
+        from video_transcript_api.api.context import _InflightTaskRegistry
+
+        full_registry = _InflightTaskRegistry({"transcription": 1, "llm": 1})
+        full_registry.try_register("transcription", "already-in-flight")
+
+        with patch(
+            "video_transcript_api.api.routes.tasks.get_inflight_registry",
+            return_value=full_registry,
+        ):
+            app = _build_test_app()
+            resp = TestClient(app).post(
+                "/api/transcribe",
+                json={"url": "https://www.youtube.com/watch?v=abc123"},
+            )
+
+        assert resp.status_code == 503
+        # "满载拒绝根本不落库" -- unlike the queue-full path (which CAS's an
+        # already-created row to failed), registry-full rejection happens
+        # before create_task is ever called.
+        mock_cache_manager.create_task.assert_not_called()
+        mock_cache_manager.update_task_status.assert_not_called()
+
+    def test_registry_slot_released_when_create_task_raises(
+        self, mock_cache_manager, mock_audit_logger, mock_user_manager,
+        mock_send_notification, mock_base_url,
+    ):
+        from video_transcript_api.api.context import _InflightTaskRegistry
+
+        registry = _InflightTaskRegistry({"transcription": 1, "llm": 1})
+        mock_cache_manager.create_task.side_effect = RuntimeError("db down")
+
+        with patch(
+            "video_transcript_api.api.routes.tasks.get_inflight_registry",
+            return_value=registry,
+        ):
+            app = _build_test_app()
+            resp = TestClient(app).post(
+                "/api/transcribe",
+                json={"url": "https://www.youtube.com/watch?v=abc123"},
+            )
+
+        assert resp.status_code == 500
+        assert registry.size("transcription") == 0, (
+            "registration must be released when create_task itself fails, "
+            "otherwise the slot is leaked forever"
+        )
+
+    def test_registry_slot_released_when_queue_full(
+        self, mock_cache_manager, mock_audit_logger, mock_user_manager,
+        mock_send_notification, mock_base_url,
+    ):
+        """Defense-in-depth path: the queue's own maxsize should rarely if
+        ever be hit now that admission is gated by the registry first, but
+        if it is (e.g. capacity mismatch), the registration must still be
+        released -- otherwise the slot leaks even though the task row was
+        already CAS'd to failed."""
+        from video_transcript_api.api.context import _InflightTaskRegistry
+
+        registry = _InflightTaskRegistry({"transcription": 5, "llm": 5})
+
+        full_queue = asyncio.Queue(maxsize=1)
+        full_queue.put_nowait({"placeholder": True})
+
+        with patch(
+            "video_transcript_api.api.routes.tasks.get_task_queue",
+            return_value=full_queue,
+        ), patch(
+            "video_transcript_api.api.routes.tasks.get_inflight_registry",
+            return_value=registry,
+        ):
+            app = _build_test_app()
+            resp = TestClient(app).post(
+                "/api/transcribe",
+                json={"url": "https://www.youtube.com/watch?v=abc123"},
+            )
+
+        assert resp.status_code == 503
+        assert registry.size("transcription") == 0
+
+    def test_registry_slot_still_held_after_successful_admission(
+        self, mock_cache_manager, mock_audit_logger, mock_user_manager,
+        mock_send_notification, mock_base_url,
+    ):
+        """Registration is only released when the worker's future completes
+        (RuntimeContext.track_future's completion callback) -- there is no
+        real worker in this unit test (the mocked task_queue is never
+        consumed), so a successful 202 response must leave the slot
+        occupied, not free it on HTTP response alone."""
+        from video_transcript_api.api.context import _InflightTaskRegistry
+
+        registry = _InflightTaskRegistry({"transcription": 2, "llm": 2})
+        roomy_queue = asyncio.Queue(maxsize=10)
+
+        with patch(
+            "video_transcript_api.api.routes.tasks.get_task_queue",
+            return_value=roomy_queue,
+        ), patch(
+            "video_transcript_api.api.routes.tasks.get_inflight_registry",
+            return_value=registry,
+        ):
+            app = _build_test_app()
+            resp = TestClient(app).post(
+                "/api/transcribe",
+                json={"url": "https://www.youtube.com/watch?v=abc123"},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["code"] == 202
+        assert registry.size("transcription") == 1
 
 
 class TestGetTaskStatus:

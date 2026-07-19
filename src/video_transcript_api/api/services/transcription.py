@@ -7,17 +7,22 @@ from typing import Optional, Dict, Any
 
 from fastapi import HTTPException, Header, Request
 from pydantic import BaseModel, Field, StrictBool, field_validator
+from ..processing_options import ProcessingOptions, normalize_processing_options
 
 from ..context import (
     get_audit_logger,
     get_cache_manager,
     get_config,
     get_executor,
+    get_inflight_registry,
     get_llm_queue,
     get_logger,
+    get_runtime,
     get_task_queue,
     get_temp_manager,
     get_user_manager,
+    lazy_resource,
+    run_with_runtime,
 )
 from ...downloaders import create_downloader
 from ...errors import (
@@ -37,6 +42,26 @@ _TERMINAL_RESOLVER_ERRORS = (
     ResolverResolveError,
     ResolverResponseError,
 )
+
+
+def _extract_speaker_labels(dialogs) -> list[str]:
+    """Extract stable speaker labels without dropping numeric ID zero,
+    skipping empty-text dialogs.
+
+    委托给 SpeakerInferencer.extract_speaker_labels（本地 codex review
+    第 7 轮 H7）：读侧（本函数，供分层缓存预检计算 input_fingerprint 用）
+    与写侧（SpeakerAwareProcessor.process() 基于 _coerce_dialogs 结果推导
+    speakers 列表）必须使用同一份说话人标签提取逻辑——否则同一份 dialogs
+    在"某个说话人只在空文本 dialog 里出现"这种边界输入上，两侧算出的
+    说话人集合会不一致，进而让 input_fingerprint 永久不同：预检误判为
+    "从未处理过"，明明已经缓存的说话人映射每次都被当作缓存未命中重新
+    触发一轮 LLM 推断，并用这轮结果覆写已经落盘的产物。局部 import
+    沿用本函数原有的懒加载风格（与下方 process_transcription 内部对
+    同一个类的局部 import 保持一致，避免为一次纯计算在模块导入期就拉起
+    整条 llm.core 依赖链）。
+    """
+    from ...llm.core.speaker_inferencer import SpeakerInferencer
+    return SpeakerInferencer.extract_speaker_labels(dialogs)
 from ...transcriber import FunASRSpeakerClient, Transcriber
 from ...utils.notifications import (
     WechatNotifier,
@@ -49,14 +74,14 @@ from ...utils.perf_tracker import PerfTracker
 from ...utils.task_status import TaskStatus
 from ...utils.llm_status import CalibrationStatus, SummaryStatus
 
-logger = get_logger()
-config = get_config()
-user_manager = get_user_manager()
-audit_logger = get_audit_logger()
-cache_manager = get_cache_manager()
-task_queue = get_task_queue()
-llm_task_queue = get_llm_queue()
-executor = get_executor()
+logger = lazy_resource(get_logger)
+config = lazy_resource(get_config)
+user_manager = lazy_resource(get_user_manager)
+audit_logger = lazy_resource(get_audit_logger)
+cache_manager = lazy_resource(get_cache_manager)
+task_queue = lazy_resource(get_task_queue)
+llm_task_queue = lazy_resource(get_llm_queue)
+executor = lazy_resource(get_executor)
 
 
 class MetadataOverride(BaseModel):
@@ -82,52 +107,6 @@ class NotificationConfig(BaseModel):
         except URLValidationError as e:
             raise ValueError(f"webhook URL is not allowed: {e}")
         return v
-
-
-class ProcessingOptions(BaseModel):
-    """处理深度开关：控制本次任务要跑到哪一步（只转录 / 转录+校对 / 全流程）。
-
-    两个字段互相独立，默认均为 True（等价于历史行为：完整跑校对+总结）。
-    summarize=True 且 calibrate=False 是合法组合——总结会基于未经 LLM 校对的
-    原始转录文本生成，其质量可能受 ASR 识别噪声（错别字、断句错误等）影响，
-    但仍然可用；系统不做硬性拦截，由调用方自行权衡。
-
-    用 StrictBool 而非普通 bool（ci-gate review）：Pydantic 的宽松 bool 会
-    静默把 "yes"/"1"/"no"/"0" 等字符串转换成布尔值，与本 API 文档声明的
-    JSON boolean 类型不符——请求方一个拼写习惯的差异（比如误传字符串
-    "false" 而不是布尔 false）就可能意外触发/关闭有真实 token 成本的 LLM
-    阶段而不自知。StrictBool 只接受真正的 JSON boolean，其余一律 422。
-    """
-
-    calibrate: StrictBool = Field(True, description="是否执行 LLM 校对")
-    summarize: StrictBool = Field(
-        True,
-        description=(
-            "是否生成内容总结。若 calibrate=False，总结将基于未经校对的原始转录"
-            "文本生成，质量可能受 ASR 识别噪声影响"
-        ),
-    )
-
-
-def normalize_processing_options(
-    processing_options: Optional["ProcessingOptions"],
-) -> dict:
-    """将请求里的 processing_options 归一化为 plain dict。
-
-    None（调用方未指定）等价于全部启用（calibrate=True, summarize=True），
-    与历史行为保持一致——这是贯穿 task dict / llm_task_queue payload 的统一
-    "缺省即全流程"约定，下游（tasks.py/transcription.py/llm_ops.py）都应
-    通过本函数或同等的 `.get(...) or DEFAULT` 兜底来读取，不要直接假设键存在。
-
-    Args:
-        processing_options: 请求体里的 ProcessingOptions 实例，可能为 None
-
-    Returns:
-        dict: {"calibrate": bool, "summarize": bool}
-    """
-    if processing_options is None:
-        return {"calibrate": True, "summarize": True}
-    return processing_options.model_dump()
 
 
 class TranscribeRequest(BaseModel):
@@ -309,7 +288,7 @@ async def verify_token(authorization: str = Header(None), request: Request = Non
     token = token_parts[1]
     user_info = user_manager.validate_token(token)
     if not user_info:
-        logger.warning(f"授权令牌无效: {token[:8]}...")
+        logger.warning("Authorization token rejected")
         raise HTTPException(status_code=401, detail="授权令牌无效")
 
     logger.debug(f"用户认证成功: {user_info.get('user_id')}")
@@ -330,37 +309,41 @@ async def process_task_queue():
             use_speaker_recognition = task.get("use_speaker_recognition", False)
             wechat_webhook = task.get("wechat_webhook")
             notification_channel = task.get("notification_channel")
-            notification_webhooks = task.get("notification_webhooks", {})
+            notification_webhooks = task.get("notification_webhooks") or {}
             download_url = task.get("download_url")
             metadata_override = task.get("metadata_override")
             # 处理深度开关（只转录/转录+校对/全流程）：task dict 里缺失时按全流程兜底，
             # 与 normalize_processing_options(None) 的语义保持一致。
-            processing_options = task.get("processing_options") or {
-                "calibrate": True,
-                "summarize": True,
-            }
+            processing_options = normalize_processing_options(task.get("processing_options"))
 
             try:
                 cache_manager.update_task_status(task_id, TaskStatus.PROCESSING, download_url=download_url)
 
-                future = executor.submit(
-                    process_transcription,
-                    task_id,
-                    url,
-                    use_speaker_recognition,
-                    wechat_webhook,
-                    download_url,
-                    metadata_override,
-                    notification_channel=notification_channel,
-                    notification_webhooks=notification_webhooks,
-                    processing_options=processing_options,
-                )
+                runtime = get_runtime()
 
-                def task_completed(future_result):
-                    # 状态由 process_transcription / LLM 阶段写入 DB；
-                    # 此回调仅兜底 future 意外抛出（未被内部捕获）的情况。
+                def run_and_finalize(
+                    task_id=task_id,
+                    url=url,
+                    use_speaker_recognition=use_speaker_recognition,
+                    wechat_webhook=wechat_webhook,
+                    download_url=download_url,
+                    metadata_override=metadata_override,
+                    notification_channel=notification_channel,
+                    notification_webhooks=dict(notification_webhooks),
+                    processing_options=dict(processing_options),
+                ):
                     try:
-                        future_result.result()
+                        process_transcription(
+                            task_id,
+                            url,
+                            use_speaker_recognition,
+                            wechat_webhook,
+                            download_url,
+                            metadata_override,
+                            notification_channel=notification_channel,
+                            notification_webhooks=notification_webhooks,
+                            processing_options=processing_options,
+                        )
                         logger.info(f"任务完成: {task_id}")
                     except Exception as exc:
                         logger.exception(
@@ -370,27 +353,299 @@ async def process_task_queue():
                             task_id, TaskStatus.FAILED,
                             error_message=f"转录任务失败: {exc}",
                         )
-                        display_url = url
                         get_notification_router().notify_task_status(
-                            url=display_url, status="转录失败", error=str(exc),
-                            channel_name=notification_channel, webhooks=notification_webhooks,
+                            url=url, status="转录失败", error=str(exc),
+                            channel_name=notification_channel,
+                            webhooks=notification_webhooks,
                         )
 
-                future.add_done_callback(task_completed)
+                future = executor.submit(
+                    run_with_runtime,
+                    runtime,
+                    run_and_finalize,
+                )
+                runtime.track_future(future, task_id=task_id)
                 logger.info(f"任务已提交到线程池: {task_id}, URL: {url}")
             except Exception as exc:
                 logger.exception(
                     f"提交任务到线程池失败: {task_id}, URL: {url}, 错误: {exc}"
                 )
-                cache_manager.update_task_status(
-                    task_id, TaskStatus.FAILED,
-                    error_message=f"提交任务失败: {exc}",
-                )
+                # Y1 修复（PR3 review hardening 加固轮）：在途任务登记表释放提到
+                # update_task_status 之前——与 R3 先例同一套顺序原则（见
+                # _handoff_to_llm_stage 里 put() 失败分支的注释：release 提到
+                # 通知之前）：release() 本身不会抛异常（InflightRegistry 内部
+                # 一次加锁的 dict.pop，幂等，见其文档），会抛异常的只有
+                # get_runtime() 这一步（进程内 contextvar 读取，理论上不该在
+                # 这条路径失败，仍用 try/except 兜底），因此整体排在下面的
+                # update_task_status 之前。旧顺序里 update_task_status 排在
+                # release 之前：这是一次会触达数据库的 CAS 写入，一旦抛出未
+                # 预期的异常（如 DB 层故障），会直接跳出这个 except 块，下面
+                # 的 release 永远不会执行——这个 task_id 占用的
+                # "transcription" 桶名额永久无法回收；此时 future 从未真正
+                # 创建，track_future 的完成回调（release 的另一个主挂点）也
+                # 不会触发补救，连续故障会让可用配额持续缩水，最终耗尽到
+                # /api/transcribe 恒 503，直到进程重启。release 提前执行不会
+                # 引入新的失败面。
+                try:
+                    get_runtime().inflight_registry.release("transcription", task_id)
+                except Exception:
+                    logger.exception(f"释放在途任务登记表名额失败: {task_id}")
+                # G1 修复（CI review 第 2 轮 major）：此前这里认为
+                # "update_task_status 自身的异常也不能向上传播"——重新核实后
+                # 发现这个理由不成立：下面的 task_queue.task_done() 是外层
+                # try(305) 的 finally（见下方 403 行），不在这个内层
+                # try/except 的保护范围内，重新抛出不会跳过它；原始异常 exc
+                # 也已经在上面（370 行）被 logger.exception 记录过，不会被
+                # "掩盖"。此前只记日志、不重新抛出，函数就此吞掉终态写库
+                # 异常（这个 except 已经是提交失败分支的最后一步）——任务
+                # 实际停在 PROCESSING 之前的非终态，只能靠运行期对账（最长
+                # ~27h）才会被发现，违反"repository 清理/保存失败必须抛错"
+                # 的设计条款。改为记日志后重新抛出：异常传出这个 except 块，
+                # 被下面的 finally 放行后，传播到本函数最外层的 `except
+                # Exception as exc:`（process_task_queue 自身的泵循环兜底，
+                # 本来就设计成容忍单次异常、sleep(1) 后继续消费下一项）。
+                # 与 llm_ops.py 的 process_llm_queue 泵循环不同：那里的
+                # task_done() 不在 finally 里，重新抛出会跳过它、造成队列
+                # 记账永久泄漏，因此保留 log-only；这里 task_done() 由
+                # finally 保护，重新抛出不会破坏队列记账，可以采用与其它
+                # 站点一致的"清理后重抛"。
+                try:
+                    cache_manager.update_task_status(
+                        task_id, TaskStatus.FAILED,
+                        error_message=f"提交任务失败: {exc}",
+                    )
+                except Exception:
+                    logger.exception(f"提交失败后写入 failed 终态异常: {task_id}")
+                    raise
             finally:
                 task_queue.task_done()
         except Exception as exc:
             logger.exception(f"任务队列处理器异常: {exc}")
             await asyncio.sleep(1)
+
+
+def _register_llm_handoff(task_id: str) -> None:
+    """转录 worker 把任务通过 llm_task_queue.put() 交给 LLM 阶段前，先登记
+    进 inflight_registry 的 "llm" 桶（本地 codex review 第 13 轮唯一发现，
+    详见 _InflightTaskRegistry.register_internal 的方法文档）。
+
+    调用时机是这个函数存在的唯一理由：必须在 put() 之前调用，
+    且仍在 process_transcription 所在的 worker 线程内——此时该 task_id 仍占着
+    "transcription" 桶的名额（future 尚未完成），两桶之间因此无缝
+    衔接，不会出现"transcription 名额已释放、llm 名额尚未登记"的真
+    空窗口，运行期对账（app.py::_periodic_maintenance 的 all_task_ids()
+    排除名单）任何时刻查询都能看到这个任务。
+
+    用 get_inflight_registry() 而非 get_runtime().inflight_registry：
+    process_transcription 除了生产环境的 run_with_runtime worker 线程，
+    也被大量既有单测（如 tests/integration/test_layered_cache.py、
+    tests/features/test_transcription_flow_regression.py）在未绑定
+    runtime 的主线程里直接调用——get_runtime() 在这种环境下会抛
+    RuntimeError，get_inflight_registry() 则按设计优雅降级为一次性的
+    空登记表（不缓存单例，不影响任何真实背压/对账逻
+    辑），保证这里的登记调用在测试环境下是安全的纯
+    粹 no-op，不会连带让下面真正重要的 llm_task_queue.put() 交接失败。
+    """
+    get_inflight_registry().register_internal("llm", task_id)
+
+
+def _handoff_to_llm_stage(
+    task_id: str,
+    llm_payload: dict,
+    *,
+    calibrating_status_kwargs: dict,
+    task_notifier,
+    log_context: str,
+) -> Optional[dict]:
+    """把已完成转录、待补 LLM 层的任务交给 LLM 阶段——转录到 LLM 的五处内部
+    交接（process_transcription 的缓存复用分支、YouTube API Server 的两条快速路
+    径、平台字幕分支、常规下载转录分支）共用同一份顺序与失败处理
+    （本地 codex review 第 15 轮唯一发现）。
+
+    调用约定：转录 worker 已经拿到可以喂给 LLM 阶段的产物（transcript/
+    transcription_data 等），装好 llm_payload 后调用本函数。返回 None 表示交接
+    完全成功（CALIBRATING 已落库、任务已入队）——调用方据此继续构造并返回自己的
+    "success" 响应；返回非 None 的 dict 表示交接未完成——调用方必须原样 return
+    这个 dict，绝不能再假装成功继续往下走（这正是重排前第一处分支的 bug：
+    CALIBRATING 写入异常被当成入队失败处理、写了 failed，函数却仍然 return 了
+    "status": "success"）。
+
+    重排后的顺序（本次修复的核心）：先写 CALIBRATING、检查 CAS 返回值，赢了才
+    register_internal + put()——不是旧版"先 put 入队、再写 CALIBRATING"。旧版的
+    问题：queue.Queue.put() 一旦成功，队列消费者立刻可能取走任务开始处理，不可
+    撤回；这之后才发现 CALIBRATING 写入失败或被终态黏性拒绝（CAS False）的话，
+    任务对外已经呈现某个终态（通常是 failed 或维持原有 success/failed），LLM
+    worker 却仍会继续处理这个已经被放弃的任务——烧 token、写共享产物，最终 LLM
+    阶段的 success CAS 因终态黏性被静默拒绝，一次不可观测的重复劳动。重排后
+    CALIBRATING 写入是唯一"是否交给 LLM 阶段"的关卡，赢了才有资格入队。
+
+    三种结果分支：
+    1. CALIBRATING 写入本身抛异常：不注册 llm 名额（还没走到那一步）、不入队；
+       尝试收敛写 failed；这次写入成功则返回 failed 响应。这次写入若也失败
+       （G1 修复，CI review 第 2 轮 major）：记日志后重新抛出，不再静默返回
+       failed 响应假装已经收敛——异常沿 process_transcription 的外层兜底继续
+       传播，最终可被 worker future 观察到（详见下面 except 分支的注释）。
+    2. CALIBRATING 写入返回 False（终态黏性：任务已被运行期对账/关闭清算/另一
+       次并发写入判定为 success/failed）：不入队、不注册 llm 名额、不覆盖已有
+       终态；按任务当前实际终态如实返回，而不是硬编码 failed。
+    3. CALIBRATING 写入成功（True）：register_internal 登记 llm 名额，随后
+       put()。put() 抛异常：释放 llm 名额、收敛写 failed。这次写入若也失败
+       （G1 修复同上）：记日志后重新抛出，不返回 failed 响应；写入成功则
+       返回 failed 响应。put() 成功：返回 None，交接完成。
+
+    Args:
+        task_id: 任务 ID。
+        llm_payload: 传给 llm_task_queue.put() 的完整任务字典，由调用方按各自
+            分支的产物组装（结构因分支而异，本函数不关心内容）。
+        calibrating_status_kwargs: 透传给 update_task_status(...,
+            TaskStatus.CALIBRATING, **kwargs) 的关键字参数（platform/media_id/
+            title/author/download_url），由调用方按各自分支的变量名组装。
+        task_notifier: 绑定了通知渠道的任务通知器，put() 失败时用于
+            task_notifier.send_text 告警（与重排前的既有行为一致）。
+        log_context: 日志里标识调用分支的简短中文标签（如"缓存""youtube-api"
+            "平台字幕""常规转录"），拼进本函数内部的日志文案，方便按分支定位
+            问题。
+
+    Returns:
+        None 表示交接成功；否则返回调用方应直接 return 的 failed 响应 dict
+        （含 "status"/"message" 两个键）。
+    """
+    try:
+        calibrating_written = cache_manager.update_task_status(
+            task_id, TaskStatus.CALIBRATING, **calibrating_status_kwargs,
+        )
+    except Exception as status_exc:
+        logger.exception(
+            f"CALIBRATING 状态写入异常，放弃 LLM 交接（{log_context}）: "
+            f"{task_id}, 错误: {status_exc}"
+        )
+        try:
+            cache_manager.update_task_status(
+                task_id, TaskStatus.FAILED,
+                error_message=f"任务状态写入异常: {status_exc}",
+            )
+        except Exception:
+            # G1 修复（CI review 第 2 轮 major）：此前这里只记日志、不重新
+            # 抛出，函数继续往下 return failed 字典——调用方（process_
+            # transcription 的各分支）会把这当成"已经妥善收敛"，任务实际
+            # 停在 CALIBRATING 之前的非终态（多为 PROCESSING），只能靠运行
+            # 期对账（最长 ~27h）才会被发现，违反"repository 清理/保存失败
+            # 必须抛错"的设计条款。这里还没有走到 register_internal（还未
+            # 注册 llm 名额），没有需要额外释放的配额；改为记日志后重新
+            # 抛出：异常会传出这个 except 块（不会被本函数其它 except 再次
+            # 捕获），一路传播到 process_transcription 最外层的 `except
+            # Exception as exc:`——那里会再尝试一次 FAILED 写入，如果同样
+            # 失败会再抛出，最终传播到 run_and_finalize/线程池 future，被
+            # RuntimeContext.track_future 的完成回调观察到（future 完成即
+            # 释放 inflight_registry 名额，不依赖终态写入是否成功）。
+            logger.exception(f"收敛 failed 终态写入也失败（{log_context}）: {task_id}")
+            raise
+        return {"status": "failed", "message": f"任务状态写入异常: {status_exc}"}
+
+    if not calibrating_written:
+        current_task = cache_manager.get_task_by_id(task_id)
+        current_status = (current_task or {}).get("status") or "unknown"
+        logger.warning(
+            f"CALIBRATING 写入被终态黏性拦截，任务已被外部终态化，跳过 LLM 交接"
+            f"（{log_context}）: {task_id}, 当前状态: {current_status}"
+        )
+        reported_status = (
+            current_status
+            if current_status in (TaskStatus.SUCCESS, TaskStatus.FAILED)
+            else "failed"
+        )
+        return {
+            "status": reported_status,
+            "message": f"任务已被并发流程终态化（当前状态: {current_status}），跳过 LLM 交接",
+        }
+
+    _register_llm_handoff(task_id)
+    try:
+        llm_task_queue.put(llm_payload)
+    except Exception as exc:
+        logger.exception(f"将LLM任务加入队列失败（{log_context}）: {exc}")
+        # R3 修复（PR3 review hardening）：release 提到通知之前——release()
+        # 是 InflightRegistry 内部一次加锁的 dict.pop，幂等且不会抛异常
+        # （见 api/context.py::InflightRegistry.release 的文档），而
+        # task_notifier.send_text 是外部 webhook 调用，可能因超时/限流抛
+        # 异常。旧顺序里通知排在 release 之前：通知一旦抛异常，会直接跳出
+        # 这个 except 块，release 和下面的 FAILED 收敛写入都不会执行——
+        # "llm" 桶里的登记条目永久漏掉一个名额（且没有 future 完成回调能
+        # 补救，因为 put() 从未成功、根本没有对应的 future），每次这种
+        # 组合故障都会让可用配额缩水一个，最终耗尽到 recalibrate 恒 503，
+        # 直到进程重启。release 不会抛异常，提前执行不会引入新的失败面。
+        get_inflight_registry().release("llm", task_id)
+
+        # W5 修复（PR3 review hardening 二轮）：FAILED 终态写入提到通知之前——
+        # 与 R2/K3（llm_ops.py 里成功/失败两侧的同一顺序重排，见该文件
+        # _handle_llm_task 的注释）同一套顺序原则：先写终态 CAS 并检查返回值，
+        # 终态落定后再尝试通知；通知放进独立 try/except 兜住，异常只记日志，
+        # 不影响已经写定的终态。旧顺序里通知（task_notifier.send_text，外部
+        # webhook 调用，可能因超时/限流抛异常）排在终态写入之前，一旦抛异常会
+        # 直接跳出这个 except 块，下面的 FAILED 写入永远不会执行——任务永久停在
+        # CALIBRATING（非终态），客户端只能一直轮询、再也等不到结果；既有测试
+        # 还反过来锁死了"通知异常会传播"这个错误行为，本次一并修正（见
+        # tests/features/test_transcription_flow_regression.py）。
+        try:
+            fail_status_written = cache_manager.update_task_status(
+                task_id, TaskStatus.FAILED,
+                error_message=f"LLM任务加入队列失败: {exc}",
+            )
+        except Exception:
+            # G1 修复（CI review 第 2 轮 major）：此前这里只记日志、不重新
+            # 抛出，函数继续往下发通知 + return failed 字典——调用方会把
+            # 这当成"已经妥善收敛"直接 return，任务实际停在 CALIBRATING
+            # （已经在上面成功写入过一次），既不是 failed 也不会再被任何
+            # 路径推进，只能靠运行期对账（最长 ~27h）才会被发现。llm 名额
+            # （release("llm", task_id)）已经在上面完成，这里不需要额外
+            # 清理；改为记日志后重新抛出，异常会传出这个 except 块，一路
+            # 传播到 process_transcription 最外层的 `except Exception as
+            # exc:`——那里会再尝试一次 FAILED 写入，如果同样失败会再抛出，
+            # 最终传播到 run_and_finalize/线程池 future，被 RuntimeContext.
+            # track_future 的完成回调观察到（future 完成即释放
+            # inflight_registry 名额，不依赖终态写入是否成功）。L1 修复
+            # （CI review 第 5 轮 P1）：不再在 finally 里无条件发通知——写入
+            # 本身抛异常时终态未落定，这里直接向上抛出，不发任何确定性的
+            # 失败通知。
+            logger.exception(f"收敛 failed 终态写入异常（{log_context}）: {task_id}")
+            raise
+
+        if fail_status_written:
+            # M1 修复（PR3 review hardening 收尾轮）：CAS==True 才是本次调用的
+            # 真正胜者——只有这个分支能确定"是本次把任务写成 failed 的"，失败
+            # 通知严格只挂在这里。
+            logger.info(f"任务状态已更新为 failed（{log_context}）: {task_id}")
+            try:
+                task_notifier.send_text(f"【LLM任务加入队列失败】{exc}")
+            except Exception:
+                logger.exception(
+                    f"入队失败通知发送失败（任务终态已落库，不影响任务结果，"
+                    f"{log_context}）: {task_id}"
+                )
+            return {"status": "failed", "message": f"LLM任务加入队列失败: {exc}"}
+
+        # M1 修复（PR3 review hardening 收尾轮）：CAS 返回 False 只代表"这次
+        # 没有写入"，无法区分"任务行已是 success/failed 终态"与"任务行根本
+        # 不存在"——两种情况下 update_task_status 的 UPDATE ... WHERE task_id=?
+        # AND status NOT IN ('success','failed') rowcount 都是 0。因此除
+        # success 分支要如实改写返回值外，其余一律不再发失败通知：已是 failed
+        # 的话，真正的 CAS 胜者早已发过一次；行不存在/unknown 的话，不为不存在
+        # 的终态编造通知（上一轮 L1 修复遗留的口子：曾经对"非 success"一律继续
+        # 发通知，未做这个区分）。
+        current_task = cache_manager.get_task_by_id(task_id)
+        current_status = (current_task or {}).get("status") or "unknown"
+        logger.warning(
+            f"任务状态 CAS 写入 failed 失败（任务已处于终态 "
+            f"{current_status}，未被本次异常覆盖，跳过失败通知，{log_context}）: {task_id}"
+        )
+        if current_status == TaskStatus.SUCCESS:
+            return {
+                "status": TaskStatus.SUCCESS,
+                "message": f"任务已被并发流程标记为 success，跳过失败通知（{log_context}）",
+            }
+        return {"status": "failed", "message": f"LLM任务加入队列失败: {exc}"}
+
+    return None
 
 
 def process_transcription(
@@ -415,8 +670,7 @@ def process_transcription(
     """
     if notification_webhooks is None:
         notification_webhooks = {}
-    if processing_options is None:
-        processing_options = {"calibrate": True, "summarize": True}
+    processing_options = normalize_processing_options(processing_options)
     # 性能追踪器：记录各阶段耗时
     tracker = PerfTracker(task_id=task_id)
 
@@ -469,6 +723,96 @@ def process_transcription(
                 )
 
         task_notifier = _TaskNotifier()
+
+        def _fail_task_and_notify(
+            error_msg: str, *, notify_status: str = "下载失败",
+            title: Optional[str] = None, author_name: Optional[str] = None,
+        ) -> dict:
+            """终态写入 + 失败通知的统一顺序（W5 修复，PR3 review hardening
+            二轮，顺手排查全仓同类站点后一并修复的 4 处下载/字幕失败分支之一）：
+            先写 FAILED 终态并检查 CAS 返回值，终态落定后再尝试通知，通知放进
+            独立 try/except 兜住——通知（task_notifier.notify_task_status，最终
+            经 NotificationRouter 转发到各渠道，理论上可能因超时/限流失败）绝不
+            能因为自身抛异常而跳过终态写入，否则任务会永久停在非终态（此前
+            PROCESSING/尚未进入 CALIBRATING），客户端只能一直轮询、永远等不到
+            结果，与 _handoff_to_llm_stage 内 put() 失败分支同一根因、同一处
+            修复。闭包读取本函数作用域内的 task_id/cache_manager/task_notifier/
+            display_url/download_url，避免每个下载失败分支重复抄一遍这段
+            顺序 + 日志样板代码。
+
+            G1 修复（CI review 第 2 轮 major）：FAILED 终态写入本身若抛异常，
+            此前只记日志、不重新抛出，函数正常返回——调用方（本文件十来处
+            下载/字幕失败分支）会把这当成"已经妥善收敛"，任务实际停在写入
+            FAILED 之前的非终态（多为 PROCESSING），只能靠运行期对账（最长
+            ~27h）才会被发现。现在改为记日志后重新抛出：本函数的全部调用点
+            都是 process_transcription 内部的裸调用（无局部 try/except 吞掉
+            普通 Exception），异常会一路传播到 process_transcription 最外层
+            的 `except Exception as exc:`——那里会再尝试一次 FAILED 写入，
+            如果同样失败会再抛出，最终传播到 run_and_finalize/线程池
+            future，被 RuntimeContext.track_future 的完成回调观察到（future
+            完成即释放 inflight_registry 名额，不依赖终态写入是否成功）。
+
+            L1 修复（CI review 第 5 轮 P1）：通知不再放在无条件执行的
+            finally 里——旧版无论 FAILED 写入抛异常还是 CAS 返回 False（任务
+            已被并发流程终态化，例如已经写成功），都会照发一条确定性的失败
+            通知，与权威终态自相矛盾。现在通知只在 CAS 明确返回 True（终态
+            真的落定为 failed）之后发送；写入抛异常直接向上抛出、不发任何
+            通知；CAS 返回 False 时读取既有终态，如果已经是 success 则同样不
+            发失败通知，并把返回值如实改成 success（不再硬编码
+            failed）——调用方从 `_fail_task_and_notify(...); return
+            {"status": "failed", ...}` 两行硬编码，改为直接
+            `return _fail_task_and_notify(...)`，复用这里算出的真实终态。
+
+            Returns:
+                调用方应直接 return 的响应 dict（含 "status"/"message" 两个
+                键）：CAS 写入成功时为 {"status": "failed", ...}；CAS 返回
+                False 且既有终态已是 success 时为 {"status": "success",
+                ...}；CAS 写入抛异常则不返回，异常向上传播。"""
+            try:
+                fail_status_written = cache_manager.update_task_status(
+                    task_id, TaskStatus.FAILED,
+                    download_url=download_url, error_message=error_msg,
+                )
+            except Exception:
+                logger.exception(f"收敛 failed 终态写入异常: {task_id} ({error_msg})")
+                raise
+
+            if fail_status_written:
+                # M1 修复（PR3 review hardening 收尾轮）：CAS==True 才是本次调用
+                # 的真正胜者，失败通知严格只挂在这里。
+                logger.info(f"任务状态已更新为 failed: {task_id} ({error_msg})")
+                try:
+                    task_notifier.notify_task_status(
+                        display_url, notify_status, error_msg,
+                        title=title, author=author_name,
+                    )
+                except Exception:
+                    logger.exception(
+                        f"失败通知发送失败（任务终态已落库，不影响任务结果）: {task_id}"
+                    )
+                return {"status": "failed", "message": error_msg}
+
+            # M1 修复（PR3 review hardening 收尾轮）：CAS 返回 False 无法区分
+            # "任务行已是 success/failed 终态"与"任务行根本不存在"——两种情况
+            # 下 update_task_status 的 UPDATE ... WHERE task_id=? AND status
+            # NOT IN ('success','failed') rowcount 都是 0。因此除 success 分支
+            # 要如实改写返回值外，其余一律不再发失败通知：已是 failed 的话，
+            # 真正的 CAS 胜者早已发过一次；行不存在/unknown 的话，不为不存在的
+            # 终态编造通知（上一轮 L1 修复遗留的口子：曾经对"非 success"一律
+            # 继续发通知，未做这个区分）。
+            current_task = cache_manager.get_task_by_id(task_id)
+            current_status = current_task.get("status") if current_task else "unknown"
+            logger.warning(
+                f"任务状态 CAS 写入 failed 失败(任务已处于终态 {current_status}，"
+                f"未被本次异常覆盖，跳过失败通知): {task_id} ({error_msg})"
+            )
+            if current_status == TaskStatus.SUCCESS:
+                return {
+                    "status": TaskStatus.SUCCESS,
+                    "message": f"任务已被并发流程标记为 success，跳过失败通知（当前状态: {current_status}）",
+                }
+            return {"status": "failed", "message": error_msg}
+
         engine_info = (
             "说话人识别(FunASR)" if use_speaker_recognition else "普通转录(CapsWriter)"
         )
@@ -568,14 +912,144 @@ def process_transcription(
             # 永久锁死在失败状态。
             cached_llm_status = cache_data.get("llm_status") or {}
             cached_calibration_status = cached_llm_status.get("calibration_status")
+            # llm_status.json 是 _save_llm_results 整个多文件落盘序列里最后
+            # 才写入的那一个（校对文本 -> 总结 -> 结构化数据 -> 状态文件），
+            # 天然就是这次 LLM 处理“已完整提交”的标记。中途失败（例如状态
+            # 文件写入本身失败，或更早的某个产物写入失败直接中止了整段
+            # 保存）都会让本轮的 llm_calibrated.txt 停留在磁盘上，却永远等
+            # 不到这份状态文件——has_llm_calibrated=True 但
+            # cached_calibration_status 仍是 None。此前的判定只看文件是否
+            # 存在，会把这种半提交产物（甚至可能是全降级 NONE 的兜底格式化
+            # 原文）误判为“层已满足”，永久跳过重试（本地 codex review 第 16
+            # 轮 Q2）。
+            #
+            # 兼容性说明：llm_status.json（诚实状态模型）晚于
+            # llm_calibrated.txt 落地——在它上线之前保存成功的旧缓存也会
+            # 呈现“calibrated 存在、status 缺失”这同一种文件形状，与半提交
+            # 在磁盘上完全无法区分（没有时间戳/版本标记可用；但上线前的旧
+            # 代码从不会在校对全降级为 NONE 时落盘任何文件，所以旧数据只
+            # 可能是真实的 full/partial 结果，不会是伪装成成功的失败产物）。
+            # 这里没有引入按 llm_processed.json 等尾部产物反推“是不是旧
+            # 数据”的第二套判定——那套推断本身也不可靠（比如从未启用过说话
+            # 人识别的普通任务压根不会有 llm_processed.json 可供参照），
+            # 刻意选择统一保守处理：状态文件缺失一律视为未确认完成，触发
+            # 一次真实重新校对。旧缓存因此最多被重新校对一次，且这一次会
+            # 自然补写 llm_status.json，之后同一媒体的请求即可正常命中——
+            # 是一次性代价，不是数据损坏。
             calibrated_layer_satisfied = (
                 has_llm_calibrated
+                and cached_calibration_status is not None
                 and cached_calibration_status != CalibrationStatus.DISABLED
                 and cached_calibration_status != CalibrationStatus.NONE
             )
             calibrate_requested = processing_options.get("calibrate", True)
             need_calibrated = calibrate_requested and not calibrated_layer_satisfied
             need_summary = processing_options.get("summarize", True) and not has_llm_summary
+            infer_speaker_names_requested = processing_options.get(
+                "infer_speaker_names", True
+            )
+            need_speaker_names = False
+            if infer_speaker_names_requested and has_speaker_recognition:
+                from ...llm.core.speaker_inferencer import SpeakerInferencer
+                from .llm_ops import (
+                    structured_artifact_is_refreshable,
+                    structured_dialogs_consistent_with_mapping,
+                )
+
+                dialogs = (
+                    transcription_data.get("segments", [])
+                    if isinstance(transcription_data, dict)
+                    else (transcription_data or [])
+                )
+                speakers = _extract_speaker_labels(dialogs)
+                if speakers:
+                    fingerprint = SpeakerInferencer.input_fingerprint(speakers, dialogs)
+                    current_speaker_mapping = cache_manager.get_speaker_mapping(
+                        cache_data.get("platform"),
+                        cache_data.get("media_id"),
+                        input_fingerprint=fingerprint,
+                        speakers=speakers,
+                    )
+                    cached_structured_for_names = cache_data.get("llm_processed")
+                    structured_refreshable = structured_artifact_is_refreshable(
+                        cached_structured_for_names
+                    )
+                    # need_speaker_names 判定条件表（映射状态 × 结构化产物可刷新性 ×
+                    # 校对完成状态 → 是否排队）。这个判定改了很多轮
+                    # （X1/G2/H2/J1/J2……），历史论证已归档进各自的
+                    # commit/复盘文档，这里只保留对下一个读者有用的最终结论：
+                    #
+                    # structured_refreshable 现在由
+                    # llm_ops.structured_artifact_is_refreshable 的 schema 层计算
+                    # （J2 修复，本地增量复核第 3 轮）：不再是简单的
+                    # isinstance(x, dict)——还要求 speaker_mapping/
+                    # dialogs 字段完整、dialogs 非空、且每条 dialog 都带非空
+                    # speaker_id。与 llm_ops._refresh_speaker_names_in_existing_
+                    # structured_artifact 真正尝试写入前的判定共用同一份实现，排队
+                    # 侧因此不会再对"存在但不可刷新"的产物（空
+                    # dict、缺字段、旧 schema、混合 schema、空 dialogs）误判为
+                    # 可刷新——那种误判此前会排队烧一次 LLM 推断，
+                    # helper 侧再静默跳过，结果永远不可见。
+                    # mapping 层校验（speaker_id 是否能在新映射里解析出姓名）依赖
+                    # 本轮尚未推断出的映射，只有 helper 侧真正拿到映射后
+                    # 才判定得了，排队侧不传 mapping，只做 schema 层判定。
+                    #
+                    # 1. 映射缺失（current_speaker_mapping is None，本轮需要真实
+                    #    LLM 推断新映射）：
+                    #    a. 结构化产物可刷新（structured_refreshable）→ 排队。新
+                    #       推断出的映射有落点可写（下游
+                    #       _refresh_speaker_names_in_existing_structured_artifact
+                    #       会原子刷新 dialogs 展示名），值得花这次 LLM 调用。
+                    #    b. 结构化产物不可刷新（缺失/空/旧格式/混合 schema）→ 不
+                    #       排队（J1 修复：不管校对是否确认 FULL，继续排队都只会
+                    #       换来一次没有任何落点的说话人推断——白烧 LLM token 且
+                    #       结果永远不可见，合并成同一条"无落点不排队"规则）。
+                    #       J2 修复进一步把"结构化产物存在"的判据从 naive 的
+                    #       isinstance(x, dict) 收紧为 structured_refreshable
+                    #       （schema 层），"存在但不可刷新"的产物现在也会落进这
+                    #       条不排队分支，不再需要排队后靠 helper 侧静默跳过来
+                    #       兜底。legacy 缺口交给用户显式 recalibrate 触发全流程
+                    #       处理，不在这里自动垫付。
+                    #
+                    # 2. 映射存在（fingerprint 命中，本轮不需要真实
+                    #    LLM 推断，零成本）：
+                    #    a. 结构化产物可刷新但与映射不一致（分叉）→ 排队，K5 刷新
+                    #       分支只改展示名、不动已校对内容，零成本安全。
+                    #    b. 结构化产物可刷新且一致 → 不排队，无事可做。
+                    #    c. 结构化产物不可刷新 + 校对层未满足（calibrated_layer_
+                    #       satisfied 为 False，即 DISABLED/NONE/状态缺失）→ 排队，
+                    #       Q3 原有保护，未变。这条腿本身零 LLM 成本（映射已知，
+                    #       cache_hit 来源，不受 J1 删除隐式升级影响）；
+                    #       queued_calibrate 现在纯由 need_calibrated 决定，
+                    #       calibrate_requested=True 时 need_calibrated 天然为 True
+                    #       （校对层未满足），照样触发一次真实完整校对自愈缺口；
+                    #       用户显式 calibrate=false 时按其意图保留 False，这一轮
+                    #       说话人补层因为仍无落点会在 helper 侧被
+                    #       structured_artifact_is_refreshable 挡下、不写入，但也
+                    #       不产生额外 LLM 成本，无需在这里单独收紧。
+                    #    d. 结构化产物不可刷新 + 校对层已满足（FULL 或 PARTIAL）→
+                    #       不排队（X1，未变）。映射本身没变，缺口只是历史展示层
+                    #       空洞，渲染层本有平文本回退，不值得为一个纯展示问题
+                    #       触发重建。
+                    #
+                    #    1b 与 2c/2d 的判定口径故意不同（前者只看
+                    #    structured_refreshable，后者仍用更宽松的
+                    #    calibrated_layer_satisfied，含 PARTIAL）：1 这条腿一旦
+                    #    排队必然真烧一次 LLM 推断，只有确认有落点
+                    #    （structured_refreshable）才划算；2 这条腿排队与否都不
+                    #    产生新的 LLM 推断（映射已就位，只差展示层重建），沿用 X1
+                    #    已验证过的更宽松判定即可，不需要收紧。
+                    if current_speaker_mapping is None:
+                        if structured_refreshable:
+                            need_speaker_names = True
+                    elif structured_refreshable:
+                        if not structured_dialogs_consistent_with_mapping(
+                            cached_structured_for_names,
+                            current_speaker_mapping.get("mapping"),
+                        ):
+                            need_speaker_names = True
+                    elif not calibrated_layer_satisfied:
+                        need_speaker_names = True
 
             # need_calibrated=False 不代表校对层已经有任何产物——calibrate=False
             # 会无条件把它压成 False，即便 llm_calibrated 压根不存在（比如只有
@@ -590,7 +1064,12 @@ def process_transcription(
             # 兜底），不存在"读空字符串"的问题。
             calibration_effectively_missing = not calibrate_requested and not has_llm_calibrated
 
-            if not need_calibrated and not need_summary and not calibration_effectively_missing:
+            if (
+                not need_calibrated
+                and not need_summary
+                and not need_speaker_names
+                and not calibration_effectively_missing
+            ):
                 logger.info("缓存中已有 LLM 结果，直接使用")
                 cache_type = "含说话人识别" if has_speaker_recognition else "普通转录"
                 engine_info = "FunASR" if has_speaker_recognition else "CapsWriter"
@@ -689,39 +1168,6 @@ def process_transcription(
 {summary_text}"""
                     logger.info("缓存模式 - 发送总结文本")
 
-                # 发送（跳过自动添加的内容类型标题）
-                _router.send_long_text(
-                    title=video_title,
-                    url=display_url,
-                    text=full_message,
-                    is_summary=not skip_summary,
-                    has_speaker_recognition=has_speaker_recognition,
-                    channel_name=notification_channel,
-                    webhooks=notification_webhooks,
-                    skip_content_type_header=True,
-                )
-
-                # 确保总结文本完全加入队列后再发送完成通知
-                logger.info("[缓存模式] 总结文本发送完成，延迟100ms后发送完成通知")
-                time.sleep(0.1)
-
-                # 发送任务完成通知，包含查看链接
-                task_info = cache_manager.get_task_by_id(task_id)
-                if task_info and task_info.get("view_token"):
-                    base_url = get_base_url()
-                    view_url = f"{base_url}/view/{task_info['view_token']}"
-
-                    from ...utils.notifications.channel import _apply_risk_control_safe
-                    clean = _clean_url(display_url)
-                    sanitized_title = _apply_risk_control_safe(video_title, text_type="title")
-
-                    completion_message = f"# {sanitized_title}\n\n{clean}\n\n🔗 总结和校对：\n{view_url}\n\n✅ **【任务完成】**"
-                    logger.info(f"[缓存模式] 准备发送任务完成通知: {sanitized_title}")
-                    task_notifier.send_text(completion_message, skip_risk_control=True)
-                    logger.info(f"[缓存模式] 任务完成通知已加入限流队列: {task_id}")
-
-                logger.info(f"已发送缓存的 LLM 结果: {video_title}")
-
                 # 缓存全命中（含 LLM 结果）：无后续 LLM 工作，直接置终态 success。
                 # 把本次已读到的 llm_status.json 快照（cached_llm_status，见上方
                 # 分层缓存命中判定）镜像进这条新建的 task_status 行——否则
@@ -733,12 +1179,24 @@ def process_transcription(
                 # 文件推导合理默认——calibrated_layer_satisfied 已排除 disabled
                 # 占位符，此时真实存在校对文件即可推断为 full；summary 无法
                 # 可靠区分 generated 与 skipped_short，缺失时保持 None，不瞎编。
+                # calibrated_layer_satisfied 现在已经把“状态文件缺失”纳入
+                # 判定（见上方定义处的注释），意味着只要走到这条“完全命中”
+                # 分支，cached_calibration_status 就不可能再是 None——不再
+                # 需要（也不应该）在这里把“缺失”悄悄补成 FULL：那正是本地
+                # codex review 第 16 轮 Q2 指出的“缺失状态被推断为 FULL”
+                # 问题本身。直接镜像状态文件里的真实值，缺失时保持 None
+                # （保守值，如实反映“未确认”），不再编造。
                 mirrored_calibration_status = cached_calibration_status
-                if mirrored_calibration_status is None and calibrated_layer_satisfied:
-                    mirrored_calibration_status = CalibrationStatus.FULL
                 mirrored_summary_status = cached_llm_status.get("summary_status")
 
-                cache_manager.update_task_status(
+                # 先写终态、检查 CAS 返回值，赢了才发送通知（本地 codex review
+                # 第 7 轮 H2）：update_task_status 是 compare-and-set，终态黏性会
+                # 拒绝覆盖一个已经处于 success/failed 的任务行——例如任务已被
+                # 关闭清算或恢复流程判定为 failed。此前这里先发"任务完成"
+                # 通知、再写 CAS 且忽略返回值——CAS 落败时用户已经收到了通知，
+                # 日志却从不提示矛盾。改为先写、检查结果，只有真正赢得
+                # 终态写入时才发送。
+                status_written = cache_manager.update_task_status(
                     task_id,
                     TaskStatus.SUCCESS,
                     platform=cache_data.get("platform"),
@@ -749,7 +1207,72 @@ def process_transcription(
                     download_url=download_url,
                     calibration_status=mirrored_calibration_status,
                     summary_status=mirrored_summary_status,
+                    terminal_snapshot={
+                        "title": video_title,
+                        "author": author,
+                        "platform": cache_data.get("platform"),
+                        "media_id": cache_data.get("media_id"),
+                        "calibration_status": mirrored_calibration_status,
+                        "summary_status": mirrored_summary_status,
+                        "processing_options": processing_options,
+                    },
                 )
+
+                if not status_written:
+                    current_task = cache_manager.get_task_by_id(task_id)
+                    current_status = current_task.get("status") if current_task else "unknown"
+                    logger.warning(
+                        f"任务状态 CAS 写入 success 失败(任务已处于终态 {current_status}，"
+                        f"可能已被关闭清算/恢复流程判定)，跳过完成通知: {task_id}"
+                    )
+                else:
+                    # K3 修复（本地 codex review 第 8 轮）：完成通知与其辅助
+                    # 逻辑（发送校对/总结正文、拼装查看链接、发送完成通知）
+                    # 此前仍在最外层通用失败处理的 try/except（本函数末尾的
+                    # `except Exception as exc:`）覆盖范围内——success 已经
+                    # 落库后，这里任意一步抛异常都会被那个 except 当成
+                    # "转录处理异常"：把返回值改成 failed、发一条误导性的
+                    # "转录异常"通知，且原本没有检查 FAILED CAS 的返回值就
+                    # 声称处理完毕。改为独立 try/except 兜住这段通知逻辑
+                    # 本身的异常：通知失败只记日志，不影响已经写定的
+                    # success 任务结果，也不会误触发失败通知。
+                    try:
+                        # 发送（跳过自动添加的内容类型标题）
+                        _router.send_long_text(
+                            title=video_title,
+                            url=display_url,
+                            text=full_message,
+                            is_summary=not skip_summary,
+                            has_speaker_recognition=has_speaker_recognition,
+                            channel_name=notification_channel,
+                            webhooks=notification_webhooks,
+                            skip_content_type_header=True,
+                        )
+
+                        # 确保总结文本完全加入队列后再发送完成通知
+                        logger.info("[缓存模式] 总结文本发送完成，延迟100ms后发送完成通知")
+                        time.sleep(0.1)
+
+                        # 发送任务完成通知，包含查看链接
+                        task_info = cache_manager.get_task_by_id(task_id)
+                        if task_info and task_info.get("view_token"):
+                            base_url = get_base_url()
+                            view_url = f"{base_url}/view/{task_info['view_token']}"
+
+                            from ...utils.notifications.channel import _apply_risk_control_safe
+                            clean = _clean_url(display_url)
+                            sanitized_title = _apply_risk_control_safe(video_title, text_type="title")
+
+                            completion_message = f"# {sanitized_title}\n\n{clean}\n\n🔗 总结和校对：\n{view_url}\n\n✅ **【任务完成】**"
+                            logger.info(f"[缓存模式] 准备发送任务完成通知: {sanitized_title}")
+                            task_notifier.send_text(completion_message, skip_risk_control=True)
+                            logger.info(f"[缓存模式] 任务完成通知已加入限流队列: {task_id}")
+
+                        logger.info(f"已发送缓存的 LLM 结果: {video_title}")
+                    except Exception:
+                        logger.exception(
+                            f"完成通知发送失败（任务已成功落库，不影响任务结果）: {task_id}"
+                        )
 
                 # 缓存完全命中（含 LLM 结果），记录计数并输出性能摘要
                 tracker.count("cache_hit")
@@ -792,7 +1315,7 @@ def process_transcription(
                 if cached_speaker_mapping:
                     cached_speaker_count = len(cached_speaker_mapping)
 
-            if need_calibrated:
+            if need_calibrated or need_speaker_names:
                 # 校对层缺失，需要真实（重新）校对：沿用原始转录内容
                 queued_transcript = transcript
                 queued_transcription_data = transcription_data if has_speaker_recognition else None
@@ -819,56 +1342,79 @@ def process_transcription(
                 queued_transcription_data = None
                 queued_use_speaker_recognition = has_speaker_recognition
 
+            # J1 修复（本地增量复核第 3 轮）：此前这里还会在
+            # need_speaker_names=True 且校对未确认 FULL 时（G2 修复）把
+            # queued_calibrate 强制升级为 True——即便用户本次请求显式
+            # 传了 calibrate=false，也会被系统偷偷改写成一次真实付费
+            # 校对，违反 ProcessingOptions 每个开关都必须相互独立
+            # 、用户显式传值必须被尊重的设计合同。
+            #
+            # G2 当初这么做是为了避免"生肉发布"：need_speaker_names 排
+            # 队后若仍以 calibrate=False 运行，SpeakerAwareProcessor 会
+            # skip_calibration=True 产出未经校对的原始 dialogs，一旦被
+            # _refresh_speaker_names_in_existing_structured_artifact 当作
+            # 结构化产物首次落盘，会被 DialogRenderer 无条件优先渲
+            # 染，用生肉冒充/覆盖已有的（哪怕只是部分）真实校
+            # 对文本。但这条首次落盘路径已经被 H2（本地增量
+            # 复核）整段删除——没有旧产物可刷新时，helper 现在只
+            # 记日志、不做任何写入，生肉不再有机会伪装成结构化
+            # 产物。原本"校对未确认 FULL + 结构化产物缺失 + 要
+            # 姓名"的场景，也已经并入上面 need_speaker_names 条件表 1b
+            # 分支的"无落点不排队"：结构化产物缺失时压根不会
+            # 排队 need_speaker_names，queued_calibrate 也就不再
+            # 需要为它兜底升级。
+            #
+            # 现在 queued_calibrate 纯粹反映用户意图 + 缓存层状态
+            # （need_calibrated 的既有计算已经如实综合了 calibrate_requested
+            # 与 calibrated_layer_satisfied），不再有任何隐式升级。
+            queued_calibrate = need_calibrated
             queued_processing_options = {
-                "calibrate": need_calibrated,
+                "calibrate": queued_calibrate,
                 "summarize": need_summary,
+                "infer_speaker_names": need_speaker_names,
             }
 
-            try:
-                llm_task_queue.put(
-                    {
-                        "task_id": task_id,
-                        "url": url,
-                        "display_url": display_url,
-                        "platform": cache_data.get("platform"),
-                        "media_id": cache_data.get("media_id"),
-                        "video_title": video_title,
-                        "author": author,
-                        "description": description,
-                        "transcript": queued_transcript,
-                        "use_speaker_recognition": queued_use_speaker_recognition,
-                        "transcription_data": queued_transcription_data,
-                        "cached_speaker_count": cached_speaker_count,
-                        "is_generic": is_generic_downloader or is_from_generic,
-                        "wechat_webhook": wechat_webhook,
-                        "notification_channel": notification_channel,
-                        "notification_webhooks": notification_webhooks,
-                        "perf_tracker": tracker,
-                        "processing_options": queued_processing_options,
-                    }
-                )
-                logger.info(
-                    f"将LLM任务加入队列: {task_id}, 标题: {video_title}, "
-                    f"说话人识别: {has_speaker_recognition}, "
-                    f"需补层: calibrate={need_calibrated}, summarize={need_summary}"
-                )
-                # 转录已就绪、LLM 校对/总结进行中 → calibrating（终态由 LLM 阶段写）
-                cache_manager.update_task_status(
-                    task_id,
-                    TaskStatus.CALIBRATING,
-                    platform=cache_data.get("platform"),
-                    media_id=cache_data.get("media_id"),
-                    title=video_title,
-                    author=author,
-                    download_url=download_url,
-                )
-            except Exception as exc:
-                logger.exception(f"将LLM任务加入队列失败（缓存）: {exc}")
-                task_notifier.send_text(f"【LLM任务加入队列失败】{exc}")
-                cache_manager.update_task_status(
-                    task_id, TaskStatus.FAILED,
-                    error_message=f"LLM任务加入队列失败: {exc}",
-                )
+            handoff_failure = _handoff_to_llm_stage(
+                task_id,
+                {
+                    "task_id": task_id,
+                    "url": url,
+                    "display_url": display_url,
+                    "platform": cache_data.get("platform"),
+                    "media_id": cache_data.get("media_id"),
+                    "video_title": video_title,
+                    "author": author,
+                    "description": description,
+                    "transcript": queued_transcript,
+                    "use_speaker_recognition": queued_use_speaker_recognition,
+                    "transcription_data": queued_transcription_data,
+                    "cached_speaker_count": cached_speaker_count,
+                    "is_generic": is_generic_downloader or is_from_generic,
+                    "wechat_webhook": wechat_webhook,
+                    "notification_channel": notification_channel,
+                    "notification_webhooks": notification_webhooks,
+                    "perf_tracker": tracker,
+                    "processing_options": queued_processing_options,
+                },
+                calibrating_status_kwargs={
+                    "platform": cache_data.get("platform"),
+                    "media_id": cache_data.get("media_id"),
+                    "title": video_title,
+                    "author": author,
+                    "download_url": download_url,
+                },
+                task_notifier=task_notifier,
+                log_context="缓存",
+            )
+            if handoff_failure is not None:
+                return handoff_failure
+
+            logger.info(
+                f"将LLM任务加入队列: {task_id}, 标题: {video_title}, "
+                f"说话人识别: {has_speaker_recognition}, "
+                f"需补层: calibrate={need_calibrated}, summarize={need_summary}, "
+                f"infer_speaker_names={need_speaker_names}"
+            )
 
             return {
                 "status": "success",
@@ -1061,54 +1607,55 @@ def process_transcription(
                             description=description,
                         )
                         if not cache_result:
-                            logger.error(
-                                "[youtube-api] Failed to save transcript cache"
+                            error_msg = "[youtube-api] 转录结果保存到缓存失败"
+                            logger.error(error_msg)
+                            # Y4 修复（PR3 review hardening 加固轮）：save_cache 失败
+                            # 不能只记日志继续走 handoff/通知/success——转录产物根本
+                            # 没有落盘，任务却仍会报告成功，进程重启后正文永久不可
+                            # 恢复（没有缓存文件、没有可供 /view 页面读取的产物），
+                            # 终态快照与实际缓存状态不一致。改走既有的失败收口
+                            # （_fail_task_and_notify）：写 FAILED 终态 + 快照、发
+                            # 失败通知、不再继续下面的 LLM handoff。
+                            return _fail_task_and_notify(
+                                error_msg, notify_status="转录结果保存失败",
+                                title=video_title, author_name=author,
                             )
 
                         # 加入 LLM 处理队列
-                        try:
-                            llm_task_queue.put(
-                                {
-                                    "task_id": task_id,
-                                    "url": url,
-                                    "display_url": display_url,
-                                    "platform": platform,
-                                    "media_id": media_id,
-                                    "video_title": video_title,
-                                    "author": author,
-                                    "description": description,
-                                    "transcript": transcript,
-                                    "use_speaker_recognition": False,
-                                    "is_generic": False,
-                                    "wechat_webhook": wechat_webhook,
-                                    "notification_channel": notification_channel,
-                                    "notification_webhooks": notification_webhooks,
-                                    "perf_tracker": tracker,
-                                    "processing_options": processing_options,
-                                }
-                            )
-                            logger.info(f"[youtube-api] LLM task queued: {task_id}")
-                        except Exception as exc:
-                            logger.exception(
-                                f"[youtube-api] Failed to queue LLM task: {exc}"
-                            )
-                            task_notifier.send_text(f"【LLM任务加入队列失败】{exc}")
-                            cache_manager.update_task_status(
-                                task_id, TaskStatus.FAILED,
-                                error_message=f"LLM任务加入队列失败: {exc}",
-                            )
-                            return {"status": "failed", "message": f"LLM任务加入队列失败: {exc}"}
-
-                        # 转录就绪、LLM 校对/总结进行中 → calibrating（终态由 LLM 阶段写）
-                        cache_manager.update_task_status(
+                        handoff_failure = _handoff_to_llm_stage(
                             task_id,
-                            TaskStatus.CALIBRATING,
-                            platform=platform,
-                            media_id=media_id,
-                            title=video_title,
-                            author=author,
-                            download_url=download_url,
+                            {
+                                "task_id": task_id,
+                                "url": url,
+                                "display_url": display_url,
+                                "platform": platform,
+                                "media_id": media_id,
+                                "video_title": video_title,
+                                "author": author,
+                                "description": description,
+                                "transcript": transcript,
+                                "use_speaker_recognition": False,
+                                "is_generic": False,
+                                "wechat_webhook": wechat_webhook,
+                                "notification_channel": notification_channel,
+                                "notification_webhooks": notification_webhooks,
+                                "perf_tracker": tracker,
+                                "processing_options": processing_options,
+                            },
+                            calibrating_status_kwargs={
+                                "platform": platform,
+                                "media_id": media_id,
+                                "title": video_title,
+                                "author": author,
+                                "download_url": download_url,
+                            },
+                            task_notifier=task_notifier,
+                            log_context="youtube-api",
                         )
+                        if handoff_failure is not None:
+                            return handoff_failure
+                        logger.info(f"[youtube-api] LLM task queued: {task_id}")
+
                         return {
                             "status": "success",
                             "message": "使用 YouTube API Server 获取字幕成功",
@@ -1183,8 +1730,14 @@ def process_transcription(
                                 )
 
                         if not cache_result:
-                            logger.error(
-                                "[youtube-api] Failed to save transcription cache"
+                            error_msg = "[youtube-api] 转录结果保存到缓存失败"
+                            logger.error(error_msg)
+                            # Y4 修复（PR3 review hardening 加固轮，同 [youtube-api]
+                            # 平台字幕分支的收口原则）：转录产物未真正落盘，任务却
+                            # 仍会报告成功，改走既有失败收口 _fail_task_and_notify。
+                            return _fail_task_and_notify(
+                                error_msg, notify_status="转录结果保存失败",
+                                title=video_title, author_name=author,
                             )
 
                         task_notifier.notify_task_status(
@@ -1196,54 +1749,45 @@ def process_transcription(
                         )
 
                         # 加入 LLM 处理队列
-                        try:
-                            llm_task_queue.put(
-                                {
-                                    "task_id": task_id,
-                                    "url": url,
-                                    "display_url": display_url,
-                                    "platform": platform,
-                                    "media_id": media_id,
-                                    "video_title": video_title,
-                                    "author": author,
-                                    "description": description,
-                                    "transcript": transcript,
-                                    "use_speaker_recognition": use_speaker_recognition,
-                                    "transcription_data": transcription_result.get(
-                                        "transcription_data"
-                                    )
-                                    if use_speaker_recognition
-                                    else None,
-                                    "is_generic": False,
-                                    "wechat_webhook": wechat_webhook,
-                                    "notification_channel": notification_channel,
-                                    "notification_webhooks": notification_webhooks,
-                                    "perf_tracker": tracker,
-                                    "processing_options": processing_options,
-                                }
-                            )
-                            logger.info(f"[youtube-api] LLM task queued: {task_id}")
-                        except Exception as exc:
-                            logger.exception(
-                                f"[youtube-api] Failed to queue LLM task: {exc}"
-                            )
-                            task_notifier.send_text(f"【LLM任务加入队列失败】{exc}")
-                            cache_manager.update_task_status(
-                                task_id, TaskStatus.FAILED,
-                                error_message=f"LLM任务加入队列失败: {exc}",
-                            )
-                            return {"status": "failed", "message": f"LLM任务加入队列失败: {exc}"}
-
-                        # 转录就绪、LLM 校对/总结进行中 → calibrating（终态由 LLM 阶段写）
-                        cache_manager.update_task_status(
+                        handoff_failure = _handoff_to_llm_stage(
                             task_id,
-                            TaskStatus.CALIBRATING,
-                            platform=platform,
-                            media_id=media_id,
-                            title=video_title,
-                            author=author,
-                            download_url=download_url,
+                            {
+                                "task_id": task_id,
+                                "url": url,
+                                "display_url": display_url,
+                                "platform": platform,
+                                "media_id": media_id,
+                                "video_title": video_title,
+                                "author": author,
+                                "description": description,
+                                "transcript": transcript,
+                                "use_speaker_recognition": use_speaker_recognition,
+                                "transcription_data": transcription_result.get(
+                                    "transcription_data"
+                                )
+                                if use_speaker_recognition
+                                else None,
+                                "is_generic": False,
+                                "wechat_webhook": wechat_webhook,
+                                "notification_channel": notification_channel,
+                                "notification_webhooks": notification_webhooks,
+                                "perf_tracker": tracker,
+                                "processing_options": processing_options,
+                            },
+                            calibrating_status_kwargs={
+                                "platform": platform,
+                                "media_id": media_id,
+                                "title": video_title,
+                                "author": author,
+                                "download_url": download_url,
+                            },
+                            task_notifier=task_notifier,
+                            log_context="youtube-api",
                         )
+                        if handoff_failure is not None:
+                            return handoff_failure
+                        logger.info(f"[youtube-api] LLM task queued: {task_id}")
+
                         return {
                             "status": "success",
                             "message": "使用 YouTube API Server 下载并转录成功",
@@ -1259,23 +1803,13 @@ def process_transcription(
                     # API Server 失败，不降级，直接返回错误
                     error_msg = f"YouTube API Server error: [{api_error.code}] {api_error.message}"
                     logger.error(f"[youtube-api] {error_msg}")
-                    task_notifier.notify_task_status(display_url, "下载失败", error_msg)
-                    cache_manager.update_task_status(
-                        task_id, TaskStatus.FAILED,
-                        download_url=download_url, error_message=error_msg,
-                    )
-                    return {"status": "failed", "message": error_msg}
+                    return _fail_task_and_notify(error_msg)
 
                 except Exception as exc:
                     # 其他异常也不降级
                     error_msg = f"YouTube API Server unexpected error: {exc}"
                     logger.exception(f"[youtube-api] {error_msg}")
-                    task_notifier.notify_task_status(display_url, "下载失败", error_msg)
-                    cache_manager.update_task_status(
-                        task_id, TaskStatus.FAILED,
-                        download_url=download_url, error_message=error_msg,
-                    )
-                    return {"status": "failed", "message": error_msg}
+                    return _fail_task_and_notify(error_msg)
 
             # ========== 原有逻辑（非 YouTube API Server 路径）==========
             # 已在前面完成元数据解析与下载器准备
@@ -1336,43 +1870,54 @@ def process_transcription(
                 )
 
                 if not cache_result:
-                    logger.error("保存平台字幕到缓存失败")
+                    error_msg = "保存平台字幕到缓存失败"
+                    logger.error(error_msg)
+                    # Y4 修复（PR3 review hardening 加固轮，同上游 [youtube-api]
+                    # 分支的收口原则）：字幕产物未真正落盘，任务却仍会报告成功，
+                    # 改走既有失败收口 _fail_task_and_notify。
+                    return _fail_task_and_notify(
+                        error_msg, notify_status="转录结果保存失败",
+                        title=video_title, author_name=author,
+                    )
 
                 # 将LLM处理任务加入队列
-                try:
-                    llm_task_queue.put(
-                        {
-                            "task_id": task_id,
-                            "url": url,
-                            "display_url": display_url,
-                            "platform": platform,
-                            "media_id": video_id,
-                            "video_title": video_title,
-                            "author": author,
-                            "description": description,
-                            "transcript": subtitle,
-                            "use_speaker_recognition": False,  # 平台字幕没有说话人信息
-                            "is_generic": is_generic_downloader or is_from_generic,
-                            "wechat_webhook": wechat_webhook,
-                            "notification_channel": notification_channel,
-                            "notification_webhooks": notification_webhooks,
-                            "perf_tracker": tracker,
-                            "processing_options": processing_options,
-                        }
-                    )
-                    logger.info(
-                        f"将LLM任务加入队列（平台字幕）: {task_id}, 标题: {video_title}"
-                    )
-                except Exception as exc:
-                    logger.exception(f"将LLM任务加入队列失败（平台字幕）: {exc}")
-                    task_notifier.send_text(f"【LLM任务加入队列失败】{exc}")
-                    cache_manager.update_task_status(
-                        task_id, TaskStatus.FAILED,
-                        error_message=f"LLM任务加入队列失败: {exc}",
-                    )
-                    return {"status": "failed", "message": f"LLM任务加入队列失败: {exc}"}
+                handoff_failure = _handoff_to_llm_stage(
+                    task_id,
+                    {
+                        "task_id": task_id,
+                        "url": url,
+                        "display_url": display_url,
+                        "platform": platform,
+                        "media_id": video_id,
+                        "video_title": video_title,
+                        "author": author,
+                        "description": description,
+                        "transcript": subtitle,
+                        "use_speaker_recognition": False,  # 平台字幕没有说话人信息
+                        "is_generic": is_generic_downloader or is_from_generic,
+                        "wechat_webhook": wechat_webhook,
+                        "notification_channel": notification_channel,
+                        "notification_webhooks": notification_webhooks,
+                        "perf_tracker": tracker,
+                        "processing_options": processing_options,
+                    },
+                    calibrating_status_kwargs={
+                        "platform": platform,
+                        "media_id": video_id,
+                        "title": video_title,
+                        "author": author,
+                        "download_url": download_url,
+                    },
+                    task_notifier=task_notifier,
+                    log_context="平台字幕",
+                )
+                if handoff_failure is not None:
+                    return handoff_failure
+                logger.info(
+                    f"将LLM任务加入队列（平台字幕）: {task_id}, 标题: {video_title}"
+                )
 
-                result = {
+                return {
                     "status": "success",
                     "message": "使用平台字幕成功",
                     "data": {
@@ -1381,17 +1926,6 @@ def process_transcription(
                         "transcript": subtitle,
                     },
                 }
-                # 转录就绪、LLM 校对/总结进行中 → calibrating（终态由 LLM 阶段写）
-                cache_manager.update_task_status(
-                    task_id,
-                    TaskStatus.CALIBRATING,
-                    platform=platform,
-                    media_id=video_id,
-                    title=video_title,
-                    author=author,
-                    download_url=download_url,
-                )
-                return result
             else:
                 # 没有字幕，需要下载音视频并转录
                 logger.info(f"下载视频进行转录: {url}")
@@ -1464,26 +1998,16 @@ def process_transcription(
                         else:
                             error_msg = f"无法获取下载信息: {url}"
                             logger.error(error_msg)
-                            task_notifier.notify_task_status(
-                                display_url, "下载失败", error_msg, title=video_title, author=author
+                            return _fail_task_and_notify(
+                                error_msg, title=video_title, author_name=author,
                             )
-                            cache_manager.update_task_status(
-                                task_id, TaskStatus.FAILED,
-                                download_url=download_url, error_message=error_msg,
-                            )
-                            return {"status": "failed", "message": error_msg}
 
                 if not local_file:
                     error_msg = f"下载文件失败: {url}"
                     logger.error(error_msg)
-                    task_notifier.notify_task_status(
-                        display_url, "下载失败", error_msg, title=video_title, author=author
+                    return _fail_task_and_notify(
+                        error_msg, title=video_title, author_name=author,
                     )
-                    cache_manager.update_task_status(
-                        task_id, TaskStatus.FAILED,
-                        download_url=download_url, error_message=error_msg,
-                    )
-                    return {"status": "failed", "message": error_msg}
 
                 try:
                     # 开始转录
@@ -1523,7 +2047,19 @@ def process_transcription(
                             )
 
                             if not cache_result:
-                                logger.error("保存FunASR转录结果到缓存失败")
+                                error_msg = "保存FunASR转录结果到缓存失败"
+                                logger.error(error_msg)
+                                # Y4 修复（PR3 review hardening 加固轮，同上游各
+                                # save_cache 站点的收口原则）：转录产物未真正落盘，
+                                # 任务却仍会报告成功，改走既有失败收口
+                                # _fail_task_and_notify；外层 with tracker.track(...)
+                                # / try 均以 finally: pass 收尾，这里 return 不会跳过
+                                # 任何清理逻辑（与本函数上方"下载文件失败"分支同款
+                                # 写法）。
+                                return _fail_task_and_notify(
+                                    error_msg, notify_status="转录结果保存失败",
+                                    title=video_title, author_name=author,
+                                )
 
                             # 构造与普通转录器兼容的结果
                             transcription_result = {
@@ -1557,7 +2093,14 @@ def process_transcription(
                             )
 
                             if not cache_result:
-                                logger.error("保存CapsWriter转录结果到缓存失败")
+                                error_msg = "保存CapsWriter转录结果到缓存失败"
+                                logger.error(error_msg)
+                                # Y4 修复（PR3 review hardening 加固轮，同上面 FunASR
+                                # 分支的收口原则，理由同注释）。
+                                return _fail_task_and_notify(
+                                    error_msg, notify_status="转录结果保存失败",
+                                    title=video_title, author_name=author,
+                                )
 
                     # 获取转录文本
                     transcript = transcription_result.get("transcript", "")
@@ -1572,43 +2115,46 @@ def process_transcription(
                     )
 
                     # 将LLM处理任务加入队列
-                    try:
-                        llm_task_queue.put(
-                            {
-                                "task_id": task_id,
-                                "url": url,
-                                "display_url": display_url,
-                                "platform": platform,
-                                "media_id": media_id,
-                                "video_title": video_title,
-                                "author": author,
-                                "description": description,
-                                "transcript": transcript,
-                                "use_speaker_recognition": use_speaker_recognition,
-                                "transcription_data": transcription_result.get(
-                                    "transcription_data"
-                                )
-                                if use_speaker_recognition
-                                else None,
-                                "is_generic": is_generic_downloader or is_from_generic,
-                                "wechat_webhook": wechat_webhook,
-                                "notification_channel": notification_channel,
-                                "notification_webhooks": notification_webhooks,
-                                "perf_tracker": tracker,
-                                "processing_options": processing_options,
-                            }
-                        )
-                        logger.info(
-                            f"将LLM任务加入队列（常规转录）: {task_id}, 标题: {video_title}"
-                        )
-                    except Exception as exc:
-                        logger.exception(f"将LLM任务加入队列失败（常规转录）: {exc}")
-                        task_notifier.send_text(f"【LLM任务加入队列失败】{exc}")
-                        cache_manager.update_task_status(
-                            task_id, TaskStatus.FAILED,
-                            error_message=f"LLM任务加入队列失败: {exc}",
-                        )
-                        return {"status": "failed", "message": f"LLM任务加入队列失败: {exc}"}
+                    handoff_failure = _handoff_to_llm_stage(
+                        task_id,
+                        {
+                            "task_id": task_id,
+                            "url": url,
+                            "display_url": display_url,
+                            "platform": platform,
+                            "media_id": media_id,
+                            "video_title": video_title,
+                            "author": author,
+                            "description": description,
+                            "transcript": transcript,
+                            "use_speaker_recognition": use_speaker_recognition,
+                            "transcription_data": transcription_result.get(
+                                "transcription_data"
+                            )
+                            if use_speaker_recognition
+                            else None,
+                            "is_generic": is_generic_downloader or is_from_generic,
+                            "wechat_webhook": wechat_webhook,
+                            "notification_channel": notification_channel,
+                            "notification_webhooks": notification_webhooks,
+                            "perf_tracker": tracker,
+                            "processing_options": processing_options,
+                        },
+                        calibrating_status_kwargs={
+                            "platform": platform,
+                            "media_id": video_id,
+                            "title": video_title,
+                            "author": author,
+                            "download_url": download_url,
+                        },
+                        task_notifier=task_notifier,
+                        log_context="常规转录",
+                    )
+                    if handoff_failure is not None:
+                        return handoff_failure
+                    logger.info(
+                        f"将LLM任务加入队列（常规转录）: {task_id}, 标题: {video_title}"
+                    )
 
                     # 返回结果
                     result = {
@@ -1624,31 +2170,68 @@ def process_transcription(
                 finally:
                     pass
 
-                # 转录就绪、LLM 校对/总结进行中 → calibrating（终态由 LLM 阶段写）
-                cache_manager.update_task_status(
-                    task_id,
-                    TaskStatus.CALIBRATING,
-                    platform=platform,
-                    media_id=video_id,
-                    title=video_title,
-                    author=author,
-                    download_url=download_url,
-                )
-
         return result
     except Exception as exc:
         logger.exception(f"转录处理异常: {exc}")
         # 任务失败时输出已记录的性能摘要
         tracker.log_summary()
         display_url = url
-        get_notification_router().notify_task_status(
-            url=display_url, status="转录异常", error=str(exc),
-            channel_name=notification_channel, webhooks=notification_webhooks,
+        # 先写终态再通知：与队列处理器（run_and_finalize
+        # 的 except 分支）保持一致的顺序：若先 notify 再 update，
+        # 通知渠道悬挂/失败会延迟终态写入，让
+        # GET /api/task 在此期间仍显示过时的 in-flight 状态。
+        # K3 修复（本地 codex review 第 8 轮）：update_task_status 是
+        # compare-and-set，终态黏性可能拒绝这次 FAILED 写入（例如缓存全
+        # 命中分支其实已经成功写过 success，只是完成通知逻辑抛了异常——但
+        # 那条路径现在已经被独立 try/except 兜住，不会再走到这里；这里检
+        # 查返回值是为了其它真正在 success CAS 之前就失败的路径，不能对
+        # 写入结果不闻不问）。
+        # L1 修复（CI review 第 5 轮 P1）：这是最后一道防线——写入本身若抛
+        # 异常，此前这里没有 try/except，异常会直接原样传播（恰好没有先发
+        # 通知，但缺少收敛日志）；现在显式 try/except 记日志后重新抛出，
+        # 行为不变、可观测性补齐，且与 _handoff_to_llm_stage /
+        # _fail_task_and_notify 两处站点统一。
+        try:
+            failed_status_written = cache_manager.update_task_status(
+                task_id, TaskStatus.FAILED, download_url=download_url,
+                error_message=f"转录任务异常: {exc}",
+            )
+        except Exception:
+            logger.exception(f"收敛 failed 终态写入异常: {task_id}")
+            raise
+
+        if failed_status_written:
+            # M1 修复（PR3 review hardening 收尾轮）：CAS==True 才是本次调用的
+            # 真正胜者，失败通知严格只挂在这里。
+            get_notification_router().notify_task_status(
+                url=display_url, status="转录异常", error=str(exc),
+                channel_name=notification_channel, webhooks=notification_webhooks,
+            )
+            return {
+                "status": "failed",
+                "message": f"转录任务异常: {exc}",
+                "error": str(exc),
+            }
+
+        # M1 修复（PR3 review hardening 收尾轮）：CAS 返回 False 无法区分"任务
+        # 行已是 success/failed 终态"与"任务行根本不存在"——两种情况下
+        # update_task_status 的 UPDATE ... WHERE task_id=? AND status NOT IN
+        # ('success','failed') rowcount 都是 0。因此除 success 分支要如实改写
+        # 返回值外，其余一律不再发失败通知：已是 failed 的话，真正的 CAS 胜者
+        # 早已发过一次；行不存在/unknown 的话，不为不存在的终态编造通知（上一
+        # 轮 L1 修复遗留的口子：曾经对"非 success"一律继续发通知，未做这个
+        # 区分）。
+        current_task = cache_manager.get_task_by_id(task_id)
+        current_status = current_task.get("status") if current_task else "unknown"
+        logger.warning(
+            f"任务状态 CAS 写入 failed 失败(任务已处于终态 {current_status}，"
+            f"未被本次异常覆盖，跳过失败通知): {task_id}"
         )
-        cache_manager.update_task_status(
-            task_id, TaskStatus.FAILED, download_url=download_url,
-            error_message=f"转录任务异常: {exc}",
-        )
+        if current_status == TaskStatus.SUCCESS:
+            return {
+                "status": TaskStatus.SUCCESS,
+                "message": "任务已被并发流程标记为 success，跳过失败通知",
+            }
         return {
             "status": "failed",
             "message": f"转录任务异常: {exc}",

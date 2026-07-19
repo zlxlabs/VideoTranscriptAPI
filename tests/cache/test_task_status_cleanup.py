@@ -30,6 +30,12 @@ from src.video_transcript_api.utils.task_status import TaskStatus
 def cm(tmp_path):
     """Create a CacheManager backed by a temporary directory/db."""
     manager = CacheManager(cache_dir=str(tmp_path / "cache"))
+    manager.audit_logger = type(
+        "NoopAudit", (), {
+            "archive_task_snapshot": lambda self, task: None,
+            "expire_task_snapshot": lambda self, task_id: None,
+        }
+    )()
     yield manager
     manager.close()
 

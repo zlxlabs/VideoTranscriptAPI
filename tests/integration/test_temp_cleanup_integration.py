@@ -89,7 +89,14 @@ class FakeCache:
         return True
 
     def update_task_status(self, *a, **k):
-        return None
+        # 真实 CacheManager.update_task_status 是 compare-and-set，正常
+        # 写入（未被终态黏性拦截）返回 True（本地 codex review 第 15 轮：
+        # process_transcription 的 LLM 交接现在会检查 CALIBRATING 写入的
+        # 返回值——见 _handoff_to_llm_stage，返回 falsy 会被当作"任务已被
+        # 外部终态化"提前退出并报告失败）。这个 fake 此前无条件返回 None，
+        # 在没人检查返回值时无害；加了返回值检查后必须如实返回 True，
+        # 否则本测试预期的成功路径会被误判为竞态失败。
+        return True
 
     def get_task_by_id(self, *a, **k):
         return {}

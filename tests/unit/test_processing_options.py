@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from video_transcript_api.api.services.transcription import (
     ProcessingOptions,
@@ -27,10 +28,15 @@ from video_transcript_api.api.services.transcription import (
 
 
 class TestProcessingOptionsSchema:
+    def test_rejects_unknown_feature_gate(self):
+        with pytest.raises(ValidationError):
+            ProcessingOptions.model_validate({"summarizee": False})
+
     def test_default_is_all_true(self):
         opts = ProcessingOptions()
         assert opts.calibrate is True
         assert opts.summarize is True
+        assert opts.infer_speaker_names is True
 
     def test_explicit_calibrate_false_summarize_false(self):
         opts = ProcessingOptions(calibrate=False, summarize=False)
@@ -53,7 +59,7 @@ class TestProcessingOptionsSchema:
         with pytest.raises(Exception):
             ProcessingOptions(calibrate="not-a-bool-and-not-coercible")
 
-    @pytest.mark.parametrize("field_name", ["calibrate", "summarize"])
+    @pytest.mark.parametrize("field_name", ["calibrate", "summarize", "infer_speaker_names"])
     @pytest.mark.parametrize(
         "loose_value", ["yes", "no", "1", "0", "true", "false", 1, 0]
     )
@@ -100,6 +106,7 @@ class TestNormalizeProcessingOptions:
         assert normalize_processing_options(None) == {
             "calibrate": True,
             "summarize": True,
+            "infer_speaker_names": True,
         }
 
     def test_explicit_options_pass_through_as_dict(self):
@@ -107,6 +114,7 @@ class TestNormalizeProcessingOptions:
         assert normalize_processing_options(opts) == {
             "calibrate": False,
             "summarize": True,
+            "infer_speaker_names": True,
         }
 
 
@@ -208,6 +216,7 @@ class TestTranscribeTaskDictProcessingOptions:
         assert queued_task["processing_options"] == {
             "calibrate": True,
             "summarize": True,
+            "infer_speaker_names": True,
         }
 
     def test_explicit_processing_options_reach_task_dict(self, client, mock_task_queue):
@@ -223,6 +232,7 @@ class TestTranscribeTaskDictProcessingOptions:
         assert queued_task["processing_options"] == {
             "calibrate": False,
             "summarize": True,
+            "infer_speaker_names": True,
         }
 
     def test_calibrate_and_summarize_both_false(self, client, mock_task_queue):
@@ -238,6 +248,7 @@ class TestTranscribeTaskDictProcessingOptions:
         assert queued_task["processing_options"] == {
             "calibrate": False,
             "summarize": False,
+            "infer_speaker_names": True,
         }
 
     def test_invalid_processing_options_type_returns_422(self, client):
@@ -250,7 +261,7 @@ class TestTranscribeTaskDictProcessingOptions:
         )
         assert resp.status_code == 422
 
-    @pytest.mark.parametrize("field_name", ["calibrate", "summarize"])
+    @pytest.mark.parametrize("field_name", ["calibrate", "summarize", "infer_speaker_names"])
     @pytest.mark.parametrize("loose_value", ["yes", "1", "0", "true", 1, 0])
     def test_loosely_coercible_boolean_value_returns_422(
         self, client, field_name, loose_value

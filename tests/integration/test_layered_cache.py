@@ -68,12 +68,23 @@ class DummyCacheManager:
     def get_cache(self, platform, media_id, use_speaker_recognition):
         return self.cache_data
 
+    def get_speaker_mapping(self, *args, **kwargs):
+        return self.cache_data.get("speaker_mapping") if self.cache_data else None
+
     def save_cache(self, **kwargs):
         self.saved.append(kwargs)
         return True
 
     def update_task_status(self, task_id, status, **kwargs):
         self.status_updates.append((task_id, status, kwargs))
+        # Real CacheManager.update_task_status is a compare-and-set that
+        # returns True on a genuine win (see H2 fix, local codex review
+        # round 7: process_transcription's cache-hit branch now gates its
+        # completion notification on this return value). This double has
+        # no terminal-stickiness model of its own -- callers that need to
+        # simulate a CAS loss should stub this method directly rather than
+        # relying on the default.
+        return True
 
     def get_task_by_id(self, task_id):
         return self.tasks.get(task_id)
@@ -113,7 +124,9 @@ def _run(monkeypatch, patch_runtime, cache_data, processing_options, task_id="t"
     result = transcription.process_transcription(
         task_id=task_id,
         url="https://www.youtube.com/watch?v=abc123",
-        use_speaker_recognition=False,
+        use_speaker_recognition=bool(
+            cache_data and cache_data.get("use_speaker_recognition")
+        ),
         wechat_webhook=None,
         download_url=None,
         metadata_override=None,
@@ -143,6 +156,174 @@ class TestLayeredCacheMatrix:
         assert result["data"]["cached"] is True
         assert queued == []
 
+    def test_missing_mapping_with_full_calibration_and_missing_structured_is_not_queued(
+        self, monkeypatch, patch_runtime
+    ):
+        """单项修复（PR3 review hardening）：这个测试原名
+        test_missing_speaker_artifact_requeues_only_name_inference，此前锁死的
+        正是本轮要修的 bug——mapping 缺失（本媒体从未推断过说话人姓名，或
+        fingerprint 未命中）+ 校对已确认 FULL + 结构化产物缺失（典型 legacy
+        缓存形态：早于说话人展示层上线的旧数据）。
+
+        旧代码在 need_speaker_names 判定里对"mapping 缺失"这条腿完全不看
+        结构化产物是否存在，无条件排队；而 calibration_confirmed_full=True
+        时 G2 又不会强制 calibrate=True，排队因此只会落进 calibrate=False
+        的"仅推断"分支——SpeakerInferencer 真烧一次 LLM token 推断出新
+        mapping、存进 speaker_mapping.json，但没有结构化产物可刷新
+        （llm_ops._refresh_speaker_names_in_existing_structured_artifact 的
+        "无旧产物可刷新"分支直接原样跳过），用户在 /view 页面永远看不到这次
+        调用的结果；下一次请求 mapping 又命中缓存，不再重新排队——一次白烧
+        token、且成功语义与可见结果完全不符的无效付费调用。
+
+        修复后：mapping 缺失 + 结构化缺失时，只有校对未确认 FULL（会被 G2
+        强制改成一次真实完整校对，结构化产物随之产出，映射有地方落地）才
+        排队；FULL 时不排队，legacy 缺口交给用户显式 recalibrate 触发全流程
+        处理（红：旧代码在这里断言 len(queued) == 1）。"""
+        dialogs = {
+            "segments": [
+                {"speaker": "S1", "text": "hello"},
+                {"speaker": "S2", "text": "world"},
+            ]
+        }
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "transcript_type": "funasr",
+            "transcript_data": dialogs,
+            "use_speaker_recognition": True,
+            "llm_calibrated": "done",
+            "llm_summary": "done",
+            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+            # 故意不带 "speaker_mapping"（mapping 缺失）和 "llm_processed"
+            # （结构化产物缺失）。
+        }
+
+        result, queued = _run(monkeypatch, patch_runtime, cache_data, None)
+
+        assert result["status"] == "success"
+        assert queued == [], (
+            "mapping 缺失但没有结构化产物可承接推断结果，且校对已确认 FULL "
+            "时不会被 G2 收编成完整流程——排队只会白烧一次 LLM token，结果永"
+            "远不可见，必须直接判定为完整命中，不排队"
+        )
+
+    def test_malformed_structured_artifact_with_missing_mapping_is_treated_as_not_refreshable(
+        self, monkeypatch, patch_runtime
+    ):
+        """J2 修复（本地增量复核第 3 轮）矩阵测试的排队侧断言：mapping 缺失
+        （本轮需要真实 LLM 推断新映射）+ 结构化产物"存在但不可刷新"（这里用
+        混合 schema——一条 dialog 带 speaker_id，另一条不带）时，此前排队侧
+        只用 isinstance(x, dict) 判断"可刷新"，会把这份产物误判为可刷新
+        （1a 分支）排队，真烧一次 LLM 推断；但 llm_ops._refresh_speaker_
+        names_in_existing_structured_artifact 真正尝试写入前的 schema 校验
+        （见 tests/unit/test_recalibrate.py::
+        test_mixed_missing_speaker_id_skips_refresh_without_partial_commit）
+        会认定这份产物不满足刷新前置条件、直接跳过——结果永远不可见，白烧
+        token（红：旧代码在这里断言 len(queued) == 1）。现在排队侧改用
+        llm_ops.structured_artifact_is_refreshable 的 schema 层判定，与
+        helper 侧共用同一份实现，一开始就不会排队，和结构化产物彻底缺失
+        （见上面 test_missing_mapping_with_full_calibration_and_missing_
+        structured_is_not_queued）同等对待。"""
+        dialogs = {
+            "segments": [
+                {"speaker": "S1", "text": "hello"},
+                {"speaker": "S2", "text": "world"},
+            ]
+        }
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "transcript_type": "funasr",
+            "transcript_data": dialogs,
+            "use_speaker_recognition": True,
+            "llm_calibrated": "done",
+            "llm_summary": "done",
+            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+            "llm_processed": {
+                # 混合 schema：一条带 speaker_id，一条不带——不满足
+                # structured_artifact_is_refreshable 的 schema 层
+                # （dialogs 非空且全部相关 dialog 都带非空 speaker_id）。
+                "dialogs": [
+                    {"speaker_id": "S1", "speaker": "说话人1", "text": "hello"},
+                    {"speaker": "说话人2", "text": "world"},
+                ],
+                "speaker_mapping": {"S1": "说话人1", "S2": "说话人2"},
+            },
+            # 故意不带 "speaker_mapping"：DummyCacheManager.get_speaker_mapping
+            # 返回 None，模拟 fingerprint 未命中/mapping 缺失。
+        }
+
+        result, queued = _run(monkeypatch, patch_runtime, cache_data, None)
+
+        assert result["status"] == "success"
+        assert queued == [], (
+            "结构化产物存在但不满足刷新前置条件（混合 schema）时，必须与"
+            "产物彻底缺失同等对待——不排队，避免白烧一次不会被 helper 消费"
+            "的 LLM 推断"
+        )
+
+    def test_missing_mapping_with_existing_structured_artifact_still_requeues_name_inference(
+        self, monkeypatch, patch_runtime
+    ):
+        """上一个测试收窄的边界证明：mapping 缺失时"结构化产物是否存在"才是
+        决定是否排队的关键，不是校对状态。这里结构化产物存在（有地方承接
+        新推断出的姓名），即便校对已确认 FULL，也必须继续排队一次零成本的
+        name-only 补层——这是 need_speaker_names 判定条件表里 1a 分支的正
+        向覆盖，避免上面的收窄误伤这条本该继续工作的路径。"""
+        dialogs = {
+            "segments": [
+                {"speaker": "S1", "text": "hello"},
+                {"speaker": "S2", "text": "world"},
+            ]
+        }
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "transcript_type": "funasr",
+            "transcript_data": dialogs,
+            "use_speaker_recognition": True,
+            "llm_calibrated": "done",
+            "llm_summary": "done",
+            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+            "llm_processed": {
+                "dialogs": [
+                    {"speaker_id": "S1", "speaker": "说话人1", "text": "hello"},
+                    {"speaker_id": "S2", "speaker": "说话人2", "text": "world"},
+                ],
+                "speaker_mapping": {"S1": "说话人1", "S2": "说话人2"},
+            },
+            # 故意不带 "speaker_mapping"：DummyCacheManager.get_speaker_mapping
+            # 返回 None，模拟 fingerprint 未命中/mapping 缺失。
+        }
+
+        result, queued = _run(monkeypatch, patch_runtime, cache_data, None)
+
+        assert result["status"] == "success"
+        assert len(queued) == 1
+        assert queued[0]["transcription_data"] == dialogs
+        assert queued[0]["processing_options"] == {
+            "calibrate": False,
+            "summarize": False,
+            "infer_speaker_names": True,
+        }
+
+    def test_explicitly_disabled_speaker_inference_does_not_require_artifact(
+        self, monkeypatch, patch_runtime
+    ):
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "transcript_type": "funasr",
+            "transcript_data": {"segments": [{"speaker": "S1", "text": "hello"}]},
+            "use_speaker_recognition": True,
+            "llm_calibrated": "done",
+            "llm_summary": "done",
+            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+        }
+        _, queued = _run(
+            monkeypatch,
+            patch_runtime,
+            cache_data,
+            {"calibrate": False, "summarize": False, "infer_speaker_names": False},
+        )
+        assert queued == []
+
     def test_transcript_only_then_full_flow_requeues_both_layers(
         self, monkeypatch, patch_runtime
     ):
@@ -164,7 +345,7 @@ class TestLayeredCacheMatrix:
         assert result["status"] == "success"
         assert len(queued) == 1
         task = queued[0]
-        assert task["processing_options"] == {"calibrate": True, "summarize": True}
+        assert task["processing_options"] == {"calibrate": True, "summarize": True, "infer_speaker_names": False}
         # Real calibration is needed -> feed the raw transcript, not the
         # disabled placeholder, and no download/transcription was re-run
         # (no save_cache call for a fresh transcript).
@@ -196,7 +377,7 @@ class TestLayeredCacheMatrix:
         assert result["status"] == "success"
         assert len(queued) == 1
         task = queued[0]
-        assert task["processing_options"] == {"calibrate": True, "summarize": True}
+        assert task["processing_options"] == {"calibrate": True, "summarize": True, "infer_speaker_names": False}
         assert task["transcript"] == "RAW uncalibrated transcript"
 
     def test_calibrate_only_then_full_flow_requeues_summary_only(
@@ -221,7 +402,7 @@ class TestLayeredCacheMatrix:
         assert result["status"] == "success"
         assert len(queued) == 1
         task = queued[0]
-        assert task["processing_options"] == {"calibrate": False, "summarize": True}
+        assert task["processing_options"] == {"calibrate": False, "summarize": True, "infer_speaker_names": False}
         assert task["transcript"] == "REAL calibrated text from a genuine LLM pass"
         # Force plain-text routing downstream (no re-diarization LLM call).
         assert task["transcription_data"] is None
@@ -251,6 +432,13 @@ class TestLayeredCacheMatrix:
                 "dialogs": [{"speaker": "Alice", "text": "hello"}],
                 "speaker_mapping": {"S0": "Alice", "S1": "Bob", "S2": "Carol"},
             },
+            # DummyCacheManager treats this as an already validated v1
+            # artifact; production validates schema/fingerprint/speaker set.
+            "speaker_mapping": {
+                "mapping": {"S0": "Alice"},
+                "meta": {"S0": {"name": "Alice", "confidence": 0.9}},
+                "low_confidence": [],
+            },
         }
 
         result, queued = _run(
@@ -261,10 +449,281 @@ class TestLayeredCacheMatrix:
         assert result["status"] == "success"
         assert len(queued) == 1
         task = queued[0]
-        assert task["processing_options"] == {"calibrate": False, "summarize": True}
+        assert task["processing_options"] == {"calibrate": False, "summarize": True, "infer_speaker_names": False}
         assert task["transcription_data"] is None
         assert task["use_speaker_recognition"] is True
         assert task["cached_speaker_count"] == 3
+
+    def test_stale_structured_artifact_forces_speaker_name_rebuild(
+        self, monkeypatch, patch_runtime
+    ):
+        """codex-review 本地第 16 轮 Q3: llm_processed.json 是渲染层
+        （dialog_renderer）直接消费的展示产物，也是 _save_llm_results 里除
+        状态文件外最晚写入的一个。即便校对/总结/说话人映射本身都已确认
+        完整（llm_status.json=FULL、speaker_mapping.json 指纹命中），
+        llm_processed.json 仍可能因半提交或历史姓名刷新失败而独立分叉
+        （新 schema，dialog 带 speaker_id 但姓名过期）——完整命中判定必须
+        额外核验这份展示产物，不能对它视而不见，直接短路成功。"""
+        dialogs = {
+            "segments": [
+                {"speaker": "S0", "text": "hello", "start_time": 0, "end_time": 1},
+            ]
+        }
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "transcript_type": "funasr",
+            "transcript_data": dialogs,
+            "use_speaker_recognition": True,
+            "llm_calibrated": "REAL calibrated text",
+            "llm_summary": "REAL summary",
+            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+            "llm_processed": {
+                # 新 schema：带 speaker_id，但姓名是过期的 "Old Name"——与
+                # 下面 speaker_mapping 里的权威映射 "New Name" 不一致。
+                "dialogs": [{"speaker_id": "S0", "speaker": "Old Name", "text": "hello"}],
+                "speaker_mapping": {"S0": "Old Name"},
+            },
+            # DummyCacheManager.get_speaker_mapping 直接返回这份 dict，
+            # 代表指纹已命中的权威映射（生产环境由 cache_manager 校验
+            # schema/fingerprint/speaker 集合）。
+            "speaker_mapping": {
+                "mapping": {"S0": "New Name"},
+                "meta": {"S0": {"name": "New Name", "confidence": 0.9}},
+                "low_confidence": [],
+            },
+        }
+
+        result, queued = _run(
+            monkeypatch, patch_runtime, cache_data,
+            {"calibrate": True, "summarize": True},
+        )
+
+        assert result["status"] == "success"
+        # 不得短路为"无需处理"——必须重新排队一次零成本的展示刷新。
+        assert len(queued) == 1
+        task = queued[0]
+        assert task["processing_options"] == {
+            "calibrate": False, "summarize": False, "infer_speaker_names": True,
+        }
+
+    def test_missing_structured_artifact_with_completed_calibration_is_full_hit(
+        self, monkeypatch, patch_runtime
+    ):
+        """X1（PR3 review hardening 三轮）：此前（见本测试原先的名字/断言）
+        "结构化产物缺失"无条件触发 need_speaker_names 补层重排队——但补层
+        请求的 processing_options.calibrate 恒为 False（见下面 queued 断言），
+        下游 SpeakerAwareProcessor.process(skip_calibration=True) 会直接把
+        未经校对的原始 ASR dialogs 当作 calibrated_dialogs，再经
+        llm_ops._refresh_speaker_names_in_existing_structured_artifact 的
+        "无旧产物、首次落盘"分支（V5 修复）落盘——覆盖/伪装成权威产物，与
+        这里已经真实存在、经过校对的 llm_calibrated.txt（llm_status 声明
+        FULL）自相矛盾，公开页（DialogRenderer 无条件优先读结构化产物）从
+        校对文本退化为生肉。
+
+        修法：llm_status 已声明校对真正完整完成时，"结构化产物缺失"不再
+        单独触发 need_speaker_names——渲染层对无结构化产物本就有平文本
+        回退（继续显示 llm_calibrated.txt 的校对内容），不需要靠这条零
+        成本"重建"路径冒险覆盖已有的真实产物。校对层本身还没有真正完成时，
+        Q3 原有的重排队保护原样保留，见下面
+        test_missing_structured_artifact_with_incomplete_calibration_still_
+        forces_rebuild。"""
+        dialogs = {
+            "segments": [
+                {"speaker": "S0", "text": "hello", "start_time": 0, "end_time": 1},
+            ]
+        }
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "transcript_type": "funasr",
+            "transcript_data": dialogs,
+            "use_speaker_recognition": True,
+            "llm_calibrated": "REAL calibrated text",
+            "llm_summary": "REAL summary",
+            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+            # 故意不带 "llm_processed"。
+            "speaker_mapping": {
+                "mapping": {"S0": "New Name"},
+                "meta": {"S0": {"name": "New Name", "confidence": 0.9}},
+                "low_confidence": [],
+            },
+        }
+
+        result, queued = _run(
+            monkeypatch, patch_runtime, cache_data,
+            {"calibrate": True, "summarize": True},
+        )
+
+        assert result["status"] == "success"
+        # X1 修复：不再排队补层任务，直接判定为完整命中——公开页继续通过
+        # 渲染层的平文本回退读取已有的真实校对文本，不会让补层任务用未经
+        # 校对的原始 ASR dialogs 冒充首次落盘的结构化产物，覆盖这份真实
+        # 产物。
+        assert queued == []
+
+    @pytest.mark.parametrize(
+        "calibration_status",
+        [CalibrationStatus.NONE, None],
+        ids=["status-none", "status-missing"],
+    )
+    def test_missing_structured_artifact_with_known_mapping_and_incomplete_calibration_does_not_escalate_calibrate(
+        self, monkeypatch, patch_runtime, calibration_status
+    ):
+        """J1 修复（本地增量复核第 3 轮）：此前 G2 会在 need_speaker_names=True
+        且校对未确认 FULL 时，把 queued_calibrate 强制升级为 True——即便
+        用户本次请求显式传了 calibrate=false，也会被系统偷偷改写成一次
+        真实付费校对，违反 ProcessingOptions 每个开关必须相互独立、用户
+        显式传值必须被尊重的设计合同（红：旧代码在这两种校对状态下都会
+        把这里断言为 calibrate=True——本测试原名 test_missing_structured_
+        artifact_with_incomplete_calibration_still_forces_rebuild，只锁死
+        了 NONE 单一场景下的升级行为，现在改写成参数化用例，同时证明升级
+        已被移除）。
+
+        这个测试驱动的是"mapping 已知"这条腿（case 2c：speaker_mapping
+        指纹命中、结构化产物缺失、calibrated_layer_satisfied 为 False，
+        即 DISABLED/NONE/状态缺失——PARTIAL 不在这条腿里：PARTIAL 与 FULL
+        同等被 calibrated_layer_satisfied 视为"层已满足"，落进不排队的
+        2d 分支，与本测试要验证的"排队但不该被升级"场景无关，故不参数化
+        进来）——排队本身仍然发生（codex-review 本地第 16 轮 Q3 原有的
+        重排队保护，未变，走 need_speaker_names 条件表 2c 分支零成本自愈
+        缺口，不受 J1 影响），但 queued_calibrate 现在纯由 need_calibrated
+        决定：用户显式 calibrate=false 时 need_calibrated 天然为 False
+        （与 calibrated_layer_satisfied/校对状态无关），queued_calibrate
+        因此保持 False，不再被 need_speaker_names 或校对状态牵连升级为
+        True。"""
+        dialogs = {
+            "segments": [
+                {"speaker": "S0", "text": "hello", "start_time": 0, "end_time": 1},
+            ]
+        }
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "transcript_type": "funasr",
+            "transcript_data": dialogs,
+            "use_speaker_recognition": True,
+            "llm_calibrated": "local formatted placeholder, not real calibration",
+            "llm_summary": "REAL summary",
+            # 故意不带 "llm_processed"。
+            "speaker_mapping": {
+                "mapping": {"S0": "New Name"},
+                "meta": {"S0": {"name": "New Name", "confidence": 0.9}},
+                "low_confidence": [],
+            },
+        }
+        if calibration_status is not None:
+            cache_data["llm_status"] = {"calibration_status": calibration_status}
+        # calibration_status is None -> 故意不带 "llm_status" 键，模拟诚实
+        # 状态模型上线之前的旧缓存（同样应被当作"未确认完成"处理）。
+
+        # calibrate=False（用户本轮未请求重新校对）——单独把 need_speaker_names
+        # 的判定隔离出来验证，不被 need_calibrated 一起触发的重排队掩盖。
+        result, queued = _run(
+            monkeypatch, patch_runtime, cache_data,
+            {"calibrate": False, "summarize": True},
+        )
+
+        assert result["status"] == "success"
+        assert len(queued) == 1
+        assert queued[0]["processing_options"] == {
+            "calibrate": False, "summarize": False, "infer_speaker_names": True,
+        }, f"calibration_status={calibration_status!r} 时 calibrate 被隐式升级"
+
+    @pytest.mark.parametrize(
+        "calibration_status",
+        [CalibrationStatus.NONE, CalibrationStatus.PARTIAL, None],
+        ids=["status-none", "status-partial", "status-missing"],
+    )
+    def test_missing_mapping_and_missing_structured_artifact_is_not_queued_regardless_of_calibration_status(
+        self, monkeypatch, patch_runtime, calibration_status
+    ):
+        """J1 修复（本地增量复核第 3 轮）：need_speaker_names 条件表 1b 分支
+        合并进"不排队"——mapping 缺失（本媒体从未推断过说话人姓名，或
+        fingerprint 未命中）且结构化产物缺失（无落点承接本轮新推断出的
+        映射）时，无论校对是否确认 FULL，一律不排队。
+
+        本测试原名 test_missing_structured_artifact_with_partial_
+        calibration_forces_recalibration，只覆盖 PARTIAL 单一场景，且锁死
+        的正是本轮要删除的行为：旧代码这里认为 PARTIAL/NONE/状态缺失三种
+        非-FULL 状态都必须排队并强制 queued_calibrate=True（G2 逻辑），
+        让"仅补说话人姓名"的请求偷偷变成一次真实付费校对。现在改写为参数
+        化用例，覆盖三种非-FULL 状态，全部断言为不排队（红：旧代码在这里
+        断言 len(queued) == 1 且 calibrate 被升级为 True）——原本"结构化
+        产物缺失+校对未确认 FULL+要姓名"这个场景，已经和已确认 FULL 的
+        场景（见上面 test_missing_mapping_with_full_calibration_and_
+        missing_structured_is_not_queued）合并成同一条"无落点不排队"规则：
+        H2 已经删除了"仅推断一轮的结果可以首次落盘"这条路径，继续排队只
+        会换来一次没有任何落点的说话人推断，白烧 LLM token 且结果永远不
+        可见，与已确认 FULL 时的问题完全同构。legacy 缺口交给用户显式
+        recalibrate 触发全流程处理。"""
+        dialogs = {
+            "segments": [
+                {"speaker": "S0", "text": "hello", "start_time": 0, "end_time": 1},
+            ]
+        }
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "transcript_type": "funasr",
+            "transcript_data": dialogs,
+            "use_speaker_recognition": True,
+            "llm_calibrated": "REAL partially-calibrated text (some segments really went through LLM calibration)",
+            "llm_summary": "REAL summary",
+            # 故意不带 "llm_processed" 和 "speaker_mapping"：DummyCacheManager.
+            # get_speaker_mapping 会返回 None（指纹未命中），驱动
+            # need_speaker_names 走"映射缺失"这条腿。
+        }
+        if calibration_status is not None:
+            cache_data["llm_status"] = {"calibration_status": calibration_status}
+        # calibration_status is None -> 故意不带 "llm_status" 键，模拟诚实
+        # 状态模型上线之前的旧缓存。
+
+        result, queued = _run(
+            monkeypatch, patch_runtime, cache_data,
+            {"calibrate": False, "summarize": True},
+        )
+
+        assert result["status"] == "success"
+        assert queued == [], (
+            f"calibration_status={calibration_status!r}：mapping 缺失且没有"
+            "结构化产物可承接推断结果时，即便校对未确认 FULL，也不应排队"
+            "——排队只会白烧一次 LLM token，结果永远不可见"
+        )
+
+    def test_consistent_structured_artifact_is_still_a_full_hit(
+        self, monkeypatch, patch_runtime
+    ):
+        """健全性检查：展示产物与权威映射一致时（新 schema，带
+        speaker_id），Q3 新增的核验不得误伤，仍然是完整命中，不触发任何
+        多余的排队。"""
+        dialogs = {
+            "segments": [
+                {"speaker": "S0", "text": "hello", "start_time": 0, "end_time": 1},
+            ]
+        }
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "transcript_type": "funasr",
+            "transcript_data": dialogs,
+            "use_speaker_recognition": True,
+            "llm_calibrated": "REAL calibrated text",
+            "llm_summary": "REAL summary",
+            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+            "llm_processed": {
+                "dialogs": [{"speaker_id": "S0", "speaker": "New Name", "text": "hello"}],
+                "speaker_mapping": {"S0": "New Name"},
+            },
+            "speaker_mapping": {
+                "mapping": {"S0": "New Name"},
+                "meta": {"S0": {"name": "New Name", "confidence": 0.9}},
+                "low_confidence": [],
+            },
+        }
+
+        result, queued = _run(
+            monkeypatch, patch_runtime, cache_data,
+            {"calibrate": True, "summarize": True},
+        )
+
+        assert result["status"] == "success"
+        assert queued == []
 
     def test_non_speaker_cache_leaves_cached_speaker_count_none(
         self, monkeypatch, patch_runtime
@@ -341,16 +800,49 @@ class TestLayeredCacheMatrix:
     ):
         """Backward compatibility: process_transcription(processing_options=None)
         must reproduce the pre-feature gate exactly (has_llm_calibrated and
-        has_llm_summary)."""
-        cache_data = {**BASE_CACHE_DATA, "llm_calibrated": "x"}  # summary missing
+        has_llm_summary) for a cache that DOES carry a confirmed llm_status.json
+        (the normal, fully-committed case)."""
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "llm_calibrated": "x",  # summary missing
+            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+        }
 
         result, queued = _run(monkeypatch, patch_runtime, cache_data, None)
 
         assert result["status"] == "success"
         assert len(queued) == 1
-        # Legacy default (all True): calibrated layer already real (no
-        # llm_status -> not disabled) so only summary is missing.
-        assert queued[0]["processing_options"] == {"calibrate": False, "summarize": True}
+        # Legacy default (all True): calibrated layer already real and
+        # confirmed by llm_status.json, so only summary is missing.
+        assert queued[0]["processing_options"] == {"calibrate": False, "summarize": True, "infer_speaker_names": False}
+
+    def test_missing_llm_status_does_not_trust_existing_calibrated_file(
+        self, monkeypatch, patch_runtime
+    ):
+        """codex-review 本地第 16 轮 Q2: llm_status.json 是 _save_llm_results
+        整段落盘序列里最后写入的提交标记。calibrated 文件存在但状态文件缺失
+        无法区分"半提交（中途失败）"与"从未有状态的旧缓存"，统一按保守
+        策略处理——不得把 has_llm_calibrated=True 当作层已满足，必须触发
+        真实重新校对（而不是永久信任一份可能是全降级 NONE 兜底文本的产物）。
+        """
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "llm_calibrated": "x",
+            # 故意不带 "llm_status"：模拟 save_llm_status 从未成功写入过
+            # （半提交，或早于诚实状态模型上线的旧缓存——两者在磁盘上完全
+            # 无法区分，见 transcription.py 里 calibrated_layer_satisfied
+            # 定义处的注释）。
+        }
+
+        result, queued = _run(monkeypatch, patch_runtime, cache_data, None)
+
+        assert result["status"] == "success"
+        assert len(queued) == 1
+        task = queued[0]
+        # 校对层被视为未确认完成，触发真实重新校对（不再是 False）。
+        assert task["processing_options"] == {"calibrate": True, "summarize": True, "infer_speaker_names": False}
+        # 重新校对必须喂原始转录文本，而不是那份未经确认的 calibrated 产物。
+        assert task["transcript"] == "RAW uncalibrated transcript"
 
 
 class TestFullHitMirrorsCacheStatusOnTaskRow:
@@ -449,6 +941,63 @@ class TestFullHitMirrorsCacheStatusOnTaskRow:
             assert row["summary_status"] == llm_status["summary_status"]
             assert row["calibration_status"] == CalibrationStatus.PARTIAL
             assert row["summary_status"] == SummaryStatus.GENERATED
+        finally:
+            real_cm.close()
+
+    def test_full_hit_does_not_fabricate_full_status_when_llm_status_missing(
+        self, monkeypatch, patch_runtime, tmp_path
+    ):
+        """codex-review 本地第 16 轮 Q2: llm_status.json 缺失（半提交，或
+        早于诚实状态模型上线的旧缓存）时，即便本轮请求 calibrate=False（无
+        需触发真实重新校对，直接短路 success），也不能在镜像进
+        task_status 行时把"未确认"悄悄编成 FULL——那会让 /api/audit/history
+        展示一个从未真正确认过的状态，与磁盘上"根本没有 llm_status.json"
+        的真实情况矛盾。"""
+        real_cm = CacheManager(cache_dir=str(tmp_path / "cache"))
+        try:
+            real_cm.save_cache(
+                platform="youtube",
+                url="https://www.youtube.com/watch?v=abc123",
+                media_id="abc123",
+                use_speaker_recognition=False,
+                transcript_data="RAW uncalibrated transcript",
+                transcript_type="capswriter",
+                title="cached title",
+                author="cached author",
+                description="cached desc",
+            )
+            real_cm.save_llm_result(
+                platform="youtube", media_id="abc123", use_speaker_recognition=False,
+                llm_type="calibrated", content="real calibrated text",
+            )
+            # 故意不调用 save_llm_status：模拟半提交（中途失败）或旧缓存。
+
+            task_id = real_cm.create_task(
+                url="https://www.youtube.com/watch?v=abc123",
+                use_speaker_recognition=False,
+                platform="youtube",
+                media_id="abc123",
+            )["task_id"]
+
+            monkeypatch.setattr(transcription, "cache_manager", real_cm)
+
+            result = transcription.process_transcription(
+                task_id=task_id,
+                url="https://www.youtube.com/watch?v=abc123",
+                use_speaker_recognition=False,
+                wechat_webhook=None,
+                download_url=None,
+                metadata_override=None,
+                processing_options={"calibrate": False, "summarize": False},
+            )
+
+            assert result["status"] == "success"
+
+            row = real_cm.get_task_by_id(task_id)
+            assert row is not None
+            assert row["status"] == "success"
+            # 不得被推断为 FULL——保持 None，如实反映"未确认"。
+            assert row["calibration_status"] is None
         finally:
             real_cm.close()
 
@@ -677,7 +1226,7 @@ class TestTranscriptOnlyCacheBothSwitchesOffIsNotFullHit:
         assert result["status"] == "success"
         assert len(queued) == 1
         task = queued[0]
-        assert task["processing_options"] == {"calibrate": False, "summarize": False}
+        assert task["processing_options"] == {"calibrate": False, "summarize": False, "infer_speaker_names": False}
         # Real (raw) transcript reused as input -- no re-download/re-transcribe.
         assert task["transcript"] == "RAW uncalibrated transcript"
 
@@ -1122,3 +1671,199 @@ class TestCalibrateOnlyBackfillDoesNotMisreportSkippedShortAsSummary:
             assert call_kwargs["is_summary"] is False
         finally:
             real_cm.close()
+
+
+class TestFullHitCasLossSuppressesNotification:
+    """H2 (local codex review round 7): process_transcription()'s cache
+    full-hit branch used to send its content notification
+    (router.send_long_text) and its "任务完成" completion notification
+    (task_notifier.send_text) BEFORE calling cache_manager
+    .update_task_status(..., TaskStatus.SUCCESS, ...), and it silently
+    ignored that call's compare-and-set return value. If the task had
+    already been closed to a terminal state by another path (e.g. shutdown
+    liquidation marking it failed on a timeout) before this branch's own
+    write landed, the CAS write loses -- but the user had already received
+    a "success" notification for a task the database actually recorded as
+    failed. Fixed by writing the CAS first and gating both notifications on
+    a genuine win; a loss now logs a warning with the real terminal status
+    instead.
+    """
+
+    def test_cas_loss_suppresses_notifications(self, monkeypatch, patch_runtime):
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "llm_calibrated": "real calibrated text",
+            "llm_summary": "real summary",
+            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+        }
+
+        class CasLosingCacheManager(DummyCacheManager):
+            def update_task_status(self, task_id, status, **kwargs):
+                # Simulate the task already having been closed elsewhere
+                # (e.g. shutdown liquidation) as a terminal failure --
+                # update_task_status()'s real terminal stickiness would
+                # reject this SUCCESS write and return False.
+                self.status_updates.append((task_id, status, kwargs))
+                return False
+
+        cache_manager = CasLosingCacheManager(cache_data=cache_data)
+        monkeypatch.setattr(transcription, "cache_manager", cache_manager)
+
+        notification_router = MagicMock()
+        monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)
+
+        result = transcription.process_transcription(
+            task_id="task-cas-loss",
+            url="https://www.youtube.com/watch?v=abc123",
+            use_speaker_recognition=False,
+            wechat_webhook=None,
+            download_url=None,
+            metadata_override=None,
+            processing_options={"calibrate": False, "summarize": False},
+        )
+
+        # The HTTP-level response still reports the cached content was
+        # served successfully -- that part is unrelated to this fix, which
+        # is only about the async notification + terminal-status logging.
+        assert result["status"] == "success"
+
+        # The actual bug this test pins down: once the CAS write loses, no
+        # notification of any kind (content or "task complete") may be sent.
+        notification_router.send_long_text.assert_not_called()
+        notification_router.send_text.assert_not_called()
+
+        # The CAS write was genuinely attempted with SUCCESS (and lost) --
+        # this isn't a case of the write being skipped outright.
+        assert cache_manager.status_updates[-1][1] == TaskStatus.SUCCESS
+
+    def test_cas_win_still_sends_notifications(self, monkeypatch, patch_runtime):
+        """Sanity/regression companion: the normal path (CAS wins) must
+        still notify -- the fix must not accidentally suppress real
+        completions."""
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "llm_calibrated": "real calibrated text",
+            "llm_summary": "real summary",
+            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+        }
+        cache_manager = DummyCacheManager(cache_data=cache_data)
+        # The completion-message ("任务完成") send is guarded by
+        # `task_info and task_info.get("view_token")` -- populate it so this
+        # test can actually observe that branch being reached, matching a
+        # real task row (which always has a view_token, assigned at
+        # create_task time).
+        cache_manager.tasks["task-cas-win"] = {"view_token": "vt-cas-win"}
+        monkeypatch.setattr(transcription, "cache_manager", cache_manager)
+
+        notification_router = MagicMock()
+        monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)
+
+        result = transcription.process_transcription(
+            task_id="task-cas-win",
+            url="https://www.youtube.com/watch?v=abc123",
+            use_speaker_recognition=False,
+            wechat_webhook=None,
+            download_url=None,
+            metadata_override=None,
+            processing_options={"calibrate": False, "summarize": False},
+        )
+
+        assert result["status"] == "success"
+        notification_router.send_long_text.assert_called_once()
+        notification_router.send_text.assert_called_once()
+
+
+class TestFullHitNotificationExceptionDoesNotFailTask:
+    """K3（本地 codex review 第 8 轮）：H2 把 CAS 提到通知之前是对的，但
+    通知本身此前仍在最外层通用失败处理的 try/except 覆盖范围内——success
+    已经落库后，通知调用（router.send_long_text / task_notifier.send_text）
+    抛出的任何异常都会被那个 except 当成"转录处理异常"：函数返回值改成
+    failed、发一条误导性的"转录异常"通知、且无条件尝试把 task_status 覆盖
+    成 failed（即便这次覆盖会被终态黏性拒绝）。修复后通知逻辑有自己独立
+    的 try/except，异常只记日志，不影响已经写定的 success 结果。
+    """
+
+    def test_content_notification_exception_after_success_cas_does_not_fail_task(
+        self, monkeypatch, patch_runtime,
+    ):
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "llm_calibrated": "real calibrated text",
+            "llm_summary": "real summary",
+            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+        }
+        cache_manager = DummyCacheManager(cache_data=cache_data)
+        cache_manager.tasks["task-notify-boom"] = {"view_token": "vt-notify-boom"}
+        monkeypatch.setattr(transcription, "cache_manager", cache_manager)
+
+        notification_router = MagicMock()
+        notification_router.send_long_text.side_effect = RuntimeError("webhook timeout")
+        monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)
+
+        result = transcription.process_transcription(
+            task_id="task-notify-boom",
+            url="https://www.youtube.com/watch?v=abc123",
+            use_speaker_recognition=False,
+            wechat_webhook=None,
+            download_url=None,
+            metadata_override=None,
+            processing_options={"calibrate": False, "summarize": False},
+        )
+
+        # 任务结果如实反映 success 已经落库——不能因为通知失败就整体报告
+        # failed。
+        assert result["status"] == "success"
+
+        # CAS 只被真正尝试过一次（SUCCESS）：outer except 从未被触发，
+        # 因此没有第二次试图把状态覆盖成 FAILED 的写入。
+        assert len(cache_manager.status_updates) == 1
+        assert cache_manager.status_updates[0][1] == TaskStatus.SUCCESS
+
+        # 没有误导性的"转录异常"通知（notify_task_status 在正常流程里也会
+        # 被调用几次做进度提示——"开始处理"/"使用已有缓存" 等，这里只需要
+        # 确认其中不存在 outer except 那条 status="转录异常" 的调用）。
+        error_calls = [
+            call for call in notification_router.notify_task_status.call_args_list
+            if call.kwargs.get("status") == "转录异常"
+        ]
+        assert error_calls == []
+
+    def test_completion_notification_exception_after_success_cas_does_not_fail_task(
+        self, monkeypatch, patch_runtime,
+    ):
+        """同上，但异常发生在"任务完成"通知（task_notifier.send_text，独立
+        try/except 包住的第二个调用点）而不是正文通知。"""
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "llm_calibrated": "real calibrated text",
+            "llm_summary": "real summary",
+            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+        }
+        cache_manager = DummyCacheManager(cache_data=cache_data)
+        cache_manager.tasks["task-notify-boom-2"] = {"view_token": "vt-notify-boom-2"}
+        monkeypatch.setattr(transcription, "cache_manager", cache_manager)
+
+        notification_router = MagicMock()
+        notification_router.send_text.side_effect = RuntimeError("webhook timeout")
+        monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)
+
+        result = transcription.process_transcription(
+            task_id="task-notify-boom-2",
+            url="https://www.youtube.com/watch?v=abc123",
+            use_speaker_recognition=False,
+            wechat_webhook=None,
+            download_url=None,
+            metadata_override=None,
+            processing_options={"calibrate": False, "summarize": False},
+        )
+
+        assert result["status"] == "success"
+        assert len(cache_manager.status_updates) == 1
+        assert cache_manager.status_updates[0][1] == TaskStatus.SUCCESS
+        error_calls = [
+            call for call in notification_router.notify_task_status.call_args_list
+            if call.kwargs.get("status") == "转录异常"
+        ]
+        assert error_calls == []
+        # 正文通知本身必须已经真正发出（异常发生在它之后的完成通知阶段）。
+        notification_router.send_long_text.assert_called_once()

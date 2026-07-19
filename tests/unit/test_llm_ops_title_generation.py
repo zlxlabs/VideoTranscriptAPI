@@ -74,6 +74,16 @@ def _patch_module_singletons(monkeypatch, coordinator, config=None):
 
 
 class TestGenerateTitleCallsLLMWithCorrectSignature:
+    def test_irrelevant_speaker_gate_does_not_enable_title_llm(self):
+        assert llm_ops._requires_llm_title(
+            {
+                "calibrate": False,
+                "summarize": False,
+                "infer_speaker_names": True,
+            },
+            use_speaker_recognition=False,
+        ) is False
+
     """Locks in the fixed call: call_llm_api() (via LLMClient.call()) must
     receive the current-signature keyword arguments, not the stale
     6-positional-arg form that always raised TypeError."""

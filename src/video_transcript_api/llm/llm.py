@@ -96,6 +96,35 @@ def _build_sensitive_detector(config: Dict[str, Any]):
         return None
 
 
+def _normalize_provider_patterns(llm_cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """校验并规整 `llm.provider_patterns` 配置段。
+
+    该字段若存在必须是对象（provider 名 -> 检测规则），否则原地
+    `.items()` 会因非 dict 类型抛出裸 AttributeError。抽成独立的纯函数
+    （无 IO/网络/全局状态写入）是为了让 `--check-config` 的预检"解析器
+    演练"（见 api/context.py 的 `_rehearse_llm_config`）可以复用同一段
+    校验逻辑，而不必调用 `set_default_config` 本身——后者还会创建全局
+    `SyncLLMClient` 并写入 llm-compat 的全局 custom patterns 注册表，这些
+    是真实启动才应该发生的副作用。
+
+    Args:
+        llm_cfg: 配置字典中的 `llm` 段。
+
+    Returns:
+        规整后的 dict；provider_patterns 缺失/为 None/为其他 falsy 值时
+        返回 None（与调用方原有的 `if provider_patterns:` 判断语义一致）。
+
+    Raises:
+        ValueError: provider_patterns 存在且为 truthy 但不是对象。
+    """
+    provider_patterns = llm_cfg.get("provider_patterns")
+    if not provider_patterns:
+        return None
+    if not isinstance(provider_patterns, dict):
+        raise ValueError("llm.provider_patterns must be an object")
+    return {k: v for k, v in provider_patterns.items()}
+
+
 def set_default_config(config: Optional[Dict[str, Any]]) -> None:
     """设置模块级默认配置并初始化 SyncLLMClient"""
     global _default_config, _sync_client
@@ -115,11 +144,10 @@ def set_default_config(config: Optional[Dict[str, Any]]) -> None:
         return
 
     # 注入自定义 provider patterns
-    provider_patterns = llm_cfg.get("provider_patterns")
+    provider_patterns = _normalize_provider_patterns(llm_cfg)
     if provider_patterns:
-        patterns = {k: v for k, v in provider_patterns.items()}
-        set_custom_patterns(patterns)
-        logger.info(f"[LLM] Custom provider patterns set: {list(patterns.keys())}")
+        set_custom_patterns(provider_patterns)
+        logger.info(f"[LLM] Custom provider patterns set: {list(provider_patterns.keys())}")
 
     # 从 risk_control 配置加载敏感词库，传给 llm-compat SensitiveDetector 做 pre-scan
     sensitive_detector = _build_sensitive_detector(config)

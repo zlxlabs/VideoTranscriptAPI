@@ -1017,7 +1017,13 @@ class TestNoSamplesAndFailureFallback(unittest.TestCase):
     def test_empty_speakers_returns_empty_result(self):
         inferencer = _make_inferencer()
         result = inferencer.infer(speakers=[], dialogs=[], title="t")
-        self.assertEqual(result, {"mapping": {}, "meta": {}, "low_confidence": []})
+        self.assertEqual(
+            result,
+            {
+                "mapping": {}, "meta": {}, "low_confidence": [],
+                "source": "identity_fallback",
+            },
+        )
 
     def test_no_valid_samples_falls_back_to_identity(self):
         inferencer = _make_inferencer()
@@ -1028,8 +1034,15 @@ class TestNoSamplesAndFailureFallback(unittest.TestCase):
         )
         self.assertEqual(result["mapping"], {"Speaker1": "Speaker1"})
         self.assertFalse(result["meta"]["Speaker1"]["applied"])
+        self.assertEqual(result["source"], "identity_fallback")
 
     def test_llm_call_exception_falls_back_to_identity(self):
+        """Local codex review round 6, G4: a transient LLM failure (network
+        blip, rate limit, timeout...) must be tagged "identity_fallback",
+        not silently indistinguishable from a genuine successful inference --
+        llm_ops._refresh_speaker_names_in_existing_structured_artifact relies
+        on this tag to refuse overwriting an already-displayed good name with
+        this fallback's raw "Speaker1" placeholder."""
         inferencer = _make_inferencer()
         inferencer.llm_client.call = MagicMock(side_effect=Exception("boom"))
 
@@ -1041,6 +1054,90 @@ class TestNoSamplesAndFailureFallback(unittest.TestCase):
 
         self.assertEqual(result["mapping"], {"Speaker1": "Speaker1"})
         self.assertFalse(result["meta"]["Speaker1"]["applied"])
+        self.assertEqual(result["source"], "identity_fallback")
+
+    def test_allow_llm_false_returns_identity_fallback_source(self):
+        inferencer = _make_inferencer()
+        result = inferencer.infer(
+            speakers=["Speaker1"],
+            dialogs=[_make_dialog("Speaker1", "hello", 0.0)],
+            title="t",
+            allow_llm=False,
+        )
+        self.assertEqual(result["source"], "identity_fallback")
+
+    def test_real_llm_success_tags_source_llm(self):
+        inferencer = _make_inferencer()
+        inferencer.llm_client.call = MagicMock(
+            return_value=_mock_llm_response(
+                speaker_mapping={"Speaker1": "张三"},
+                confidence={"Speaker1": 0.9},
+            )
+        )
+        result = inferencer.infer(
+            speakers=["Speaker1"],
+            dialogs=[_make_dialog("Speaker1", "hello", 0.0)],
+            title="t",
+        )
+        self.assertEqual(result["source"], "llm")
+
+    def test_save_rejection_falls_back_to_identity_not_a_task_failure(self):
+        """R5 (PR3 review hardening): CacheManager.save_speaker_mapping now
+        validates the payload shape before persisting (shared with
+        get_speaker_mapping's read-side validation) and raises ValueError
+        for a malformed result (e.g. an LLM response with a non-str name or
+        a bool confidence value gets carried straight through
+        _apply_confidence_gate's meta["name"]/["confidence"] fields into the
+        save call). infer()'s existing broad `except Exception` (the same
+        one that already handles a raw LLM-call exception, see
+        test_llm_call_exception_falls_back_to_identity above) must catch
+        this too and degrade to identity_fallback -- not propagate the
+        exception and fail the whole task."""
+        cache_manager = MagicMock()
+        cache_manager.get_speaker_mapping.return_value = None  # no cache hit
+        cache_manager.save_speaker_mapping.side_effect = ValueError(
+            "speaker mapping result failed shape validation"
+        )
+        inferencer = _make_inferencer(cache_manager=cache_manager)
+        inferencer.llm_client.call = MagicMock(
+            return_value=_mock_llm_response(
+                speaker_mapping={"Speaker1": "张三"},
+                confidence={"Speaker1": 0.9},
+            )
+        )
+
+        result = inferencer.infer(
+            speakers=["Speaker1"],
+            dialogs=[_make_dialog("Speaker1", "hello", 0.0)],
+            title="t",
+            platform="p",
+            media_id="m",
+        )
+
+        cache_manager.save_speaker_mapping.assert_called_once()
+        self.assertEqual(result["mapping"], {"Speaker1": "Speaker1"})
+        self.assertFalse(result["meta"]["Speaker1"]["applied"])
+        self.assertEqual(result["source"], "identity_fallback")
+
+    def test_cache_hit_tags_source_cache_hit_not_llm(self):
+        cache_manager = MagicMock()
+        cache_manager.get_speaker_mapping.return_value = {
+            "mapping": {"Speaker1": "张三"},
+            "meta": {"Speaker1": {"name": "张三", "confidence": 0.95, "applied": True}},
+            "low_confidence": [],
+        }
+        inferencer = _make_inferencer(cache_manager=cache_manager)
+
+        result = inferencer.infer(
+            speakers=["Speaker1"],
+            dialogs=[_make_dialog("Speaker1", "hi", 0.0)],
+            title="t",
+            platform="p",
+            media_id="m",
+        )
+
+        inferencer.llm_client.call.assert_not_called()
+        self.assertEqual(result["source"], "cache_hit")
 
 
 if __name__ == "__main__":
