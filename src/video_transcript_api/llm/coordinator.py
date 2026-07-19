@@ -1,9 +1,10 @@
 """协调器模块 - 场景路由和统一入口"""
 
 from typing import Dict, List, Optional, Any, Union
+from dataclasses import asdict
 
 from ..utils.logging import setup_logger
-from ..utils.llm_status import SummaryStatus
+from ..utils.llm_status import ChaptersStatus, SummaryStatus
 from .core.config import LLMConfig
 from .core.llm_client import LLMClient
 from .core.cache_manager import CacheManager
@@ -14,6 +15,7 @@ from .validators.unified_quality_validator import UnifiedQualityValidator
 from .processors.plain_text_processor import PlainTextProcessor
 from .processors.speaker_aware_processor import SpeakerAwareProcessor
 from .processors.summary_processor import SummaryProcessor, SummaryResult
+from .processors.chapters_processor import ChaptersProcessor, ChaptersResult
 
 logger = setup_logger(__name__)
 
@@ -98,6 +100,12 @@ class LLMCoordinator:
             config=self.config,
         )
 
+        # 章节梗概处理器（阶段三；与 summary 对称的诚实状态模型）
+        self.chapters_processor = ChaptersProcessor(
+            llm_client=self.llm_client,
+            config=self.config,
+        )
+
         logger.info("LLM Coordinator initialized successfully with summary support")
 
     def process(
@@ -112,6 +120,8 @@ class LLMCoordinator:
         skip_calibration: bool = False,
         speaker_count_hint: Optional[int] = None,
         infer_speaker_names: bool = True,
+        skip_chapters: bool = False,
+        timeline_segments: Optional[List[Dict]] = None,
     ) -> Dict:
         """处理文本（统一入口）
 
@@ -137,6 +147,12 @@ class LLMCoordinator:
                 丢失结构化对话语境。调用方（llm_ops._handle_llm_task）从缓存的
                 llm_processed.json 里读出真实说话人数回传，None 表示"没有更优信息，
                 按自动推断走"，不影响其余调用方（保持向后兼容）。
+            skip_chapters: 是否跳过章节生成（processing_options.chapters=False 或
+                分层缓存层已满足时为 True）。跳过时 chapters_status 保持 None——
+                "本轮未尝试"，由下游合并语义保留旧值。
+            timeline_segments: 章节输入（dialogs 或原始 segments 列表）。由
+                llm_ops 按输入梯度解析后传入，保持 llm/ 包不依赖 cache 读盘。
+                None/空时 processor 会诚实返回 SKIPPED_NO_TIMELINE。
 
         Returns:
             处理结果字典:
@@ -144,13 +160,14 @@ class LLMCoordinator:
                 "calibrated_text": str,        # 校对后的文本
                 "summary_text": Optional[str], # 总结文本（新增）
                 "key_info": dict,              # 关键信息
-                "stats": dict,                 # 统计信息
+                "stats": dict,                 # 统计信息（含 chapters / chapters_status）
                 "structured_data": dict,       # 结构化数据（仅有说话人）
             }
         """
         logger.info(
             f"Processing content for: {title} "
-            f"(skip_summary={skip_summary}, skip_calibration={skip_calibration})"
+            f"(skip_summary={skip_summary}, skip_calibration={skip_calibration}, "
+            f"skip_chapters={skip_chapters})"
         )
 
         # 获取模型配置（敏感词降级由 llm-compat 自动处理）
@@ -209,7 +226,47 @@ class LLMCoordinator:
             summary_text = summary_result.text
             summary_status = summary_result.status
 
-        # 步骤 4: 合并结果
+        # 步骤 4: 章节梗概生成（可跳过；与 summary 对称的诚实状态）
+        # chapters_status 为 None 表示"本轮未尝试"，下游合并语义保留旧值。
+        # 输入梯度（本轮 dialogs > 调用方传入的 timeline_segments）：
+        # 本轮结构化校对 dialogs 质量最优；llm_ops 负责把缓存 dialogs / 原始
+        # segments 解析后经 timeline_segments 传入（保持 llm 包不读盘）。
+        chapters_list: List[Dict[str, Any]] = []
+        chapters_status: Optional[ChaptersStatus] = None
+        chapters_fingerprint: Optional[str] = None
+        chapters_segment_count: int = 0
+        chapters_error: Optional[str] = None
+        chapters_source_kind: Optional[str] = None
+        if skip_chapters:
+            logger.info("Step 3/3: Chapters generation SKIPPED (skip_chapters=True)")
+        else:
+            logger.info("Step 3/3: Chapters generation")
+            chapters_input = timeline_segments
+            chapters_source_kind = "segments" if timeline_segments else "none"
+            structured_for_chapters = calibration_result.get("structured_data")
+            if isinstance(structured_for_chapters, dict):
+                dialogs = structured_for_chapters.get("dialogs")
+                if isinstance(dialogs, list) and dialogs:
+                    chapters_input = dialogs
+                    chapters_source_kind = "dialogs"
+            with set_context(stage="chapters"):
+                chapters_result = self._generate_chapters_if_needed(
+                    segments=chapters_input,
+                    title=title,
+                    author=author,
+                    description=description,
+                    selected_models=selected_models,
+                )
+            chapters_status = chapters_result.status
+            chapters_fingerprint = chapters_result.fingerprint
+            chapters_segment_count = chapters_result.segment_count
+            chapters_error = chapters_result.error
+            if chapters_status == ChaptersStatus.GENERATED:
+                chapters_list = [asdict(ch) for ch in chapters_result.chapters]
+            else:
+                chapters_list = []
+
+        # 步骤 5: 合并结果
         # calibration_status/calibration_stats 统一提升到 stats 顶层：
         # - 纯文本路径：calibration_status 与统计字段(total_segments 等)本来就在 stats 顶层
         # - 结构化路径：calibration_status 与统计字段都嵌在 stats["calibration_stats"] 里
@@ -241,6 +298,12 @@ class LLMCoordinator:
                 "calibration_status": calibration_status,
                 "calibration_stats": calibration_stats_detail,
                 "summary_status": summary_status,
+                "chapters": chapters_list,
+                "chapters_status": chapters_status,
+                "chapters_fingerprint": chapters_fingerprint,
+                "chapters_segment_count": chapters_segment_count,
+                "chapters_error": chapters_error,
+                "chapters_source_kind": chapters_source_kind,
             },
             "structured_data": calibration_result.get("structured_data"),
             "models_used": selected_models,
@@ -373,6 +436,53 @@ class LLMCoordinator:
             return {"segments": content}
         else:
             return None
+
+    def _generate_chapters_if_needed(
+        self,
+        segments: Optional[List[Dict]],
+        title: str,
+        author: str,
+        description: str,
+        selected_models: Dict,
+    ) -> ChaptersResult:
+        """Generate chapter outline when timeline segments are available.
+
+        Input resolution (dialogs vs raw segments) is the caller's job
+        (llm_ops input gradient); this method only invokes ChaptersProcessor
+        and maps exceptions to FAILED so the pipeline never crashes.
+
+        Args:
+            segments: Timeline list (dialogs or segments); may be None/empty.
+            title: Video title.
+            author: Author / channel.
+            description: Video description.
+            selected_models: Model selection dict (may include chapters_model).
+
+        Returns:
+            ChaptersResult with honest status (GENERATED / SKIPPED_* / FAILED).
+        """
+        try:
+            result = self.chapters_processor.process(
+                segments=segments,
+                title=title,
+                author=author,
+                description=description,
+                selected_models=selected_models,
+            )
+            logger.info(
+                f"Chapters generation finished: status={result.status}, "
+                f"count={len(result.chapters)}, segments={result.segment_count}"
+            )
+            return result
+        except Exception as e:
+            logger.error(f"Chapters generation failed: {e}", exc_info=True)
+            return ChaptersResult(
+                chapters=[],
+                status=ChaptersStatus.FAILED,
+                error=str(e),
+                fingerprint=None,
+                segment_count=0,
+            )
 
     def _generate_summary_if_needed(
         self,
