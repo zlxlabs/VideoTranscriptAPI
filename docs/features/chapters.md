@@ -54,6 +54,23 @@
 | `disabled` | 用户关闭 | 否（仅当本轮 `chapters=true` 时再生成） |
 | 缺省 / 文件与状态不一致 | — | 否（保守重跑） |
 
+## plain 源结构化校对与段落化（阶段二，T8）
+
+> 2026-07-19 T9 真实样本验收通过，开关默认翻 true（此前为 false 暗启动）。
+
+**开关**：`llm.structured_calibration_for_plain`（默认 `true`）。置 `false` 回退旧纯文本路径；已产出产物**只增不减**，凭 provenance 识别并在渲染时忽略（方案 b）。
+
+**行为差异**（开关开启、plain 源有 timeline segments、且本轮 `calibrate=true`）：
+
+- plain 源（CapsWriter 转录 / YouTube 字幕，无说话人标识）走 `SpeakerAwareProcessor` 的 **has_speaker=False 模式**：结构化逐段校对（`{id, text}` 契约，禁止合并/拆分/重排），**零 SpeakerInferencer.infer 调用**（key_info 提取保留）；缺省说话人/时间一律保留缺省，不塞 `"unknown"` / `"00:00:00"`。
+- 校准后、构造 `structured_data` 前执行**确定性段落化 v1**（`transcriber/paragraphize.py`）：只选边界、不动文本。授权断点 = 句末标点 / 段间停顿 ≥ `pause_threshold_seconds`；`target_chars` 是预算不是闸刀，到 `hard_max_chars` 无授权点放宽到逗号级，2×hard_max 仍无授权点在成员边界硬切（记 warning）。
+- 落盘 `llm_processed.json` 与 FunASR 同构但顶层带 `"mode": "plain_structured"`，dialogs 无 speaker 键；`llm_calibrated.txt` 继续生成无前缀变体（export/raw 兼容）。
+- **章节输入梯度自动取到本轮段落化后的 dialogs**——落盘 dialogs、章节输入、渲染锚点是同一个列表，因此 `start_seg` 直接对应 `#dlg-{i}` 锚点，plain 源章节首次获得精准跳转（`jump_ok=1`）。
+- `calibrate=false` 的补层任务维持纯文本路径（防指纹永久 mismatch → 永久 nolink）。
+- 无 segments 的老 plain 缓存诚实走 PlainTextProcessor 降级，行为不变。
+
+**配置**：`llm.structured_calibration.plain_preferred_chunk_length` / `plain_max_chunk_length`（无说话人独立分块，默认 3000/4000）；`llm.paragraphization.target_chars` / `hard_max_chars` / `pause_threshold_seconds`（默认 300/600/2.0）。
+
 ## 管线要点
 
 1. **输入梯度**：本轮 structured dialogs → 缓存 `llm_processed.json` dialogs → `load_segments()` 原始 segments → 都无则 `skipped_no_timeline`。  
@@ -61,6 +78,7 @@
 3. **suppress**：已有 GENERATED 且本轮未请求 chapters → 不覆盖。  
 4. **recalibrate**：原 `chapters_status=generated` 时**强制联动重算**（与 summary 的「仅缺失 backfill」不同）。  
 5. **title 副作用**：仅 `chapters=true` **不会**单独触发 LLM 标题生成。
+6. **start_seg 类型容忍**：LLM 返回的整数值字符串（`"1676"`）/整数值浮点（`1676.0`）先强转为 int 再校验（真实样本暴露 deepseek 对靠后章节输出字符串下标）；非数值/非整数仍判语义校验失败并重试。
 
 ## 前端展示
 
@@ -86,6 +104,8 @@
 
 ## 未做 / 后续
 
-- 阶段二：`structured_calibration_for_plain` 推广（T8，独立开关）  
-- 真实长样本质量验收与 prompt 定稿（T9）  
+- ~~阶段二：`structured_calibration_for_plain` 推广（T8，独立开关）~~（已完成，见上节）
+- ~~真实长样本质量验收与 prompt 定稿（T9）~~（2026-07-19 验收通过，开关默认翻 true；
+  v2 LLM 语义段落化不启动——v1 读感可用；英文 YouTube 自动字幕场景段落偏粗已记录，
+  如需优化先调 `paragraphization.target_chars`）
 - 无 structured 锚点时的 jump 门控收紧（session backlog B7）  

@@ -46,6 +46,8 @@
 
 > **独立说话人开关**：`infer_speaker_names` 不依赖 `calibrate` 或 `summarize`。因此只关闭后两者但保留 `infer_speaker_names=true` 时，有说话人识别数据的任务仍可调用 LLM；没有说话人识别数据时该开关不生效，也不会仅为生成标题而调用 LLM。三个开关全部为 `false` 始终是明确的零 LLM 请求语义。
 
+> **plain 源结构化校对（T8）**：`llm.structured_calibration_for_plain` 开启（默认）时，`calibrate=true` 且 plain 源有 timeline segments 的任务走结构化逐段校对 + 确定性段落化，产出段落级 `llm_processed.json`（章节可精准跳转）；`calibrate=false` 的补层任务**维持纯文本路径**（避免未校准段落与缓存已校准段落指纹永久 mismatch → 章节永久 nolink）。详见 [chapters.md](./chapters.md#plain-源结构化校对与段落化阶段二t8)。
+
 说话人姓名映射以版本化 `speaker_mapping.json` artifact 保存到 `video_cache.files_loc` 指向的媒体目录。artifact 包含转录/diarization 输入指纹、完整 speaker 集合和 `source=llm`；写入复用媒体锁并通过临时文件原子替换。`infer_speaker_names=false` 时只复用指纹与 speaker 集合均有效的完整映射，未命中则保留原始通用标签，且不会把通用标签写成“已完成”缓存。
 
 ## 分层缓存复用
