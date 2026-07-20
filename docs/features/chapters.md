@@ -85,12 +85,12 @@
 仅 `chapters_status=generated` 且存在 `llm_chapters.json` 时启用章节 UI；无章节 / 生成失败 / 纯文本无锚点时页面无任何章节元素，目录退化为纯大纲（旧浮动目录路径）。
 
 - **章节数据岛**：后端将章节列表序列化为 JSON 注入 `<script type="application/json" id="chapters-data">`，序列化时全量 `<` → `\u003c` 转义防注入（防 `</script>` 逃逸与 script-data double-escape）。每章字段 `{index,title,gist,start_time,start_seg,jump_ok}`。
-- **逐字稿内嵌章节头**：渲染到某章 `start_seg` 段落前插入分隔线式章节头（时间 + 标题，`id="chapter-anchor-{index}"`），仅当该章 `jump_ok` 时插入；跳转目标为相邻的 `#dlg-{start_seg}`。
+- **逐字稿内嵌章节头**：渲染到某章 `start_seg` 段落前插入分隔线式章节头（时间 + 标题 + 完整摘要，`id="chapter-anchor-{index}"`），仅当该章 `jump_ok` 时插入；跳转目标为相邻的 `#dlg-{start_seg}`。
 - **章节速览面板**（浮动目录重构，`章节 | 大纲` tab，有章节时默认停在「章节」）：
-  - PC ≥1400px：常驻展开，正文在面板左侧剩余空间居中，不遮挡；
-  - 768~1399px：浮层覆盖，默认展开、可手动收起（偏好存 localStorage）；
-  - 条目 = 时间 + 标题 + 摘要（CSS 两行截断，点击条目展开/收起）；当前章随滚动跟随高亮，面板自动滚动使当前章条目可见。
-- **移动端（<768px）**：吸顶当前章条（滚动进入逐字稿区域后显示 `{index}. {title}`，点击拉开抽屉）+ 底部章节抽屉（打开时自动滚到当前章），点条目跳转后抽屉自动收起；FAB 保留。
+  - PC ≥1400px：常驻 docked 侧栏（380px），正文在面板左侧剩余空间居中（预留 420px），不遮挡；
+  - 768~1399px：浮层覆盖（360px），默认展开、可手动收起（偏好存 localStorage）；
+  - 条目 = 时间 + 标题 + 完整摘要（不截断、无展开/收起；条目间 hairline 分隔、摘要大行距的文档密度排版），**整条可点跳转**，`jump_ok=false` 条目灰化不可点；当前章随滚动跟随高亮（左侧强调条 + 背景块），面板自动滚动使当前章条目可见。
+- **移动端（<768px）**：吸顶当前章条（滚动进入逐字稿区域后显示 `{index}. {title}`，点击拉开抽屉）+ 底部章节抽屉（max-height 70vh，打开时自动滚到当前章），点条目跳转后抽屉自动收起；FAB 保留。
 - 安全：`title` 服务端 `html.escape`；前端条目文本一律 `textContent` 注入（数据来自 JSON 数据岛），禁止 innerHTML 拼接。
 
 ## 相关代码
