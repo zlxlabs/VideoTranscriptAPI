@@ -13,8 +13,6 @@ per project convention.
 
 import json
 
-import pytest
-
 from video_transcript_api.transcriber.segments import (
     load_segments,
     normalize_segments,
