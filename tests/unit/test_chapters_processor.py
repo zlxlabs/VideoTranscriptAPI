@@ -1183,6 +1183,53 @@ class TestRetryHintBounding(ChaptersProcessorTestBase):
         self.assertLess(len(error), 500)  # nowhere near the 500,000-char raw value
 
 
+class TestStartSegTypeCoercion(unittest.TestCase):
+    """Real-sample finding (T8 manual verification): deepseek-chat returned
+    later chapters' start_seg as digit STRINGS ('1676'), and the strict
+    isinstance-int check failed the whole chapters run after both attempts.
+    The validator now coerces integer-valued strings/floats while keeping
+    non-integral/non-numeric values as hard failures."""
+
+    def test_digit_string_coerced_and_validated(self):
+        raw = [
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": "5"},
+        ]
+        normalized, error = _validate_and_normalize_start_segs(raw, list(range(10)))
+        self.assertIsNone(error)
+        self.assertEqual([c["start_seg"] for c in normalized], [0, 5])
+        self.assertIs(type(normalized[1]["start_seg"]), int)
+
+    def test_integral_float_coerced(self):
+        raw = [
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 3.0},
+        ]
+        normalized, error = _validate_and_normalize_start_segs(raw, list(range(10)))
+        self.assertIsNone(error)
+        self.assertEqual([c["start_seg"] for c in normalized], [0, 3])
+        self.assertIs(type(normalized[1]["start_seg"]), int)
+
+    def test_bool_still_rejected(self):
+        raw = [{"title": "A", "gist": "g", "start_seg": True}]
+        normalized, error = _validate_and_normalize_start_segs(raw, list(range(10)))
+        self.assertIsNone(normalized)
+        self.assertIn("not an int", error)
+
+    def test_non_numeric_string_still_rejected(self):
+        for bad in ("abc", "12.5", "", None):
+            raw = [{"title": "A", "gist": "g", "start_seg": bad}]
+            normalized, error = _validate_and_normalize_start_segs(raw, list(range(10)))
+            self.assertIsNone(normalized, f"should reject {bad!r}")
+            self.assertIn("not an int", error)
+
+    def test_coerced_value_still_checked_against_survived_indices(self):
+        raw = [{"title": "A", "gist": "g", "start_seg": "7"}]
+        normalized, error = _validate_and_normalize_start_segs(raw, [0, 2, 4])
+        self.assertIsNone(normalized)
+        self.assertIn("out of range", error)
+
+
 class TestFinalErrorRawChaptersBounding(ChaptersProcessorTestBase):
     """gate-r27 P3: when both attempts (first + the single semantic retry)
     exhaust without producing a valid chapters list, `_process_impl` writes
