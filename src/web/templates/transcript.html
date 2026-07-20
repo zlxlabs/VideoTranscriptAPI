@@ -221,15 +221,8 @@
         </div>
     </div>
 
-    {% if chapters_html %}
-    <div class="section chapters-section" id="chapters-section">
-        <div class="section-header">
-            <h2>📚 章节梗概</h2>
-        </div>
-        <div class="content" id="chapters-content-block">
-            {{ chapters_html|safe }}
-        </div>
-    </div>
+    {% if chapters_data %}
+    <script type="application/json" id="chapters-data">{{ chapters_data|safe }}</script>
     {% endif %}
 
     {% if calibrated_html %}

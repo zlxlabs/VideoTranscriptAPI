@@ -8,8 +8,8 @@ Covers:
   ``"mode": "plain_structured"`` is ignored by the rendering strategy unless
   ``plain_structured_enabled`` is passed in; FunASR artifacts (no ``mode``
   key) are unaffected.
-- ``views._page_has_dialog_anchors`` applies the same gate so chapter cards
-  never emit dead ``#dlg-N`` links when the body renders as plain text.
+- ``views._page_has_dialog_anchors`` applies the same gate so chapter entries
+  are never marked jumpable (``jump_ok``) when the body renders as plain text.
 - Paragraphs whose ``start_time``/``end_time`` are None must still render
   with ``id="dlg-{i}"`` anchors and must NOT be stamped with a fallback
   ``00:00:00`` time tag (T8 review R1 F7).
@@ -320,11 +320,15 @@ class TestPrepareSuccessViewGateIntegration:
         view_data = {"cache_dir": str(tmp_path), "summary": None}
         _prepare_success_view(view_data)
 
-        chapters_html = view_data.get("chapters_html") or ""
-        assert chapters_html, "chapter cards should still render"
-        assert 'href="#dlg-' not in chapters_html, "no dead jump links when gated"
+        chapters_data = view_data.get("chapters_data")
+        assert chapters_data, "chapters data island should still be emitted"
+        chapters = json.loads(chapters_data)
+        assert all(
+            ch["jump_ok"] is False for ch in chapters
+        ), "no dead jump ability when gated"
         calibrated_html = view_data.get("calibrated_html") or ""
         assert 'id="dlg-' not in calibrated_html, "body falls back to plain rendering"
+        assert "chapter-anchor" not in calibrated_html
 
     def test_switch_on_links_and_structured_body(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -337,10 +341,13 @@ class TestPrepareSuccessViewGateIntegration:
         view_data = {"cache_dir": str(tmp_path), "summary": None}
         _prepare_success_view(view_data)
 
-        chapters_html = view_data.get("chapters_html") or ""
-        assert 'href="#dlg-0"' in chapters_html
+        chapters_data = view_data.get("chapters_data")
+        assert chapters_data, "chapters data island should be emitted"
+        chapters = json.loads(chapters_data)
+        assert chapters[0]["jump_ok"] is True
         calibrated_html = view_data.get("calibrated_html") or ""
         assert 'id="dlg-0"' in calibrated_html
+        assert 'id="chapter-anchor-0"' in calibrated_html
 
 
 # ---------------------------------------------------------------------------
