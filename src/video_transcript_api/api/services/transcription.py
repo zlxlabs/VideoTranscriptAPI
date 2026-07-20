@@ -44,6 +44,26 @@ _TERMINAL_RESOLVER_ERRORS = (
 )
 
 
+def _rebuild_text_from_segments(segments) -> str:
+    """空 text 兜底：从 segments 的 text 字段重建字幕正文。
+
+    真实场景：纯数字字幕正文行（如 "2024"）会被 SRT 文本提取逻辑当作
+    序号行整行跳过，而 segments 提取路径按"文本永不丢失"不变式保留了
+    这些条目——最终 text 为空、segments 非空。此时用 segments 重建非空
+    正文，避免把空正文写进缓存 / 交给 LLM 阶段。拼接分隔符与既有字幕
+    文本提取保持一致（单空格 join，见 youtube_api_client.
+    parse_srt_to_subtitle_result / youtube._build_subtitle_result_from_
+    snippets）。segments 里没有可用文本时返回空串（诚实降级，不编造）。
+    """
+    return " ".join(
+        seg["text"].strip()
+        for seg in segments
+        if isinstance(seg, dict)
+        and isinstance(seg.get("text"), str)
+        and seg["text"].strip()
+    )
+
+
 def _extract_speaker_labels(dialogs) -> list[str]:
     """Extract stable speaker labels without dropping numeric ID zero,
     skipping empty-text dialogs.
@@ -1586,6 +1606,12 @@ def process_transcription(
                         # fetch_for_transcription 在解析 SRT 时尽力保留
                         # segments；缺省时诚实降级（extra_json_data=None）
                         yt_api_segments = api_result.get("transcript_segments")
+                        # 空 text + 非空 segments 兜底：纯数字字幕正文会被
+                        # 文本提取逻辑当作序号行跳过，而 segments 按"文本
+                        # 永不丢失"保留——从 segments 重建非空正文再写缓存
+                        # /送 LLM，否则任务成功了正文却是空串。
+                        if not (transcript or "").strip() and yt_api_segments:
+                            transcript = _rebuild_text_from_segments(yt_api_segments)
                         yt_api_extra_json = (
                             {"segments": yt_api_segments}
                             if yt_api_segments
@@ -1871,6 +1897,13 @@ def process_transcription(
                         subtitle_result.text.strip() or subtitle_result.segments
                     ):
                         subtitle = subtitle_result.text
+                        # 空 text + 非空 segments 兜底（同 [youtube-api]
+                        # 快速路径）：纯数字字幕正文被文本提取逻辑跳过而
+                        # segments 保留时，从 segments 重建非空正文。
+                        if not subtitle.strip() and subtitle_result.segments:
+                            subtitle = _rebuild_text_from_segments(
+                                subtitle_result.segments
+                            )
                         if subtitle_result.segments:
                             # FunASR 兼容形态：{"segments": [...]}
                             subtitle_extra_json = {

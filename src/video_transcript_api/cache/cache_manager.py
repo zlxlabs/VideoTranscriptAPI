@@ -669,6 +669,29 @@ class CacheManager:
                     )
                 else:
                     transcript_file = file_path / "transcript_capswriter.txt"
+
+                    # 覆盖写不再携带 timeline 时，必须在写入新正文之前清掉
+                    # 上一轮可能残留的旧侧车 transcript_capswriter.json：
+                    # 本目录是 (platform, media_id) 的确定性路径，上一轮的
+                    # 侧车在本轮不会被重写（下面的 if 只在 extra_json_data
+                    # 为真时才写），而 Z3 的孤儿清理只在"没有任何存活
+                    # video_cache 行"时才触发，正常覆盖写（行仍存在）走不到
+                    # 那里——不主动删除的话，get_cache 会经 load_segments 把
+                    # 上一轮旧 segments 读回来，与本轮新正文混用。删除放在
+                    # 写新正文之前、失败时如实中止本次保存（与 K2 同一原则：
+                    # 宁肯不写入新行，也不制造新旧产物混用的读取状态），这样
+                    # 删除失败时磁盘上仍是上一轮的完整旧状态。
+                    if not extra_json_data:
+                        stale_json_file = file_path / "transcript_capswriter.json"
+                        try:
+                            stale_json_file.unlink(missing_ok=True)
+                        except OSError as unlink_exc:
+                            logger.error(
+                                f"删除旧 timeline 侧车失败，放弃本次保存以避免"
+                                f"新旧 segments/正文混用: {stale_json_file}: {unlink_exc}"
+                            )
+                            return None
+
                     self._atomic_write(transcript_file, lambda f: f.write(transcript_data))
 
                     # 如果提供了额外的JSON数据（CapsWriter的FunASR兼容格式），也保存

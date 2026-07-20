@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -179,6 +180,60 @@ class TestCacheTimelineRoundTrip:
         cached = cm.get_cache(platform="youtube", media_id="t1-none")
         assert cached is not None
         assert "segments" not in cached
+
+
+# ---------------------------------------------------------------------------
+# Overwrite without timeline must drop the stale sidecar
+# ---------------------------------------------------------------------------
+
+
+class TestOverwriteWithoutTimelineDropsStaleSidecar:
+    """Regression: overwriting a cache entry with new text but no timeline
+    (extra_json_data=None) must not leave the previous
+    transcript_capswriter.json sidecar behind -- otherwise get_cache() /
+    load_segments() keep reading the OLD segments back and mix them with the
+    NEW transcript text. The orphan cleanup at save time only triggers when
+    no live video_cache row exists, so it never covers this overwrite path."""
+
+    def test_overwrite_with_none_extra_json_removes_old_sidecar(self, cm, cache_dir):
+        cm.save_cache(
+            platform="youtube",
+            url="https://example.com/t1-overwrite",
+            media_id="t1-overwrite",
+            use_speaker_recognition=False,
+            transcript_data="old text with timeline",
+            transcript_type="capswriter",
+            title="T1 overwrite",
+            author="tester",
+            description="",
+            extra_json_data=_extra_segments_payload(),
+        )
+        assert list(cache_dir.rglob("transcript_capswriter.json"))
+
+        result = cm.save_cache(
+            platform="youtube",
+            url="https://example.com/t1-overwrite",
+            media_id="t1-overwrite",
+            use_speaker_recognition=False,
+            transcript_data="brand new text without timeline",
+            transcript_type="capswriter",
+            title="T1 overwrite",
+            author="tester",
+            description="",
+            extra_json_data=None,
+        )
+        assert result is not None
+
+        # The stale sidecar must be gone from disk.
+        assert not list(cache_dir.rglob("transcript_capswriter.json"))
+
+        cached = cm.get_cache(platform="youtube", media_id="t1-overwrite")
+        assert cached is not None
+        assert cached["transcript_data"] == "brand new text without timeline"
+        assert cached.get("segments") in (None, [])
+
+        # Direct adapter readback must also come up empty.
+        assert load_segments(Path(cached["file_path"])) is None
 
 
 # ---------------------------------------------------------------------------
@@ -351,3 +406,48 @@ class TestSplitLongSegmentIsfinite:
                 assert math.isfinite(et)
         assert any("alpha" in p["text"] for p in parts)
         assert any("omega" in p["text"] for p in parts)
+
+
+# ---------------------------------------------------------------------------
+# F: capswriter _split_long_segment inverted interval (end < start)
+# ---------------------------------------------------------------------------
+
+
+class TestSplitLongSegmentInvertedTimes:
+    """An inverted interval (end_time < start_time) is not a usable timeline:
+    interpolating over it would emit a monotonically decreasing time axis.
+    The text must be kept, but all times must degrade to None."""
+
+    def test_inverted_interval_degrades_times_to_none_text_kept(self):
+        text = "part one，" + "x" * 40 + "，" + "part two trailing text"
+        segment = {
+            "start_time": 10.0,
+            "end_time": 5.0,  # inverted: end < start
+            "text": text,
+            "length": len(text),
+        }
+        parts = _split_long_segment(segment, max_len=50)
+        assert len(parts) >= 2
+        joined = "".join(p["text"] for p in parts)
+        assert "part one" in joined
+        assert "part two" in joined
+        for part in parts:
+            assert part["start_time"] is None
+            assert part["end_time"] is None
+
+    def test_output_never_contains_end_before_start(self):
+        """Whatever the input, output must never contain end_time < start_time."""
+        text = "alpha，" + "y" * 40 + "，" + "omega trailing"
+        segment = {
+            "start_time": 8.0,
+            "end_time": 3.0,  # inverted
+            "text": text,
+            "length": len(text),
+        }
+        parts = _split_long_segment(segment, max_len=50)
+        assert parts
+        for part in parts:
+            st = part["start_time"]
+            et = part["end_time"]
+            if st is not None and et is not None:
+                assert et >= st
