@@ -149,6 +149,29 @@ class TestRenderDialogsWithoutSpeakerKey:
         assert "unknown" not in html_out
         assert "No speaker key" in html_out
 
+    def test_no_speaker_and_none_time_renders_anchor_without_fabrication(
+        self, tmp_path: Path
+    ):
+        """Dialog without speaker key AND with None times must still render its
+        dlg-* anchor, without fabricating a speaker tag or a 00:00:00 time."""
+        dialogs = [
+            {"speaker": "Alice", "text": "Has speaker", "start_time": "0:00"},
+            {"text": "No speaker, no time", "start_time": None, "end_time": None},
+        ]
+        _write_processed(tmp_path, dialogs)
+
+        html_out = DialogRenderer()._render_from_structured_data(str(tmp_path))
+
+        assert 'id="dlg-1"' in html_out
+        assert "No speaker, no time" in html_out
+        # No fabricated speaker label / time for the speakerless, timeless dialog.
+        assert "unknown" not in html_out
+        assert "00:00:00" not in html_out
+        assert "None" not in html_out
+        # Exactly one speaker-tag (Alice's) and one time-tag (hers) overall.
+        assert html_out.count("speaker-tag") == 1
+        assert html_out.count("time-tag") == 1
+
 
 # ---------------------------------------------------------------------------
 # Strategy gating (plan b): plain_structured artifact ignored when switch off
