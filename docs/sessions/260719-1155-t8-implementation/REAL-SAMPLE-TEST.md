@@ -72,6 +72,16 @@ TestStartSegTypeCoercion）。修复后 chapters 一次成功（20,644 tokens / 
    要补章节需 recalibrate（会重跑整轮 FunASR 校准 + 说话人推断，改动历史产物），
    本轮未动——它继续作为 speaker 路径回归基线。
 
+**追加 2（2026-07-20，用户要求重跑）**：小宇宙 recalibrate 已完成（legacy
+单 token 鉴权通过归属校验——原任务由 legacy_user 提交，user_001/004 均被
+fail-closed 拒绝，归属加固行为符合设计）。结果：校准 full、章节 **13 章
+generated**（`source.kind=dialogs`，181 段落），查看页 181 锚点、
+**13/13 `jump_ok=1`**；`llm_processed.json` **无 `mode` 键**（FunASR 产物
+不带 plain_structured 标记，防误标双条件生效）。产物漂移：段落 145→181
+（重校合并粒度差异），说话人姓名 任鑫/徐文浩/杨攀 保持，新增 1 段通配标签
+「说话人7」（1/181 段本轮未推断出真名，LLM 非确定性，可接受）。
+总结未重跑（已有总结保留）。
+
 ## 遗留与备注
 
 - 巫师 ASR 片尾乱码（"同单单是是…"）校准未完全救回——源转录质量问题，非 T8 机制问题。
