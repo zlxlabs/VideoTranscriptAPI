@@ -92,13 +92,19 @@ def _chapters_payload(fingerprint: str | None, *, title: str = "Intro", gist: st
     }
 
 
-def _view_chapters(*, jump_ok: bool = True, title: str = "Intro"):
+def _view_chapters(
+    *,
+    jump_ok: bool = True,
+    title: str = "Intro",
+    gist0: str = "About intro",
+    gist1: str = "Second part",
+):
     """Chapter dicts in the shape views.py hands to the renderer."""
     return [
         {
             "index": 0,
             "title": title,
-            "gist": "About intro",
+            "gist": gist0,
             "start_time": 0.0,
             "start_seg": 0,
             "jump_ok": jump_ok,
@@ -106,7 +112,7 @@ def _view_chapters(*, jump_ok: bool = True, title: str = "Intro"):
         {
             "index": 1,
             "title": "Middle",
-            "gist": "Second part",
+            "gist": gist1,
             "start_time": 10.0,
             "start_seg": 2,
             "jump_ok": jump_ok,
@@ -414,6 +420,32 @@ class TestInlineChapterAnchors:
         # mm:ss time label + bold-title span per the DOM contract.
         assert '<span class="chapter-anchor-time">00:10</span>' in html_out
         assert '<span class="chapter-anchor-title">Middle</span>' in html_out
+        # Full gist paragraph follows the title.
+        assert '<p class="chapter-anchor-gist">Second part</p>' in html_out
+
+    def test_anchor_gist_is_html_escaped(self, tmp_path: Path):
+        _write_structured_cache(tmp_path, _sample_dialogs())
+        chapters = _view_chapters(gist0='<img src=x onerror=alert(1)>')
+
+        html_out = DialogRenderer()._render_from_structured_data(
+            str(tmp_path), chapters=chapters
+        )
+
+        assert "<img src=x onerror=alert(1)>" not in html_out
+        assert (
+            '<p class="chapter-anchor-gist">'
+            "&lt;img src=x onerror=alert(1)&gt;</p>"
+        ) in html_out
+
+    def test_anchor_empty_gist_renders_no_paragraph(self, tmp_path: Path):
+        _write_structured_cache(tmp_path, _sample_dialogs())
+
+        html_out = DialogRenderer()._render_from_structured_data(
+            str(tmp_path), chapters=_view_chapters(gist0="", gist1="")
+        )
+
+        assert 'id="chapter-anchor-0"' in html_out
+        assert "chapter-anchor-gist" not in html_out
 
     def test_anchor_title_is_html_escaped(self, tmp_path: Path):
         _write_structured_cache(tmp_path, _sample_dialogs())
@@ -481,6 +513,9 @@ class TestPrepareSuccessViewChapters:
         assert 'id="chapter-anchor-0"' in calibrated_html
         assert 'id="chapter-anchor-1"' in calibrated_html
         assert '<span class="chapter-anchor-title">Intro</span>' in calibrated_html
+        # Full gist rides along inside each inline anchor (views.py passes the
+        # same chapter dicts to the data island and the renderer).
+        assert '<p class="chapter-anchor-gist">About intro</p>' in calibrated_html
         # Anchors must sit inside the transcript, before their dlg targets.
         assert calibrated_html.find('id="chapter-anchor-0"') < calibrated_html.find(
             'id="dlg-0"'
@@ -577,3 +612,40 @@ class TestFloatingTocXssHardening:
         # The old DOM-card scanning extractor is gone.
         assert "extractChapters" not in toc_js
         assert "chapters-section" not in toc_js
+
+
+# ---------------------------------------------------------------------------
+# Chapter panel/drawer items: slim jump-only rows (no gist UI)
+# ---------------------------------------------------------------------------
+
+
+class TestChapterPanelSlimItems:
+    """Panel/drawer chapter rows are time + title only; the gist lives in the
+    inline chapter header, not in the navigation list."""
+
+    @pytest.fixture
+    def toc_js(self) -> str:
+        root = Path(__file__).resolve().parents[2]
+        return (root / "src" / "web" / "static" / "js" / "floating-toc.js").read_text(
+            encoding="utf-8"
+        )
+
+    @pytest.fixture
+    def toc_css(self) -> str:
+        root = Path(__file__).resolve().parents[2]
+        return (
+            root / "src" / "web" / "static" / "css" / "floating-toc.css"
+        ).read_text(encoding="utf-8")
+
+    def test_no_gist_ui_in_js(self, toc_js: str):
+        assert "toc-chapter-gist" not in toc_js
+        assert "gist-expanded" not in toc_js
+
+    def test_no_gist_styles_in_css(self, toc_css: str):
+        assert "toc-chapter-gist" not in toc_css
+        assert "gist-expanded" not in toc_css
+
+    def test_title_clamped_to_one_line(self, toc_css: str):
+        """Long titles collapse to a single line with an ellipsis so 12+
+        chapters fit one screen."""
+        assert "text-overflow: ellipsis" in toc_css

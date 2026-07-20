@@ -609,8 +609,8 @@ body.toc-wide-margin {
 
 /* ========== 章节条目 ========== */
 .toc-chapter-item {
-    margin: 2px 4px;
-    padding: 4px 8px 4px 12px;
+    margin: 1px 4px;
+    padding: 2px 8px 2px 12px;
     border-left: 3px solid transparent;
     border-radius: 6px;
     transition: background 0.2s ease, border-color 0.2s ease;
@@ -637,10 +637,10 @@ body.toc-wide-margin {
     width: 100%;
     background: none;
     border: none;
-    padding: 4px;
+    padding: 2px 4px;
     text-align: left;
     font-size: 0.875rem;
-    line-height: 1.4;
+    line-height: 1.35;
     color: var(--toc-text);
     cursor: pointer;
 }
@@ -654,29 +654,10 @@ body.toc-wide-margin {
 
 .toc-chapter-title {
     color: var(--toc-text);
-}
-
-.toc-chapter-gist {
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
+    min-width: 0;
+    white-space: nowrap;
     overflow: hidden;
-    width: 100%;
-    margin-top: 2px;
-    padding: 2px 4px 4px;
-    background: none;
-    border: none;
-    text-align: left;
-    font-size: 0.78rem;
-    line-height: 1.45;
-    color: var(--toc-text-secondary);
-    cursor: pointer;
-}
-
-.toc-chapter-item.gist-expanded .toc-chapter-gist {
-    display: block;
-    -webkit-line-clamp: unset;
-    overflow: visible;
+    text-overflow: ellipsis;
 }
 
 /* 不可跳转章节（jump_ok=false）：灰化、无 pointer */
@@ -748,10 +729,6 @@ body.toc-wide-margin {
     .toc-mobile-body .toc-chapter-main {
         font-size: 1rem;
         padding: 8px 4px;
-    }
-
-    .toc-mobile-body .toc-chapter-gist {
-        font-size: 0.85rem;
     }
 
     .toc-mobile-header .toc-tabs {

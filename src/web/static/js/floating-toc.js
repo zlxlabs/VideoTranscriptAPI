@@ -5,8 +5,9 @@
  * Features:
  * - Auto-extract H1-H4 from the summary section (outline tab)
  * - Chapters are read from the #chapters-data JSON island
- *   (items: {index,title,gist,start_time,start_seg,jump_ok}); a chapter item
- *   jumps to the inline #chapter-anchor-{index} header (fallback #dlg-{start_seg})
+ *   (items: {index,title,gist,start_time,start_seg,jump_ok}); a chapter row
+ *   is time + title only and jumps to the inline #chapter-anchor-{index}
+ *   header (fallback #dlg-{start_seg})
  * - Chapter pages: panel with "chapters | outline" tabs, current chapter
  *   tracking via IntersectionObserver on .chapter-anchor
  * - Breakpoints on chapter pages:
@@ -18,7 +19,7 @@
  *   hover/pin to expand, localStorage key vta_toc_pinned)
  * - Scroll highlight + smooth jump
  * - XSS: build all user/chapter text via DOM API + textContent only
- *   (never HTML-string concatenation of titles or gists)
+ *   (never HTML-string concatenation of titles)
  */
 
 (function() {
@@ -265,8 +266,6 @@
             const title = (typeof ch.title === 'string' ? ch.title : '').trim();
             if (!title) return;
 
-            const gist = typeof ch.gist === 'string' ? ch.gist : '';
-
             let startSeg = parseInt(ch.start_seg, 10);
             if (isNaN(startSeg)) startSeg = null;
 
@@ -276,7 +275,6 @@
             chapters.push({
                 index: index,
                 title: title,
-                gist: gist,
                 timeLabel: formatChapterSeconds(ch.start_time),
                 startSeg: startSeg,
                 jumpOk: jumpOk,
@@ -322,7 +320,8 @@
 
     /**
      * One chapter row, shared by the PC panel and the mobile drawer.
-     * Whole-row main button = jump; gist button = expand/collapse summary.
+     * Slim jump-only row: time + title; the gist lives in the inline
+     * chapter header inside the transcript.
      */
     function buildChapterItem(chapter) {
         const item = createEl('div', 'toc-chapter-item');
@@ -342,13 +341,6 @@
         }
         main.appendChild(createEl('span', 'toc-chapter-title', chapter.title));
         item.appendChild(main);
-
-        if (chapter.gist) {
-            const gistBtn = createEl('button', 'toc-chapter-gist', chapter.gist);
-            gistBtn.type = 'button';
-            gistBtn.title = '点击展开/收起摘要';
-            item.appendChild(gistBtn);
-        }
 
         return item;
     }
@@ -914,16 +906,6 @@
                 if (root) {
                     setActiveTab(root, tab.dataset.tab);
                 }
-                return;
-            }
-
-            if (e.target.closest('.toc-chapter-gist')) {
-                const gist = e.target.closest('.toc-chapter-gist');
-                const item = gist.closest('.toc-chapter-item');
-                if (item) {
-                    item.classList.toggle('gist-expanded');
-                }
-                e.stopPropagation();
                 return;
             }
 

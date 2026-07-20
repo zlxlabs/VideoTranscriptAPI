@@ -707,9 +707,12 @@ def _render_chapter_anchor(chapter: Optional[Dict]) -> str:
              data-chapter-index="{index}">
           <span class="chapter-anchor-time">{mm:ss}</span>
           <span class="chapter-anchor-title">{title}</span>
+          <p class="chapter-anchor-gist">{gist}</p>   <!-- only when gist -->
         </div>
 
-    Security: ``title`` is always passed through ``html.escape`` (LLM output).
+    Security: ``title`` and ``gist`` are always passed through
+    ``html.escape`` (LLM output). The gist paragraph is omitted entirely
+    when the gist is empty.
     Callers must only pass chapters whose ``jump_ok`` is True.
     """
     if not chapter:
@@ -721,11 +724,17 @@ def _render_chapter_anchor(chapter: Optional[Dict]) -> str:
     raw_title = chapter.get("title")
     safe_title = html.escape("" if raw_title is None else str(raw_title))
     safe_time = html.escape(_format_chapter_seconds(chapter.get("start_time")))
+    raw_gist = chapter.get("gist")
+    safe_gist = html.escape("" if raw_gist is None else str(raw_gist))
+    gist_html = (
+        f'<p class="chapter-anchor-gist">{safe_gist}</p>' if safe_gist else ""
+    )
     return (
         f'<div class="chapter-anchor" id="chapter-anchor-{index}" '
         f'data-chapter-index="{index}">'
         f'<span class="chapter-anchor-time">{safe_time}</span>'
         f'<span class="chapter-anchor-title">{safe_title}</span>'
+        f"{gist_html}"
         f"</div>"
     )
 
