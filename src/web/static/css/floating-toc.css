@@ -60,8 +60,8 @@
     backdrop-filter: blur(10px);
 }
 
-/* 悬停或固定时展开 */
-.floating-toc-container:hover,
+/* 悬停或固定时展开（仅旧模式；章节页新模式不受 hover 影响） */
+.floating-toc-container:not(.toc-new):hover,
 .floating-toc-container.pinned {
     width: var(--toc-width-expanded);
 }
@@ -71,7 +71,7 @@
     display: block;
 }
 
-.floating-toc-container:hover .toc-indicator,
+.floating-toc-container:not(.toc-new):hover .toc-indicator,
 .floating-toc-container.pinned .toc-indicator {
     display: none;
 }
@@ -122,7 +122,7 @@
     transition: opacity 0.3s ease, background 0.3s ease, border 0.3s ease;
 }
 
-.floating-toc-container:hover .toc-header,
+.floating-toc-container:not(.toc-new):hover .toc-header,
 .floating-toc-container.pinned .toc-header {
     opacity: 1;
 }
@@ -206,7 +206,7 @@
     transition: opacity 0.3s ease;
 }
 
-.floating-toc-container:hover .toc-content,
+.floating-toc-container:not(.toc-new):hover .toc-content,
 .floating-toc-container.pinned .toc-content {
     opacity: 1;
 }
@@ -475,7 +475,288 @@
 @media print {
     .floating-toc-container,
     .floating-toc-mobile-btn,
-    .floating-toc-mobile-panel {
+    .floating-toc-mobile-panel,
+    .chapter-sticky-bar {
         display: none !important;
+    }
+}
+
+/* ========== 章节页新模式（toc-new）：tab + 章节速览 ========== */
+
+/* 面板顶部 tab 切换 */
+.toc-tabs {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+    min-width: 0;
+}
+
+.toc-tab {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 4px 4px 0 0;
+    padding: 6px 10px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--toc-text-secondary);
+    cursor: pointer;
+    transition: color 0.2s ease, border-color 0.2s ease;
+}
+
+.toc-tab:hover {
+    color: var(--toc-text);
+}
+
+.toc-tab.active {
+    color: var(--toc-active);
+    border-bottom-color: var(--toc-active);
+}
+
+/* tab 面板显隐 */
+.toc-pane {
+    display: none;
+}
+
+.toc-pane.active {
+    display: block;
+}
+
+/* 收起按钮（中屏浮层模式） */
+.toc-collapse-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 6px;
+    border-radius: 6px;
+    color: var(--toc-text-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 32px;
+    min-height: 32px;
+    transition: background 0.2s ease, color 0.2s ease;
+}
+
+.toc-collapse-btn:hover {
+    background: var(--toc-hover);
+    color: var(--toc-text);
+}
+
+/* 新模式：默认展开，不受 hover 影响 */
+.floating-toc-container.toc-new {
+    width: var(--toc-width-expanded);
+}
+
+.floating-toc-container.toc-new .toc-header,
+.floating-toc-container.toc-new .toc-content {
+    opacity: 1;
+}
+
+.floating-toc-container.toc-new .toc-indicator {
+    display: none;
+}
+
+/* 新模式手动收起：收成指示条，点击可再展开 */
+.floating-toc-container.toc-new.toc-collapsed {
+    width: var(--toc-width-collapsed);
+}
+
+.floating-toc-container.toc-new.toc-collapsed .toc-header,
+.floating-toc-container.toc-new.toc-collapsed .toc-content {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.floating-toc-container.toc-new.toc-collapsed .toc-indicator {
+    display: flex;
+    cursor: pointer;
+}
+
+/* 宽屏（>=1400px）：面板停靠为常驻侧栏，正文让出右边距 */
+body.toc-wide-margin {
+    margin-right: 320px;
+}
+
+.floating-toc-container.toc-docked {
+    top: 0;
+    right: 0;
+    width: 300px;
+    height: 100vh;
+    max-height: 100vh;
+    border-radius: 0;
+    border-top: none;
+    border-right: none;
+    border-bottom: none;
+    display: flex;
+    flex-direction: column;
+}
+
+.floating-toc-container.toc-docked .toc-content {
+    flex: 1;
+    max-height: none;
+}
+
+.floating-toc-container.toc-docked .toc-collapse-btn {
+    display: none;
+}
+
+/* ========== 章节条目 ========== */
+.toc-chapter-item {
+    margin: 2px 4px;
+    padding: 4px 8px 4px 12px;
+    border-left: 3px solid transparent;
+    border-radius: 6px;
+    transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.toc-chapter-item:hover {
+    background: var(--toc-hover);
+}
+
+.toc-chapter-item.current {
+    background: var(--toc-hover);
+    border-left-color: var(--toc-active);
+}
+
+.toc-chapter-item.current .toc-chapter-title {
+    color: var(--toc-active);
+    font-weight: 600;
+}
+
+.toc-chapter-main {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    width: 100%;
+    background: none;
+    border: none;
+    padding: 4px;
+    text-align: left;
+    font-size: 0.875rem;
+    line-height: 1.4;
+    color: var(--toc-text);
+    cursor: pointer;
+}
+
+.toc-chapter-time {
+    flex-shrink: 0;
+    font-size: 0.75rem;
+    color: var(--toc-text-secondary);
+    font-family: "SFMono-Regular", Monaco, "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
+}
+
+.toc-chapter-title {
+    color: var(--toc-text);
+}
+
+.toc-chapter-gist {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    width: 100%;
+    margin-top: 2px;
+    padding: 2px 4px 4px;
+    background: none;
+    border: none;
+    text-align: left;
+    font-size: 0.78rem;
+    line-height: 1.45;
+    color: var(--toc-text-secondary);
+    cursor: pointer;
+}
+
+.toc-chapter-item.gist-expanded .toc-chapter-gist {
+    display: block;
+    -webkit-line-clamp: unset;
+    overflow: visible;
+}
+
+/* 不可跳转章节（jump_ok=false）：灰化、无 pointer */
+.toc-chapter-item.toc-chapter-disabled {
+    opacity: 0.55;
+}
+
+.toc-chapter-item.toc-chapter-disabled .toc-chapter-main {
+    cursor: default;
+}
+
+/* ========== 移动端：吸顶当前章条 ========== */
+.chapter-sticky-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 998;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    background: var(--toc-bg);
+    border-bottom: 1px solid var(--toc-border);
+    box-shadow: 0 2px 8px var(--toc-shadow);
+    color: var(--toc-text);
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    backdrop-filter: blur(10px);
+}
+
+.chapter-sticky-bar[hidden] {
+    display: none;
+}
+
+.chapter-sticky-bar-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: left;
+}
+
+.chapter-sticky-bar-icon {
+    flex-shrink: 0;
+    color: var(--toc-text-secondary);
+}
+
+/* 吸顶条只在移动端出现 */
+@media (min-width: 769px) {
+    .chapter-sticky-bar {
+        display: none;
+    }
+}
+
+/* 移动端：跳转目标避开吸顶条遮挡 */
+@media (max-width: 768px) {
+    .chapter-anchor,
+    .dialog-item {
+        scroll-margin-top: 48px;
+    }
+
+    .toc-mobile-body .toc-chapter-item {
+        margin: 2px 8px;
+    }
+
+    .toc-mobile-body .toc-chapter-main {
+        font-size: 1rem;
+        padding: 8px 4px;
+    }
+
+    .toc-mobile-body .toc-chapter-gist {
+        font-size: 0.85rem;
+    }
+
+    .toc-mobile-header .toc-tabs {
+        flex: 0 1 auto;
+    }
+
+    .toc-mobile-header .toc-tab {
+        font-size: 1rem;
+        padding: 8px 14px;
     }
 }

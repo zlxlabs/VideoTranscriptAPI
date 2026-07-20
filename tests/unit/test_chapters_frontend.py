@@ -492,6 +492,17 @@ class TestFloatingTocXssHardening:
         for pattern in bad_patterns:
             assert not re.search(pattern, toc_js), f"Unsafe pattern still present: {pattern}"
 
-    def test_extracts_chapters_group(self, toc_js: str):
-        assert "extractChapters" in toc_js or "chapters-section" in toc_js
+    def test_no_innerhtml_anywhere(self, toc_js: str):
+        """Chapter titles/gists come from LLM output; the viewer must build
+        every node via DOM API, so innerHTML must not appear at all."""
+        assert "innerHTML" not in toc_js
+
+    def test_reads_chapters_from_data_island(self, toc_js: str):
+        """Phase 2 (T11): chapters come from the #chapters-data JSON island,
+        not from scanning server-rendered chapter cards."""
+        assert "chapters-data" in toc_js
+        assert "JSON.parse" in toc_js
         assert "dlg-" in toc_js
+        # The old DOM-card scanning extractor is gone.
+        assert "extractChapters" not in toc_js
+        assert "chapters-section" not in toc_js

@@ -3,13 +3,22 @@
  * Responsive design for desktop and mobile.
  *
  * Features:
- * - Auto-extract H1-H4 from the summary section
- * - Chapters group: jump to #dlg-{start_seg} when data-jump-ok=1
- * - Desktop: right-side floating panel with pin
- * - Mobile: bottom FAB + half-screen panel
+ * - Auto-extract H1-H4 from the summary section (outline tab)
+ * - Chapters are read from the #chapters-data JSON island
+ *   (items: {index,title,gist,start_time,start_seg,jump_ok}); a chapter item
+ *   jumps to the inline #chapter-anchor-{index} header (fallback #dlg-{start_seg})
+ * - Chapter pages: panel with "chapters | outline" tabs, current chapter
+ *   tracking via IntersectionObserver on .chapter-anchor
+ * - Breakpoints on chapter pages:
+ *     >=1400px: docked expanded panel, body gets a right margin (toc-wide-margin)
+ *     769-1399px: overlay panel, expanded by default, manually collapsible
+ *       (state in localStorage key vta_toc_panel_collapsed)
+ *     <=768px: sticky current-chapter bar + FAB + bottom drawer
+ * - Pages without chapters keep the legacy behavior (collapsed indicator bar,
+ *   hover/pin to expand, localStorage key vta_toc_pinned)
  * - Scroll highlight + smooth jump
- * - XSS: build all user/chapter titles via DOM API + textContent
- *   (never insertAdjacentHTML / innerHTML string concat of titles)
+ * - XSS: build all user/chapter text via DOM API + textContent only
+ *   (never HTML-string concatenation of titles or gists)
  */
 
 (function() {
@@ -18,11 +27,13 @@
     // ========== Config ==========
     const CONFIG = {
         STORAGE_KEY: 'vta_toc_pinned',
+        COLLAPSE_STORAGE_KEY: 'vta_toc_panel_collapsed',
         OBSERVER_OPTIONS: {
             threshold: 0.5,
             rootMargin: '-100px 0px -60% 0px'
         },
-        MOBILE_BREAKPOINT: 768
+        MOBILE_QUERY: '(max-width: 768px)',
+        WIDE_QUERY: '(min-width: 1400px)'
     };
 
     // ========== State ==========
@@ -32,14 +43,27 @@
         chapters: []
     };
 
+    let hasChapters = false;
     let observer = null;
+    let chapterObserver = null;
+    let transcriptObserver = null;
     let isPinned = false;
-    let isMobile = false;
+    let mode = 'mid'; // 'mobile' | 'mid' | 'wide'
+    let currentChapterIndex = null;
+    let transcriptInView = false;
+    let stickyBar = null;
+    let stickyBarLabel = null;
+    const passedAnchors = new Set();
+
+    const mobileMq = window.matchMedia(CONFIG.MOBILE_QUERY);
+    const wideMq = window.matchMedia(CONFIG.WIDE_QUERY);
 
     // ========== Utils ==========
 
-    function checkMobile() {
-        return window.innerWidth <= CONFIG.MOBILE_BREAKPOINT;
+    function computeMode() {
+        if (mobileMq.matches) return 'mobile';
+        if (wideMq.matches) return 'wide';
+        return 'mid';
     }
 
     function generateId(text, index) {
@@ -67,6 +91,40 @@
         } catch (e) {
             console.warn('Failed to save TOC pin state:', e);
         }
+    }
+
+    function loadCollapseState() {
+        try {
+            return localStorage.getItem(CONFIG.COLLAPSE_STORAGE_KEY) === 'true';
+        } catch (e) {
+            console.warn('Failed to load TOC collapse state:', e);
+            return false;
+        }
+    }
+
+    function saveCollapseState(collapsed) {
+        try {
+            localStorage.setItem(CONFIG.COLLAPSE_STORAGE_KEY, collapsed.toString());
+        } catch (e) {
+            console.warn('Failed to save TOC collapse state:', e);
+        }
+    }
+
+    /**
+     * Format chapter start seconds as mm:ss (or h:mm:ss), matching the
+     * server-side _format_chapter_seconds. Empty string when unknown.
+     */
+    function formatChapterSeconds(seconds) {
+        if (typeof seconds !== 'number' || !isFinite(seconds) || seconds < 0) {
+            return '';
+        }
+        const total = Math.floor(seconds);
+        const hours = Math.floor(total / 3600);
+        const minutes = Math.floor((total % 3600) / 60);
+        const secs = total % 60;
+        const mm = String(minutes).padStart(2, '0');
+        const ss = String(secs).padStart(2, '0');
+        return hours > 0 ? (hours + ':' + mm + ':' + ss) : (mm + ':' + ss);
     }
 
     /**
@@ -106,6 +164,21 @@
     function appendSectionTitle(listEl, text) {
         const title = createEl('div', 'toc-section-title', text);
         listEl.appendChild(title);
+    }
+
+    /**
+     * Scroll the container just enough to reveal the item; no-op when the
+     * item is already fully visible (avoids panel jitter).
+     */
+    function ensureItemVisible(container, item) {
+        if (!container || !item) return;
+        const cRect = container.getBoundingClientRect();
+        const iRect = item.getBoundingClientRect();
+        if (iRect.top >= cRect.top && iRect.bottom <= cRect.bottom) {
+            return;
+        }
+        const delta = iRect.top - cRect.top - (cRect.height - iRect.height) / 2;
+        container.scrollTop += delta;
     }
 
     // ========== Data extraction ==========
@@ -162,49 +235,65 @@
     }
 
     /**
-     * Extract chapters from the server-rendered chapters section.
-     * Only jumpable chapters (data-jump-ok=1) get a #dlg-{start_seg} target.
+     * Read chapters from the #chapters-data JSON island.
+     * Only jumpable chapters (jump_ok) get a jump target.
      */
-    function extractChapters() {
-        const section = document.getElementById('chapters-section');
-        if (!section) {
+    function readChaptersData() {
+        const island = document.getElementById('chapters-data');
+        if (!island) {
             return [];
         }
 
-        const cards = section.querySelectorAll('.chapter-card');
+        let raw = null;
+        try {
+            raw = JSON.parse(island.textContent);
+        } catch (e) {
+            console.warn('Failed to parse chapters data island:', e);
+            return [];
+        }
+        if (!Array.isArray(raw)) {
+            return [];
+        }
+
         const chapters = [];
+        raw.forEach((ch) => {
+            if (!ch || typeof ch !== 'object') return;
 
-        cards.forEach((card) => {
-            const startSeg = card.getAttribute('data-start-seg');
-            const jumpOk = card.getAttribute('data-jump-ok') === '1';
-            const titleEl = card.querySelector('.chapter-title-link, .chapter-title');
-            const text = titleEl ? titleEl.textContent.trim() : '';
-            if (!text) return;
+            let index = parseInt(ch.index, 10);
+            if (isNaN(index)) index = chapters.length;
 
-            const dlgId = (jumpOk && startSeg !== null && startSeg !== '')
-                ? ('dlg-' + startSeg)
-                : null;
+            const title = (typeof ch.title === 'string' ? ch.title : '').trim();
+            if (!title) return;
+
+            const gist = typeof ch.gist === 'string' ? ch.gist : '';
+
+            let startSeg = parseInt(ch.start_seg, 10);
+            if (isNaN(startSeg)) startSeg = null;
+
+            const jumpOk = ch.jump_ok === true && startSeg !== null;
+            const anchorId = jumpOk ? ('chapter-anchor-' + index) : null;
 
             chapters.push({
-                text: text,
-                id: dlgId,
+                index: index,
+                title: title,
+                gist: gist,
+                timeLabel: formatChapterSeconds(ch.start_time),
                 startSeg: startSeg,
                 jumpOk: jumpOk,
-                element: dlgId ? document.getElementById(dlgId) : null
+                anchorId: anchorId,
+                dlgId: jumpOk ? ('dlg-' + startSeg) : null,
+                anchorEl: anchorId ? document.getElementById(anchorId) : null
             });
         });
 
-        console.log('Extracted chapters: ' + chapters.length);
+        console.log('Loaded chapters: ' + chapters.length);
         return chapters;
     }
 
     // ========== UI (DOM API) ==========
 
-    function buildTocList(listEl, options) {
+    function buildOutlineList(listEl, showSectionTitles) {
         const headings = tocData.headings;
-        const hasCalibratedSection = !!tocData.calibratedSection;
-        const chapters = tocData.chapters;
-        const showSectionTitles = !!options.showSectionTitles;
 
         if (headings.length > 0) {
             if (showSectionTitles) {
@@ -221,29 +310,7 @@
             });
         }
 
-        if (chapters.length > 0) {
-            if (showSectionTitles) {
-                appendSectionTitle(listEl, '章节梗概');
-            }
-            chapters.forEach((chapter, idx) => {
-                if (chapter.jumpOk && chapter.id) {
-                    appendTocLink(listEl, {
-                        href: '#' + chapter.id,
-                        text: chapter.text,
-                        id: chapter.id,
-                        className: 'toc-link toc-chapter'
-                    });
-                } else {
-                    // Fingerprint mismatch: show label without jump
-                    const item = createEl('div', 'toc-item');
-                    const span = createEl('span', 'toc-link toc-chapter toc-nolink', chapter.text);
-                    item.appendChild(span);
-                    listEl.appendChild(item);
-                }
-            });
-        }
-
-        if (hasCalibratedSection) {
+        if (tocData.calibratedSection) {
             appendTocLink(listEl, {
                 href: '#calibrated-section',
                 text: '校对文本',
@@ -253,9 +320,108 @@
         }
     }
 
+    /**
+     * One chapter row, shared by the PC panel and the mobile drawer.
+     * Whole-row main button = jump; gist button = expand/collapse summary.
+     */
+    function buildChapterItem(chapter) {
+        const item = createEl('div', 'toc-chapter-item');
+        item.dataset.chapterIndex = String(chapter.index);
+        if (!chapter.jumpOk) {
+            item.classList.add('toc-chapter-disabled');
+        }
+
+        const main = createEl('button', 'toc-chapter-main');
+        main.type = 'button';
+        if (chapter.jumpOk) {
+            main.dataset.targetId = chapter.anchorId || chapter.dlgId;
+            main.dataset.fallbackId = chapter.dlgId || '';
+        }
+        if (chapter.timeLabel) {
+            main.appendChild(createEl('span', 'toc-chapter-time', chapter.timeLabel));
+        }
+        main.appendChild(createEl('span', 'toc-chapter-title', chapter.title));
+        item.appendChild(main);
+
+        if (chapter.gist) {
+            const gistBtn = createEl('button', 'toc-chapter-gist', chapter.gist);
+            gistBtn.type = 'button';
+            gistBtn.title = '点击展开/收起摘要';
+            item.appendChild(gistBtn);
+        }
+
+        return item;
+    }
+
+    function buildChaptersPane(isActive) {
+        const pane = createEl('div', 'toc-pane toc-chapters-pane' + (isActive ? ' active' : ''));
+        tocData.chapters.forEach((chapter) => {
+            pane.appendChild(buildChapterItem(chapter));
+        });
+        return pane;
+    }
+
+    function buildOutlinePane(isActive, showSectionTitles) {
+        const pane = createEl('div', 'toc-pane toc-outline-pane' + (isActive ? ' active' : ''));
+        const list = createEl('ul', 'toc-list');
+        buildOutlineList(list, showSectionTitles);
+        pane.appendChild(list);
+        return pane;
+    }
+
+    function buildTabs() {
+        const tabs = createEl('div', 'toc-tabs');
+        tabs.setAttribute('role', 'tablist');
+
+        const chapterTab = createEl('button', 'toc-tab', '章节');
+        chapterTab.type = 'button';
+        chapterTab.dataset.tab = 'chapters';
+        chapterTab.setAttribute('role', 'tab');
+        chapterTab.classList.add('active'); // chapters tab is the default
+
+        const outlineTab = createEl('button', 'toc-tab', '大纲');
+        outlineTab.type = 'button';
+        outlineTab.dataset.tab = 'outline';
+        outlineTab.setAttribute('role', 'tab');
+
+        tabs.appendChild(chapterTab);
+        tabs.appendChild(outlineTab);
+        return tabs;
+    }
+
+    /**
+     * Switch tabs within one widget root (PC container or mobile drawer).
+     */
+    function setActiveTab(rootEl, tabName) {
+        rootEl.querySelectorAll('.toc-tab').forEach(tab => {
+            tab.classList.toggle('active', tab.dataset.tab === tabName);
+        });
+        rootEl.querySelectorAll('.toc-chapters-pane').forEach(pane => {
+            pane.classList.toggle('active', tabName === 'chapters');
+        });
+        rootEl.querySelectorAll('.toc-outline-pane').forEach(pane => {
+            pane.classList.toggle('active', tabName === 'outline');
+        });
+
+        // When switching back to chapters, keep the current chapter visible.
+        if (tabName === 'chapters' && currentChapterIndex !== null) {
+            const scroller = rootEl.querySelector('.toc-content') || rootEl.querySelector('.toc-mobile-body');
+            const item = rootEl.querySelector('.toc-chapter-item.current');
+            if (scroller && item) {
+                ensureItemVisible(scroller, item);
+            }
+        }
+    }
+
     function createPCToc() {
-        const container = createEl('div', 'floating-toc-container collapsed');
+        const container = createEl('div', 'floating-toc-container');
         container.id = 'floating-toc';
+
+        if (hasChapters) {
+            container.classList.add('toc-new');
+        } else {
+            container.classList.add('collapsed');
+        }
 
         const indicator = createEl('div', 'toc-indicator');
         for (let i = 0; i < 4; i++) {
@@ -264,20 +430,34 @@
         container.appendChild(indicator);
 
         const header = createEl('div', 'toc-header');
-        header.appendChild(createEl('div', 'toc-title', '目录'));
-        const pinBtn = createEl('button', 'toc-pin-btn');
-        pinBtn.id = 'toc-pin-btn';
-        pinBtn.title = '固定目录（点击保持展开）';
-        pinBtn.type = 'button';
-        pinBtn.textContent = '📌';
-        header.appendChild(pinBtn);
+        if (hasChapters) {
+            header.appendChild(buildTabs());
+            const collapseBtn = createEl('button', 'toc-collapse-btn');
+            collapseBtn.id = 'toc-collapse-btn';
+            collapseBtn.type = 'button';
+            collapseBtn.title = '收起目录';
+            collapseBtn.textContent = '»';
+            header.appendChild(collapseBtn);
+        } else {
+            header.appendChild(createEl('div', 'toc-title', '目录'));
+            const pinBtn = createEl('button', 'toc-pin-btn');
+            pinBtn.id = 'toc-pin-btn';
+            pinBtn.title = '固定目录（点击保持展开）';
+            pinBtn.type = 'button';
+            pinBtn.textContent = '📌';
+            header.appendChild(pinBtn);
+        }
         container.appendChild(header);
 
         const content = createEl('div', 'toc-content');
-        const list = createEl('ul', 'toc-list');
-        // Use div children (existing CSS targets .toc-item inside .toc-list)
-        buildTocList(list, { showSectionTitles: true });
-        content.appendChild(list);
+        if (hasChapters) {
+            content.appendChild(buildChaptersPane(true));
+            content.appendChild(buildOutlinePane(false, true));
+        } else {
+            const list = createEl('ul', 'toc-list');
+            buildOutlineList(list, true);
+            content.appendChild(list);
+        }
         container.appendChild(content);
 
         return container;
@@ -299,7 +479,11 @@
 
         const mobileContent = createEl('div', 'toc-mobile-content');
         const mobileHeader = createEl('div', 'toc-mobile-header');
-        mobileHeader.appendChild(createEl('div', 'toc-mobile-title', '目录'));
+        if (hasChapters) {
+            mobileHeader.appendChild(buildTabs());
+        } else {
+            mobileHeader.appendChild(createEl('div', 'toc-mobile-title', '目录'));
+        }
         const closeBtn = createEl('button', 'toc-mobile-close-btn');
         closeBtn.id = 'toc-mobile-close-btn';
         closeBtn.type = 'button';
@@ -308,13 +492,33 @@
         mobileContent.appendChild(mobileHeader);
 
         const body = createEl('div', 'toc-mobile-body');
-        const list = createEl('ul', 'toc-list');
-        buildTocList(list, { showSectionTitles: true });
-        body.appendChild(list);
+        if (hasChapters) {
+            body.appendChild(buildChaptersPane(true));
+            body.appendChild(buildOutlinePane(false, true));
+        } else {
+            const list = createEl('ul', 'toc-list');
+            buildOutlineList(list, true);
+            body.appendChild(list);
+        }
         mobileContent.appendChild(body);
         panel.appendChild(mobileContent);
 
         return { btn: btn, panel: panel };
+    }
+
+    /**
+     * Sticky current-chapter bar (mobile only). Created once, JS toggles the
+     * hidden attribute and the label text.
+     */
+    function createStickyBar() {
+        const bar = createEl('div', 'chapter-sticky-bar');
+        bar.setAttribute('role', 'button');
+        bar.hidden = true;
+        stickyBarLabel = createEl('span', 'chapter-sticky-bar-label');
+        bar.appendChild(stickyBarLabel);
+        bar.appendChild(createEl('span', 'chapter-sticky-bar-icon', '☰'));
+        stickyBar = bar;
+        return bar;
     }
 
     function hasTocContent() {
@@ -327,10 +531,14 @@
         const existingPC = document.getElementById('floating-toc');
         const existingMobileBtn = document.getElementById('toc-mobile-btn');
         const existingMobilePanel = document.getElementById('toc-mobile-panel');
+        const existingSticky = document.querySelector('.chapter-sticky-bar');
 
         if (existingPC) existingPC.remove();
         if (existingMobileBtn) existingMobileBtn.remove();
         if (existingMobilePanel) existingMobilePanel.remove();
+        if (existingSticky) existingSticky.remove();
+        stickyBar = null;
+        stickyBarLabel = null;
 
         if (!hasTocContent()) {
             console.log('No TOC data, skip render');
@@ -342,8 +550,59 @@
         const mobile = createMobileTocParts();
         document.body.appendChild(mobile.btn);
         document.body.appendChild(mobile.panel);
+        if (hasChapters) {
+            document.body.appendChild(createStickyBar());
+        }
 
         console.log('TOC render complete');
+    }
+
+    // ========== Mode / breakpoints ==========
+
+    function applyCollapsed(container, collapsed) {
+        container.classList.toggle('toc-collapsed', collapsed);
+        const btn = container.querySelector('#toc-collapse-btn');
+        if (btn) {
+            btn.textContent = collapsed ? '«' : '»';
+            btn.title = collapsed ? '展开目录' : '收起目录';
+        }
+    }
+
+    function applyMode() {
+        const prevMode = mode;
+        mode = computeMode();
+
+        if (prevMode === 'mobile' && mode !== 'mobile') {
+            closeMobilePanel();
+        }
+
+        if (hasChapters) {
+            const container = document.getElementById('floating-toc');
+            if (container) {
+                if (mode === 'wide') {
+                    container.classList.add('toc-docked');
+                    applyCollapsed(container, false);
+                } else {
+                    container.classList.remove('toc-docked');
+                    applyCollapsed(container, mode === 'mid' && loadCollapseState());
+                }
+            }
+        }
+
+        document.body.classList.toggle('toc-wide-margin', hasChapters && mode === 'wide');
+        updateStickyBar();
+        scrollPanelToCurrentChapter();
+    }
+
+    function setupBreakpointListeners() {
+        const onChange = () => applyMode();
+        if (typeof mobileMq.addEventListener === 'function') {
+            mobileMq.addEventListener('change', onChange);
+            wideMq.addEventListener('change', onChange);
+        } else if (typeof mobileMq.addListener === 'function') {
+            mobileMq.addListener(onChange);
+            wideMq.addListener(onChange);
+        }
     }
 
     // ========== Events ==========
@@ -373,13 +632,39 @@
             block: 'start'
         });
 
-        if (isMobile) {
+        if (mode === 'mobile') {
             closeMobilePanel();
         }
 
         setTimeout(() => {
             updateActiveLink(targetId);
         }, 100);
+    }
+
+    function handleChapterJump(mainEl) {
+        const targetId = mainEl.dataset.targetId;
+        if (!targetId) {
+            // Chapter is not jumpable (fingerprint mismatch / no anchors).
+            return;
+        }
+
+        let targetElement = document.getElementById(targetId);
+        if (!targetElement && mainEl.dataset.fallbackId) {
+            targetElement = document.getElementById(mainEl.dataset.fallbackId);
+        }
+        if (!targetElement) {
+            console.warn('Chapter jump target not found:', targetId);
+            return;
+        }
+
+        targetElement.scrollIntoView({
+            behavior: 'smooth',
+            block: 'start'
+        });
+
+        if (mode === 'mobile') {
+            closeMobilePanel();
+        }
     }
 
     function handlePinClick() {
@@ -415,11 +700,33 @@
         savePinState(isPinned);
     }
 
+    function handleCollapseToggle() {
+        // Manual collapse only applies to the mid breakpoint; the wide
+        // breakpoint keeps the panel docked/expanded.
+        if (mode !== 'mid') return;
+
+        const container = document.getElementById('floating-toc');
+        if (!container) return;
+
+        const collapsed = !container.classList.contains('toc-collapsed');
+        applyCollapsed(container, collapsed);
+        saveCollapseState(collapsed);
+    }
+
     function openMobilePanel() {
         const panel = document.getElementById('toc-mobile-panel');
-        if (panel) {
-            panel.classList.add('show');
-            document.body.style.overflow = 'hidden';
+        if (!panel) return;
+
+        panel.classList.add('show');
+        document.body.style.overflow = 'hidden';
+
+        // Reveal the current chapter row when the drawer opens.
+        if (hasChapters && currentChapterIndex !== null) {
+            const body = panel.querySelector('.toc-mobile-body');
+            const item = panel.querySelector('.toc-chapter-item.current');
+            if (body && item) {
+                ensureItemVisible(body, item);
+            }
         }
     }
 
@@ -442,7 +749,116 @@
         });
     }
 
-    // ========== Scroll observer ==========
+    // ========== Current chapter tracking ==========
+
+    function updateStickyBar() {
+        if (!stickyBar) return;
+
+        const show = hasChapters
+            && mode === 'mobile'
+            && transcriptInView
+            && currentChapterIndex !== null;
+
+        if (!show) {
+            stickyBar.hidden = true;
+            return;
+        }
+
+        const chapter = tocData.chapters.find(c => c.index === currentChapterIndex);
+        if (!chapter) {
+            stickyBar.hidden = true;
+            return;
+        }
+
+        if (stickyBarLabel) {
+            stickyBarLabel.textContent = (chapter.index + 1) + '. ' + chapter.title;
+        }
+        stickyBar.hidden = false;
+    }
+
+    function scrollPanelToCurrentChapter() {
+        if (currentChapterIndex === null || mode === 'mobile') return;
+        const container = document.getElementById('floating-toc');
+        if (!container) return;
+        const pane = container.querySelector('.toc-chapters-pane');
+        if (!pane || !pane.classList.contains('active')) return;
+        const content = container.querySelector('.toc-content');
+        const item = pane.querySelector('.toc-chapter-item.current');
+        if (content && item) {
+            ensureItemVisible(content, item);
+        }
+    }
+
+    function setCurrentChapter(index) {
+        const changed = currentChapterIndex !== index;
+        currentChapterIndex = index;
+
+        document.querySelectorAll('.toc-chapter-item').forEach(item => {
+            const match = index !== null && item.dataset.chapterIndex === String(index);
+            item.classList.toggle('current', match);
+        });
+
+        if (changed) {
+            scrollPanelToCurrentChapter();
+        }
+        updateStickyBar();
+    }
+
+    function setupChapterObserver() {
+        if (!hasChapters) return;
+
+        const indexByEl = new Map();
+        tocData.chapters.forEach(ch => {
+            if (ch.anchorEl) {
+                indexByEl.set(ch.anchorEl, ch.index);
+            }
+        });
+        if (indexByEl.size === 0) return;
+
+        chapterObserver = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                const idx = indexByEl.get(entry.target);
+                if (idx === undefined) return;
+                // Anchor in view, or already scrolled above the viewport top,
+                // means its chapter has been reached.
+                if (entry.isIntersecting || entry.boundingClientRect.top < 0) {
+                    passedAnchors.add(idx);
+                } else {
+                    passedAnchors.delete(idx);
+                }
+            });
+
+            if (passedAnchors.size > 0) {
+                setCurrentChapter(Math.max.apply(null, Array.from(passedAnchors)));
+            } else {
+                setCurrentChapter(null);
+            }
+        }, { threshold: 0 });
+
+        indexByEl.forEach((idx, el) => {
+            chapterObserver.observe(el);
+        });
+
+        console.log('Chapter observer ready');
+    }
+
+    function setupTranscriptObserver() {
+        if (!hasChapters) return;
+
+        const block = document.getElementById('calibrated-content-block');
+        if (!block) return;
+
+        transcriptObserver = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                transcriptInView = entry.isIntersecting;
+            });
+            updateStickyBar();
+        }, { threshold: 0 });
+
+        transcriptObserver.observe(block);
+    }
+
+    // ========== Scroll observer (outline) ==========
 
     function setupScrollObserver() {
         if (observer) {
@@ -453,11 +869,6 @@
         if (tocData.calibratedSection) {
             elements.push(tocData.calibratedSection);
         }
-        tocData.chapters.forEach(ch => {
-            if (ch.element) {
-                elements.push(ch.element);
-            }
-        });
 
         if (elements.length === 0) return;
 
@@ -477,23 +888,52 @@
         console.log('Scroll observer ready');
     }
 
-    // ========== Responsive ==========
-
-    function handleResize() {
-        const wasMobile = isMobile;
-        isMobile = checkMobile();
-
-        if (wasMobile && !isMobile) {
-            closeMobilePanel();
-        }
-    }
-
     // ========== Init ==========
 
     function bindEvents() {
         document.addEventListener('click', (e) => {
             if (e.target.closest('#toc-pin-btn')) {
                 handlePinClick();
+                return;
+            }
+
+            if (e.target.closest('#toc-collapse-btn')) {
+                handleCollapseToggle();
+                return;
+            }
+
+            // Collapsed chapter panel: clicking the indicator bar re-expands.
+            if (e.target.closest('#floating-toc.toc-collapsed .toc-indicator')) {
+                handleCollapseToggle();
+                return;
+            }
+
+            if (e.target.closest('.toc-tab')) {
+                const tab = e.target.closest('.toc-tab');
+                const root = tab.closest('#floating-toc, #toc-mobile-panel');
+                if (root) {
+                    setActiveTab(root, tab.dataset.tab);
+                }
+                return;
+            }
+
+            if (e.target.closest('.toc-chapter-gist')) {
+                const gist = e.target.closest('.toc-chapter-gist');
+                const item = gist.closest('.toc-chapter-item');
+                if (item) {
+                    item.classList.toggle('gist-expanded');
+                }
+                e.stopPropagation();
+                return;
+            }
+
+            if (e.target.closest('.toc-chapter-main')) {
+                handleChapterJump(e.target.closest('.toc-chapter-main'));
+                return;
+            }
+
+            if (e.target.closest('.chapter-sticky-bar')) {
+                openMobilePanel();
                 return;
             }
 
@@ -520,19 +960,18 @@
             }
         });
 
-        window.addEventListener('resize', handleResize);
-
         console.log('TOC events bound');
     }
 
     function init() {
         console.log('Init floating TOC...');
 
-        isMobile = checkMobile();
+        mode = computeMode();
 
         tocData.headings = extractHeadings();
         tocData.calibratedSection = findCalibratedSection();
-        tocData.chapters = extractChapters();
+        tocData.chapters = readChaptersData();
+        hasChapters = tocData.chapters.length > 0;
 
         if (tocData.calibratedSection && !tocData.calibratedSection.id) {
             tocData.calibratedSection.id = 'calibrated-section';
@@ -545,25 +984,32 @@
 
         renderTOC();
         bindEvents();
+        applyMode();
 
-        isPinned = loadPinState();
-        if (isPinned && !isMobile) {
-            const container = document.getElementById('floating-toc');
-            const pinBtn = document.getElementById('toc-pin-btn');
-            if (container && pinBtn) {
-                container.classList.add('pinned');
-                container.classList.remove('collapsed');
-                pinBtn.classList.add('pinned');
-                pinBtn.title = '取消固定目录（已固定）';
-            }
-        } else {
-            const pinBtn = document.getElementById('toc-pin-btn');
-            if (pinBtn) {
-                pinBtn.title = '固定目录（点击保持展开）';
+        if (!hasChapters) {
+            // Legacy behavior: collapsed indicator bar, pin to keep expanded.
+            isPinned = loadPinState();
+            if (isPinned && mode !== 'mobile') {
+                const container = document.getElementById('floating-toc');
+                const pinBtn = document.getElementById('toc-pin-btn');
+                if (container && pinBtn) {
+                    container.classList.add('pinned');
+                    container.classList.remove('collapsed');
+                    pinBtn.classList.add('pinned');
+                    pinBtn.title = '取消固定目录（已固定）';
+                }
+            } else {
+                const pinBtn = document.getElementById('toc-pin-btn');
+                if (pinBtn) {
+                    pinBtn.title = '固定目录（点击保持展开）';
+                }
             }
         }
 
         setupScrollObserver();
+        setupChapterObserver();
+        setupTranscriptObserver();
+        setupBreakpointListeners();
 
         console.log('Floating TOC ready');
     }
