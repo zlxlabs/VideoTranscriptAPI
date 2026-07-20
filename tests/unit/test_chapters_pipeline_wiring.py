@@ -11,6 +11,7 @@ Console output must be English only (no emoji, no Chinese).
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -328,6 +329,163 @@ class TestRecalibrateForceChapters:
         if force:
             skip = False
         assert skip is True
+
+
+# ---------------------------------------------------------------------------
+# Recalibrate chapters gate through the real _handle_llm_task path
+# ---------------------------------------------------------------------------
+
+class TestRecalibrateChaptersSkipGate:
+    """Assert the skip_chapters flag the coordinator actually receives.
+
+    The recalibrate route (tasks.py) builds llm_task with calibrate_only=True
+    and processing_options=normalize_processing_options(None), so
+    chapters_requested is always True on that path and must not decide the
+    chapters gate. Only a prior GENERATED status forces recompute; any other
+    prior state (SKIPPED_*/FAILED/DISABLED/no status) must reach the
+    coordinator with skip_chapters=True to avoid unbudgeted LLM spend.
+    """
+
+    def _run_handle_llm_task(self, monkeypatch, *, old_status=None,
+                             task_overrides=None):
+        captured = {}
+
+        mock_cm = MagicMock()
+        mock_cm.media_lock.return_value.__enter__ = MagicMock(return_value=None)
+        mock_cm.media_lock.return_value.__exit__ = MagicMock(return_value=False)
+        llm_status = {}
+        if old_status is not None:
+            llm_status["chapters_status"] = old_status
+        mock_cm.get_cache.return_value = {
+            # no file_path -> _should_backfill_summary deterministically False
+            "llm_status": llm_status,
+            "llm_processed": {
+                "dialogs": [
+                    {"speaker": "A", "start_time": 0.0, "end_time": 1.0,
+                     "text": "x"},
+                ],
+            },
+        }
+        mock_cm.invalidate_llm_status.return_value = {}
+        mock_cm.save_llm_result.return_value = True
+        mock_cm.save_llm_status.return_value = True
+        mock_cm.get_task_by_id.return_value = {"view_token": "tok"}
+        mock_cm.update_task_status.return_value = True
+
+        def fake_process(**kwargs):
+            captured.update(kwargs)
+            return {
+                "calibrated_text": "calibrated",
+                "summary_text": "summary",
+                "stats": {
+                    "calibration_status": "full",
+                    "summary_status": SummaryStatus.GENERATED,
+                },
+                "models_used": {},
+            }
+
+        mock_coordinator = MagicMock()
+        mock_coordinator.process = fake_process
+
+        class _FakeQueue:
+            def task_done(self):
+                pass
+
+        class _FakeRouter:
+            def send_text(self, content, **kwargs):
+                return {"fake": True}
+
+            def send_long_text(self, **kwargs):
+                return {"fake": True}
+
+            def notify_task_status(self, **kwargs):
+                return {"fake": True}
+
+        @contextmanager
+        def noop_lock(task_id):
+            yield
+
+        monkeypatch.setattr(llm_ops, "llm_task_queue", _FakeQueue())
+        monkeypatch.setattr(llm_ops, "cache_manager", mock_cm)
+        monkeypatch.setattr(llm_ops, "llm_coordinator", mock_coordinator)
+        monkeypatch.setattr(llm_ops, "task_lock", noop_lock)
+        monkeypatch.setattr(
+            llm_ops, "get_notification_router", lambda: _FakeRouter()
+        )
+        monkeypatch.setattr(llm_ops, "get_base_url", lambda: "https://fake-base")
+
+        llm_task = {
+            # Mirrors the recalibrate route payload (tasks.py): calibrate_only
+            # + normalized default processing_options (chapters_requested is
+            # therefore always True on this path).
+            "task_id": "task-recal",
+            "url": "https://example.com/v/1",
+            "platform": "youtube",
+            "media_id": "vid-1",
+            "video_title": "Video 1",
+            "author": "author",
+            "description": "desc",
+            "transcript": "transcript",
+            "use_speaker_recognition": False,
+            "transcription_data": None,
+            "wechat_webhook": None,
+            "notification_webhooks": {},
+            "is_generic": False,
+            "calibrate_only": True,
+            "processing_options": normalize_processing_options(None),
+        }
+        if task_overrides:
+            llm_task.update(task_overrides)
+
+        llm_ops._handle_llm_task(llm_task)
+        return captured
+
+    @pytest.mark.parametrize(
+        "old_status",
+        [
+            ChaptersStatus.SKIPPED_SHORT,
+            ChaptersStatus.SKIPPED_NO_TIMELINE,
+            ChaptersStatus.FAILED,
+            ChaptersStatus.DISABLED,
+            None,
+        ],
+    )
+    def test_recalibrate_skips_chapters_unless_prior_generated(
+        self, monkeypatch, old_status
+    ):
+        captured = self._run_handle_llm_task(monkeypatch, old_status=old_status)
+        assert captured["skip_chapters"] is True
+        assert captured["timeline_segments"] is None
+
+    def test_recalibrate_prior_generated_forces_recompute(self, monkeypatch):
+        captured = self._run_handle_llm_task(
+            monkeypatch, old_status=ChaptersStatus.GENERATED
+        )
+        assert captured["skip_chapters"] is False
+        # chapters actually runs: timeline seed resolved from cached dialogs
+        assert captured["timeline_segments"] == [
+            {"speaker": "A", "start_time": 0.0, "end_time": 1.0, "text": "x"},
+        ]
+
+    def test_non_recalibrate_chapters_requested_still_runs(self, monkeypatch):
+        captured = self._run_handle_llm_task(
+            monkeypatch, task_overrides={"calibrate_only": False}
+        )
+        assert captured["skip_chapters"] is False
+
+    def test_non_recalibrate_chapters_not_requested_still_skips(
+        self, monkeypatch
+    ):
+        captured = self._run_handle_llm_task(
+            monkeypatch,
+            task_overrides={
+                "calibrate_only": False,
+                "processing_options": normalize_processing_options(
+                    {"chapters": False}
+                ),
+            },
+        )
+        assert captured["skip_chapters"] is True
 
 
 class TestBuildResultDictChapters:

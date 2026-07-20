@@ -428,13 +428,20 @@ def _handle_llm_task(llm_task: dict):
                 # 因此 recalibrate 永远真实执行校对，不受本开关影响。
                 skip_calibration_for_coordinator = not calibrate_requested
 
-                # chapters: skip when not requested, unless recalibrate forces
-                # recompute of a prior GENERATED artifact (R6).
-                skip_chapters_for_coordinator = (
-                    not chapters_requested and not force_chapters_recompute
-                )
-                if force_chapters_recompute:
-                    skip_chapters_for_coordinator = False
+                # chapters 跳过判定（R6）：
+                # - calibrate_only（recalibrate）：路由（tasks.py）用
+                #   normalize_processing_options(None) 写入默认 processing_options，
+                #   chapters_requested 恒为 True，不能据此决定是否跑章节——
+                #   仅旧状态为 GENERATED（force_chapters_recompute=True）时强制
+                #   重算，SKIPPED_*/FAILED/DISABLED/无状态一律跳过，避免对旧
+                #   状态任务产生非预期的章节 LLM 调用费用。
+                # - 非 calibrate_only（正常 transcribe 路径）：仅由本轮
+                #   processing_options.chapters 决定（此时 force_chapters_recompute
+                #   恒为 False——它只在 calibrate_only 分支内置 True）。
+                if calibrate_only:
+                    skip_chapters_for_coordinator = not force_chapters_recompute
+                else:
+                    skip_chapters_for_coordinator = not chapters_requested
 
                 # Cache-side chapters seed (this-round dialogs preferred inside
                 # coordinator after calibration). Keep llm/ package pure.
