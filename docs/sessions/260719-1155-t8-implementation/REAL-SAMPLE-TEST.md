@@ -10,7 +10,7 @@
 | 样本 | 类型 | 结论 |
 |------|------|------|
 | Terence Tao – How the world's top mathematician uses AI（YouTube，84min，英文自动字幕） | plain，新转录 + recalibrate | **全链路符合预期**（唯一发现的阻塞为 chapters 校验 bug，已修） |
-| 【巫师】韩国再拿第一，工蜂经济倒逼年轻人选择双输（bilibili BV18QLD6eEYz，13min，CapsWriter ASR） | plain，calibrate=false 首跑 + recalibrate | **符合预期**；章节 skipped_short（<阈值，诚实行为）；ASR 片尾乱码校准未完全救回（源质量问题） |
+| 【巫师】韩国再拿第一，工蜂经济倒逼年轻人选择双输（bilibili BV18QLD6eEYz，13min，CapsWriter ASR） | plain，calibrate=false 首跑 + recalibrate | **符合预期**；首跑章节 skipped_short 系本地阈值默认 10000（转录 ~8000 字）——对齐生产 `min_chapters_threshold=1000` 后 recalibrate 生成 5 章且全部 jump_ok=1（见「追加：章节阈值」）；ASR 片尾乱码校准未完全救回（源质量问题） |
 | 别给人类写软件了（小宇宙，FunASR speaker=1 历史任务） | speaker 回归样本 | **开关 ON/OFF 下渲染与基线逐点一致**（145 锚点、说话人姓名不变） |
 
 ## 开关 ON 全链路验收（Terence）
@@ -56,6 +56,21 @@ TestStartSegTypeCoercion）。修复后 chapters 一次成功（20,644 tokens / 
 - 结构化逐段校对 token 约为旧路径 1.8×（id 行格式 + 逐 chunk 指令开销），墙钟 +35%；
   章节 prompt 因输入从 2338 段变 150 段而显著变小。
 - 巫师 recalibrate：校准 3 次调用 11,875 tokens / 31s；总结补跑 6,864 tokens / 30s。
+
+## 追加：章节阈值与小宇宙任务无章节的原因（2026-07-19 晚）
+
+用户反馈三个样本里只有 Terence 有章节。排查结论：
+
+1. **巫师**：首跑 `chapters_status=skipped_short`——本地 config 未配
+   `min_chapters_threshold`，代码默认 10000 字符，其转录全文 ~8000 字被诚实跳过。
+   生产/worktree 本地配置为 1000。对齐本地配置为 1000 后 recalibrate：
+   `chapters_status=generated`，5 章（`source.kind=dialogs`，17 段落），
+   查看页 17 个 dlg 锚点、**5/5 `data-jump-ok="1"`**。
+   教训：**测试环境的章节阈值要与生产对齐**，否则"没章节"是配置差异而非功能缺陷。
+2. **小宇宙（杨攀）**：历史 FunASR 任务，处理时分支还没有 chapters 功能，
+   缓存里无 `llm_chapters.json`/无 `llm_status.json`，查看页不会追溯生成。
+   要补章节需 recalibrate（会重跑整轮 FunASR 校准 + 说话人推断，改动历史产物），
+   本轮未动——它继续作为 speaker 路径回归基线。
 
 ## 遗留与备注
 
