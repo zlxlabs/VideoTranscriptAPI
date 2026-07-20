@@ -776,13 +776,14 @@ def _generate_title_if_needed(llm_task: dict, video_title: str, transcript: str)
 
 
 def _structured_calibration_for_plain_enabled() -> bool:
-    """读取 llm.structured_calibration_for_plain 开关（默认 False，暗启动）。
+    """读取 llm.structured_calibration_for_plain 开关（默认 True，T9 验收后翻正）。
 
-    配置缺失或读取失败一律按 False 兜底——失败必须倒向旧 plain 路径行为。
+    配置缺键按 True（与 LLMConfig 默认值一致）；读取异常按 False 兜底——
+    失败必须倒向旧 plain 路径行为。
     """
     try:
         llm_cfg = config.get("llm", {}) or {}
-        return bool(llm_cfg.get("structured_calibration_for_plain", False))
+        return bool(llm_cfg.get("structured_calibration_for_plain", True))
     except Exception as exc:
         logger.warning(
             f"Failed to read llm.structured_calibration_for_plain: {exc}"
