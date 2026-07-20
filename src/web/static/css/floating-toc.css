@@ -660,6 +660,15 @@ body.toc-wide-margin {
     text-overflow: ellipsis;
 }
 
+/* 摘要全文：不截断、无展开交互；灰化由 .toc-chapter-disabled 整体 opacity 继承 */
+.toc-chapter-gist {
+    margin-top: 2px;
+    padding: 0 4px 2px;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--toc-text-secondary);
+}
+
 /* 不可跳转章节（jump_ok=false）：灰化、无 pointer */
 .toc-chapter-item.toc-chapter-disabled {
     opacity: 0.55;

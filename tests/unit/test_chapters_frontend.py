@@ -615,13 +615,15 @@ class TestFloatingTocXssHardening:
 
 
 # ---------------------------------------------------------------------------
-# Chapter panel/drawer items: slim jump-only rows (no gist UI)
+# Chapter panel/drawer items: time + title row plus full gist text below
 # ---------------------------------------------------------------------------
 
 
-class TestChapterPanelSlimItems:
-    """Panel/drawer chapter rows are time + title only; the gist lives in the
-    inline chapter header, not in the navigation list."""
+class TestChapterPanelGistItems:
+    """Panel/drawer chapter rows show time + one-line title with the full
+    gist text underneath. Gists are short (one or two sentences), so the
+    gist is plain inert text: no button, no expand/collapse, and no
+    clamping/max-height truncation anywhere."""
 
     @pytest.fixture
     def toc_js(self) -> str:
@@ -637,15 +639,23 @@ class TestChapterPanelSlimItems:
             root / "src" / "web" / "static" / "css" / "floating-toc.css"
         ).read_text(encoding="utf-8")
 
-    def test_no_gist_ui_in_js(self, toc_js: str):
-        assert "toc-chapter-gist" not in toc_js
+    def test_js_renders_full_gist_as_plain_element(self, toc_js: str):
+        """The gist is injected via DOM API textContent on a plain div --
+        not a button, and with no expand/collapse machinery left over."""
+        assert "createEl('div', 'toc-chapter-gist'" in toc_js
         assert "gist-expanded" not in toc_js
 
-    def test_no_gist_styles_in_css(self, toc_css: str):
-        assert "toc-chapter-gist" not in toc_css
+    def test_css_gist_full_text_no_truncation(self, toc_css: str):
+        """The .toc-chapter-gist rule must not clamp: no -webkit-line-clamp,
+        no max-height, no overflow hiding, and no gist-expanded styles."""
+        m = re.search(r"\.toc-chapter-gist\s*\{([^}]*)\}", toc_css)
+        assert m, ".toc-chapter-gist rule missing from floating-toc.css"
+        rule = m.group(1)
+        assert "line-clamp" not in rule
+        assert "max-height" not in rule
+        assert "overflow" not in rule
         assert "gist-expanded" not in toc_css
 
     def test_title_clamped_to_one_line(self, toc_css: str):
-        """Long titles collapse to a single line with an ellipsis so 12+
-        chapters fit one screen."""
+        """Titles still collapse to a single line with an ellipsis."""
         assert "text-overflow: ellipsis" in toc_css

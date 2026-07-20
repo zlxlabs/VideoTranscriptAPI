@@ -6,8 +6,8 @@
  * - Auto-extract H1-H4 from the summary section (outline tab)
  * - Chapters are read from the #chapters-data JSON island
  *   (items: {index,title,gist,start_time,start_seg,jump_ok}); a chapter row
- *   is time + title only and jumps to the inline #chapter-anchor-{index}
- *   header (fallback #dlg-{start_seg})
+ *   shows time + title + full gist and jumps to the inline
+ *   #chapter-anchor-{index} header (fallback #dlg-{start_seg})
  * - Chapter pages: panel with "chapters | outline" tabs, current chapter
  *   tracking via IntersectionObserver on .chapter-anchor
  * - Breakpoints on chapter pages:
@@ -266,6 +266,8 @@
             const title = (typeof ch.title === 'string' ? ch.title : '').trim();
             if (!title) return;
 
+            const gist = typeof ch.gist === 'string' ? ch.gist : '';
+
             let startSeg = parseInt(ch.start_seg, 10);
             if (isNaN(startSeg)) startSeg = null;
 
@@ -275,6 +277,7 @@
             chapters.push({
                 index: index,
                 title: title,
+                gist: gist,
                 timeLabel: formatChapterSeconds(ch.start_time),
                 startSeg: startSeg,
                 jumpOk: jumpOk,
@@ -320,8 +323,9 @@
 
     /**
      * One chapter row, shared by the PC panel and the mobile drawer.
-     * Slim jump-only row: time + title; the gist lives in the inline
-     * chapter header inside the transcript.
+     * Time + title row (whole-row jump) with the full gist text below it.
+     * Gists are short, so the gist is plain inert text: no clamping and
+     * no expand/collapse interaction.
      */
     function buildChapterItem(chapter) {
         const item = createEl('div', 'toc-chapter-item');
@@ -341,6 +345,10 @@
         }
         main.appendChild(createEl('span', 'toc-chapter-title', chapter.title));
         item.appendChild(main);
+
+        if (chapter.gist) {
+            item.appendChild(createEl('div', 'toc-chapter-gist', chapter.gist));
+        }
 
         return item;
     }
