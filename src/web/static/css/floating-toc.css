@@ -576,9 +576,12 @@
     cursor: pointer;
 }
 
-/* 宽屏（>=1400px）：面板停靠为常驻侧栏，正文让出右边距 */
+/* 宽屏（>=1400px）：面板停靠为常驻侧栏，正文在面板左侧剩余空间内居中。
+   body 为 content-box：max-width 900px + 左右 padding 各 20px，实际占位 940px；
+   margin-right 预留 320px 面板位后，再吸收剩余空间的一半，margin-left auto 吸收另一半。 */
 body.toc-wide-margin {
-    margin-right: 320px;
+    margin-left: auto;
+    margin-right: calc(320px + (100vw - 320px - 940px) / 2);
 }
 
 .floating-toc-container.toc-docked {

@@ -3,8 +3,9 @@
 T11 replaces the chapter card wall with:
 - a JSON data island (``chapters_data`` view var, rendered into
   ``<script type="application/json" id="chapters-data">``), fields per
-  chapter: ``{index,title,gist,start_time,start_seg,jump_ok}``, with ``</``
-  escaped as ``<\\/`` so the payload cannot break out of the script tag;
+  chapter: ``{index,title,gist,start_time,start_seg,jump_ok}``, with every
+  ``<`` escaped as ``\\u003c`` so the payload can neither close the script
+  tag nor re-open it via script-data double-escape (``<!--<script>``);
 - inline ``.chapter-anchor`` headers inside the structured transcript,
   inserted before the dialog item whose ``dlg_index == chapter.start_seg``
   (only for chapters with ``jump_ok``).
@@ -186,9 +187,9 @@ class TestChaptersDataIsland:
         assert chapters[1]["jump_ok"] is True
 
     def test_data_island_escapes_script_close_tag(self, tmp_path: Path):
-        """``</`` must be escaped as ``<\\/`` so a title/gist containing
-        ``</script>`` cannot break out of the JSON script island, while
-        ``json.loads`` still round-trips the original text."""
+        """Every ``<`` must be escaped as ``\\u003c`` so a title/gist
+        containing ``</script>`` cannot break out of the JSON script
+        island, while ``json.loads`` still round-trips the original text."""
         from video_transcript_api.api.routes.views import _prepare_success_view
 
         dialogs = _sample_dialogs()
@@ -205,12 +206,82 @@ class TestChaptersDataIsland:
 
         chapters_data = view_data.get("chapters_data")
         assert isinstance(chapters_data, str)
-        assert "</" not in chapters_data
-        assert "<\\/" in chapters_data
+        assert "<" not in chapters_data
+        assert "\\u003c" in chapters_data
 
         chapters = json.loads(chapters_data)
         assert chapters[0]["title"] == 'x</script><script>alert(1)</script>'
         assert chapters[0]["gist"] == 'g</script><img src=x onerror=alert(1)>'
+
+    def test_data_island_escapes_script_data_double_escape(self, tmp_path: Path):
+        """``<!--<script>`` is a script-data double-escape sequence: inside a
+        script island it would re-open a real script context and swallow the
+        page DOM up to the next ``</script>``. Escaping only ``</`` cannot
+        stop this; escaping every ``<`` as ``\\u003c`` does, and
+        ``json.loads`` must round-trip the original text."""
+        from video_transcript_api.api.routes.views import _prepare_success_view
+
+        dialogs = _sample_dialogs()
+        fp = _fingerprint_for(dialogs)
+        payload = _chapters_payload(
+            fp,
+            title='<!--<script>alert(1)</script>-->',
+            gist='g<!--<script>',
+        )
+        _build_view_task(tmp_path, payload)
+
+        view_data = {"cache_dir": str(tmp_path), "summary": None}
+        _prepare_success_view(view_data)
+
+        chapters_data = view_data.get("chapters_data")
+        assert isinstance(chapters_data, str)
+        assert "<" not in chapters_data
+        assert "\\u003c" in chapters_data
+
+        chapters = json.loads(chapters_data)
+        assert chapters[0]["title"] == '<!--<script>alert(1)</script>-->'
+        assert chapters[0]["gist"] == 'g<!--<script>'
+
+    def test_data_island_start_time_non_finite_becomes_null(self, tmp_path: Path):
+        """json.dumps emits ``Infinity``/``NaN`` literals for non-finite
+        floats, which are invalid JSON and would make JSON.parse fail,
+        silently dropping all chapters. inf/-inf/NaN (and non-numeric or
+        missing) start_time values must serialize as null; finite numbers
+        pass through unchanged."""
+        from video_transcript_api.api.routes.views import _prepare_success_view
+
+        dialogs = _sample_dialogs()
+        fp = _fingerprint_for(dialogs)
+        payload = _chapters_payload(fp)
+        payload["chapters"] = [
+            {"index": 0, "title": "pos_inf", "gist": "", "start_seg": 0,
+             "start_time": float("inf")},
+            {"index": 1, "title": "neg_inf", "gist": "", "start_seg": 0,
+             "start_time": float("-inf")},
+            {"index": 2, "title": "nan", "gist": "", "start_seg": 0,
+             "start_time": float("nan")},
+            {"index": 3, "title": "finite", "gist": "", "start_seg": 0,
+             "start_time": 12.5},
+            {"index": 4, "title": "missing", "gist": "", "start_seg": 0,
+             "start_time": None},
+        ]
+        _build_view_task(tmp_path, payload)
+
+        view_data = {"cache_dir": str(tmp_path), "summary": None}
+        _prepare_success_view(view_data)
+
+        chapters_data = view_data["chapters_data"]
+        assert isinstance(chapters_data, str)
+        assert "Infinity" not in chapters_data
+        assert "NaN" not in chapters_data
+
+        chapters = json.loads(chapters_data)
+        by_title = {ch["title"]: ch for ch in chapters}
+        assert by_title["pos_inf"]["start_time"] is None
+        assert by_title["neg_inf"]["start_time"] is None
+        assert by_title["nan"]["start_time"] is None
+        assert by_title["finite"]["start_time"] == 12.5
+        assert by_title["missing"]["start_time"] is None
 
     def test_mismatched_fingerprint_marks_jump_not_ok(self, tmp_path: Path):
         from video_transcript_api.api.routes.views import _prepare_success_view
@@ -297,7 +368,7 @@ class TestChaptersDataIsland:
         _prepare_success_view(view_data)
 
         chapters_data = view_data["chapters_data"]
-        assert "</" not in chapters_data
+        assert "<" not in chapters_data
         # Inline anchor titles must be HTML-escaped too.
         calibrated_html = view_data.get("calibrated_html") or ""
         assert "<script>alert(1)</script>" not in calibrated_html

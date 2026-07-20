@@ -964,6 +964,7 @@ def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
     chapters_data），返回 stats。
     """
     import json
+    import math
 
     if view_data.get("summary"):
         view_data["summary_html"] = render_markdown_to_html(view_data["summary"])
@@ -1148,7 +1149,7 @@ def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
                             start_time = ch.get("start_time")
                             if not (
                                 isinstance(start_time, (int, float))
-                                and start_time == start_time  # NaN guard
+                                and math.isfinite(start_time)  # NaN/inf guard
                             ):
                                 start_time = None
                             chapters_for_view.append(
@@ -1165,9 +1166,11 @@ def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
                             )
                     if chapters_for_view:
                         data_json = json.dumps(chapters_for_view, ensure_ascii=False)
-                        # Escape "</" so LLM text cannot break out of the
-                        # <script type="application/json"> data island.
-                        view_data["chapters_data"] = data_json.replace("</", "<\\/")
+                        # Escape every "<" as "\\u003c" (a valid JSON string
+                        # escape that JSON.parse round-trips) so LLM text can
+                        # neither close the data island nor re-open it via
+                        # script-data double-escape (e.g. <!--<script>).
+                        view_data["chapters_data"] = data_json.replace("<", "\\u003c")
                     else:
                         chapters_for_view = None
                 except Exception as exc:
