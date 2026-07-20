@@ -309,28 +309,6 @@ class TestSaveLlmResultsChapters:
         assert kwargs["chapters_status"] == ChaptersStatus.GENERATED
 
 
-class TestRecalibrateForceChapters:
-    def test_prior_generated_forces_skip_chapters_false(self, monkeypatch):
-        """Simulate the flag logic used in _handle_llm_task for R6."""
-        # This unit-tests the decision table without spinning the full queue.
-        old_status = ChaptersStatus.GENERATED
-        chapters_requested = True
-        force = old_status == ChaptersStatus.GENERATED
-        skip = not chapters_requested and not force
-        if force:
-            skip = False
-        assert skip is False
-
-    def test_prior_skipped_does_not_force(self):
-        old_status = ChaptersStatus.SKIPPED_SHORT
-        chapters_requested = False
-        force = old_status == ChaptersStatus.GENERATED
-        skip = not chapters_requested and not force
-        if force:
-            skip = False
-        assert skip is True
-
-
 # ---------------------------------------------------------------------------
 # Recalibrate chapters gate through the real _handle_llm_task path
 # ---------------------------------------------------------------------------
