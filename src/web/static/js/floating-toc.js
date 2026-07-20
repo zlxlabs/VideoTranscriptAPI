@@ -917,8 +917,15 @@
                 return;
             }
 
-            if (e.target.closest('.toc-chapter-main')) {
-                handleChapterJump(e.target.closest('.toc-chapter-main'));
+            // Whole chapter row is one jump target: title row or gist.
+            // Route through the row's .toc-chapter-main (it carries the
+            // jump dataset; jump_ok=false rows have none and no-op).
+            if (e.target.closest('.toc-chapter-main, .toc-chapter-gist')) {
+                const item = e.target.closest('.toc-chapter-item');
+                const main = item ? item.querySelector('.toc-chapter-main') : null;
+                if (main) {
+                    handleChapterJump(main);
+                }
                 return;
             }
 

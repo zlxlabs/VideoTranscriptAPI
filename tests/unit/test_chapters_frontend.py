@@ -622,8 +622,10 @@ class TestFloatingTocXssHardening:
 class TestChapterPanelGistItems:
     """Panel/drawer chapter rows show time + one-line title with the full
     gist text underneath. Gists are short (one or two sentences), so the
-    gist is plain inert text: no button, no expand/collapse, and no
-    clamping/max-height truncation anywhere."""
+    gist is plain text: no button, no expand/collapse, and no
+    clamping/max-height truncation anywhere. The whole row -- title line
+    and gist alike -- is one jump target; rows with jump_ok=false stay
+    inert (no dataset.targetId, so handleChapterJump no-ops)."""
 
     @pytest.fixture
     def toc_js(self) -> str:
@@ -645,6 +647,15 @@ class TestChapterPanelGistItems:
         assert "createEl('div', 'toc-chapter-gist'" in toc_js
         assert "gist-expanded" not in toc_js
 
+    def test_whole_item_click_delegates_to_jump(self, toc_js: str):
+        """Clicking the gist must reach the same jump handler as clicking
+        the title row: the delegated click handler matches both
+        .toc-chapter-main and .toc-chapter-gist, then routes through the
+        row's shared .toc-chapter-main button (which carries the jump
+        dataset; absent on jump_ok=false rows, so those stay inert)."""
+        assert "'.toc-chapter-main, .toc-chapter-gist'" in toc_js
+        assert "querySelector('.toc-chapter-main')" in toc_js
+
     def test_css_gist_full_text_no_truncation(self, toc_css: str):
         """The .toc-chapter-gist rule must not clamp: no -webkit-line-clamp,
         no max-height, no overflow hiding, and no gist-expanded styles."""
@@ -655,6 +666,19 @@ class TestChapterPanelGistItems:
         assert "max-height" not in rule
         assert "overflow" not in rule
         assert "gist-expanded" not in toc_css
+
+    def test_gist_shows_clickable_cursor(self, toc_css: str):
+        """The gist area is part of the jump target -> pointer cursor,
+        while disabled (jump_ok=false) rows keep the default cursor."""
+        m = re.search(r"\.toc-chapter-gist\s*\{([^}]*)\}", toc_css)
+        assert m, ".toc-chapter-gist rule missing from floating-toc.css"
+        assert "cursor: pointer" in m.group(1)
+        disabled = re.search(
+            r"\.toc-chapter-item\.toc-chapter-disabled \.toc-chapter-gist\s*\{([^}]*)\}",
+            toc_css,
+        )
+        assert disabled, "disabled gist cursor rule missing"
+        assert "cursor: default" in disabled.group(1)
 
     def test_title_clamped_to_one_line(self, toc_css: str):
         """Titles still collapse to a single line with an ellipsis."""

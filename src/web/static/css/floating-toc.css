@@ -670,6 +670,7 @@ body.toc-wide-margin {
 }
 
 /* 摘要全文：不截断、无展开交互，文档级行距；
+   整条目（标题行+摘要）都是跳转目标，故用 pointer；
    灰化由 .toc-chapter-disabled 整体 opacity 继承 */
 .toc-chapter-gist {
     margin-top: 6px;
@@ -677,6 +678,7 @@ body.toc-wide-margin {
     font-size: 0.83rem;
     line-height: 1.7;
     color: var(--toc-text-secondary);
+    cursor: pointer;
 }
 
 /* 不可跳转章节（jump_ok=false）：灰化、无 pointer */
@@ -684,7 +686,8 @@ body.toc-wide-margin {
     opacity: 0.55;
 }
 
-.toc-chapter-item.toc-chapter-disabled .toc-chapter-main {
+.toc-chapter-item.toc-chapter-disabled .toc-chapter-main,
+.toc-chapter-item.toc-chapter-disabled .toc-chapter-gist {
     cursor: default;
 }
 
