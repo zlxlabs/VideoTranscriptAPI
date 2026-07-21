@@ -26,6 +26,10 @@ class LLMConfig:
     speaker_model: Optional[str] = None  # 默认使用 calibrate_model
     speaker_reasoning_effort: Optional[str] = None
 
+    # 章节梗概生成模型
+    chapters_model: Optional[str] = None  # 默认使用 calibrate_model
+    chapters_reasoning_effort: Optional[str] = None
+
     # 说话人推断采样配置（按说话人采样，而非全局前 N 字符截断）
     speaker_samples_per_speaker: int = 3       # 每个说话人采样的发言条数上限
     speaker_max_chars_per_speaker: int = 400   # 每个说话人采样文本的总字符上限
@@ -46,6 +50,10 @@ class LLMConfig:
     # 质量配置
     min_calibrate_ratio: float = 0.80
     min_summary_threshold: int = 500
+    min_chapters_threshold: int = 10000  # 原文字符数低于此值不生成章节（正常跳过，非失败）
+    # 章节生成输入的字符数上限：超过此值直接判为 FAILED，而不是把超大输入硬塞给模型。
+    # 须与 chapters_model 的上下文窗口能力匹配——换用上下文更小/更大的模型时需同步调整。
+    max_chapters_input_chars: int = 500000
 
     # 统一质量验证配置
     quality_score_weights: Dict[str, float] = field(
@@ -177,6 +185,12 @@ class LLMConfig:
                 llm_config.get("speaker_reasoning_effort")
             ),
 
+            # 章节梗概生成模型（默认使用校对模型）
+            chapters_model=llm_config.get("chapters_model", llm_config["calibrate_model"]),
+            chapters_reasoning_effort=normalize_reasoning_effort(
+                llm_config.get("chapters_reasoning_effort")
+            ),
+
             # 说话人推断采样配置
             speaker_samples_per_speaker=speaker_inference_config.get("samples_per_speaker", 3),
             speaker_max_chars_per_speaker=speaker_inference_config.get(
@@ -205,6 +219,8 @@ class LLMConfig:
             # 质量配置
             min_calibrate_ratio=llm_config.get("min_calibrate_ratio", 0.80),
             min_summary_threshold=llm_config.get("min_summary_threshold", 500),
+            min_chapters_threshold=llm_config.get("min_chapters_threshold", 10000),
+            max_chapters_input_chars=llm_config.get("max_chapters_input_chars", 500000),
             quality_score_weights=score_weights,
 
             # 分段配置

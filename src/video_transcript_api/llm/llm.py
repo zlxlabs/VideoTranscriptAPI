@@ -609,6 +609,7 @@ def call_llm_api(
     response_schema: None = None,
     config: Optional[Dict[str, Any]] = None,
     system_prompt: str = "You are a helpful assistant.",
+    force_json_mode: Optional[str] = None,
 ) -> str: ...
 
 
@@ -622,6 +623,7 @@ def call_llm_api(
     response_schema: Dict[str, Any],
     config: Optional[Dict[str, Any]] = None,
     system_prompt: str = "You are a helpful assistant.",
+    force_json_mode: Optional[str] = None,
 ) -> StructuredResult: ...
 
 
@@ -634,6 +636,7 @@ def call_llm_api(
     response_schema: Optional[Dict[str, Any]] = None,
     config: Optional[Dict[str, Any]] = None,
     system_prompt: str = "You are a helpful assistant.",
+    force_json_mode: Optional[str] = None,
     # Deprecated params kept for backward compat (ignored)
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
@@ -644,6 +647,15 @@ def call_llm_api(
 
     api_key/base_url/max_retries/retry_delay 参数已废弃，
     由 set_default_config() 初始化的 SyncLLMClient 统一管理。
+
+    Args:
+        force_json_mode: 若指定（目前仅支持 "json_object"），跳过按模型名自动选择
+            JSON 模式（_get_json_mode_for_model）的逻辑，强制使用该模式。
+            json_schema 严格模式（_call_with_json_schema_mode）失败即返回、没有重试；
+            只有 json_object 模式带 Self-Correction 重试。调用方若依赖重试语义
+            （如章节生成的语义校验重试），必须强制走 json_object，不能让结果随
+            model 名称匹配到的默认模式漂移。默认 None，保持原有按模型自动选择的行为，
+            对已有调用方（key_info/speaker_inference 等）完全向后兼容。
     """
     if response_schema is None:
         return _call_with_text_output(
@@ -658,8 +670,9 @@ def call_llm_api(
     if effective_config is None:
         effective_config = {"llm": {"json_output": {"mode_by_model": {"*": "json_schema"}}}}
 
-    json_mode = _get_json_mode_for_model(model, effective_config)
-    logger.info(f"[{task_type.upper()}] Model: {model} | JSON Mode: {json_mode}")
+    json_mode = force_json_mode or _get_json_mode_for_model(model, effective_config)
+    mode_source = "forced" if force_json_mode else "auto"
+    logger.info(f"[{task_type.upper()}] Model: {model} | JSON Mode: {json_mode} ({mode_source})")
 
     if json_mode == "json_schema":
         return _call_with_json_schema_mode(

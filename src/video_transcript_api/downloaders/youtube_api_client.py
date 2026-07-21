@@ -15,6 +15,7 @@ from typing import Optional
 import requests
 
 from ..utils.logging import setup_logger
+from .subtitle_types import SubtitleResult
 from .youtube_api_errors import (
     YouTubeApiError,
     YouTubeApiTimeoutError,
@@ -113,16 +114,39 @@ class YouTubeApiClient:
 
     def fetch_transcript(self, video_id: str) -> Optional[str]:
         """
-        仅获取视频字幕（不下载音频）
+        仅获取视频字幕（不下载音频，向后兼容的纯文本入口）
 
         该方法是 create_and_wait() 的便捷封装，专门用于获取字幕文本。
-        适用于不需要音频，只需要字幕的场景。
+        适用于不需要音频，只需要字幕的场景。内部委托给 fetch_transcript_result()，
+        只取其中的纯文本部分，保持历史返回值不变。
 
         Args:
             video_id: YouTube 视频 ID
 
         Returns:
             str: 字幕纯文本，如果无字幕则返回 None
+
+        Raises:
+            YouTubeApiError: API 调用失败或视频无字幕
+            YouTubeApiTimeoutError: 任务超时
+            YouTubeApiNetworkError: 网络错误
+        """
+        result = self.fetch_transcript_result(video_id)
+        return result.text if result else None
+
+    def fetch_transcript_result(self, video_id: str) -> Optional[SubtitleResult]:
+        """
+        仅获取视频字幕（不下载音频），保留时间戳分段信息
+
+        fetch_transcript() 的完整版：fetch_transcript() 只返回纯文本，这里额外
+        携带 segments 时间戳分段，供后续需要时间轴的场景（get_subtitle_result
+        等）使用。
+
+        Args:
+            video_id: YouTube 视频 ID
+
+        Returns:
+            SubtitleResult: 字幕文本 + 时间戳分段，如果无字幕则返回 None
 
         Raises:
             YouTubeApiError: API 调用失败或视频无字幕
@@ -146,15 +170,15 @@ class YouTubeApiClient:
             )
             return None
 
-        # 下载字幕内容并解析
+        # 下载字幕内容并解析（含时间戳分段）
         srt_content = self.download_content(result.transcript.url)
-        plain_text = self.parse_srt_to_text(srt_content)
+        subtitle_result = self.parse_srt_to_subtitle_result(srt_content)
 
         logger.info(
             f"[youtube-api] Transcript fetched successfully: {video_id}, "
-            f"length={len(plain_text)} chars, language={result.transcript.language}"
+            f"length={len(subtitle_result.text)} chars, language={result.transcript.language}"
         )
-        return plain_text
+        return subtitle_result
 
     def fetch_video_info(self, video_id: str) -> VideoInfoResult:
         """
@@ -555,10 +579,20 @@ class YouTubeApiClient:
                 original_error=e
             )
 
+    # SRT 时间轴行正则（如 "00:00:01,000 --> 00:00:04,000"），文本提取和时间戳
+    # 提取共用同一份正则，保证两者对"什么算时间轴行"的判断完全一致。
+    _SRT_TIMESTAMP_LINE_PATTERN = re.compile(
+        r"\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}"
+    )
+    # 同上，但带分组，用于把各段数字提取出来换算成秒
+    _SRT_TIMESTAMP_RANGE_PATTERN = re.compile(
+        r"(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})"
+    )
+
     @staticmethod
     def parse_srt_to_text(srt_content: str) -> str:
         """
-        解析 SRT 字幕为纯文本
+        解析 SRT 字幕为纯文本（向后兼容入口，保持历史行为逐字节一致）
 
         SRT 格式示例:
             1
@@ -575,11 +609,26 @@ class YouTubeApiClient:
         Returns:
             str: 纯文本（各句之间用空格连接）
         """
+        return YouTubeApiClient.parse_srt_to_subtitle_result(srt_content).text
+
+    @staticmethod
+    def parse_srt_to_subtitle_result(srt_content: str) -> SubtitleResult:
+        """
+        解析 SRT 字幕，同时返回纯文本与时间戳分段信息
+
+        文本提取算法与历史版本的 parse_srt_to_text 完全一致（逐字节兼容，未识别
+        为时间轴的行会和以前一样被当作普通文本保留）；时间戳分段提取是独立的
+        容错步骤，解析失败或没有可用时间轴时 segments 会被置为 None，绝不会
+        影响 text 字段（容错铁律）。
+
+        Args:
+            srt_content: SRT 格式的字幕内容
+
+        Returns:
+            SubtitleResult: text（纯文本，逐字节兼容旧版）+ segments（可能为 None）
+        """
         lines = srt_content.strip().split("\n")
         text_parts = []
-
-        # 时间轴正则
-        timestamp_pattern = re.compile(r"\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}")
 
         i = 0
         while i < len(lines):
@@ -591,7 +640,7 @@ class YouTubeApiClient:
                 continue
 
             # 跳过时间轴行
-            if timestamp_pattern.match(line):
+            if YouTubeApiClient._SRT_TIMESTAMP_LINE_PATTERN.match(line):
                 i += 1
                 continue
 
@@ -609,7 +658,72 @@ class YouTubeApiClient:
 
             i += 1
 
-        return " ".join(text_parts)
+        text = " ".join(text_parts)
+
+        # 独立提取时间戳分段：任何异常都不能影响上面已经算好的 text
+        segments = None
+        try:
+            segments = YouTubeApiClient._extract_srt_segments(lines) or None
+        except Exception as e:
+            logger.warning(f"[youtube-api] SRT 时间戳解析失败，segments 置空: {e}")
+            segments = None
+
+        return SubtitleResult(text=text, segments=segments)
+
+    @staticmethod
+    def _extract_srt_segments(lines: list) -> list:
+        """
+        从 SRT 文本行中提取时间戳分段信息
+
+        仅在遇到形如 "HH:MM:SS,mmm --> HH:MM:SS,mmm" 的时间轴行时才会生成分段；
+        无法识别的时间轴行（缺失、格式错误）不会产生分段，也不会抛出异常影响
+        上层的文本提取。
+
+        Args:
+            lines: parse_srt_to_subtitle_result 已经按行 split 好的原始行列表
+
+        Returns:
+            list[dict]: 每项形如 {"start_time": float, "end_time": float, "text": str}
+        """
+
+        def to_seconds(hours: str, minutes: str, seconds: str, millis: str) -> float:
+            return int(hours) * 3600 + int(minutes) * 60 + int(seconds) + int(millis) / 1000.0
+
+        segments = []
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            match = YouTubeApiClient._SRT_TIMESTAMP_RANGE_PATTERN.match(line)
+
+            if not match:
+                i += 1
+                continue
+
+            h1, m1, s1, ms1, h2, m2, s2, ms2 = match.groups()
+            start_time = to_seconds(h1, m1, s1, ms1)
+            end_time = to_seconds(h2, m2, s2, ms2)
+
+            # 收集该时间轴对应的文本行，直到遇到空行/序号行/下一个时间轴行
+            text_lines = []
+            j = i + 1
+            while j < len(lines):
+                candidate = lines[j].strip()
+                if not candidate or candidate.isdigit() or YouTubeApiClient._SRT_TIMESTAMP_LINE_PATTERN.match(candidate):
+                    break
+                text_lines.append(re.sub(r"<[^>]+>", "", candidate))
+                j += 1
+
+            segment_text = " ".join(t for t in text_lines if t).strip()
+            if segment_text:
+                segments.append({
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "text": segment_text,
+                })
+
+            i = j
+
+        return segments
 
     def close(self):
         """关闭客户端连接"""

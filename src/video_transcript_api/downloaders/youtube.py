@@ -12,6 +12,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, VideoUnavailable, IpBlocked, NoTranscriptFound
 from .base import BaseDownloader
 from .models import VideoMetadata, DownloadInfo
+from .subtitle_types import SubtitleResult
 from ..utils.logging import setup_logger
 from ..utils import create_debug_dir
 from ..utils.ytdlp import YtdlpConfigBuilder
@@ -488,6 +489,92 @@ class YoutubeDownloader(BaseDownloader):
             logger.exception(f"[字幕获取] 异常: {str(e)}")
             return None
 
+    def get_subtitle_result(self, url):
+        """
+        获取字幕，保留时间戳分段信息（get_subtitle 的完整版，供后续接线使用）
+
+        行为策略与 get_subtitle 完全一致（同样的优先级、同样的回退顺序），
+        唯一区别是成功时返回 SubtitleResult（text + 可选 segments）而不是纯
+        文本。get_subtitle 出于向后兼容需要保持字符串返回值不变，因此这里
+        单独实现一份平行的分支逻辑，而不是让 get_subtitle 反过来委托本方法
+        （否则 mock 了 get_subtitle 内部旧方法名的既有测试会失效）。
+
+        参数:
+            url: 视频URL
+
+        返回:
+            SubtitleResult | None: 字幕文本 + 时间戳分段，如果没有字幕则返回 None
+        """
+        try:
+            video_id = self._extract_video_id(url)
+            if not video_id:
+                logger.warning("[字幕获取] 无法提取视频ID")
+                return None
+
+            # ============================================================
+            # 分支 A：启用了 youtube_api_server
+            # ============================================================
+            if self.use_api_server:
+                logger.info(
+                    f"[字幕获取] 使用 youtube_api_server 优先策略: video_id={video_id}"
+                )
+
+                try:
+                    subtitle_result = self._youtube_api_client.fetch_transcript_result(video_id)
+                    if subtitle_result and subtitle_result.text and subtitle_result.text.strip():
+                        logger.info(
+                            f"[字幕获取] youtube_api_server 成功: "
+                            f"length={len(subtitle_result.text)} chars"
+                        )
+                        return subtitle_result
+                    else:
+                        # 返回 None 或空文本 = 视频没有字幕，不需要重试
+                        logger.info(
+                            f"[字幕获取] 视频没有可用字幕（已由 API Server 确认）: {video_id}"
+                        )
+                        return None
+                except Exception as api_error:
+                    # 只有失败（异常）时才回退到 TikHub
+                    logger.warning(
+                        f"[字幕获取] youtube_api_server 失败: {api_error}, "
+                        f"回退到 TikHub API（跳过本地方案）"
+                    )
+                    return self._get_subtitle_result_with_tikhub_api(url)
+
+            # ============================================================
+            # 分支 B：未启用 youtube_api_server，使用本地方案
+            # ============================================================
+            else:
+                logger.info(
+                    f"[字幕获取] 使用本地方案: video_id={video_id}"
+                )
+
+                transcript_result = self._fetch_youtube_transcript_result(video_id)
+
+                if transcript_result == "IP_BLOCKED":
+                    logger.warning(
+                        f"[字幕获取] 本地方案 IP 被封，回退到 TikHub API: {video_id}"
+                    )
+                    return self._get_subtitle_result_with_tikhub_api(url)
+                elif transcript_result == "TRANSCRIPTS_DISABLED":
+                    logger.info(f"[字幕获取] 视频字幕已被禁用: {video_id}")
+                    return None
+                elif isinstance(transcript_result, SubtitleResult) and transcript_result.text.strip():
+                    logger.info(
+                        f"[字幕获取] 本地方案成功: length={len(transcript_result.text)} chars"
+                    )
+                    return transcript_result
+
+                # 如果 youtube-transcript-api 失败，尝试使用 TikHub API
+                logger.info(
+                    f"[字幕获取] 本地方案失败，回退到 TikHub API: {video_id}"
+                )
+                return self._get_subtitle_result_with_tikhub_api(url)
+
+        except Exception as e:
+            logger.exception(f"[字幕获取] 异常: {str(e)}")
+            return None
+
     def _fetch_metadata(self, url: str, video_id: str) -> VideoMetadata:
         if self.use_api_server:
             try:
@@ -557,21 +644,46 @@ class YoutubeDownloader(BaseDownloader):
     
     def _fetch_youtube_transcript(self, video_id):
         """
-        使用 youtube-transcript-api 获取字幕
+        使用 youtube-transcript-api 获取字幕（向后兼容的纯文本入口）
+
+        内部委托给 _fetch_youtube_transcript_result()：成功时只取其中的纯
+        文本部分，控制信号哨兵字符串（"IP_BLOCKED" / "TRANSCRIPTS_DISABLED"）
+        和 None 原样透传，保持历史返回值不变。
+        """
+        result = self._fetch_youtube_transcript_result(video_id)
+        if isinstance(result, SubtitleResult):
+            return result.text
+        return result
+
+    def _fetch_youtube_transcript_result(self, video_id):
+        """
+        使用 youtube-transcript-api 获取字幕，保留时间戳分段信息
+
+        _fetch_youtube_transcript() 的完整版：那个方法只返回纯文本，这里
+        成功时额外返回 SubtitleResult 中的 segments，供 get_subtitle_result()
+        使用。控制信号（字符串哨兵 "IP_BLOCKED" / "TRANSCRIPTS_DISABLED"，
+        以及 None）与历史行为完全一致。
+
+        返回:
+            SubtitleResult | str | None:
+                - SubtitleResult: 成功获取字幕（text 逐字节兼容旧版，segments
+                  可能为 None）
+                - "IP_BLOCKED" / "TRANSCRIPTS_DISABLED": 控制信号哨兵
+                - None: 未获取到字幕
         """
         try:
             # 列出可用字幕
             transcript_list = self.ytt_api.list(video_id)
             available_languages = []
-            
+
             for transcript in transcript_list:
                 available_languages.append(transcript.language_code)
                 logger.debug(f"视频 {video_id} 可用字幕: {transcript.language_code} (自动生成: {transcript.is_generated})")
-            
+
             if not available_languages:
                 logger.info(f"视频 {video_id} 没有可用字幕")
                 return None
-                
+
         except TranscriptsDisabled:
             logger.info(f"视频 {video_id} 字幕已被禁用")
             return "TRANSCRIPTS_DISABLED"
@@ -584,27 +696,21 @@ class YoutubeDownloader(BaseDownloader):
         except Exception as e:
             logger.warning(f"无法获取视频 {video_id} 的字幕列表: {e}")
             return None
-        
+
         # 尝试按优先级获取字幕
         priority_languages = ['zh-CN', 'zh-TW', 'zh', 'en']
-        
+
         for lang in priority_languages:
             if lang in available_languages:
                 try:
                     logger.debug(f"尝试获取 {video_id} 的 {lang} 字幕")
                     fetched_transcript = self.ytt_api.fetch(video_id, languages=[lang])
-                    
-                    # 拼接字幕文本
-                    text_parts = []
-                    for item in fetched_transcript:
-                        # 使用属性访问而不是字典访问
-                        text_parts.append(item.text.strip())
-                    
-                    result = ' '.join(text_parts)
-                    if result.strip():
-                        logger.info(f"成功获取视频 {video_id} 的 {lang} 字幕，长度: {len(result)} 字符")
-                        return result
-                        
+
+                    subtitle_result = self._build_subtitle_result_from_snippets(fetched_transcript)
+                    if subtitle_result.text.strip():
+                        logger.info(f"成功获取视频 {video_id} 的 {lang} 字幕，长度: {len(subtitle_result.text)} 字符")
+                        return subtitle_result
+
                 except IpBlocked:
                     logger.error(f"IP 被 YouTube 阻止")
                     return "IP_BLOCKED"
@@ -614,38 +720,87 @@ class YoutubeDownloader(BaseDownloader):
                 except Exception as e:
                     logger.warning(f"获取视频 {video_id} 的 {lang} 字幕失败: {e}")
                     continue
-        
+
         # 如果优先语言都失败，尝试获取第一个可用字幕
         if available_languages:
             try:
                 first_lang = available_languages[0]
                 logger.debug(f"尝试获取 {video_id} 的 {first_lang} 字幕 (备选)")
                 fetched_transcript = self.ytt_api.fetch(video_id, languages=[first_lang])
-                
-                # 拼接字幕文本
-                text_parts = []
-                for item in fetched_transcript:
-                    text_parts.append(item.text.strip())
-                
-                result = ' '.join(text_parts)
-                if result.strip():
-                    logger.info(f"成功获取视频 {video_id} 的 {first_lang} 字幕 (备选)，长度: {len(result)} 字符")
-                    return result
-                    
+
+                subtitle_result = self._build_subtitle_result_from_snippets(fetched_transcript)
+                if subtitle_result.text.strip():
+                    logger.info(f"成功获取视频 {video_id} 的 {first_lang} 字幕 (备选)，长度: {len(subtitle_result.text)} 字符")
+                    return subtitle_result
+
             except IpBlocked:
                 logger.error(f"IP 被 YouTube 阻止")
                 return "IP_BLOCKED"
             except Exception as e:
                 logger.error(f"获取视频 {video_id} 的备选字幕失败: {e}")
-        
+
         return None
-    
+
+    def _build_subtitle_result_from_snippets(self, fetched_transcript) -> SubtitleResult:
+        """
+        将 youtube-transcript-api 返回的字幕条目转换为 SubtitleResult
+
+        文本拼接逻辑（item.text.strip() 后用空格 join）与历史版本逐字节一致；
+        时间戳（item.start / item.duration）提取是独立的容错步骤，条目缺少
+        这些属性或数值非法时，segments 整体降级为 None，不影响 text 字段。
+
+        参数:
+            fetched_transcript: 可迭代的字幕条目（每项需有 .text 属性，
+                时间戳分段额外需要 .start / .duration 属性）
+
+        返回:
+            SubtitleResult
+        """
+        # 只迭代一次原始数据（部分实现可能是一次性迭代器），文本与时间戳
+        # 分别从同一份缓存列表中提取，避免二次迭代导致数据丢失
+        raw_items = list(fetched_transcript)
+
+        text_parts = [item.text.strip() for item in raw_items]
+        text = ' '.join(text_parts)
+
+        segments = None
+        try:
+            segments = [
+                {
+                    "start_time": float(item.start),
+                    "end_time": float(item.start) + float(item.duration),
+                    "text": item.text.strip(),
+                }
+                for item in raw_items
+            ] or None
+        except Exception as e:
+            logger.warning(f"字幕时间戳解析失败，segments 置空: {e}")
+            segments = None
+
+        return SubtitleResult(text=text, segments=segments)
+
     def _get_subtitle_with_tikhub_api(self, url):
         """
-        使用原有的 TikHub API 获取字幕作为备用方案
+        使用原有的 TikHub API 获取字幕作为备用方案（向后兼容的纯文本入口）
+
+        内部委托给 _get_subtitle_result_with_tikhub_api()，只取其中的纯文本
+        部分，保持历史返回值（str | None）不变。
+        """
+        result = self._get_subtitle_result_with_tikhub_api(url)
+        return result.text if result else None
+
+    def _get_subtitle_result_with_tikhub_api(self, url):
+        """
+        使用原有的 TikHub API 获取字幕作为备用方案，保留时间戳分段信息
+
+        _get_subtitle_with_tikhub_api() 的完整版：那个方法只返回纯文本，这里
+        额外携带 SubtitleResult 中的 segments，供 get_subtitle_result() 使用。
 
         🆕 优化：复用实例缓存的 video_info，避免重复 TikHub API 请求
         （在同一任务内，get_video_info 通常已被调用）
+
+        返回:
+            SubtitleResult | None
         """
         try:
             video_id = self._extract_video_id(url)
@@ -660,31 +815,31 @@ class YoutubeDownloader(BaseDownloader):
                 video_info = self.get_video_info(url)
 
             subtitle_info = video_info.get("subtitle_info")
-            
+
             if not subtitle_info or not subtitle_info.get("url"):
                 logger.info(f"TikHub API 未找到字幕信息")
                 return None
-            
+
             # 下载字幕XML
             subtitle_url = subtitle_info["url"]
-            
+
             logger.info(f"从 TikHub API 下载字幕: {subtitle_url[:50]}...")
             response = requests.get(subtitle_url, timeout=30)
             response.raise_for_status()
-            
+
             xml_content = response.text
-            
+
             # 生成时间戳前缀
             timestamp_prefix = datetime.datetime.now().strftime("%y%m%d-%H%M%S")
-            
+
             # 保存字幕XML到文件，用于调试
             video_id = video_info.get("video_id")
             subtitle_file = os.path.join(DEBUG_DIR, f"{timestamp_prefix}_subtitle_youtube_{video_id}.xml")
             with open(subtitle_file, 'w', encoding='utf-8') as f:
                 f.write(xml_content)
             logger.debug(f"字幕内容已保存到: {subtitle_file}")
-            
-            # 解析XML字幕
+
+            # 解析XML字幕（含时间戳分段）
             return self._parse_youtube_subtitle_xml(xml_content)
         except Exception as e:
             logger.exception(f"TikHub API 获取字幕异常: {str(e)}")
@@ -693,40 +848,72 @@ class YoutubeDownloader(BaseDownloader):
     def _parse_youtube_subtitle_xml(self, xml_content):
         """
         解析YouTube字幕XML
-        
+
+        文本提取算法与历史版本逐字节兼容（按 start 排序后拼接）；时间戳分段
+        提取是独立的容错步骤，"start"/"dur" 属性缺失或格式错误时不会影响文本
+        拼接，只会让 segments 整体降级为 None（容错铁律：时间解析失败绝不能
+        影响文本提取）。
+
         参数:
             xml_content: XML字幕内容
-            
+
         返回:
-            str: 解析后的字幕文本
+            SubtitleResult | None: 解析成功返回 SubtitleResult（text 逐字节兼容
+            旧版，segments 可能为 None）；XML 本身无法解析时返回 None（与历史
+            行为一致）
         """
         try:
             root = ET.fromstring(xml_content)
-            
-            # 提取文本并按时间顺序排序
-            texts = []
+
+            # 提取文本内容与原始时间属性字符串。start/dur 在此处不做数值转换，
+            # 避免个别条目属性格式错误时连带影响文本提取（见下方独立的
+            # 时间戳分段提取步骤）。
+            raw_items = []
             for text_element in root.findall(".//text"):
-                start = float(text_element.get("start", "0"))
-                duration = float(text_element.get("dur", "0"))
-                content = text_element.text or ""
-                
-                texts.append({
-                    "start": start,
-                    "duration": duration,
-                    "content": content.strip()
+                raw_items.append({
+                    "start_raw": text_element.get("start", "0"),
+                    "dur_raw": text_element.get("dur", "0"),
+                    "content": (text_element.text or "").strip(),
                 })
-            
-            # 按开始时间排序
-            texts.sort(key=lambda x: x["start"])
-            
-            # 合并字幕文本
+
+            # 按开始时间排序；无法解析为数字的 start 视为 0，不影响排序继续
+            def _safe_start(item):
+                try:
+                    return float(item["start_raw"])
+                except (TypeError, ValueError):
+                    return 0.0
+
+            raw_items.sort(key=_safe_start)
+
+            # 合并字幕文本（与历史行为保持逐字节一致）
             merged_text = ""
-            for text in texts:
-                if text["content"]:
-                    merged_text += text["content"] + " "
-            
-            logger.info(f"成功解析YouTube字幕，共{len(texts)}段")
-            return merged_text.strip()
+            for item in raw_items:
+                if item["content"]:
+                    merged_text += item["content"] + " "
+            text = merged_text.strip()
+
+            # 独立提取时间戳分段：整体解析失败（如属性非数字）时降级为 None，
+            # 不影响上面已经算好的 text
+            segments = None
+            try:
+                candidate_segments = []
+                for item in raw_items:
+                    if not item["content"]:
+                        continue
+                    start = float(item["start_raw"])
+                    duration = float(item["dur_raw"])
+                    candidate_segments.append({
+                        "start_time": start,
+                        "end_time": start + duration,
+                        "text": item["content"],
+                    })
+                segments = candidate_segments or None
+            except Exception as e:
+                logger.warning(f"YouTube字幕XML时间戳解析失败，segments 置空: {e}")
+                segments = None
+
+            logger.info(f"成功解析YouTube字幕，共{len(raw_items)}段")
+            return SubtitleResult(text=text, segments=segments)
         except Exception as e:
             logger.exception(f"解析Youtube字幕XML异常: {str(e)}")
             return None

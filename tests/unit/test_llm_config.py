@@ -169,6 +169,52 @@ class TestLLMConfigSpeakerInference:
         assert config.speaker_confidence_threshold == 0.6
 
 
+class TestLLMConfigChapters:
+    """Test chapters_* config fields (章节梗概生成器配置)."""
+
+    def test_dataclass_defaults(self):
+        """Direct construction (no from_dict) must expose sensible chapters defaults."""
+        config = LLMConfig(
+            api_key="k", base_url="u",
+            calibrate_model="m", summary_model="s",
+        )
+        assert config.chapters_model is None
+        assert config.chapters_reasoning_effort is None
+        assert config.min_chapters_threshold == 10000
+        assert config.max_chapters_input_chars == 500000
+
+    def test_from_dict_defaults_fallback_to_calibrate_model(self):
+        """chapters_model missing -> falls back to calibrate_model, like key_info_model/speaker_model."""
+        config_dict = {
+            "llm": {
+                "api_key": "k", "base_url": "u",
+                "calibrate_model": "calib-model", "summary_model": "s",
+            }
+        }
+        config = LLMConfig.from_dict(config_dict)
+        assert config.chapters_model == "calib-model"
+        assert config.min_chapters_threshold == 10000
+        assert config.max_chapters_input_chars == 500000
+
+    def test_from_dict_explicit_overrides(self):
+        """Explicit chapters_* values in config dict must override defaults."""
+        config_dict = {
+            "llm": {
+                "api_key": "k", "base_url": "u",
+                "calibrate_model": "calib-model", "summary_model": "s",
+                "chapters_model": "chapters-model",
+                "chapters_reasoning_effort": "high",
+                "min_chapters_threshold": 5000,
+                "max_chapters_input_chars": 200000,
+            }
+        }
+        config = LLMConfig.from_dict(config_dict)
+        assert config.chapters_model == "chapters-model"
+        assert config.chapters_reasoning_effort == "high"
+        assert config.min_chapters_threshold == 5000
+        assert config.max_chapters_input_chars == 200000
+
+
 class TestLLMConfigGetModels:
     """Test get_models method."""
 
