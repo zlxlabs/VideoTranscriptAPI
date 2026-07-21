@@ -251,13 +251,15 @@
         },
 
         // ------------------------------------------------------
-        // plain 源结构化逐段校对总开关（阶段二，暗启动）
-        // 默认 false：plain 源（CapsWriter 转录 / YouTube 字幕）维持现状纯文本校对。
-        // 开启后：plain 源走结构化逐段校对（id 锚点映射，不动文本结构），
-        //         产物带时间块锚点（dlg-{i}），配合确定性段落化输出段落级 dialogs。
-        // 何时需要改：真实样本验证通过后翻 true；验证期间保持 false。
+        // plain 源结构化逐段校对总开关（阶段二）
+        // 默认 true（2026-07-19 真实样本验收通过后由暗启动翻正）：
+        //   plain 源（CapsWriter 转录 / YouTube 字幕）走结构化逐段校对
+        //   （id 锚点映射，不动文本结构），产物带时间块锚点（dlg-{i}），
+        //   配合确定性段落化输出段落级 dialogs，章节可精准跳转。
+        // 置 false：回退旧纯文本校对路径；已产出产物凭 provenance
+        //   "mode": "plain_structured" 识别，渲染时忽略、不受影响。
         // ------------------------------------------------------
-        "structured_calibration_for_plain": false,
+        "structured_calibration_for_plain": true,
 
         // ------------------------------------------------------
         // 确定性段落化配置（v1，仅在 structured_calibration_for_plain=true 时生效）

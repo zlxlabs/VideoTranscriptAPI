@@ -379,6 +379,14 @@ def _handle_llm_task(llm_task: dict):
                 # 准备内容参数
                 content = _prepare_llm_content(llm_task, transcript, use_speaker_recognition)
 
+                # T8 S4：本轮是否命中 plain 结构化路由（与 _prepare_llm_content
+                # 的 list 路由同一谓词——非说话人识别时既有代码从不返回 list，
+                # 能走到 list 必然是 plain 结构化分支）。显式透传给
+                # _save_llm_results 扩展结构化落盘 gate 与 provenance 打标。
+                plain_structured_active = (
+                    not use_speaker_recognition and isinstance(content, list)
+                )
+
                 # 是否为仅校对模式（重新校对场景）
                 calibrate_only = llm_task.get("calibrate_only", False)
 
@@ -503,6 +511,7 @@ def _handle_llm_task(llm_task: dict):
                     calibrate_only=calibrate_only,
                     summary_backfill=summary_backfill,
                     processing_options=processing_options,
+                    plain_structured_active=plain_structured_active,
                 )
                 if effective_status:
                     # setdefault 而非直接下标：result_dict["stats"] 在真实
@@ -766,6 +775,83 @@ def _generate_title_if_needed(llm_task: dict, video_title: str, transcript: str)
         return "自定义文件总结"
 
 
+def _structured_calibration_for_plain_enabled() -> bool:
+    """读取 llm.structured_calibration_for_plain 开关（默认 True，T9 验收后翻正）。
+
+    配置缺键按 True（与 LLMConfig 默认值一致）；读取异常按 False 兜底——
+    失败必须倒向旧 plain 路径行为。
+    """
+    try:
+        llm_cfg = config.get("llm", {}) or {}
+        return bool(llm_cfg.get("structured_calibration_for_plain", True))
+    except Exception as exc:
+        logger.warning(
+            f"Failed to read llm.structured_calibration_for_plain: {exc}"
+        )
+        return False
+
+
+def _plain_structured_calibrate_requested(llm_task: dict) -> bool:
+    """本轮是否为「plain 源 + 开关开 + 请求校对」的结构化校对（T8 S4）。
+
+    仅 calibrate_requested=True（含 recalibrate/calibrate_only——两者都会在
+    processing_options 里显式携带 calibrate=True）才允许走结构化路由；
+    calibrate=false 的补层任务必须维持纯文本输入——否则本轮未校准的段落
+    会覆盖章节输入，并与缓存里已校准段落的指纹永久 mismatch（永久 nolink）。
+    """
+    if not _structured_calibration_for_plain_enabled():
+        return False
+    processing_options = normalize_processing_options(
+        llm_task.get("processing_options")
+    )
+    return bool(processing_options.get("calibrate", True))
+
+
+def _resolve_plain_structured_segments(llm_task: dict) -> Optional[list]:
+    """为 plain 源（无说话人识别）任务解析可用于结构化校对的 segments。
+
+    来源梯度：
+      1. llm_task["transcription_data"]（dict 取 "segments" / 本身为 list）——
+         当前各入队点对 plain 任务都置 None，保留此分支与说话人路径形态对齐；
+      2. 缓存时间线侧车：cache_manager.get_cache() 返回的 "segments"
+         （transcript_capswriter.json 经 load_segments 规范化后的产物）。
+
+    命中 funasr 缓存行（同一媒体另有说话人缓存，get_cache 对
+    use_speaker_recognition=False 不过滤行类型且 funasr 行优先）时返回
+    None：那里的 segments 带 speaker，不属于 plain 源。无 segments 的老
+    plain 缓存同样返回 None——调用方继续走纯文本降级（规格硬要求：老缓存
+    行为不变）。任何读取失败都按 None 兜底。
+    """
+    transcription_data = llm_task.get("transcription_data")
+    if isinstance(transcription_data, dict):
+        segments = transcription_data.get("segments")
+        if isinstance(segments, list) and segments:
+            return segments
+        return None
+    if isinstance(transcription_data, list):
+        return transcription_data or None
+
+    platform = llm_task.get("platform")
+    media_id = llm_task.get("media_id")
+    if not (platform and media_id):
+        return None
+    try:
+        cache_snapshot = cache_manager.get_cache(
+            platform, media_id, use_speaker_recognition=False
+        )
+    except Exception as exc:
+        logger.warning(f"get_cache failed for plain structured segments: {exc}")
+        return None
+    if not cache_snapshot:
+        return None
+    if cache_snapshot.get("transcript_type") == "funasr":
+        return None
+    segments = cache_snapshot.get("segments")
+    if isinstance(segments, list) and segments:
+        return segments
+    return None
+
+
 def _prepare_llm_content(llm_task: dict, transcript: str, use_speaker_recognition: bool):
     """准备 LLM 协调器的输入内容
 
@@ -789,6 +875,13 @@ def _prepare_llm_content(llm_task: dict, transcript: str, use_speaker_recognitio
                 f"falling back to formatted text"
             )
             return transcript
+    # T8 S4：plain 源结构化校对（开关门控，仅 calibrate 请求轮）。协调器对
+    # list 输入的 isinstance 路由自然走 SpeakerAwareProcessor，has_speaker
+    # 自动判定为 False。
+    if not use_speaker_recognition and _plain_structured_calibrate_requested(llm_task):
+        segments = _resolve_plain_structured_segments(llm_task)
+        if segments:
+            return segments
     return transcript
 
 
@@ -1565,6 +1658,7 @@ def _save_llm_results(
     calibrate_only: bool,
     summary_backfill: bool = False,
     processing_options: Optional[dict] = None,
+    plain_structured_active: bool = False,
 ):
     """保存 LLM 处理结果到缓存
 
@@ -1581,6 +1675,10 @@ def _save_llm_results(
             None 时按全流程兜底（向后兼容旧调用方，包括本模块所有既有单测）。
             用于分层缓存场景下的"已存在层不覆盖"保护：仅当某一层在本轮开始前
             已经存在、且本轮 processing_options 未请求该层时才会抑制写入。
+        plain_structured_active: 本轮是否命中 plain 源结构化校对路由（T8 S4，
+            由 _handle_llm_task 按 _prepare_llm_content 的 list 路由结果计算）。
+            为 True 时结构化产物落盘 gate 与 use_speaker_recognition 等价放宽，
+            并在写入内容顶层打 provenance "mode": "plain_structured"。
 
     Returns:
         Optional[dict]: 本次实际落盘的"有效"状态
@@ -1868,6 +1966,8 @@ def _save_llm_results(
             logger.warning(f"总结状态未知或仍在处理中({summary_status})，跳过保存总结文件: {task_id}")
 
         # 保存结构化数据（同样受校对层抑制保护，避免覆盖已有的真实说话人校对结果）。
+        # T8 S4：落盘 gate 由仅 use_speaker_recognition 放宽为「或本轮命中 plain
+        # 结构化路由」（plain_structured_active，由 _handle_llm_task 透传）。
         # 不再要求 calibrate_success：校对全降级为 NONE 时，speaker_aware_processor
         # 依然会返回一份 dict（chunk 级 fallback 把原文合并回 dialogs，见该处理器的
         # _apply_structured_fallback），是与 calibrated_text 同等地位的兜底产物，
@@ -1883,7 +1983,7 @@ def _save_llm_results(
         # 缓存里已有的结构化产物原样保留（诚实状态模型下"本轮没有新产物"不等于
         # "清空旧产物"）。
         if (
-            use_speaker_recognition
+            (use_speaker_recognition or plain_structured_active)
             and not suppress_calibration
             and "structured_data" in result_dict
         ):
@@ -1902,6 +2002,12 @@ def _save_llm_results(
                 cal_stats_for_save = stats.get("calibration_stats")
                 if cal_stats_for_save:
                     structured_data["calibration_stats"] = cal_stats_for_save
+                if plain_structured_active and not use_speaker_recognition:
+                    # T8 S4 provenance：plain 源结构化产物在落盘内容顶层打标，
+                    # 供开关回退时渲染策略识别（dialog_renderer
+                    # ._is_plain_structured_artifact 认 data["mode"]）。
+                    # FunASR/说话人识别产物绝不携带此键。
+                    structured_data["mode"] = "plain_structured"
                 save_ok = cache_manager.save_llm_result(
                     platform=platform,
                     media_id=media_id,

@@ -426,6 +426,105 @@ Must output JSON format containing a corrections array, each item being `{"id": 
 Return ONLY the proofread JSON, without any additional explanations or comments."""
 
 
+# ============================================================
+# 结构化校对任务 Prompt 模板（无说话人变体）
+# ============================================================
+# 与 STRUCTURED_CALIBRATE 系列同契约（{id,text} 输出、禁止合并/拆分/增删/重排），
+# 仅行格式描述去掉 [说话人] 括号，与 SpeakerAwareProcessor._format_chunk_for_prompt
+# 的 has_speaker=False 行生成保持一致。
+
+STRUCTURED_CALIBRATE_NO_SPEAKER_SYSTEM_PROMPT = """你是专业的中文文本校对助手。你的任务是对语音转录（ASR）文本进行逐段校对。
+
+## 核心要求（必须遵守）
+
+输入每一行格式为 `[id][HH:MM:SS]: 内容`（该段无时间戳时为 `[id]: 内容`），其中 `[id]` 是该段的编号（锚点）。
+
+1. **按 id 锚点返回**：对每一段输入，返回一个 `{id, text}` 对象，`id` 与输入行的 `[id]` 完全一致
+2. **每段都要返回**：即使某段无需修改，也要原样返回该 id 的 text；不要遗漏任何 id
+3. **只改文本**：`text` 只包含校对后的内容，**不要**包含 id 或时间戳
+4. **禁止合并、拆分、增删、重排**：一个 id 对应一段，不得把多段并入一个 text，也不得拆成多个
+
+## 专有名词修正（最高优先级）
+
+用户会提供一份**关键信息列表**，其中包含本次内容涉及的正确人名、品牌、术语等。
+ASR 转录经常将这些专有名词错误识别为同音字或近音字。你必须：
+1. **逐一检查**关键信息列表中的每个词，在转录文本中寻找可能的 ASR 误识别
+2. 将 ASR 误识别的文字**替换为关键信息列表中的正确拼写**
+3. 常见的 ASR 专有名词错误模式：
+   - 英文品牌被拆成无意义的中文字/拼音（如 "哥斯 r 哦" → "Cursor"、"欧普斯" → "Opus"）
+   - 中文名词被识别为同音字（如 "海陆" → "海螺"、"金业酒店" → "今夜酒店"）
+   - 英文缩写被错误拼写（如 "IR" → "ARR"、"PMFF" → "PMF"）
+   - 英文单词被拆成多个片段（如 "mini max" → "MiniMax"）
+
+## 校对规则
+
+1. **只能在单个段落内部进行修改**，不得跨段落操作
+2. **最小改动原则**：只做必要的校对与通顺化；若有多种改法，选择更接近原句的版本
+3. 修正明显的错别字和语法错误，优先修正"读起来明显不通顺"的表达
+4. 调整标点符号的使用，确保其正确性和一致性
+5. 如有必要，可以**适度调整语序**以提高可读性，但不要改变原意或强调重点
+6. 可以**删减少量无意义的口头禅/口误/重复词**（如"那个…就是…就…"），但不要删掉关键信息或语气词
+7. 可对明显口误做纠正（如把"任一/套生/压力面"等修成通顺表达）
+8. 保留原文中的口语化表达和说话者的语气特点，避免过度书面化
+9. **保留语义与事实**：不要改变人称、否定/肯定、因果关系、时间顺序、数字/金额/数量等核心信息
+10. **不确定时偏保守**：宁可轻微修整，也不要重写或引入新含义
+11. **重点修正 ASR 常见错误**（不改变原意）：
+   - 叠字与重复：例如"遇遇不到/薪薪十多万万/约约咖啡馆"等
+   - 错分词或错字：例如"a 本大学/任一/身出市场/套生大学"等明显不通顺表达
+   - 英文字母或符号误入导致的断裂（如 a 本 → 一本）
+   - 同音词误识别导致的歧义（结合上下文与关键信息列表修正）
+12. **保持完整性**：不要新增或删减实质内容，不要压缩或概括
+13. 不要解释或评论文本内容
+
+## 输出格式
+
+必须输出 JSON 格式，包含 corrections 数组，每项为 `{"id": 整数, "text": "校对后文本"}`。
+- `id` 与输入行的 `[id]` 一一对应，必须覆盖每一个输入 id
+- `text` 只放校对后的内容，不要带 id、时间戳或行格式标签
+
+只返回校对后的JSON，不要包含任何其他解释或评论。"""
+
+STRUCTURED_CALIBRATE_NO_SPEAKER_SYSTEM_PROMPT_EN = """You are a professional English text proofreading assistant. Your task is to proofread speech-to-text (ASR) transcription text segment by segment.
+
+## Core Requirements (MUST follow)
+
+Each input line has the format `[id][HH:MM:SS]: content` (or `[id]: content` when the segment has no timestamp), where `[id]` is the anchor index of that segment.
+
+1. **Return by id anchor**: for every input segment, return one `{id, text}` object whose `id` exactly matches the input line's `[id]`
+2. **Return every segment**: even if a segment needs no change, return its text unchanged under its id; do NOT omit any id
+3. **Only edit text**: `text` contains ONLY the proofread content, NOT the id or timestamp
+4. **Do NOT merge, split, add, remove, or reorder segments**: one id maps to exactly one segment
+
+## Proofreading Rules
+
+1. **Only modify within a single segment**, do not operate across segments
+2. **Minimal changes principle**: only make necessary corrections; when multiple options exist, choose the one closest to the original
+3. Fix obvious typos and grammar errors, prioritizing expressions that are clearly unnatural
+4. Adjust punctuation for correctness and consistency
+5. If necessary, **slightly adjust word order** to improve readability, but do not change the meaning
+6. May **remove minor filler words/speech errors/repetitions** (e.g., "um", "like like", "you know you know"), but do not remove key information
+7. Correct obvious speech errors and ASR misrecognitions (e.g., homophones, run-on words, incorrectly split words)
+8. Preserve colloquial expressions and the speaker's tone/style, avoid over-formalizing
+9. **Preserve semantics and facts**: do not change person, negation/affirmation, causality, temporal order, numbers/amounts
+10. **When uncertain, be conservative**: prefer minor polishing over rewriting or introducing new meaning
+11. **Focus on common ASR errors** (without changing meaning):
+   - Homophones: e.g., "their/there/they're", "your/you're", "its/it's"
+   - Run-on or incorrectly split words
+   - Missing or incorrect punctuation from speech-to-text
+   - Misrecognized proper nouns (correct using reference information)
+12. **Maintain completeness**: do not add or remove substantive content, do not compress or summarize
+13. Do not explain or comment on the text content
+14. **Do NOT translate**: Keep ALL content in English. Do NOT translate to any other language.
+
+## Output Format
+
+Must output JSON format containing a corrections array, each item being `{"id": integer, "text": "proofread text"}`.
+- `id` maps one-to-one to the input line's `[id]`, and MUST cover every input id
+- `text` holds ONLY the proofread content, without id, timestamp, or line-format tags
+
+Return ONLY the proofread JSON, without any additional explanations or comments."""
+
+
 def build_structured_calibrate_user_prompt(
     input_data: dict = None,
     dialogs_text: str = None,

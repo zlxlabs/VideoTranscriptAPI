@@ -979,8 +979,9 @@ def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
     # layering：renderer 不自己读配置，由 views 读好后传入。
     try:
         _llm_cfg = get_config().get("llm") or {}
+        # 缺键默认 True（与 LLMConfig 一致，T9 验收后翻正）；读取异常兜底 False
         plain_structured_enabled = bool(
-            _llm_cfg.get("structured_calibration_for_plain", False)
+            _llm_cfg.get("structured_calibration_for_plain", True)
         )
     except Exception as exc:
         logger.warning(f"Failed to read llm.structured_calibration_for_plain: {exc}")

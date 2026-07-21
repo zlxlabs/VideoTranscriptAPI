@@ -11,6 +11,8 @@ Covers:
 All console output must be in English only (no emoji, no Chinese).
 """
 
+import copy
+
 import pytest
 from unittest.mock import MagicMock
 
@@ -1142,3 +1144,490 @@ class TestReplaceSpeakerLabelsInText:
         assert _replace_speaker_labels_in_text("", {"A": "B"}) == ""
         assert _replace_speaker_labels_in_text("A：hi", {}) == "A：hi"
         assert _replace_speaker_labels_in_text(None, {"A": "B"}) is None
+
+
+class TestPrepareLLMContentPlainStructured:
+    """T8 S4: plain-source structured calibration routing in _prepare_llm_content.
+
+    The structured route for plain (no speaker recognition) sources must be
+    gated on BOTH the `llm.structured_calibration_for_plain` switch AND this
+    round requesting calibration (processing_options.calibrate, which
+    recalibrate/calibrate_only tasks always carry as True). calibrate=false
+    backfill tasks must keep the plain-text route so this round's
+    un-calibrated paragraphs never clobber chapters input or permanently
+    mismatch cached calibrated-paragraph fingerprints (permanent nolink).
+    """
+
+    def _patch_config(self, monkeypatch, enabled):
+        from video_transcript_api.api.services import llm_ops
+
+        monkeypatch.setattr(
+            llm_ops,
+            "config",
+            {"llm": {"structured_calibration_for_plain": enabled}},
+        )
+
+    def _patch_cache_snapshot(self, monkeypatch, snapshot):
+        from video_transcript_api.api.services import llm_ops
+
+        mock_cm = MagicMock()
+        mock_cm.get_cache.return_value = snapshot
+        monkeypatch.setattr(llm_ops, "cache_manager", mock_cm)
+        return mock_cm
+
+    def test_switch_off_with_segments_returns_str(self, monkeypatch):
+        """Switch off: behavior unchanged even when segments are available."""
+        self._patch_config(monkeypatch, False)
+        result = _prepare_llm_content(
+            llm_task={
+                "transcription_data": [{"text": "a", "start_time": 0.0}],
+                "processing_options": {"calibrate": True},
+            },
+            transcript="plain transcript",
+            use_speaker_recognition=False,
+        )
+        assert result == "plain transcript"
+
+    def test_switch_on_calibrate_true_list_data_returns_list(self, monkeypatch):
+        self._patch_config(monkeypatch, True)
+        data = [{"text": "a"}, {"text": "b"}]
+        result = _prepare_llm_content(
+            llm_task={
+                "transcription_data": data,
+                "processing_options": {"calibrate": True},
+            },
+            transcript="plain transcript",
+            use_speaker_recognition=False,
+        )
+        assert result == data
+
+    def test_switch_on_calibrate_true_dict_segments_returns_list(self, monkeypatch):
+        self._patch_config(monkeypatch, True)
+        result = _prepare_llm_content(
+            llm_task={
+                "transcription_data": {"segments": [{"text": "hi"}]},
+                "processing_options": {"calibrate": True},
+            },
+            transcript="plain transcript",
+            use_speaker_recognition=False,
+        )
+        assert result == [{"text": "hi"}]
+
+    def test_switch_on_calibrate_false_returns_str(self, monkeypatch):
+        """calibrate=false backfill tasks must stay on the plain-text route."""
+        self._patch_config(monkeypatch, True)
+        result = _prepare_llm_content(
+            llm_task={
+                "transcription_data": [{"text": "a"}],
+                "processing_options": {"calibrate": False},
+            },
+            transcript="plain transcript",
+            use_speaker_recognition=False,
+        )
+        assert result == "plain transcript"
+
+    def test_switch_on_missing_processing_options_defaults_to_calibrate(
+        self, monkeypatch
+    ):
+        """normalize_processing_options(None) defaults calibrate=True, which is
+        also what recalibrate/calibrate_only tasks effectively request."""
+        self._patch_config(monkeypatch, True)
+        data = [{"text": "a"}]
+        result = _prepare_llm_content(
+            llm_task={"transcription_data": data},
+            transcript="plain transcript",
+            use_speaker_recognition=False,
+        )
+        assert result == data
+
+    def test_switch_on_no_transcription_data_no_ids_returns_str(self, monkeypatch):
+        """No segments anywhere (old plain cache shape) -> honest plain-text
+        degradation, behavior unchanged."""
+        self._patch_config(monkeypatch, True)
+        result = _prepare_llm_content(
+            llm_task={"processing_options": {"calibrate": True}},
+            transcript="plain transcript",
+            use_speaker_recognition=False,
+        )
+        assert result == "plain transcript"
+
+    def test_switch_on_cache_segments_returns_list(self, monkeypatch):
+        """Plain tasks do not carry transcription_data on the queue payload;
+        segments come from the cache timeline sidecar (get_cache['segments'])."""
+        self._patch_config(monkeypatch, True)
+        segments = [{"text": "a", "start_time": 0.0, "end_time": 1.0}]
+        mock_cm = self._patch_cache_snapshot(
+            monkeypatch, {"transcript_type": "capswriter", "segments": segments}
+        )
+        result = _prepare_llm_content(
+            llm_task={
+                "platform": "youtube",
+                "media_id": "abc",
+                "processing_options": {"calibrate": True},
+            },
+            transcript="plain transcript",
+            use_speaker_recognition=False,
+        )
+        assert result == segments
+        assert mock_cm.get_cache.call_args.kwargs["use_speaker_recognition"] is False
+
+    def test_switch_on_cache_funasr_row_returns_str(self, monkeypatch):
+        """get_cache(use_speaker_recognition=False) does not filter row type and
+        prefers funasr rows; those segments carry speakers and are NOT a plain
+        source -> stay on the plain-text route."""
+        self._patch_config(monkeypatch, True)
+        self._patch_cache_snapshot(
+            monkeypatch,
+            {
+                "transcript_type": "funasr",
+                "segments": [{"text": "a", "speaker": "1"}],
+            },
+        )
+        result = _prepare_llm_content(
+            llm_task={
+                "platform": "youtube",
+                "media_id": "abc",
+                "processing_options": {"calibrate": True},
+            },
+            transcript="plain transcript",
+            use_speaker_recognition=False,
+        )
+        assert result == "plain transcript"
+
+    def test_switch_on_cache_without_segments_returns_str(self, monkeypatch):
+        self._patch_config(monkeypatch, True)
+        self._patch_cache_snapshot(
+            monkeypatch, {"transcript_type": "capswriter"}
+        )
+        result = _prepare_llm_content(
+            llm_task={
+                "platform": "youtube",
+                "media_id": "abc",
+                "processing_options": {"calibrate": True},
+            },
+            transcript="plain transcript",
+            use_speaker_recognition=False,
+        )
+        assert result == "plain transcript"
+
+    def test_switch_on_cache_lookup_failure_returns_str(self, monkeypatch):
+        self._patch_config(monkeypatch, True)
+        mock_cm = self._patch_cache_snapshot(monkeypatch, None)
+        mock_cm.get_cache.side_effect = RuntimeError("db down")
+        result = _prepare_llm_content(
+            llm_task={
+                "platform": "youtube",
+                "media_id": "abc",
+                "processing_options": {"calibrate": True},
+            },
+            transcript="plain transcript",
+            use_speaker_recognition=False,
+        )
+        assert result == "plain transcript"
+
+    def test_speaker_recognition_unaffected_by_switch(self, monkeypatch):
+        """use_speaker_recognition=True keeps its existing behavior with the
+        switch on: dict/list data routes structured, missing data falls back
+        to transcript without ever touching the plain cache lookup."""
+        self._patch_config(monkeypatch, True)
+        result = _prepare_llm_content(
+            llm_task={
+                "transcription_data": {"segments": [{"text": "hi"}]},
+                "processing_options": {"calibrate": True},
+            },
+            transcript="fallback",
+            use_speaker_recognition=True,
+        )
+        assert result == [{"text": "hi"}]
+
+        result = _prepare_llm_content(
+            llm_task={"processing_options": {"calibrate": True}},
+            transcript="text only",
+            use_speaker_recognition=True,
+        )
+        assert result == "text only"
+
+
+class TestSaveLLMResultsPlainStructuredProvenance:
+    """T8 S4: structured save gate extension + plain_structured provenance.
+
+    Plain structured artifacts must be persisted with a top-level
+    "mode": "plain_structured" marker (dialog_renderer
+    ._is_plain_structured_artifact keys off it for switch-off fallback),
+    while FunASR / speaker-recognition artifacts must NEVER carry that key.
+    """
+
+    def _patch_cache_manager(self, monkeypatch):
+        from video_transcript_api.api.services import llm_ops
+
+        mock_cm = MagicMock()
+        monkeypatch.setattr(llm_ops, "cache_manager", mock_cm)
+        return mock_cm
+
+    def _structured_calls(self, mock_cm):
+        return [
+            c for c in mock_cm.save_llm_result.call_args_list
+            if c.kwargs.get("llm_type") == "structured"
+        ]
+
+    def _result_dict(self):
+        return {
+            "校对文本": "calibrated body",
+            "内容总结": "a real summary",
+            "skip_summary": False,
+            "summary_status": SummaryStatus.GENERATED,
+            "stats": {"calibration_status": CalibrationStatus.FULL},
+            "models_used": {},
+            "calibrate_success": True,
+            "summary_success": True,
+            "structured_data": {
+                "dialogs": [
+                    {
+                        "text": "paragraph",
+                        "start_time": "00:00:00",
+                        "end_time": "00:00:05",
+                    }
+                ]
+            },
+        }
+
+    def test_plain_structured_active_saves_with_mode_provenance(self, monkeypatch):
+        mock_cm = self._patch_cache_manager(monkeypatch)
+
+        _save_llm_results(
+            task_id="plain1",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict=self._result_dict(),
+            calibrate_only=False,
+            summary_backfill=False,
+            plain_structured_active=True,
+        )
+
+        structured_calls = self._structured_calls(mock_cm)
+        assert len(structured_calls) == 1
+        content = structured_calls[0].kwargs["content"]
+        assert content["mode"] == "plain_structured"
+        assert structured_calls[0].kwargs["use_speaker_recognition"] is False
+
+    def test_speaker_artifact_never_carries_mode(self, monkeypatch):
+        mock_cm = self._patch_cache_manager(monkeypatch)
+
+        _save_llm_results(
+            task_id="spk1",
+            platform="bilibili",
+            media_id="BV1",
+            use_speaker_recognition=True,
+            result_dict=self._result_dict(),
+            calibrate_only=False,
+            summary_backfill=False,
+        )
+
+        structured_calls = self._structured_calls(mock_cm)
+        assert len(structured_calls) == 1
+        assert "mode" not in structured_calls[0].kwargs["content"]
+
+    def test_both_flags_true_still_no_mode(self, monkeypatch):
+        """Pathological combination (speaker task somehow flagged as plain
+        structured): the speaker artifact must not be mislabeled."""
+        mock_cm = self._patch_cache_manager(monkeypatch)
+
+        _save_llm_results(
+            task_id="spk2",
+            platform="bilibili",
+            media_id="BV2",
+            use_speaker_recognition=True,
+            result_dict=self._result_dict(),
+            calibrate_only=False,
+            summary_backfill=False,
+            plain_structured_active=True,
+        )
+
+        structured_calls = self._structured_calls(mock_cm)
+        assert len(structured_calls) == 1
+        assert "mode" not in structured_calls[0].kwargs["content"]
+
+    def test_plain_task_without_active_flag_keeps_old_gate(self, monkeypatch):
+        """Plain task that did NOT route structured this round (switch off or
+        calibrate=false): the structured save gate stays closed, exactly as
+        before T8."""
+        mock_cm = self._patch_cache_manager(monkeypatch)
+
+        _save_llm_results(
+            task_id="plain2",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict=self._result_dict(),
+            calibrate_only=False,
+            summary_backfill=False,
+        )
+
+        assert self._structured_calls(mock_cm) == []
+
+
+class TestNameRestorationNoOpOnPlainStructuredArtifact:
+    """T8 review R1 F1: speaker-name restoration must be a no-op on plain
+    structured artifacts.
+
+    A T8 plain_structured artifact (top-level ``"mode": "plain_structured"``)
+    has dialogs without speaker/speaker_id keys and carries no
+    speaker_mapping at all. Every name-restoration helper
+    (``structured_artifact_is_refreshable``,
+    ``_refresh_speaker_names_in_existing_structured_artifact``,
+    ``_restore_real_names_after_identity_fallback``) must leave such an
+    artifact untouched -- there are no speaker labels to restore and no
+    mapping to apply -- and ``_save_llm_results`` must never even invoke the
+    two restoration helpers on the plain structured route (their call sites
+    stay gated on ``use_speaker_recognition``).
+    """
+
+    def _plain_structured_artifact(self):
+        """T8 plain structured artifact shape: no speaker keys, no mapping,
+        None timestamps allowed."""
+        return {
+            "format_version": "v3",
+            "mode": "plain_structured",
+            "dialogs": [
+                {"text": "First plain paragraph.", "start_time": None, "end_time": None},
+                {
+                    "text": "Second plain paragraph.",
+                    "start_time": "00:00:05",
+                    "end_time": "00:00:11",
+                },
+            ],
+        }
+
+    def test_plain_artifact_is_not_refreshable(self):
+        from video_transcript_api.api.services.llm_ops import (
+            structured_artifact_is_refreshable,
+        )
+
+        artifact = self._plain_structured_artifact()
+        # Schema layer (queue-side usage): no speaker_mapping field at all.
+        assert structured_artifact_is_refreshable(artifact) is False
+        # Mapping layer (helper-side usage): even a real fresh mapping that
+        # would resolve any speaker_id cannot make it refreshable.
+        assert (
+            structured_artifact_is_refreshable(artifact, {"Speaker1": "Alice"})
+            is False
+        )
+
+    def test_refresh_speaker_names_noop_writes_nothing(self, monkeypatch):
+        from video_transcript_api.api.services import llm_ops
+
+        mock_cm = MagicMock()
+        monkeypatch.setattr(llm_ops, "cache_manager", mock_cm)
+
+        artifact = self._plain_structured_artifact()
+        artifact_before = copy.deepcopy(artifact)
+
+        result = llm_ops._refresh_speaker_names_in_existing_structured_artifact(
+            task_id="plain-refresh",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            existing_snapshot={"llm_processed": artifact},
+            new_speaker_mapping={"Speaker1": "Alice"},
+            # "llm" is the most permissive source (a real fresh inference);
+            # the no-op must come from the refreshability gate, not from the
+            # identity_fallback early return.
+            speaker_inference_source="llm",
+        )
+
+        assert result is None
+        assert artifact == artifact_before, (
+            "the plain structured artifact must be left byte-for-byte untouched"
+        )
+        mock_cm.save_llm_result.assert_not_called()
+        mock_cm.invalidate_speaker_mapping.assert_not_called()
+
+    def test_restore_real_names_returns_original_objects(self, monkeypatch):
+        from video_transcript_api.api.services import llm_ops
+
+        mock_cm = MagicMock()
+        monkeypatch.setattr(llm_ops, "cache_manager", mock_cm)
+
+        artifact = self._plain_structured_artifact()
+        structured_data = self._plain_structured_artifact()
+        structured_before = copy.deepcopy(structured_data)
+
+        restored, name_replacements = (
+            llm_ops._restore_real_names_after_identity_fallback(
+                platform="youtube",
+                media_id="abc",
+                existing_snapshot={"llm_processed": artifact},
+                structured_data=structured_data,
+            )
+        )
+
+        # Function contract: when nothing is restored the ORIGINAL object is
+        # returned as-is, with an empty replacement map.
+        assert restored is structured_data
+        assert name_replacements == {}
+        assert structured_data == structured_before
+        # The early return must fire before the fingerprint-verification
+        # machinery (SpeakerInferencer + get_speaker_mapping) is reached.
+        mock_cm.get_speaker_mapping.assert_not_called()
+
+    def test_save_llm_results_never_invokes_name_restoration(self, monkeypatch):
+        """Call-site level: on the plain structured route
+        (use_speaker_recognition=False, plain_structured_active=True) both
+        restoration helpers must see zero calls, while the structured save
+        itself still happens with the plain_structured provenance marker."""
+        from video_transcript_api.api.services import llm_ops
+
+        mock_cm = MagicMock()
+        monkeypatch.setattr(llm_ops, "cache_manager", mock_cm)
+        spy_restore = MagicMock(
+            wraps=llm_ops._restore_real_names_after_identity_fallback
+        )
+        spy_refresh = MagicMock(
+            wraps=llm_ops._refresh_speaker_names_in_existing_structured_artifact
+        )
+        monkeypatch.setattr(
+            llm_ops, "_restore_real_names_after_identity_fallback", spy_restore
+        )
+        monkeypatch.setattr(
+            llm_ops,
+            "_refresh_speaker_names_in_existing_structured_artifact",
+            spy_refresh,
+        )
+
+        result_dict = {
+            "校对文本": "calibrated body",
+            "内容总结": "a real summary",
+            "skip_summary": False,
+            "summary_status": SummaryStatus.GENERATED,
+            "stats": {"calibration_status": CalibrationStatus.FULL},
+            "models_used": {},
+            "calibrate_success": True,
+            "summary_success": True,
+            "structured_data": {
+                "dialogs": [
+                    {"text": "paragraph", "start_time": None, "end_time": None}
+                ]
+            },
+        }
+
+        _save_llm_results(
+            task_id="plain-nocall",
+            platform="youtube",
+            media_id="abc",
+            use_speaker_recognition=False,
+            result_dict=result_dict,
+            calibrate_only=False,
+            summary_backfill=False,
+            plain_structured_active=True,
+        )
+
+        assert spy_restore.call_count == 0
+        assert spy_refresh.call_count == 0
+        # Sanity: the plain structured save path was genuinely exercised.
+        structured_calls = [
+            c for c in mock_cm.save_llm_result.call_args_list
+            if c.kwargs.get("llm_type") == "structured"
+        ]
+        assert len(structured_calls) == 1
+        assert structured_calls[0].kwargs["content"]["mode"] == "plain_structured"

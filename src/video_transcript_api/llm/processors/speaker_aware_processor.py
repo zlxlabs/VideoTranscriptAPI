@@ -19,9 +19,12 @@ from ..segmenters.dialog_segmenter import DialogSegmenter
 from ..prompts import (
     STRUCTURED_CALIBRATE_SYSTEM_PROMPT,
     STRUCTURED_CALIBRATE_SYSTEM_PROMPT_EN,
+    STRUCTURED_CALIBRATE_NO_SPEAKER_SYSTEM_PROMPT,
+    STRUCTURED_CALIBRATE_NO_SPEAKER_SYSTEM_PROMPT_EN,
     build_structured_calibrate_user_prompt,
 )
 from ..schemas import CALIBRATION_RESULT_SCHEMA
+from ...transcriber.paragraphize import paragraphize_segments
 from ..utils.language_detector import detect_language
 
 logger = setup_logger(__name__)
@@ -65,6 +68,7 @@ class SpeakerAwareProcessor:
         selected_models: Optional[Dict] = None,
         skip_calibration: bool = False,
         infer_speaker_names: bool = True,
+        has_speaker: Optional[bool] = None,
     ) -> Dict:
         """处理有说话人文本
 
@@ -80,11 +84,26 @@ class SpeakerAwareProcessor:
                 时为 True）。说话人推断、说话人映射、对话规范化合并这些步骤仍会执行——
                 它们属于"转录"交付物（谁在说话）而非"校对"（文字是否准确），跳过的只是
                 逐块把文本喂给 LLM 做文字校正/纠错的那一步。
+            has_speaker: 输入是否携带说话人标签。None（默认）时自动判定——
+                任一原始输入段能解析出说话人标签即为 True（混合输入维持现状
+                行为）；False 时走「无说话人逐段校对」模式：跳过说话人推断、
+                不做同说话人合并、speaker/时间缺省保留缺省，最终产物是确定性
+                段落化后的段落。
 
         Returns:
             处理结果字典
         """
-        base_dialogs = self._coerce_dialogs(dialogs)
+        # has_speaker 自动判定（None 时）：任一原始输入段能解析出说话人标签
+        # 即视为有说话人（混合输入维持现状 has_speaker=True 行为）。必须在
+        # _coerce_dialogs 之前判定——coerce 会把缺省说话人规范掉。
+        if has_speaker is None:
+            has_speaker = any(
+                isinstance(d, dict)
+                and SpeakerInferencer.resolve_dialog_speaker(d) is not None
+                for d in dialogs or []
+            )
+
+        base_dialogs = self._coerce_dialogs(dialogs, has_speaker=has_speaker)
         total_length = sum(len(d.get("text", "")) for d in base_dialogs)
         logger.info(
             f"Start processing speaker-aware text: {title}, dialog count: {len(base_dialogs)}, "
@@ -98,7 +117,11 @@ class SpeakerAwareProcessor:
 
         # Key info only feeds calibration and speaker-name inference prompts.
         # Skipping both must not make a hidden LLM call.
-        if skip_calibration and not infer_speaker_names:
+        # 无说话人模式推广：说话人推断整步跳过时，key_info 的唯一剩余消费者
+        # 是校准——need = not skip_calibration or (has_speaker and
+        # infer_speaker_names)；has_speaker=True 时与原条件完全等价。
+        need_key_info = (not skip_calibration) or (has_speaker and infer_speaker_names)
+        if not need_key_info:
             key_info = KeyInfo([], [], [], [], [], [], [])
         else:
             key_info = self.key_info_extractor.extract(
@@ -116,21 +139,33 @@ class SpeakerAwareProcessor:
         # 在这份输入上与原来的列表推导式行为完全等价，但与
         # 读侧（transcription.py 的分层缓存预检）共用同一个实现，不再因两处各自手写悄悄漂移再次拉出
         # 经典读/写指纹不一致 bug。
-        speakers = SpeakerInferencer.extract_speaker_labels(base_dialogs)
-        # 细化 stage=speaker_inference，仅覆盖本次说话人推断调用的审计标签，
-        # 退出 with 块后自动恢复为外层的 calibration
-        with set_context(stage="speaker_inference"):
-            speaker_inference_result = self.speaker_inferencer.infer(
-                speakers=speakers,
-                dialogs=base_dialogs,
-                title=title,
-                author=author,
-                description=description,
-                key_info=key_info,
-                platform=platform,
-                media_id=media_id,
-                allow_llm=infer_speaker_names,
-            )
+        if has_speaker:
+            speakers = SpeakerInferencer.extract_speaker_labels(base_dialogs)
+            # 细化 stage=speaker_inference，仅覆盖本次说话人推断调用的审计标签，
+            # 退出 with 块后自动恢复为外层的 calibration
+            with set_context(stage="speaker_inference"):
+                speaker_inference_result = self.speaker_inferencer.infer(
+                    speakers=speakers,
+                    dialogs=base_dialogs,
+                    title=title,
+                    author=author,
+                    description=description,
+                    key_info=key_info,
+                    platform=platform,
+                    media_id=media_id,
+                    allow_llm=infer_speaker_names,
+                )
+        else:
+            # 无说话人模式：说话人推断整步跳过（零 LLM 调用）。
+            # identity_fallback source 让下游 llm_ops 的刷新判断按既有语义
+            # 安全跳过；meta 放说明性内容保持可观测。
+            speaker_inference_result = {
+                "mapping": {},
+                "meta": {
+                    "note": "input has no speaker labels; speaker inference skipped"
+                },
+                "source": "identity_fallback",
+            }
         speaker_mapping = speaker_inference_result.get("mapping", {})
         speaker_inference_meta = speaker_inference_result.get("meta", {})
         # 本地 codex review 第 6 轮 G4：随 meta 一起把本轮映射的真实
@@ -140,8 +175,22 @@ class SpeakerAwareProcessor:
         speaker_inference_source = speaker_inference_result.get("source")
 
         # 结构化标准化（应用映射 + 合并连续同说话人 + 时间字段规范化）
+        # 无说话人模式：normalize 前从 coerce 输出快照 float 秒时间轴。
+        # normalize 会把时间 int() 截断成 HH:MM:SS 字符串，±1s 误差会污染
+        # 段落化的停顿授权判定；不合并时 coerced/normalized/calibrated 三列表
+        # 按下标 1:1 对齐（coerce 会丢空文本条，快照在 coerce 后做）。
+        time_snapshot = None
+        if not has_speaker:
+            time_snapshot = [
+                (
+                    self._parse_time_value(d.get("start_time")),
+                    self._parse_time_value(d.get("end_time")),
+                )
+                for d in base_dialogs
+            ]
+
         normalized_dialogs = self._normalize_and_merge_dialogs(
-            base_dialogs, speaker_mapping
+            base_dialogs, speaker_mapping, has_speaker=has_speaker
         )
 
         if skip_calibration:
@@ -170,7 +219,17 @@ class SpeakerAwareProcessor:
             )
         else:
             # 步骤2: 分段
-            chunks = self.segmenter.segment(normalized_dialogs)
+            # 无说话人模式用 plain 独立分块参数（段落比对话长，预算放大）；
+            # has_speaker=True 路径沿用 __init__ 的 segmenter，行为不变。
+            if has_speaker:
+                segmenter = self.segmenter
+            else:
+                segmenter = DialogSegmenter(
+                    self.config,
+                    preferred_chunk_length=self.config.plain_structured_preferred_chunk_length,
+                    max_chunk_length=self.config.plain_structured_max_chunk_length,
+                )
+            chunks = segmenter.segment(normalized_dialogs)
             logger.debug(f"Dialogs segmented: {len(chunks)} chunks")
 
             # 步骤3: 分段校对（每段独立验证）
@@ -183,6 +242,7 @@ class SpeakerAwareProcessor:
                 description=description,
                 selected_models=selected_models,
                 language=detected_language,
+                has_speaker=has_speaker,
             )
 
             # 合并校对结果（不再进行整体验证）
@@ -191,8 +251,20 @@ class SpeakerAwareProcessor:
                 calibrated_dialogs.extend(chunk)
 
         # 构建文本用于统计
-        original_text = self._build_text_from_dialogs(normalized_dialogs)
-        calibrated_text = self._build_text_from_dialogs(calibrated_dialogs)
+        # 无说话人模式：确定性段落化（钉死在构造 structured_data 返回之前，
+        # 校准/skip 两条分支共用）——llm_processed.json dialogs、章节输入、
+        # 渲染锚点三者是同一个列表。
+        if not has_speaker:
+            calibrated_dialogs = self._paragraphize_no_speaker_dialogs(
+                calibrated_dialogs, time_snapshot
+            )
+
+        original_text = self._build_text_from_dialogs(
+            normalized_dialogs, has_speaker=has_speaker
+        )
+        calibrated_text = self._build_text_from_dialogs(
+            calibrated_dialogs, has_speaker=has_speaker
+        )
 
         logger.info(
             f"Speaker-aware text processing completed: "
@@ -209,7 +281,9 @@ class SpeakerAwareProcessor:
             "stats": {
                 "original_length": len(original_text),
                 "calibrated_length": len(calibrated_text),
-                "dialog_count": len(normalized_dialogs),
+                "dialog_count": (
+                    len(normalized_dialogs) if has_speaker else len(calibrated_dialogs)
+                ),
                 "chunk_count": len(chunks),
                 "calibration_stats": calibration_stats,
                 "speaker_inference": speaker_inference_meta,
@@ -217,8 +291,11 @@ class SpeakerAwareProcessor:
             }
         }
 
-    def _coerce_dialogs(self, dialogs: List[Dict]) -> List[Dict]:
-        """将原始对话列表规范化为最小可用格式（speaker/text/start/end/duration）"""
+    def _coerce_dialogs(self, dialogs: List[Dict], has_speaker: bool = True) -> List[Dict]:
+        """将原始对话列表规范化为最小可用格式（speaker/text/start/end/duration）。
+
+        has_speaker=False（无说话人模式）时缺省说话人保留 None，不塞 "unknown"。
+        """
         coerced = []
         for dialog in dialogs or []:
             if not isinstance(dialog, dict):
@@ -240,7 +317,14 @@ class SpeakerAwareProcessor:
 
             coerced.append(
                 {
-                    "speaker": str(speaker) if speaker is not None else "unknown",
+                    # 无说话人模式保留缺省（None），不塞 "unknown"。注意
+                    # d.get("speaker", "unknown") 的默认值只在键缺失时生效，
+                    # 键存在但值为 None 时不触发——所以这里必须显式写 None。
+                    "speaker": (
+                        str(speaker)
+                        if speaker is not None
+                        else ("unknown" if has_speaker else None)
+                    ),
                     "text": str(text),
                     "start_time": dialog.get("start_time", dialog.get("start")),
                     "end_time": dialog.get("end_time", dialog.get("end")),
@@ -251,10 +335,19 @@ class SpeakerAwareProcessor:
         return coerced
 
     def _normalize_and_merge_dialogs(
-        self, dialogs: List[Dict], speaker_mapping: Dict[str, str]
+        self, dialogs: List[Dict], speaker_mapping: Dict[str, str], has_speaker: bool = True
     ) -> List[Dict]:
-        """应用说话人映射、规范化时间字段并合并连续同说话人对话"""
+        """应用说话人映射、规范化时间字段并合并连续同说话人对话（has_speaker=False 时仅逐条规范化，不合并）"""
         normalized = []
+        if not has_speaker:
+            for dialog in dialogs:
+                normalized_dialog, _, _ = self._normalize_dialog(
+                    dialog, speaker_mapping, has_speaker=False
+                )
+                if normalized_dialog:
+                    normalized.append(normalized_dialog)
+            return normalized
+
         current = None
         current_start_seconds = None
         current_end_seconds = None
@@ -293,10 +386,10 @@ class SpeakerAwareProcessor:
         return normalized
 
     def _normalize_dialog(
-        self, dialog: Dict, speaker_mapping: Dict[str, str]
+        self, dialog: Dict, speaker_mapping: Dict[str, str], has_speaker: bool = True
     ) -> tuple:
         """规范化单条对话，返回(对话, start_seconds, end_seconds)"""
-        raw_speaker = dialog.get("speaker", "unknown")
+        raw_speaker = dialog.get("speaker", "unknown" if has_speaker else None)
         speaker = raw_speaker
         text = dialog.get("text", "")
         if not text:
@@ -315,12 +408,12 @@ class SpeakerAwareProcessor:
         start_time = (
             self._format_timestamp(start_seconds)
             if start_seconds is not None
-            else (str(start_raw) if start_raw else "00:00:00")
+            else (str(start_raw) if start_raw else ("00:00:00" if has_speaker else None))
         )
         end_time = (
             self._format_timestamp(end_seconds)
             if end_seconds is not None
-            else (str(end_raw) if end_raw else start_time)
+            else (str(end_raw) if end_raw else (start_time if has_speaker else None))
         )
 
         if start_seconds is not None and end_seconds is not None:
@@ -391,6 +484,7 @@ class SpeakerAwareProcessor:
         description: str,
         selected_models: Optional[Dict],
         language: str = "zh",
+        has_speaker: bool = True,
     ) -> List[List[Dict]]:
         """校对分块对话（并发处理，每块独立验证）
 
@@ -403,6 +497,7 @@ class SpeakerAwareProcessor:
             description: 描述
             selected_models: 选定的模型
             language: 检测到的语言（"zh" 或 "en"）
+            has_speaker: 是否含说话人（选择 prompt 变体与行格式/合并兜底）
 
         Returns:
             (calibrated_chunks, calibration_stats) 元组:
@@ -432,11 +527,18 @@ class SpeakerAwareProcessor:
         except Exception as e:
             logger.warning(f"Failed to load terminology DB: {e}")
 
-        # 根据语言选择 system prompt
-        structured_system_prompt = (
-            STRUCTURED_CALIBRATE_SYSTEM_PROMPT_EN if language == "en"
-            else STRUCTURED_CALIBRATE_SYSTEM_PROMPT
-        )
+        # 根据语言与说话人模式选择 system prompt（无说话人变体的行格式描述
+        # 与 _format_chunk_for_prompt 的 has_speaker=False 输出一致）
+        if has_speaker:
+            structured_system_prompt = (
+                STRUCTURED_CALIBRATE_SYSTEM_PROMPT_EN if language == "en"
+                else STRUCTURED_CALIBRATE_SYSTEM_PROMPT
+            )
+        else:
+            structured_system_prompt = (
+                STRUCTURED_CALIBRATE_NO_SPEAKER_SYSTEM_PROMPT_EN if language == "en"
+                else STRUCTURED_CALIBRATE_NO_SPEAKER_SYSTEM_PROMPT
+            )
 
         calibrated_chunks = [None] * len(chunks)
         # 跟踪每个 chunk 的校准状态: "success" | "partial" | "fallback" | "failed"
@@ -496,7 +598,7 @@ class SpeakerAwareProcessor:
                     return
                 try:
                     # 构建 prompt（每行带 [id] 锚点）
-                    chunk_text = self._format_chunk_for_prompt(chunk, speaker_mapping)
+                    chunk_text = self._format_chunk_for_prompt(chunk, speaker_mapping, has_speaker)
 
                     user_prompt = build_structured_calibrate_user_prompt(
                         dialogs_text=chunk_text,
@@ -523,7 +625,7 @@ class SpeakerAwareProcessor:
 
                     # 按 id 查表合并：结构永不失败，缺号自动保留原文
                     merged_dialogs, counts = self._apply_corrections_by_id(
-                        corrections, chunk
+                        corrections, chunk, has_speaker
                     )
                     coverage = (n - counts["kept_original"]) / n if n else 1.0
 
@@ -702,7 +804,7 @@ class SpeakerAwareProcessor:
 
         return calibrated_chunks, calibration_stats
 
-    def _format_chunk_for_prompt(self, chunk: List[Dict], speaker_mapping: Dict[str, str]) -> str:
+    def _format_chunk_for_prompt(self, chunk: List[Dict], speaker_mapping: Dict[str, str], has_speaker: bool = True) -> str:
         """格式化对话块为 prompt 文本
 
         Args:
@@ -725,11 +827,16 @@ class SpeakerAwareProcessor:
             # [id] 为 ID 锚点（chunk 内 0 基下标），LLM 必须按此 id 回传修正；
             # 时间戳仅作上下文，不要求回传。
             time_tag = f"[{start_time}]" if start_time else ""
-            parts.append(f"[{idx}]{time_tag}[{speaker}]: {text}")
+            if has_speaker:
+                parts.append(f"[{idx}]{time_tag}[{speaker}]: {text}")
+            else:
+                # 无说话人行格式变体：去掉 speaker 括号，避免 f-string 遇
+                # None 输出字面 [None] 污染 prompt；time_tag 为空时为 [{idx}]: {text}
+                parts.append(f"[{idx}]{time_tag}: {text}")
 
         return "\n".join(parts)
 
-    def _build_text_from_dialogs(self, dialogs: List[Dict]) -> str:
+    def _build_text_from_dialogs(self, dialogs: List[Dict], has_speaker: bool = True) -> str:
         """从对话列表构建纯文本
 
         Args:
@@ -742,7 +849,11 @@ class SpeakerAwareProcessor:
         for dialog in dialogs:
             speaker = dialog.get("speaker", "")
             text = dialog.get("text", "")
-            parts.append(f"{speaker}：{text}")
+            if has_speaker:
+                parts.append(f"{speaker}：{text}")
+            else:
+                # 无 speaker 变体只输出文本，不输出 `speaker：` 前缀
+                parts.append(text)
 
         return "\n\n".join(parts)
 
@@ -776,13 +887,13 @@ class SpeakerAwareProcessor:
         stripped = text.strip()
         if not stripped:
             return False
-        # 拒绝模型把输入行格式 `[0][S0]: ...` 原样抄回
-        if re.match(r"^\[\d+\]\[", stripped):
+        # 拒绝模型把输入行格式原样抄回：`[0][S0]: ...`（有说话人）与 `[0]: ...`（无说话人变体）
+        if re.match(r"^\[\d+\](\[|:)", stripped):
             return False
         return True
 
     def _apply_corrections_by_id(
-        self, corrections: List[Dict], original_chunk: List[Dict]
+        self, corrections: List[Dict], original_chunk: List[Dict], has_speaker: bool = True
     ) -> tuple:
         """按 id 锚点合并校对结果。
 
@@ -837,10 +948,10 @@ class SpeakerAwareProcessor:
                 counts["kept_original"] += 1
             merged_dialogs.append(
                 {
-                    "start_time": original.get("start_time", "00:00:00"),
-                    "end_time": original.get("end_time", "00:00:00"),
+                    "start_time": original.get("start_time", "00:00:00" if has_speaker else None),
+                    "end_time": original.get("end_time", "00:00:00" if has_speaker else None),
                     "duration": original.get("duration", 0),
-                    "speaker": original.get("speaker", "unknown"),
+                    "speaker": original.get("speaker", "unknown" if has_speaker else None),
                     # speaker_id 是原始说话人标签（由 _normalize_dialog 构建），
                     # 之前这里重建 dialog dict 时漏掉了它——本地
                     # codex review 第 5 轮 F4：llm_ops.py::
@@ -871,3 +982,65 @@ class SpeakerAwareProcessor:
             return best_candidate
 
         return original_chunk
+
+    def _paragraphize_no_speaker_dialogs(
+        self, calibrated_dialogs: List[Dict], time_snapshot: Optional[List[tuple]]
+    ) -> List[Dict]:
+        """无说话人模式：把逐段（校准后）结果确定性拼成阅读段落。
+
+        段落化只选边界、不动文本。输入文本用校准后 text，时间用 normalize 前
+        快照的 float 秒（不合并时 coerced/normalized/calibrated 按下标 1:1
+        对齐）；条数不一致——如 DialogSegmenter 拆分超长单条——时回退解析
+        条目自身的 HH:MM:SS，停顿授权精度降级但不中断。输出段落格式化回
+        HH:MM:SS（None 保留，不编造），不带 speaker/speaker_id 键，与
+        FunASR 产物同构，直接作为最终 dialogs 落盘 llm_processed.json。
+        """
+        use_snapshot = time_snapshot is not None and len(time_snapshot) == len(
+            calibrated_dialogs
+        )
+        segments = []
+        for idx, dialog in enumerate(calibrated_dialogs):
+            if use_snapshot:
+                start_seconds, end_seconds = time_snapshot[idx]
+            else:
+                start_seconds = self._parse_time_value(dialog.get("start_time"))
+                end_seconds = self._parse_time_value(dialog.get("end_time"))
+            segments.append(
+                {
+                    "text": dialog.get("text", ""),
+                    "start_time": start_seconds,
+                    "end_time": end_seconds,
+                    "original_text": dialog.get("original_text"),
+                    "duration": dialog.get("duration"),
+                }
+            )
+
+        paragraphs = paragraphize_segments(
+            segments,
+            target_chars=self.config.paragraphization_target_chars,
+            hard_max_chars=self.config.paragraphization_hard_max_chars,
+            pause_threshold_seconds=self.config.paragraphization_pause_threshold_seconds,
+        )
+
+        final_dialogs = []
+        for paragraph in paragraphs:
+            dialog = {
+                "start_time": (
+                    self._format_timestamp(paragraph["start_time"])
+                    if paragraph["start_time"] is not None
+                    else None
+                ),
+                "end_time": (
+                    self._format_timestamp(paragraph["end_time"])
+                    if paragraph["end_time"] is not None
+                    else None
+                ),
+                "text": paragraph["text"],
+            }
+            # duration / original_text 由 paragraphize 输出透传（有则带）
+            if "duration" in paragraph:
+                dialog["duration"] = paragraph["duration"]
+            if "original_text" in paragraph:
+                dialog["original_text"] = paragraph["original_text"]
+            final_dialogs.append(dialog)
+        return final_dialogs

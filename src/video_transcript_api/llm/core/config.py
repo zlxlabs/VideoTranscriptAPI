@@ -109,8 +109,10 @@ class LLMConfig:
 
     # 以下 6 个字段（plain 源结构化校对 + 确定性段落化，T8）同样追加于末尾，
     # 保持位置参数兼容（纪律同上方 chapters 段注释）。
-    # plain 源（CapsWriter/YouTube 字幕，无说话人标识）结构化逐段校对总开关，默认 false 暗启动
-    structured_calibration_for_plain: bool = False
+    # plain 源（CapsWriter/YouTube 字幕，无说话人标识）结构化逐段校对总开关。
+    # 默认 true（2026-07-19 T9 真实样本验收通过后由暗启动翻正）；置 false 可回退
+    # 旧纯文本路径，已产出产物凭 provenance "mode": "plain_structured" 识别并忽略。
+    structured_calibration_for_plain: bool = True
     # 无说话人模式的独立分块参数（plain 段落比对话长，分块预算相应放大）
     plain_structured_preferred_chunk_length: int = 3000
     plain_structured_max_chunk_length: int = 4000
@@ -280,7 +282,7 @@ class LLMConfig:
 
             # plain 源结构化校对开关（llm 顶层键）+ 无说话人独立分块（structured_calibration 段）
             structured_calibration_for_plain=llm_config.get(
-                "structured_calibration_for_plain", False
+                "structured_calibration_for_plain", True
             ),
             plain_structured_preferred_chunk_length=calibration_config.get(
                 "plain_preferred_chunk_length", 3000

@@ -634,7 +634,8 @@ def _validate_and_normalize_start_segs(
     """校验并规范化 LLM 返回的 chapters 列表的 start_seg 序列。
 
     校验以下内容：
-    1. 每项 start_seg 必须是 int（排除 bool）且属于 `survived_indices`——即
+    1. 每项 start_seg 必须是 int（排除 bool；整数字符串与整数值浮点先强转
+       为 int——容忍 LLM 类型抖动）且属于 `survived_indices`——即
        调用方传入的**原始** segments 列表里、经入口过滤后幸存下来的原始下标
        集合。这里不再用 `[0, segment_count)` 区间校验：入口过滤后幸存的原始
        下标可能不连续（中间的下标对应被过滤掉的条目），区间校验会放行一个
@@ -681,11 +682,29 @@ def _validate_and_normalize_start_segs(
             return None, f"chapters[{idx}] is not an object"
 
         start_seg = item.get("start_seg")
-        if not isinstance(start_seg, int) or isinstance(start_seg, bool):
+        # 容忍 LLM 返回的类型抖动：整数字符串（"1676"）与整数值浮点（1676.0）
+        # 统一强转为 int——真实样本中 deepseek 对靠后的章节会把下标输出成字符
+        # 串，严格 isinstance int 会让整轮章节在重试后失败。非整数/非数值
+        # （None、"12.5"、"abc"）依旧判失败走重试，语义严格性不变。
+        if isinstance(start_seg, bool):
+            coerced = None
+        elif isinstance(start_seg, int):
+            coerced = start_seg
+        elif isinstance(start_seg, float) and start_seg.is_integer():
+            coerced = int(start_seg)
+        elif isinstance(start_seg, str):
+            try:
+                coerced = int(start_seg.strip())
+            except ValueError:
+                coerced = None
+        else:
+            coerced = None
+        if coerced is None:
             return None, (
                 f"chapters[{idx}].start_seg is not an int: "
                 f"{_truncate_repr_for_hint(start_seg)}"
             )
+        start_seg = coerced
         if start_seg not in survived_set:
             return None, (
                 f"chapters[{idx}].start_seg={start_seg} out of range (not among the "

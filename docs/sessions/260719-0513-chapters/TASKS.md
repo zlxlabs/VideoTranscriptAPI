@@ -116,7 +116,7 @@ T5 已完成 ──► T9 (真实样本质量，可与 T6 后并行)
 >
 > **2026-07-19 增量 review 收敛**（对照代码核验，判 NEEDS_REVISION 后已修）：手术点由 4 处补全为 **speaker 6 处 + 时间 2 处**；钉死段落化集成点；`_prepare_llm_content` 补 calibrate 豁免；算法终端规则补全；key_info 提取保留（仅跳 SpeakerInferencer.infer）；新增开关回退语义（方案 b）。
 
-**开关**：`llm.structured_calibration_for_plain`，默认 **false**（暗启动；T9 真实样本验证通过后再翻 true；修订前文档为默认 true，以此为准）。关闭时 plain 路径行为与现状完全一致（章节仍可生成，仅无精准跳转）。
+**开关**：`llm.structured_calibration_for_plain`，默认 **true**（2026-07-19 T9 验收通过后由暗启动翻正，见 T9 节验收记录；此前为默认 false 暗启动）。关闭时 plain 路径行为与旧版完全一致（章节仍可生成，仅无精准跳转）。
 
 **改动面**：
 
@@ -171,7 +171,7 @@ T5 已完成 ──► T9 (真实样本质量，可与 T6 后并行)
 - 开关关闭：plain 路径产物/渲染/章节 nolink 与现状一致（回归测试锁死）。
 - 开关开启：
   - 断点不落在句子中间（仅停顿授权与硬切兜底两类例外；授权规则全集用性质测试锁定）；
-  - `llm_processed.json` **序列化全文不含 "unknown"**（硬断言）；无 speaker 键、无 `speaker：`前缀；
+  - `llm_processed.json` **无 speaker 占位 unknown**（硬断言；calibration_stats 既有计数键 `unknown_id` 除外——review 两轮裁决接受，语义意图为无 `speaker: "unknown"` 值与 `unknown：` 前缀）；无 speaker 键、无 `speaker：`前缀；
   - SpeakerInferencer.infer 零调用（mock 断言）；key_info 在校准开启时仍提取（mock 断言）；
   - 集成测试：plain 源开关开启全链路 → `llm_processed.json` 落盘、渲染带 `dlg-{i}` 锚点、章节 fingerprint 匹配 → `jump_ok=1`；
   - 时间 None 段落照常渲染可跳（无 "00:00:00" 时间标签）；
@@ -187,6 +187,13 @@ T5 已完成 ──► T9 (真实样本质量，可与 T6 后并行)
 ## T9 — 真实样本质量验收（P2）
 
 3–5 个长转录本地跑 `ChaptersProcessor`，人工评切分与梗概后定稿 prompt。不阻塞 T6 接线，但上线前建议完成。
+
+> **2026-07-19 验收通过**（详见 `docs/sessions/260719-1155-t8-implementation/REAL-SAMPLE-TEST.md`）：
+> 3 个真实样本（YouTube 英文访谈 84min / bilibili 中文独白 13min / 小宇宙 FunASR 对谈）
+> 全链路通过：章节全部 `jump_ok=1`（12/12、5/5、13/13），段落读感用户认可。
+> 已翻 `structured_calibration_for_plain` 默认 true（commit `090fb26`）。
+> v2 语义段落化**不启动**（v1 读感可用；英文 YouTube 段落偏粗已记录，如需优化先调 target_chars）。
+> 顺带修复：chapters start_seg 整数字符串容忍（`e609a4f`，真实样本暴露）。
 
 ---
 

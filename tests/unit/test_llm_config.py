@@ -224,7 +224,7 @@ class TestLLMConfigPlainStructured:
             api_key="k", base_url="u",
             calibrate_model="m", summary_model="s",
         )
-        assert config.structured_calibration_for_plain is False
+        assert config.structured_calibration_for_plain is True
         assert config.plain_structured_preferred_chunk_length == 3000
         assert config.plain_structured_max_chunk_length == 4000
         assert config.paragraphization_target_chars == 300
@@ -232,7 +232,7 @@ class TestLLMConfigPlainStructured:
         assert config.paragraphization_pause_threshold_seconds == 2.0
 
     def test_from_dict_defaults(self):
-        """Missing keys -> defaults (dark-launch switch stays off)."""
+        """Missing keys -> defaults (switch defaults on since T9 acceptance)."""
         config_dict = {
             "llm": {
                 "api_key": "k", "base_url": "u",
@@ -240,7 +240,7 @@ class TestLLMConfigPlainStructured:
             }
         }
         config = LLMConfig.from_dict(config_dict)
-        assert config.structured_calibration_for_plain is False
+        assert config.structured_calibration_for_plain is True
         assert config.plain_structured_preferred_chunk_length == 3000
         assert config.plain_structured_max_chunk_length == 4000
         assert config.paragraphization_target_chars == 300
@@ -278,7 +278,7 @@ class TestLLMConfigPlainStructured:
         config = LLMConfig("k", "u", "m", "s")
         assert config.api_key == "k"
         assert config.summary_model == "s"
-        assert config.structured_calibration_for_plain is False
+        assert config.structured_calibration_for_plain is True
 
 
 class TestLLMConfigGetModels:
