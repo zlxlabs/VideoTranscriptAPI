@@ -95,7 +95,8 @@ class TestUnifiedNavigationInTranscriptPage:
 
     def test_contains_history_page_link(self):
         html = self._render()
-        assert 'href="/static/history.html"' in html
+        # Versioned with the asset_v cache-busting token (?v=...).
+        assert 'href="/static/history.html?v=' in html
 
     def test_nav_links_live_inside_site_nav_container(self):
         html = self._render()
