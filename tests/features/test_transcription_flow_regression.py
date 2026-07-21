@@ -5,7 +5,8 @@ import pytest
 
 import video_transcript_api.api.services.transcription as transcription
 from video_transcript_api.downloaders.models import VideoMetadata, DownloadInfo
-from video_transcript_api.utils.llm_status import CalibrationStatus
+from video_transcript_api.downloaders.subtitle_types import SubtitleResult
+from video_transcript_api.utils.llm_status import CalibrationStatus, ChaptersStatus
 
 
 class DummyQueue:
@@ -108,6 +109,13 @@ class YoutubeDownloader:
     def get_subtitle(self, url):
         return self._subtitle
 
+    def get_subtitle_result(self, url):
+        # 生产代码自 T2 起改走 get_subtitle_result 保留 timeline；
+        # dummy 无时间轴需求，segments 恒为 None。
+        if self._subtitle is None:
+            return None
+        return SubtitleResult(text=self._subtitle, segments=None)
+
     def download_file(self, url, filename):
         return "C:/tmp/test.mp3"
 
@@ -154,7 +162,8 @@ def test_flow_cache_hit(monkeypatch, patch_runtime):
         # 历史full-flow结果，因为本用例要验证的是"完全命中不再入队"，
         # 不是缺状态文件那条独立路径（后者见
         # test_layered_cache.py::test_missing_llm_status_does_not_trust_existing_calibrated_file）。
-        "llm_status": {"calibration_status": CalibrationStatus.FULL},
+        "llm_status": {"calibration_status": CalibrationStatus.FULL,
+                       "chapters_status": ChaptersStatus.SKIPPED_SHORT},
     }
     cache_manager = DummyCacheManager(cache_data=cache_data)
     monkeypatch.setattr(transcription, "cache_manager", cache_manager)
@@ -200,6 +209,7 @@ def test_flow_cache_hit_with_disabled_calibration_notifies_disclaimer(monkeypatc
         "llm_status": {
             "calibration_status": CalibrationStatus.DISABLED,
             "summary_status": "generated",
+            "chapters_status": ChaptersStatus.SKIPPED_SHORT,
         },
     }
     cache_manager = DummyCacheManager(cache_data=cache_data)
@@ -310,6 +320,7 @@ def test_flow_cache_hit_with_full_calibration_has_no_disclaimer(monkeypatch, pat
         "llm_status": {
             "calibration_status": CalibrationStatus.FULL,
             "summary_status": "generated",
+            "chapters_status": ChaptersStatus.SKIPPED_SHORT,
         },
     }
     cache_manager = DummyCacheManager(cache_data=cache_data)
