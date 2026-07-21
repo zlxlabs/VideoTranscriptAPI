@@ -193,6 +193,28 @@ class RecalibrateRequest(BaseModel):
         return v
 
 
+class ResummarizeRequest(BaseModel):
+    """重新生成总结请求数据模型（字段与 RecalibrateRequest 完全相同）"""
+
+    view_token: str = Field(..., description="查看页面的 view_token")
+    wechat_webhook: Optional[str] = Field(
+        None, description="企业微信webhook地址，用于发送通知"
+    )
+
+    @field_validator("wechat_webhook")
+    @classmethod
+    def validate_webhook_url(cls, v):
+        """验证 webhook URL 安全性（防止 SSRF）"""
+        if v is None or v.strip() == "":
+            return v
+        from ...utils.url_validator import validate_url_safe, URLValidationError
+        try:
+            validate_url_safe(v)
+        except URLValidationError as e:
+            raise ValueError(f"webhook URL is not allowed: {e}")
+        return v
+
+
 class TranscribeResponse(BaseModel):
     """转录响应数据模型"""
 

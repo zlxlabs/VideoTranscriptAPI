@@ -209,7 +209,12 @@
             {% if summary_html %}
                 {{ summary_html|safe }}
             {% elif summary_state == 'failed' %}
-                <p style="color: #991b1b; font-style: italic;">⚠️ 总结生成失败，可点击下方「重新校对」按钮重试。</p>
+                <p style="color: #991b1b; font-style: italic;">⚠️ 总结生成失败。</p>
+                {% if view_token %}
+                <span id="resummarizeArea">
+                    <button class="recalibrate-btn" id="resummarizeBtn" onclick="document.getElementById('resummarizeDialog').showModal()">🔄 重新生成总结</button>
+                </span>
+                {% endif %}
             {% elif summary_state == 'skipped_short' %}
                 <p style="color: var(--text-secondary); font-style: italic;">该任务未生成总结（原始文本过短，未达到生成总结的长度阈值）。</p>
             {% elif summary_state == 'disabled' %}
@@ -219,6 +224,22 @@
                 <p style="color: var(--text-secondary); font-style: italic;">总结处理中...</p>
             {% endif %}
         </div>
+
+        {% if view_token %}
+        <dialog id="resummarizeDialog" class="recalibrate-dialog">
+            <form method="dialog">
+                <h3>重新生成总结</h3>
+                <p class="dialog-desc">将只重新执行 LLM 总结（跳过下载、转录和校对），生成完成后刷新页面即可查看新结果。</p>
+                <label for="resummarizeApiKey">API Key</label>
+                <input type="password" id="resummarizeApiKey" placeholder="Bearer token" autocomplete="off">
+                <div class="dialog-actions">
+                    <button type="button" class="dialog-btn dialog-btn-cancel" onclick="document.getElementById('resummarizeDialog').close()">取消</button>
+                    <button type="button" class="dialog-btn dialog-btn-confirm" id="resummarizeConfirmBtn" onclick="submitResummarize()">确认</button>
+                </div>
+                <p id="resummarizeStatus" class="dialog-status" style="display:none;"></p>
+            </form>
+        </dialog>
+        {% endif %}
     </div>
 
     {% if chapters_data %}
@@ -280,8 +301,10 @@
 (function() {
     // Auto-fill API key from localStorage (shared with /add_task_by_web)
     var stored = localStorage.getItem('api_key') || '';
-    var input = document.getElementById('recalibrateApiKey');
-    if (input && stored) input.value = stored;
+    var recalInput = document.getElementById('recalibrateApiKey');
+    if (recalInput && stored) recalInput.value = stored;
+    var resumInput = document.getElementById('resummarizeApiKey');
+    if (resumInput && stored) resumInput.value = stored;
 })();
 
 function submitRecalibrate() {
@@ -337,11 +360,65 @@ function submitRecalibrate() {
     });
 }
 
-function pollTask(taskId, apiKey, area) {
+function submitResummarize() {
+    var btn = document.getElementById('resummarizeConfirmBtn');
+    var status = document.getElementById('resummarizeStatus');
+    var dialog = document.getElementById('resummarizeDialog');
+    var area = document.getElementById('resummarizeArea');
+    var apiKey = document.getElementById('resummarizeApiKey').value.trim();
+
+    if (!apiKey) {
+        status.textContent = 'Please enter API Key';
+        status.className = 'dialog-status dialog-status-error';
+        status.style.display = 'block';
+        return;
+    }
+
+    // Save to localStorage for future use
+    localStorage.setItem('api_key', apiKey);
+
+    btn.disabled = true;
+    btn.textContent = 'Submitting...';
+    status.style.display = 'none';
+
+    fetch('/api/resummarize', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + apiKey
+        },
+        body: JSON.stringify({ view_token: '{{ view_token }}' })
+    })
+    .then(function(resp) {
+        if (resp.status === 401) throw new Error('API Key invalid');
+        if (resp.status === 403) throw new Error('No resummarize permission');
+        if (resp.status === 404) throw new Error('Transcript data not found');
+        if (!resp.ok) return resp.json().then(function(d) { throw new Error(d.detail || 'Request failed'); });
+        return resp.json();
+    })
+    .then(function(data) {
+        var taskId = data.data && data.data.task_id;
+        if (!taskId) throw new Error('No task_id returned');
+        // Close dialog, show inline status on the button area
+        dialog.close();
+        area.innerHTML = '<span class="recalibrate-status">总结中... (0s)</span>';
+        pollTask(taskId, apiKey, area, '总结');
+    })
+    .catch(function(err) {
+        status.textContent = err.message;
+        status.className = 'dialog-status dialog-status-error';
+        status.style.display = 'block';
+        btn.disabled = false;
+        btn.textContent = 'Confirm';
+    });
+}
+
+function pollTask(taskId, apiKey, area, label) {
+    label = label || '校对';
     var elapsed = 0;
     var interval = setInterval(function() {
         elapsed += 3;
-        area.innerHTML = '<span class="recalibrate-status">校对中... (' + elapsed + 's)</span>';
+        area.innerHTML = '<span class="recalibrate-status">' + label + '中... (' + elapsed + 's)</span>';
 
         fetch('/api/task/' + taskId, {
             headers: { 'Authorization': 'Bearer ' + apiKey }
@@ -351,11 +428,11 @@ function pollTask(taskId, apiKey, area) {
             var taskStatus = data.data && data.data.status;
             if (data.code === 200 || taskStatus === 'success') {
                 clearInterval(interval);
-                area.innerHTML = '<span class="recalibrate-status recalibrate-done">校对完成，刷新中...</span>';
+                area.innerHTML = '<span class="recalibrate-status recalibrate-done">' + label + '完成，刷新中...</span>';
                 setTimeout(function() { location.reload(); }, 500);
             } else if (taskStatus === 'failed') {
                 clearInterval(interval);
-                area.innerHTML = '<span class="recalibrate-status recalibrate-error">校对失败</span>';
+                area.innerHTML = '<span class="recalibrate-status recalibrate-error">' + label + '失败</span>';
             }
         })
         .catch(function() {
