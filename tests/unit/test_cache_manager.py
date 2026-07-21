@@ -375,6 +375,104 @@ class TestSaveLLMResult:
         assert "llm_summary" in result
         assert result["llm_summary"] == "Summary."
 
+    def test_save_chapters_and_get_cache(self, cm, cache_dir):
+        """llm_type=chapters writes llm_chapters.json and get_cache reads it back."""
+        _save_sample_capswriter(cm)
+        payload = {
+            "source": {
+                "kind": "segments",
+                "segment_count": 2,
+                "fingerprint": "abc",
+                "generated_at": "2026-07-19T00:00:00+00:00",
+            },
+            "chapters": [
+                {
+                    "index": 0,
+                    "title": "Intro",
+                    "gist": "Opening remarks.",
+                    "start_seg": 0,
+                    "end_seg": 1,
+                    "start_time": 0.0,
+                    "end_time": 12.3,
+                }
+            ],
+        }
+        ok = cm.save_llm_result(
+            platform="youtube",
+            media_id="vid1",
+            use_speaker_recognition=False,
+            llm_type="chapters",
+            content=payload,
+        )
+        assert ok is True
+        files = list(cache_dir.rglob("llm_chapters.json"))
+        assert len(files) == 1
+        on_disk = json.loads(files[0].read_text(encoding="utf-8"))
+        assert on_disk["format_version"] == "v1"
+        assert on_disk["chapters"][0]["start_seg"] == 0
+
+        result = cm.get_cache(platform="youtube", media_id="vid1")
+        assert "llm_chapters" in result
+        assert result["llm_chapters"]["chapters"][0]["title"] == "Intro"
+
+    def test_chapters_rejects_non_dict(self, cm):
+        _save_sample_capswriter(cm)
+        ok = cm.save_llm_result(
+            platform="youtube",
+            media_id="vid1",
+            use_speaker_recognition=False,
+            llm_type="chapters",
+            content="not a dict",
+        )
+        assert ok is False
+
+    def test_save_llm_status_merges_chapters_status(self, cm):
+        """chapters_status merges without wiping calibration/summary."""
+        _save_sample_capswriter(cm)
+        cm.save_llm_status(
+            platform="youtube",
+            media_id="vid1",
+            use_speaker_recognition=False,
+            calibration_status="full",
+            summary_status="generated",
+        )
+        cm.save_llm_status(
+            platform="youtube",
+            media_id="vid1",
+            use_speaker_recognition=False,
+            chapters_status="generated",
+        )
+        result = cm.get_cache(platform="youtube", media_id="vid1")
+        status = result["llm_status"]
+        assert status["calibration_status"] == "full"
+        assert status["summary_status"] == "generated"
+        assert status["chapters_status"] == "generated"
+
+    def test_chapters_status_column_migration_idempotent(self, cm):
+        """Fresh CacheManager DB includes chapters_status; re-migrate is safe."""
+        with cm._get_cursor() as cursor:
+            cursor.execute("PRAGMA table_info(task_status)")
+            columns = [col[1] for col in cursor.fetchall()]
+        assert "chapters_status" in columns
+        # Second migrate must not raise.
+        cm._migrate_database()
+        with cm._get_cursor() as cursor:
+            cursor.execute("PRAGMA table_info(task_status)")
+            columns2 = [col[1] for col in cursor.fetchall()]
+        assert "chapters_status" in columns2
+
+    def test_update_task_status_writes_chapters_status(self, cm):
+        task = cm.create_task(url="https://example.com/x", processing_options={})
+        ok = cm.update_task_status(
+            task["task_id"],
+            TaskStatus.SUCCESS,
+            chapters_status="generated",
+            skip_archive=True,
+        )
+        assert ok is True
+        row = cm.get_task_by_id(task["task_id"])
+        assert row["chapters_status"] == "generated"
+
 
 # ---------------------------------------------------------------------------
 # save_llm_result -- atomic write (G5, local codex review round 6)

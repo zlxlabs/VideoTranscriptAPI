@@ -215,6 +215,72 @@ class TestLLMConfigChapters:
         assert config.max_chapters_input_chars == 200000
 
 
+class TestLLMConfigPlainStructured:
+    """Test plain-source structured calibration + paragraphization config fields."""
+
+    def test_dataclass_defaults(self):
+        """Direct construction (no from_dict) must expose the new fields with defaults."""
+        config = LLMConfig(
+            api_key="k", base_url="u",
+            calibrate_model="m", summary_model="s",
+        )
+        assert config.structured_calibration_for_plain is False
+        assert config.plain_structured_preferred_chunk_length == 3000
+        assert config.plain_structured_max_chunk_length == 4000
+        assert config.paragraphization_target_chars == 300
+        assert config.paragraphization_hard_max_chars == 600
+        assert config.paragraphization_pause_threshold_seconds == 2.0
+
+    def test_from_dict_defaults(self):
+        """Missing keys -> defaults (dark-launch switch stays off)."""
+        config_dict = {
+            "llm": {
+                "api_key": "k", "base_url": "u",
+                "calibrate_model": "m", "summary_model": "s",
+            }
+        }
+        config = LLMConfig.from_dict(config_dict)
+        assert config.structured_calibration_for_plain is False
+        assert config.plain_structured_preferred_chunk_length == 3000
+        assert config.plain_structured_max_chunk_length == 4000
+        assert config.paragraphization_target_chars == 300
+        assert config.paragraphization_hard_max_chars == 600
+        assert config.paragraphization_pause_threshold_seconds == 2.0
+
+    def test_from_dict_explicit_overrides(self):
+        """Explicit values in the three key groups must override defaults."""
+        config_dict = {
+            "llm": {
+                "api_key": "k", "base_url": "u",
+                "calibrate_model": "m", "summary_model": "s",
+                "structured_calibration_for_plain": True,
+                "structured_calibration": {
+                    "plain_preferred_chunk_length": 2500,
+                    "plain_max_chunk_length": 3500,
+                },
+                "paragraphization": {
+                    "target_chars": 400,
+                    "hard_max_chars": 800,
+                    "pause_threshold_seconds": 1.5,
+                },
+            }
+        }
+        config = LLMConfig.from_dict(config_dict)
+        assert config.structured_calibration_for_plain is True
+        assert config.plain_structured_preferred_chunk_length == 2500
+        assert config.plain_structured_max_chunk_length == 3500
+        assert config.paragraphization_target_chars == 400
+        assert config.paragraphization_hard_max_chars == 800
+        assert config.paragraphization_pause_threshold_seconds == 1.5
+
+    def test_positional_args_compatibility(self):
+        """New fields appended at the end must not break positional construction."""
+        config = LLMConfig("k", "u", "m", "s")
+        assert config.api_key == "k"
+        assert config.summary_model == "s"
+        assert config.structured_calibration_for_plain is False
+
+
 class TestLLMConfigGetModels:
     """Test get_models method."""
 

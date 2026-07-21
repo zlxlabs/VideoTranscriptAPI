@@ -338,13 +338,32 @@ class DialogRenderer:
         else:
             return f"<p>{safe_text.replace(chr(10), '<br>')}</p>"
 
-    def _get_optimal_rendering_strategy(self, cache_dir: str) -> str:
+    @staticmethod
+    def _is_plain_structured_artifact(processed_file: str) -> bool:
+        """llm_processed.json 是否为 plain 源结构化产物（provenance mode=="plain_structured"）
+
+        FunASR 产物无顶层 mode 键，返回 False。解析失败保守返回 False——
+        维持旧行为选 structured，由下游统一的 fallback 逻辑处理。
+        """
+        try:
+            with open(processed_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return False
+        return isinstance(data, dict) and data.get("mode") == "plain_structured"
+
+    def _get_optimal_rendering_strategy(
+        self, cache_dir: str, plain_structured_enabled: bool = False
+    ) -> str:
         """
         根据缓存目录选择最优渲染策略
         简化为 3 种策略：structured（FunASR V2）, capswriter_long_text（CapsWriter）, normal（fallback）
 
         Args:
             cache_dir: 缓存目录路径
+            plain_structured_enabled: llm.structured_calibration_for_plain 开关值。
+                开关关（默认）时忽略 plain 源结构化产物（mode=="plain_structured"），
+                走原 plain 渲染；FunASR 产物（无 mode 键）不受任何影响。
 
         Returns:
             str: 渲染策略 (structured/capswriter_long_text/normal)
@@ -352,11 +371,19 @@ class DialogRenderer:
         logger.info(f"开始选择渲染策略，缓存目录: {cache_dir}")
 
         # 策略1: structured - FunASR V2（最优）
-        if os.path.exists(os.path.join(cache_dir, "llm_processed.json")):
-            logger.info(
-                "  [Strategy] 'structured' - Structured rendering based on llm_processed.json"
-            )
-            return "structured"
+        processed_file = os.path.join(cache_dir, "llm_processed.json")
+        if os.path.exists(processed_file):
+            if not plain_structured_enabled and self._is_plain_structured_artifact(
+                processed_file
+            ):
+                logger.info(
+                    "  [Strategy] skip 'structured' - plain_structured artifact gated off"
+                )
+            else:
+                logger.info(
+                    "  [Strategy] 'structured' - Structured rendering based on llm_processed.json"
+                )
+                return "structured"
 
         # 策略2: capswriter_long_text - CapsWriter（无版本，直接使用长文本分段）
         if os.path.exists(os.path.join(cache_dir, "transcript_capswriter.txt")):
@@ -387,23 +414,35 @@ class DialogRenderer:
             speaker_mapping = structured_data.get("speaker_mapping", {})
 
             # 获取说话人列表
-            speakers = list(dict.fromkeys([d["speaker"] for d in dialogs]))
+            # 防御：plain 源结构化产物（mode=="plain_structured"）的段落无 speaker 键，
+            # 用下标 d["speaker"] 会直接 KeyError 崩主视图；无 speaker 段不参与颜色映射。
+            speakers = list(
+                dict.fromkeys(d["speaker"] for d in dialogs if d.get("speaker"))
+            )
 
             html_parts = ['<div class="dialog-container">']
 
-            for dialog in dialogs:
-                speaker = dialog["speaker"]
+            # Enumerate over the original dialogs list so start_seg / #dlg-{i}
+            # stay aligned with the raw input indices used by chapters.
+            for dlg_index, dialog in enumerate(dialogs):
+                speaker = dialog.get("speaker") or ""
                 content = dialog.get("text", dialog.get("content", ""))
-                color = self.get_speaker_color(speaker, speakers)
+                color = self.get_speaker_color(speaker, speakers) if speaker else self.SPEAKER_COLORS[0]
 
                 # 安全转义：防止 XSS
-                safe_speaker = html.escape(speaker)
-                safe_content = html.escape(content)
+                safe_speaker = html.escape(str(speaker)) if speaker else ""
+                safe_content = html.escape(content if isinstance(content, str) else str(content or ""))
 
-                # 获取开始时间（转义）
-                start_time = html.escape(dialog.get("start_time", ""))
+                # 获取开始时间（展示用转义；属性同样转义）
+                raw_start = dialog.get("start_time", "")
+                if raw_start is None:
+                    raw_start = ""
+                start_time_attr = html.escape(str(raw_start), quote=True) if raw_start != "" else ""
+                start_time_display = html.escape(str(raw_start)) if raw_start != "" else ""
                 time_display = (
-                    f'<span class="time-tag">{start_time}</span>' if start_time else ""
+                    f'<span class="time-tag">{start_time_display}</span>'
+                    if start_time_display
+                    else ""
                 )
 
                 # 智能分段处理（在转义后的文本上操作）
@@ -416,14 +455,31 @@ class DialogRenderer:
                 if content_html and not content_html.startswith("<p>"):
                     content_html = f"<p>{content_html}</p>"
 
-                html_parts.append(f"""
-                <div class="dialog-item">
+                # Chapter anchors: id="dlg-{i}" + optional data-start-time.
+                item_attrs = f'id="dlg-{dlg_index}" class="dialog-item"'
+                if start_time_attr:
+                    item_attrs += f' data-start-time="{start_time_attr}"'
+
+                if speaker:
+                    header_html = f"""
                     <div class="speaker-header">
                         <div class="speaker-tag" style="background-color: {color};">
                             {safe_speaker}
                         </div>
                         {time_display}
                     </div>
+                    """
+                else:
+                    # No-speaker timeline blocks still get time + dlg anchor.
+                    header_html = (
+                        f'<div class="speaker-header">{time_display}</div>'
+                        if time_display
+                        else ""
+                    )
+
+                html_parts.append(f"""
+                <div {item_attrs}>
+                    {header_html}
                     <div class="dialog-content">
                         {content_html}
                     </div>
@@ -500,7 +556,10 @@ class DialogRenderer:
             raise
 
     def render_with_cache_analysis(
-        self, cache_dir: str, fallback_text: Optional[str] = None
+        self,
+        cache_dir: str,
+        fallback_text: Optional[str] = None,
+        plain_structured_enabled: bool = False,
     ) -> str:
         """
         基于缓存分析的智能渲染
@@ -509,6 +568,8 @@ class DialogRenderer:
         Args:
             cache_dir: 缓存目录路径
             fallback_text: 降级文本内容
+            plain_structured_enabled: llm.structured_calibration_for_plain 开关值，
+                透传给渲染策略判定（默认 False = 保守忽略 plain_structured 产物）
 
         Returns:
             str: 渲染后的HTML
@@ -517,7 +578,9 @@ class DialogRenderer:
             logger.info(f"开始智能渲染，缓存目录: {cache_dir}")
 
             # 直接选择渲染策略
-            strategy = self._get_optimal_rendering_strategy(cache_dir)
+            strategy = self._get_optimal_rendering_strategy(
+                cache_dir, plain_structured_enabled
+            )
             logger.info(f"  选择策略: {strategy}")
 
             if strategy == "structured":
@@ -541,13 +604,17 @@ class DialogRenderer:
             else:
                 return '<p style="color: #666;">渲染失败，无法显示内容</p>'
 
-    def render_calibrated_content_smart(self, cache_dir: str) -> Optional[str]:
+    def render_calibrated_content_smart(
+        self, cache_dir: str, plain_structured_enabled: bool = False
+    ) -> Optional[str]:
         """
         智能渲染校对文本内容的便捷函数
         简化版本：直接使用 render_with_cache_analysis
 
         Args:
             cache_dir: 缓存目录路径
+            plain_structured_enabled: llm.structured_calibration_for_plain 开关值，
+                透传给渲染策略判定（默认 False = 保守忽略 plain_structured 产物）
 
         Returns:
             str: 渲染后的HTML，如果没有校对文本则返回None
@@ -564,11 +631,131 @@ class DialogRenderer:
 
         try:
             logger.info(f"开始校对文本专用渲染: {cache_dir}")
-            return self.render_with_cache_analysis(cache_dir)
+            return self.render_with_cache_analysis(
+                cache_dir, plain_structured_enabled=plain_structured_enabled
+            )
 
         except Exception as e:
             logger.error(f"智能渲染校对文本失败 {cache_dir}: {e}", exc_info=True)
             return None
+
+
+def _format_chapter_seconds(seconds: Optional[float]) -> str:
+    """Format chapter start/end seconds as mm:ss (or h:mm:ss). Empty if unknown."""
+    if seconds is None:
+        return ""
+    try:
+        total = float(seconds)
+    except (TypeError, ValueError):
+        return ""
+    if total != total or total < 0:  # NaN / negative
+        return ""
+    total_i = int(total)
+    hours, remainder = divmod(total_i, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def render_chapters_html(
+    chapters_payload: Optional[Dict],
+    *,
+    fingerprint_ok: bool,
+) -> str:
+    """Render the chapter outline block as escaped HTML.
+
+    Security: ``title`` / ``gist`` are **always** passed through ``html.escape``.
+    When ``fingerprint_ok`` is False the cards are still shown but jump links
+    to ``#dlg-{start_seg}`` are omitted (stale anchor source after recalibrate).
+
+    Args:
+        chapters_payload: Contents of ``llm_chapters.json`` (or None).
+        fingerprint_ok: Whether the stored fingerprint matches the current
+            anchor source (dialogs / segments).
+
+    Returns:
+        HTML string for the chapters list, or empty string when there is
+        nothing to render.
+    """
+    if not chapters_payload or not isinstance(chapters_payload, dict):
+        return ""
+
+    chapters = chapters_payload.get("chapters")
+    if not isinstance(chapters, list) or not chapters:
+        return ""
+
+    html_parts: List[str] = ['<div class="chapters-list">']
+
+    for ch in chapters:
+        if not isinstance(ch, dict):
+            continue
+
+        raw_title = ch.get("title")
+        raw_gist = ch.get("gist")
+        safe_title = html.escape("" if raw_title is None else str(raw_title))
+        safe_gist = html.escape("" if raw_gist is None else str(raw_gist))
+
+        try:
+            start_seg = int(ch["start_seg"]) if ch.get("start_seg") is not None else None
+        except (TypeError, ValueError):
+            start_seg = None
+
+        try:
+            index = int(ch["index"]) if ch.get("index") is not None else 0
+        except (TypeError, ValueError):
+            index = 0
+
+        start_label = _format_chapter_seconds(ch.get("start_time"))
+        end_label = _format_chapter_seconds(ch.get("end_time"))
+        if start_label and end_label:
+            time_range = f"{start_label} – {end_label}"
+        elif start_label:
+            time_range = start_label
+        else:
+            time_range = ""
+        safe_time = html.escape(time_range)
+
+        jump_ok = bool(fingerprint_ok and start_seg is not None)
+        jump_attr = "1" if jump_ok else "0"
+        start_seg_attr = "" if start_seg is None else str(start_seg)
+
+        if jump_ok:
+            title_html = (
+                f'<a class="chapter-title-link" href="#dlg-{start_seg}">{safe_title}</a>'
+            )
+        else:
+            title_html = f'<span class="chapter-title">{safe_title}</span>'
+
+        time_html = (
+            f'<span class="chapter-time">{safe_time}</span>' if safe_time else ""
+        )
+        gist_html = (
+            f'<p class="chapter-gist">{safe_gist}</p>' if safe_gist else ""
+        )
+
+        html_parts.append(
+            f'<div class="chapter-card" id="chapter-{index}" '
+            f'data-start-seg="{html.escape(start_seg_attr, quote=True)}" '
+            f'data-jump-ok="{jump_attr}">'
+            f'<div class="chapter-header">'
+            f'<span class="chapter-index">{index + 1}</span>'
+            f"{title_html}"
+            f"{time_html}"
+            f"</div>"
+            f"{gist_html}"
+            f"</div>"
+        )
+
+    html_parts.append("</div>")
+    result = "\n".join(html_parts)
+    # Guard: if every entry was skipped, do not emit an empty wrapper.
+    if 'class="chapter-card"' not in result:
+        return ""
+    logger.debug(
+        "Rendered chapters html: cards present, fingerprint_ok=%s", fingerprint_ok
+    )
+    return result
 
 
 def render_transcript_content(text: str) -> str:
@@ -585,18 +772,24 @@ def render_transcript_content(text: str) -> str:
     return renderer.render_dialog_html(text)
 
 
-def render_calibrated_content_smart(cache_dir: str) -> Optional[str]:
+def render_calibrated_content_smart(
+    cache_dir: str, plain_structured_enabled: bool = False
+) -> Optional[str]:
     """
     智能渲染校对文本内容的便捷函数
 
     Args:
         cache_dir: 缓存目录路径
+        plain_structured_enabled: llm.structured_calibration_for_plain 开关值，
+            透传给渲染策略判定（默认 False = 保守忽略 plain_structured 产物）
 
     Returns:
         str: 渲染后的HTML，如果没有校对文本则返回None
     """
     renderer = DialogRenderer()
-    return renderer.render_calibrated_content_smart(cache_dir)
+    return renderer.render_calibrated_content_smart(
+        cache_dir, plain_structured_enabled=plain_structured_enabled
+    )
 
 
 def render_transcript_content_smart(

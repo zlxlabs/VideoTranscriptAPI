@@ -2,9 +2,13 @@
 
 > Session ID：`260719-0547-chapters-wiring`  
 > 创建：2026-07-19 05:47  
+> **状态：T1 + T6 + T7 完成；Review R1+R2 连续无新增 P1；真机 e2e 通过（2026-07-19）**  
+> **延后**：校对文本上的 CW/YouTube 章节跳转 → `DEFERRED-chapter-jump-calibrated-text.md`  
 > 类型：**接线批代码实施**（T1 → T6 → T7/T8…）  
 > 上游 session：`docs/sessions/260719-0513-chapters/`（核实 + 计划 v2.1.1 + rebase）  
-> 基线分支：`feat/chapters-foundation` @ `b578608`（已 rebase `origin/main`，unit+llm 2292 绿，未 push）
+> 基线分支：`feat/chapters-foundation` @ `ddcac6c`（含 rebase 后文档交接）  
+> **工作分支**：`feat/chapters-wiring` @ worktree `.../worktrees/chapters-wiring`（**未 push**）  
+> 详情：`PROGRESS.md` / `NOTES.md`（含 P2 backlog）
 
 ---
 

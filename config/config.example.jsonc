@@ -239,10 +239,38 @@
             "preferred_chunk_length": 2000,  // 首选块长度（尽量接近此值分块）
             "max_calibration_retries": 2,    // 单块校对失败的最大重试次数
             "calibration_concurrent_limit": 10,  // 并发校对的块数
+            // —— plain 源（无说话人）模式的独立分块参数 ——
+            // 仅在 structured_calibration_for_plain=true 时生效；
+            // plain 段落比对话长，分块预算相应放大，一般无需修改
+            "plain_preferred_chunk_length": 3000,  // plain 源首选块长度
+            "plain_max_chunk_length": 4000,        // plain 源单个校对块的最大长度
             "quality_validation": {
                 "enabled": false,        // 默认关闭
                 "fallback_strategy": "best_quality"
             }
+        },
+
+        // ------------------------------------------------------
+        // plain 源结构化逐段校对总开关（阶段二，暗启动）
+        // 默认 false：plain 源（CapsWriter 转录 / YouTube 字幕）维持现状纯文本校对。
+        // 开启后：plain 源走结构化逐段校对（id 锚点映射，不动文本结构），
+        //         产物带时间块锚点（dlg-{i}），配合确定性段落化输出段落级 dialogs。
+        // 何时需要改：真实样本验证通过后翻 true；验证期间保持 false。
+        // ------------------------------------------------------
+        "structured_calibration_for_plain": false,
+
+        // ------------------------------------------------------
+        // 确定性段落化配置（v1，仅在 structured_calibration_for_plain=true 时生效）
+        // 【作用】把校准后的 segments 按授权断点合成段落（只选边界、不动文本），
+        //         落盘为 llm_processed.json 的 dialogs，供渲染/章节/指纹复用
+        // 【规则】长度只是预算不是闸刀——到 target_chars 开始找断点，
+        //         仅在句末标点或停顿 >= pause_threshold_seconds 处断段；
+        //         到 hard_max_chars 仍无授权点时放宽到逗号级
+        // ------------------------------------------------------
+        "paragraphization": {
+            "target_chars": 300,             // 段落长度预算（字符），超过后开始寻找断点
+            "hard_max_chars": 600,           // 段落硬上限（字符），超出放宽到逗号级断点
+            "pause_threshold_seconds": 2.0   // 停顿授权阈值（秒），相邻段间隔达到即允许断段
         },
 
         // ------------------------------------------------------

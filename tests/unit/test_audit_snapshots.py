@@ -34,17 +34,28 @@ def _task(task_id="task-1", **overrides):
     return value
 
 
-def test_v4_migration_is_idempotent(tmp_path):
+def test_schema_migration_is_idempotent(tmp_path):
+    from video_transcript_api.utils.logging.audit_logger import CURRENT_SCHEMA_VERSION
+
     path = tmp_path / "audit.db"
     first = AuditLogger(str(path))
     first.close()
     second = AuditLogger(str(path))
     with second._get_cursor() as cursor:
-        assert cursor.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+        assert (
+            cursor.execute("SELECT version FROM schema_version").fetchone()[0]
+            == CURRENT_SCHEMA_VERSION
+        )
         columns = {
             row[1] for row in cursor.execute("PRAGMA table_info(task_audit_snapshots)")
         }
-    assert {"task_id", "view_token", "content_expired", "processing_options"} <= columns
+    assert {
+        "task_id",
+        "view_token",
+        "content_expired",
+        "processing_options",
+        "chapters_status",
+    } <= columns
 
 
 def test_archive_upsert_and_expire_are_idempotent(tmp_path):
@@ -554,6 +565,7 @@ def test_terminal_update_archives_snapshot(tmp_path):
         "calibrate": True,
         "infer_speaker_names": True,
         "summarize": False,
+        "chapters": False,  # omitted -> follows summarize
     }
 
 

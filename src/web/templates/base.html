@@ -985,6 +985,96 @@
                 font-size: 0.8rem;
             }
         }
+
+        /* ========== 章节梗概卡片 ========== */
+        .chapters-list {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .chapter-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-primary);
+            border-radius: 10px;
+            padding: 14px 16px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+            transition: box-shadow 0.2s ease, border-color 0.2s ease;
+        }
+
+        .chapter-card:hover {
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            border-color: #667eea;
+        }
+
+        .chapter-header {
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 8px 12px;
+            margin-bottom: 8px;
+        }
+
+        .chapter-index {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 1.6em;
+            height: 1.6em;
+            padding: 0 6px;
+            border-radius: 999px;
+            background: #667eea;
+            color: #fff;
+            font-size: 0.8rem;
+            font-weight: 600;
+            flex-shrink: 0;
+        }
+
+        .chapter-title,
+        .chapter-title-link {
+            font-weight: 600;
+            font-size: 1.05rem;
+            color: var(--text-primary);
+            text-decoration: none;
+        }
+
+        .chapter-title-link:hover {
+            color: #667eea;
+            text-decoration: underline;
+        }
+
+        .chapter-time {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            font-family: "SFMono-Regular", Monaco, "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
+            margin-left: auto;
+        }
+
+        .chapter-gist {
+            margin: 0;
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            line-height: 1.65;
+        }
+
+        [data-theme="dark"] .chapter-card:hover {
+            border-color: #93a5f6;
+        }
+
+        [data-theme="dark"] .chapter-title-link:hover {
+            color: #93a5f6;
+        }
+
+        @media (max-width: 480px) {
+            .chapter-card {
+                padding: 12px;
+            }
+
+            .chapter-time {
+                margin-left: 0;
+                width: 100%;
+            }
+        }
     </style>
     {% block extra_css %}{% endblock %}
 </head>

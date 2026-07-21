@@ -965,6 +965,28 @@ def process_transcription(
             calibrate_requested = processing_options.get("calibrate", True)
             need_calibrated = calibrate_requested and not calibrated_layer_satisfied
             need_summary = processing_options.get("summarize", True) and not has_llm_summary
+            # need_chapters：状态敏感（设计 §5.1 / R3），不要抄 need_summary 的
+            # 「有文件即满足」。满足态：
+            # - GENERATED 且 llm_chapters.json 存在
+            # - SKIPPED_SHORT / SKIPPED_NO_TIMELINE（诚实终态，不必重跑）
+            # 不满足（可重跑）：FAILED / DISABLED（仅当本轮 chapters=true）/
+            # 状态缺省 / 文件与状态不一致（仅有文件无状态或仅有状态无文件）。
+            from ...utils.llm_status import ChaptersStatus
+
+            chapters_requested = processing_options.get("chapters", True)
+            cached_chapters_status = cached_llm_status.get("chapters_status")
+            has_llm_chapters = "llm_chapters" in cache_data
+            if cached_chapters_status == ChaptersStatus.GENERATED and has_llm_chapters:
+                chapters_layer_satisfied = True
+            elif cached_chapters_status in (
+                ChaptersStatus.SKIPPED_SHORT,
+                ChaptersStatus.SKIPPED_NO_TIMELINE,
+            ):
+                chapters_layer_satisfied = True
+            else:
+                # FAILED / DISABLED / 缺省 / 文件与状态不一致 → 不满足
+                chapters_layer_satisfied = False
+            need_chapters = chapters_requested and not chapters_layer_satisfied
             infer_speaker_names_requested = processing_options.get(
                 "infer_speaker_names", True
             )
@@ -1087,6 +1109,7 @@ def process_transcription(
             if (
                 not need_calibrated
                 and not need_summary
+                and not need_chapters
                 and not need_speaker_names
                 and not calibration_effectively_missing
             ):
@@ -1392,30 +1415,59 @@ def process_transcription(
                 "calibrate": queued_calibrate,
                 "summarize": need_summary,
                 "infer_speaker_names": need_speaker_names,
+                "chapters": need_chapters,
             }
+
+            # Seed chapters timeline when only chapters (or chapters+summary)
+            # need backfill: prefer cached dialogs / segments so coordinator
+            # does not depend on re-running calibration for timeline.
+            timeline_segments_seed = None
+            if need_chapters:
+                processed = cache_data.get("llm_processed") or {}
+                if isinstance(processed, dict) and isinstance(
+                    processed.get("dialogs"), list
+                ) and processed["dialogs"]:
+                    timeline_segments_seed = processed["dialogs"]
+                elif isinstance(cache_data.get("segments"), list) and cache_data["segments"]:
+                    timeline_segments_seed = cache_data["segments"]
+                else:
+                    file_path = cache_data.get("file_path")
+                    if file_path:
+                        try:
+                            from ...transcriber.segments import load_segments
+
+                            timeline_segments_seed = load_segments(file_path)
+                        except Exception as segs_exc:
+                            logger.warning(
+                                f"load_segments for chapters handoff failed: {segs_exc}"
+                            )
+
+            handoff_payload = {
+                "task_id": task_id,
+                "url": url,
+                "display_url": display_url,
+                "platform": cache_data.get("platform"),
+                "media_id": cache_data.get("media_id"),
+                "video_title": video_title,
+                "author": author,
+                "description": description,
+                "transcript": queued_transcript,
+                "use_speaker_recognition": queued_use_speaker_recognition,
+                "transcription_data": queued_transcription_data,
+                "cached_speaker_count": cached_speaker_count,
+                "is_generic": is_generic_downloader or is_from_generic,
+                "wechat_webhook": wechat_webhook,
+                "notification_channel": notification_channel,
+                "notification_webhooks": notification_webhooks,
+                "perf_tracker": tracker,
+                "processing_options": queued_processing_options,
+            }
+            if timeline_segments_seed is not None:
+                handoff_payload["timeline_segments"] = timeline_segments_seed
 
             handoff_failure = _handoff_to_llm_stage(
                 task_id,
-                {
-                    "task_id": task_id,
-                    "url": url,
-                    "display_url": display_url,
-                    "platform": cache_data.get("platform"),
-                    "media_id": cache_data.get("media_id"),
-                    "video_title": video_title,
-                    "author": author,
-                    "description": description,
-                    "transcript": queued_transcript,
-                    "use_speaker_recognition": queued_use_speaker_recognition,
-                    "transcription_data": queued_transcription_data,
-                    "cached_speaker_count": cached_speaker_count,
-                    "is_generic": is_generic_downloader or is_from_generic,
-                    "wechat_webhook": wechat_webhook,
-                    "notification_channel": notification_channel,
-                    "notification_webhooks": notification_webhooks,
-                    "perf_tracker": tracker,
-                    "processing_options": queued_processing_options,
-                },
+                handoff_payload,
                 calibrating_status_kwargs={
                     "platform": cache_data.get("platform"),
                     "media_id": cache_data.get("media_id"),
@@ -1433,6 +1485,7 @@ def process_transcription(
                 f"将LLM任务加入队列: {task_id}, 标题: {video_title}, "
                 f"说话人识别: {has_speaker_recognition}, "
                 f"需补层: calibrate={need_calibrated}, summarize={need_summary}, "
+                f"chapters={need_chapters}, "
                 f"infer_speaker_names={need_speaker_names}"
             )
 

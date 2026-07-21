@@ -40,6 +40,7 @@ class CacheCapabilityAnalyzer:
             "structured_output": "llm_processed.json",
             "calibrated_text": "llm_calibrated.txt",
             "summary_text": "llm_summary.txt",
+            "chapters": "llm_chapters.json",
         }
 
     def analyze_cache(self, cache_dir: str) -> CacheCapabilities:

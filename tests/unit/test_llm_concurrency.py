@@ -76,13 +76,19 @@ class _DummyCacheManager:
 
     def save_llm_status(self, *, platform, media_id, use_speaker_recognition,
                          calibration_status=None, calibration_stats=None,
-                         summary_status=None):
+                         summary_status=None, chapters_status=None):
         """No-op stand-in for the honest-status-model llm_status.json writer.
 
         Intentionally does NOT append to self.saved (that list is asserted
         against as "2 tasks x 2 results each" -- calibrated + summary text).
+        chapters_status accepted for call-compatibility with T6 wiring.
         """
         return True
+
+    def get_cache(self, platform=None, media_id=None, url=None,
+                  use_speaker_recognition=None):
+        """No-op cache lookup for chapters timeline gradient / status merge."""
+        return None
 
     def update_task_status(self, task_id, status, **kwargs):
         # Real CacheManager.update_task_status is a compare-and-set that

@@ -38,7 +38,7 @@ from ...utils.notifications.channel import _clean_url, _apply_risk_control_safe
 from ...utils.rendering import get_base_url
 from ...utils.perf_tracker import PerfTracker
 from ...utils.task_status import TaskStatus
-from ...utils.llm_status import CalibrationStatus, SummaryStatus
+from ...utils.llm_status import CalibrationStatus, ChaptersStatus, SummaryStatus
 
 logger = lazy_resource(get_logger)
 config = lazy_resource(get_config)
@@ -51,7 +51,11 @@ llm_executor = lazy_resource(get_llm_executor)
 def _requires_llm_title(
     processing_options: dict, *, use_speaker_recognition: bool
 ) -> bool:
-    """Return whether any feature that can actually run for this task needs LLM."""
+    """Return whether any feature that can actually run for this task needs LLM.
+
+    Chapters alone does NOT trigger title generation (design §5.2 / R7): a
+    chapters-only request must not pay an extra title LLM call.
+    """
     return bool(
         processing_options.get("calibrate")
         or processing_options.get("summarize")
@@ -60,6 +64,70 @@ def _requires_llm_title(
             and use_speaker_recognition
         )
     )
+
+
+def _resolve_chapters_timeline_segments(
+    *,
+    llm_task: dict,
+    platform: Optional[str],
+    media_id: Optional[str],
+    use_speaker_recognition: bool,
+) -> tuple[Optional[list], str]:
+    """Resolve cache-side chapters input gradient (§5.1) for coordinator seed.
+
+    This-round structured dialogs are preferred *inside* the coordinator after
+    calibration. Here we only resolve what llm_ops can see before process():
+
+      1. Explicit llm_task["timeline_segments"] (layered handoff / tests)
+      2. Cached llm_processed.json dialogs
+      3. Cached raw segments (get_cache["segments"] or load_segments)
+      4. None → coordinator/processor returns SKIPPED_NO_TIMELINE
+
+    Returns:
+        (segments_or_none, source_kind) where source_kind is one of
+        ``cached_dialogs`` / ``segments`` / ``none``.
+    """
+    task_segments = llm_task.get("timeline_segments")
+    if isinstance(task_segments, list) and task_segments:
+        return task_segments, "segments"
+
+    if platform and media_id:
+        get_cache = getattr(cache_manager, "get_cache", None)
+        if callable(get_cache):
+            try:
+                cache_snapshot = get_cache(
+                    platform,
+                    media_id,
+                    use_speaker_recognition=use_speaker_recognition,
+                )
+            except Exception as exc:
+                logger.warning(f"get_cache failed for chapters gradient: {exc}")
+                cache_snapshot = None
+            if cache_snapshot:
+                processed = cache_snapshot.get("llm_processed") or {}
+                if isinstance(processed, dict):
+                    cached_dialogs = processed.get("dialogs")
+                    if isinstance(cached_dialogs, list) and cached_dialogs:
+                        return cached_dialogs, "cached_dialogs"
+
+                segs = cache_snapshot.get("segments")
+                if isinstance(segs, list) and segs:
+                    return segs, "segments"
+
+                file_path = cache_snapshot.get("file_path")
+                if file_path:
+                    try:
+                        from ...transcriber.segments import load_segments
+
+                        loaded = load_segments(file_path)
+                        if isinstance(loaded, list) and loaded:
+                            return loaded, "segments"
+                    except Exception as exc:
+                        logger.warning(
+                            f"load_segments failed for chapters gradient: {exc}"
+                        )
+
+    return None, "none"
 
 
 def process_llm_queue():
@@ -290,6 +358,7 @@ def _handle_llm_task(llm_task: dict):
                 )
                 calibrate_requested = processing_options.get("calibrate", True)
                 summarize_requested = processing_options.get("summarize", True)
+                chapters_requested = processing_options.get("chapters", True)
                 infer_speaker_names_requested = processing_options.get(
                     "infer_speaker_names", True
                 )
@@ -319,16 +388,31 @@ def _handle_llm_task(llm_task: dict):
                 # 仅校对模式下，若缓存里 llm_summary.txt 缺失/为空，顺手补跑一次 summary
                 # 避免老任务卡在 view 页的 "总结处理中..." 状态
                 summary_backfill = False
+                force_chapters_recompute = False
+                cache_snapshot_for_flags = None
                 if calibrate_only and platform and media_id:
-                    cache_snapshot = cache_manager.get_cache(
+                    cache_snapshot_for_flags = cache_manager.get_cache(
                         platform, media_id,
                         use_speaker_recognition=use_speaker_recognition,
                     )
-                    if _should_backfill_summary(cache_snapshot or {}, calibrate_only=True):
+                    if _should_backfill_summary(
+                        cache_snapshot_for_flags or {}, calibrate_only=True
+                    ):
                         summary_backfill = True
                         logger.info(
                             f"recalibrate: llm_summary missing for {task_id}, "
                             f"auto-backfill enabled"
+                        )
+                    # R6: recalibrate forces chapters recompute when prior
+                    # chapters_status was GENERATED (unlike summary backfill).
+                    old_status = (
+                        (cache_snapshot_for_flags or {}).get("llm_status") or {}
+                    ).get("chapters_status")
+                    if old_status == ChaptersStatus.GENERATED:
+                        force_chapters_recompute = True
+                        logger.info(
+                            f"recalibrate: prior chapters GENERATED for {task_id}, "
+                            f"force recompute"
                         )
 
                 # 协调器需要知道是否跳过 summary：backfill 时强制跑 summary；
@@ -344,7 +428,39 @@ def _handle_llm_task(llm_task: dict):
                 # 因此 recalibrate 永远真实执行校对，不受本开关影响。
                 skip_calibration_for_coordinator = not calibrate_requested
 
-                # 调用新架构（包含校对和总结）
+                # chapters 跳过判定（R6）：
+                # - calibrate_only（recalibrate）：路由（tasks.py）用
+                #   normalize_processing_options(None) 写入默认 processing_options，
+                #   chapters_requested 恒为 True，不能据此决定是否跑章节——
+                #   仅旧状态为 GENERATED（force_chapters_recompute=True）时强制
+                #   重算，SKIPPED_*/FAILED/DISABLED/无状态一律跳过，避免对旧
+                #   状态任务产生非预期的章节 LLM 调用费用。
+                # - 非 calibrate_only（正常 transcribe 路径）：仅由本轮
+                #   processing_options.chapters 决定（此时 force_chapters_recompute
+                #   恒为 False——它只在 calibrate_only 分支内置 True）。
+                if calibrate_only:
+                    skip_chapters_for_coordinator = not force_chapters_recompute
+                else:
+                    skip_chapters_for_coordinator = not chapters_requested
+
+                # Cache-side chapters seed (this-round dialogs preferred inside
+                # coordinator after calibration). Keep llm/ package pure.
+                timeline_segments_seed = None
+                chapters_seed_kind = "none"
+                if not skip_chapters_for_coordinator:
+                    timeline_segments_seed, chapters_seed_kind = (
+                        _resolve_chapters_timeline_segments(
+                            llm_task=llm_task,
+                            platform=platform,
+                            media_id=media_id,
+                            use_speaker_recognition=use_speaker_recognition,
+                        )
+                    )
+                    logger.info(
+                        f"chapters timeline seed for {task_id}: kind={chapters_seed_kind}"
+                    )
+
+                # 调用新架构（包含校对、总结、章节）
                 with tracker.track("llm_processing"):
                     coordinator_result = llm_coordinator.process(
                         content=content,
@@ -365,6 +481,8 @@ def _handle_llm_task(llm_task: dict):
                         # （codex-review R5 #3）。None 表示没有更优信息，协调器按
                         # 自身推断走，不影响其余调用方。
                         speaker_count_hint=llm_task.get("cached_speaker_count"),
+                        skip_chapters=skip_chapters_for_coordinator,
+                        timeline_segments=timeline_segments_seed,
                     )
 
                 # 适配返回格式
@@ -393,6 +511,7 @@ def _handle_llm_task(llm_task: dict):
                     result_stats = result_dict.setdefault("stats", {})
                     calibration_status = effective_status.get("calibration_status")
                     summary_status = effective_status.get("summary_status")
+                    chapters_status = effective_status.get("chapters_status")
 
                     # effective_status 里某一层为 None 表示"本轮未触碰该层，
                     # llm_status.json 按合并语义原样保留旧值"（见 _save_llm_results
@@ -406,7 +525,11 @@ def _handle_llm_task(llm_task: dict):
                     # _save_llm_results 内部已调用 save_llm_status 完成合并）里
                     # 把"未触碰层"的合并后真实状态读回来，保证任务行与缓存一致。
                     if (
-                        (calibration_status is None or summary_status is None)
+                        (
+                            calibration_status is None
+                            or summary_status is None
+                            or chapters_status is None
+                        )
                         and platform and media_id
                     ):
                         merged_snapshot = cache_manager.get_cache(
@@ -428,9 +551,12 @@ def _handle_llm_task(llm_task: dict):
                             _restore_cached_summary_for_notification(
                                 result_dict, merged_snapshot,
                             )
+                        if chapters_status is None:
+                            chapters_status = merged_llm_status.get("chapters_status")
 
                     result_stats["calibration_status"] = calibration_status
                     result_stats["summary_status"] = summary_status
+                    result_stats["chapters_status"] = chapters_status
 
                 logger.info(f"LLM任务处理完成: {task_id}, 标题: {video_title}")
 
@@ -460,6 +586,7 @@ def _handle_llm_task(llm_task: dict):
                     author=llm_task.get("author", ""),
                     calibration_status=final_stats.get("calibration_status"),
                     summary_status=final_stats.get("summary_status"),
+                    chapters_status=final_stats.get("chapters_status"),
                     terminal_snapshot={
                         "result": result_dict,
                         "processing_options": processing_options,
@@ -696,6 +823,13 @@ def _build_result_dict(coordinator_result: dict) -> dict:
         # summary_status 为 None 表示协调器本轮未尝试生成总结（calibrate_only 且
         # 未触发 backfill），_save_llm_results 会据此保留上一轮已落盘的状态，不误覆盖。
         "summary_status": stats.get("summary_status"),
+        # chapters_status 为 None 表示本轮未尝试章节（skip_chapters）；仅 GENERATED
+        # 时 chapters 列表非空。
+        "chapters_status": stats.get("chapters_status"),
+        "chapters": stats.get("chapters") or [],
+        "chapters_fingerprint": stats.get("chapters_fingerprint"),
+        "chapters_segment_count": stats.get("chapters_segment_count"),
+        "chapters_source_kind": stats.get("chapters_source_kind"),
     }
 
     if "structured_data" in coordinator_result:
@@ -1450,9 +1584,10 @@ def _save_llm_results(
 
     Returns:
         Optional[dict]: 本次实际落盘的"有效"状态
-            {"calibration_status": ..., "summary_status": ...}（值可能为 None，
-            表示该层本轮未触碰、旧值原样保留）。platform/media_id 缺失时返回
-            None（沿用早退语义，调用方应据此跳过覆盖 result_dict）。
+            {"calibration_status": ..., "summary_status": ...,
+             "chapters_status": ...}（值可能为 None，表示该层本轮未触碰、
+            旧值原样保留）。platform/media_id 缺失时返回 None（沿用早退语义，
+            调用方应据此跳过覆盖 result_dict）。
     """
     # 注意：这里不提前把"校对文本"取成局部变量——calibrated_text 的赋值
     # 挪到了下面 media_lock 内、identity_fallback 姓名恢复完成之后（V2
@@ -1483,6 +1618,27 @@ def _save_llm_results(
         else:
             summary_status = SummaryStatus.FAILED
 
+    # chapters_status：协调器显式 None = 本轮未尝试；缺键时视为未尝试（兼容
+    # 旧测试/调用方），不伪造状态。
+    chapters_status = result_dict.get("chapters_status", _MISSING)
+    if chapters_status is _MISSING:
+        chapters_status = stats.get("chapters_status")
+    chapters_payload_list = result_dict.get("chapters") or stats.get("chapters") or []
+    chapters_fingerprint = (
+        result_dict.get("chapters_fingerprint")
+        or stats.get("chapters_fingerprint")
+    )
+    chapters_segment_count = (
+        result_dict.get("chapters_segment_count")
+        if result_dict.get("chapters_segment_count") is not None
+        else stats.get("chapters_segment_count")
+    )
+    chapters_source_kind = (
+        result_dict.get("chapters_source_kind")
+        or stats.get("chapters_source_kind")
+        or "none"
+    )
+
     # 保存 LLM 模型配置到数据库
     if models_used:
         cache_manager.update_task_llm_config(task_id, models_used)
@@ -1510,11 +1666,17 @@ def _save_llm_results(
         processing_options = normalize_processing_options(processing_options)
         calibrate_requested = processing_options.get("calibrate", True)
         summarize_requested = processing_options.get("summarize", True)
+        chapters_requested = processing_options.get("chapters", True)
 
         calibrated_exists_before = False
         summary_exists_before = False
+        chapters_generated_before = False
         existing_snapshot = None
-        need_snapshot = (not calibrate_requested) or (not summarize_requested)
+        need_snapshot = (
+            (not calibrate_requested)
+            or (not summarize_requested)
+            or (not chapters_requested)
+        )
         if need_snapshot:
             existing_snapshot = cache_manager.get_cache(
                 platform, media_id, use_speaker_recognition=use_speaker_recognition,
@@ -1522,6 +1684,13 @@ def _save_llm_results(
             if existing_snapshot:
                 calibrated_exists_before = "llm_calibrated" in existing_snapshot
                 summary_exists_before = "llm_summary" in existing_snapshot
+                prior_chapters_status = (
+                    (existing_snapshot.get("llm_status") or {}).get("chapters_status")
+                )
+                chapters_generated_before = (
+                    prior_chapters_status == ChaptersStatus.GENERATED
+                    and "llm_chapters" in existing_snapshot
+                )
 
         # 校对层已存在、且本轮未请求（重新）校对 -> 抑制写入，保护已有的真实产物
         # 不被本轮 skip_calibration=True 产出的占位内容覆盖。
@@ -1588,6 +1757,15 @@ def _save_llm_results(
         if not (calibrate_only and not summary_backfill) and not summarize_requested:
             summary_status = None if summary_exists_before else SummaryStatus.DISABLED
 
+        # chapters 层 suppress / DISABLED（R5）：
+        # - 本轮未请求 chapters 且协调器给出 None（未尝试）：若已有任意真实状态
+        #   （含 GENERATED / SKIPPED_* / FAILED）则保留；尚无状态则记 DISABLED。
+        # - 本轮请求了 chapters 时用协调器输出原样（含 force recompute）。
+        # - 已有 GENERATED 且本轮未请求 -> 绝不覆盖章节文件（只增不减）。
+        suppress_chapters_artifact = (
+            not chapters_requested and chapters_generated_before
+        )
+
         # 保存校对文本：即便校对全降级为 NONE（诚实状态模型里"尝试但完全失败"），
         # 处理器返回的 calibrated_text 仍是一份可用的兜底产物（分段/分块降级后的
         # 格式化原文，见 plain_text_processor/speaker_aware_processor 的 fallback
@@ -1645,6 +1823,8 @@ def _save_llm_results(
         # summary_success 永远互补，导致"文本过短"分支实际不可达，"生成失败"
         # 被悄悄吞掉，既不落盘校对文本兜底也不报错）
         summary_saved = False
+        chapters_saved = False
+        effective_chapters_status = chapters_status
         if calibrate_only and not summary_backfill:
             logger.info(f"仅校对模式，保留原有总结文件: {task_id}")
         elif summary_status == SummaryStatus.GENERATED:
@@ -1762,6 +1942,64 @@ def _save_llm_results(
                 speaker_inference_source=stats.get("speaker_inference_source"),
             )
 
+        # ---- chapters 落盘（仅 GENERATED 写 llm_chapters.json；R4/R5）----
+        # 契约见 cache_manager.save_llm_result(llm_type="chapters") 文档注释：
+        # start_seg/end_seg = 原始输入列表下标；fingerprint 来自 ChaptersResult。
+        if suppress_chapters_artifact or (
+            chapters_status is None and not chapters_requested
+        ):
+            # 本轮未请求：若旧状态存在则保留（effective=None）；否则 DISABLED。
+            old_ch = old_llm_status.get("chapters_status")
+            if old_ch is not None:
+                effective_chapters_status = None
+                logger.info(
+                    f"chapters layer exists (status={old_ch}) and not requested; "
+                    f"preserve: {task_id}"
+                )
+            else:
+                effective_chapters_status = ChaptersStatus.DISABLED
+                logger.info(
+                    f"chapters disabled for first time (no prior status): {task_id}"
+                )
+        elif chapters_status == ChaptersStatus.GENERATED:
+            from datetime import datetime, timezone
+
+            chapters_file_payload = {
+                "format_version": "v1",
+                "source": {
+                    "kind": chapters_source_kind,
+                    "segment_count": chapters_segment_count or len(chapters_payload_list),
+                    "fingerprint": chapters_fingerprint,
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                },
+                "chapters": chapters_payload_list,
+            }
+            if not cache_manager.save_llm_result(
+                platform=platform,
+                media_id=media_id,
+                use_speaker_recognition=use_speaker_recognition,
+                llm_type="chapters",
+                content=chapters_file_payload,
+            ):
+                raise OSError("failed to persist chapters artifact")
+            chapters_saved = True
+            logger.info(f"chapters artifact saved: {task_id}")
+        elif chapters_status in (
+            ChaptersStatus.SKIPPED_SHORT,
+            ChaptersStatus.SKIPPED_NO_TIMELINE,
+            ChaptersStatus.FAILED,
+            ChaptersStatus.DISABLED,
+        ):
+            logger.info(
+                f"chapters status={chapters_status}, skip file write: {task_id}"
+            )
+        elif chapters_status is None:
+            logger.info(f"chapters not attempted this round, preserve status: {task_id}")
+        else:
+            logger.warning(
+                f"unknown chapters_status={chapters_status}, skip file write: {task_id}"
+            )
+
         # 写入统一的诚实状态落盘文件 llm_status.json（两条路径都写）。
         # calibration_status/summary_status 为 None 时（本轮未触碰该层）传 None 给
         # save_llm_status，其合并语义会保留旧值，不会把已有的真实状态误覆盖。
@@ -1787,6 +2025,11 @@ def _save_llm_results(
             if summary_status is not None
             else old_llm_status.get("summary_status")
         )
+        final_chapters_status = (
+            effective_chapters_status
+            if effective_chapters_status is not None
+            else old_llm_status.get("chapters_status")
+        )
         cache_manager.save_llm_status(
             platform=platform,
             media_id=media_id,
@@ -1794,12 +2037,13 @@ def _save_llm_results(
             calibration_status=final_calibration_status,
             calibration_stats=final_calibration_stats,
             summary_status=final_summary_status,
+            chapters_status=final_chapters_status,
         )
 
     # calibrated_saved 覆盖了"即便 calibrate_success=False（NONE 全降级）仍落盘
     # 兜底文本"的新语义（codex-review R4 #2）——不能再单纯用 calibrate_success
     # 判断"是否保存了任何文件"，否则 NONE 场景会被误报为"未保存任何结果文件"。
-    if calibrated_saved or summary_saved:
+    if calibrated_saved or summary_saved or chapters_saved:
         logger.info(f"LLM结果已保存到缓存: {platform}/{media_id}")
     else:
         logger.warning(f"LLM处理全部失败，未保存任何结果文件: {task_id}")
@@ -1807,6 +2051,7 @@ def _save_llm_results(
     return {
         "calibration_status": effective_calibration_status,
         "summary_status": summary_status,
+        "chapters_status": effective_chapters_status,
     }
 
 

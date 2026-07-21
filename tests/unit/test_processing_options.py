@@ -32,11 +32,17 @@ class TestProcessingOptionsSchema:
         with pytest.raises(ValidationError):
             ProcessingOptions.model_validate({"summarizee": False})
 
-    def test_default_is_all_true(self):
+    def test_default_is_all_true_except_chapters_is_none(self):
+        """chapters defaults to None (follow summarize on normalize), not True.
+
+        A constant True default would make legacy {summarize:false} clients
+        still pay for chapters generation (design §5.2 / R2).
+        """
         opts = ProcessingOptions()
         assert opts.calibrate is True
         assert opts.summarize is True
         assert opts.infer_speaker_names is True
+        assert opts.chapters is None
 
     def test_explicit_calibrate_false_summarize_false(self):
         opts = ProcessingOptions(calibrate=False, summarize=False)
@@ -59,7 +65,10 @@ class TestProcessingOptionsSchema:
         with pytest.raises(Exception):
             ProcessingOptions(calibrate="not-a-bool-and-not-coercible")
 
-    @pytest.mark.parametrize("field_name", ["calibrate", "summarize", "infer_speaker_names"])
+    @pytest.mark.parametrize(
+        "field_name",
+        ["calibrate", "summarize", "infer_speaker_names", "chapters"],
+    )
     @pytest.mark.parametrize(
         "loose_value", ["yes", "no", "1", "0", "true", "false", 1, 0]
     )
@@ -86,6 +95,18 @@ class TestProcessingOptionsSchema:
         )
         assert req.processing_options.calibrate is False
         assert req.processing_options.summarize is True
+        assert req.processing_options.chapters is None
+
+    def test_transcribe_request_accepts_explicit_chapters(self):
+        req = TranscribeRequest(
+            url="https://example.com/v1",
+            processing_options={
+                "calibrate": False,
+                "summarize": False,
+                "chapters": True,
+            },
+        )
+        assert req.processing_options.chapters is True
 
     @pytest.mark.parametrize("loose_value", ["yes", "1", "0", "true", 1, 0])
     def test_use_speaker_recognition_rejects_loosely_coercible_value(
@@ -102,11 +123,12 @@ class TestProcessingOptionsSchema:
 
 
 class TestNormalizeProcessingOptions:
-    def test_none_normalizes_to_all_true(self):
+    def test_none_normalizes_to_all_true_including_chapters(self):
         assert normalize_processing_options(None) == {
             "calibrate": True,
             "summarize": True,
             "infer_speaker_names": True,
+            "chapters": True,
         }
 
     def test_explicit_options_pass_through_as_dict(self):
@@ -115,7 +137,52 @@ class TestNormalizeProcessingOptions:
             "calibrate": False,
             "summarize": True,
             "infer_speaker_names": True,
+            "chapters": True,  # follows summarize when omitted
         }
+
+    @pytest.mark.parametrize(
+        "summarize,expected_chapters",
+        [(True, True), (False, False)],
+    )
+    def test_omitted_chapters_follows_summarize(self, summarize, expected_chapters):
+        result = normalize_processing_options({"summarize": summarize})
+        assert result["chapters"] is expected_chapters
+        assert result["summarize"] is summarize
+
+    @pytest.mark.parametrize(
+        "chapters,summarize",
+        [
+            (True, True),
+            (True, False),
+            (False, True),
+            (False, False),
+        ],
+    )
+    def test_explicit_chapters_preserved_regardless_of_summarize(
+        self, chapters, summarize
+    ):
+        result = normalize_processing_options(
+            {"chapters": chapters, "summarize": summarize}
+        )
+        assert result["chapters"] is chapters
+        assert result["summarize"] is summarize
+
+    def test_dict_without_chapters_key_follows_summarize_false(self):
+        """Legacy clients that only set calibrate/summarize false must not
+        accidentally enable chapters."""
+        result = normalize_processing_options(
+            {"calibrate": False, "summarize": False}
+        )
+        assert result == {
+            "calibrate": False,
+            "summarize": False,
+            "infer_speaker_names": True,
+            "chapters": False,
+        }
+
+    def test_unknown_field_still_raises(self):
+        with pytest.raises(ValidationError):
+            normalize_processing_options({"chapters": True, "bogus": 1})
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +284,7 @@ class TestTranscribeTaskDictProcessingOptions:
             "calibrate": True,
             "summarize": True,
             "infer_speaker_names": True,
+            "chapters": True,
         }
 
     def test_explicit_processing_options_reach_task_dict(self, client, mock_task_queue):
@@ -233,6 +301,7 @@ class TestTranscribeTaskDictProcessingOptions:
             "calibrate": False,
             "summarize": True,
             "infer_speaker_names": True,
+            "chapters": True,  # omitted -> follows summarize
         }
 
     def test_calibrate_and_summarize_both_false(self, client, mock_task_queue):
@@ -249,7 +318,25 @@ class TestTranscribeTaskDictProcessingOptions:
             "calibrate": False,
             "summarize": False,
             "infer_speaker_names": True,
+            "chapters": False,  # omitted -> follows summarize=false
         }
+
+    def test_explicit_chapters_true_with_summarize_false(self, client, mock_task_queue):
+        resp = client.post(
+            "/api/transcribe",
+            json={
+                "url": "https://www.youtube.com/watch?v=abc123",
+                "processing_options": {
+                    "calibrate": False,
+                    "summarize": False,
+                    "chapters": True,
+                },
+            },
+        )
+        assert resp.status_code == 200
+        queued_task = mock_task_queue.get_nowait()
+        assert queued_task["processing_options"]["chapters"] is True
+        assert queued_task["processing_options"]["summarize"] is False
 
     def test_invalid_processing_options_type_returns_422(self, client):
         resp = client.post(
@@ -261,7 +348,10 @@ class TestTranscribeTaskDictProcessingOptions:
         )
         assert resp.status_code == 422
 
-    @pytest.mark.parametrize("field_name", ["calibrate", "summarize", "infer_speaker_names"])
+    @pytest.mark.parametrize(
+        "field_name",
+        ["calibrate", "summarize", "infer_speaker_names", "chapters"],
+    )
     @pytest.mark.parametrize("loose_value", ["yes", "1", "0", "true", 1, 0])
     def test_loosely_coercible_boolean_value_returns_422(
         self, client, field_name, loose_value

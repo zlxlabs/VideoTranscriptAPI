@@ -107,6 +107,18 @@ class LLMConfig:
     # 须与 chapters_model 的上下文窗口能力匹配——换用上下文更小/更大的模型时需同步调整。
     max_chapters_input_chars: int = 500000
 
+    # 以下 6 个字段（plain 源结构化校对 + 确定性段落化，T8）同样追加于末尾，
+    # 保持位置参数兼容（纪律同上方 chapters 段注释）。
+    # plain 源（CapsWriter/YouTube 字幕，无说话人标识）结构化逐段校对总开关，默认 false 暗启动
+    structured_calibration_for_plain: bool = False
+    # 无说话人模式的独立分块参数（plain 段落比对话长，分块预算相应放大）
+    plain_structured_preferred_chunk_length: int = 3000
+    plain_structured_max_chunk_length: int = 4000
+    # 确定性段落化参数（v1：长度只是预算不是闸刀，到预算找授权断点）
+    paragraphization_target_chars: int = 300            # 段落长度预算（字符）
+    paragraphization_hard_max_chars: int = 600          # 段落硬上限，超出放宽到逗号级断点
+    paragraphization_pause_threshold_seconds: float = 2.0  # 停顿授权阈值（秒）
+
     @classmethod
     def from_dict(cls, config_dict: dict) -> "LLMConfig":
         """从配置字典创建 LLMConfig 实例
@@ -120,6 +132,7 @@ class LLMConfig:
         llm_config = config_dict.get("llm", {})
         segmentation_config = llm_config.get("segmentation", {})
         calibration_config = llm_config.get("structured_calibration", {})
+        paragraphization_config = llm_config.get("paragraphization", {})
         speaker_inference_config = llm_config.get("speaker_inference", {})
         quality_validation_config = llm_config.get("quality_validation", {})
         quality_config = quality_validation_config.get(
@@ -264,6 +277,26 @@ class LLMConfig:
             collector_api_key=llm_config.get("collector_api_key", ""),
             refusal_keywords_url=llm_config.get("refusal_keywords_url"),
             total_timeout=float(llm_config.get("total_timeout", 300.0)),
+
+            # plain 源结构化校对开关（llm 顶层键）+ 无说话人独立分块（structured_calibration 段）
+            structured_calibration_for_plain=llm_config.get(
+                "structured_calibration_for_plain", False
+            ),
+            plain_structured_preferred_chunk_length=calibration_config.get(
+                "plain_preferred_chunk_length", 3000
+            ),
+            plain_structured_max_chunk_length=calibration_config.get(
+                "plain_max_chunk_length", 4000
+            ),
+
+            # 确定性段落化配置（llm.paragraphization 段）
+            paragraphization_target_chars=paragraphization_config.get("target_chars", 300),
+            paragraphization_hard_max_chars=paragraphization_config.get(
+                "hard_max_chars", 600
+            ),
+            paragraphization_pause_threshold_seconds=paragraphization_config.get(
+                "pause_threshold_seconds", 2.0
+            ),
         )
 
     def get_models(self) -> dict:

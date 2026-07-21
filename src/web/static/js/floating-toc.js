@@ -1,65 +1,47 @@
 /**
- * 浮动 TOC (Table of Contents) 功能
- * 支持 PC 端和移动端响应式设计
+ * Floating TOC (Table of Contents)
+ * Responsive design for desktop and mobile.
  *
- * 功能特性：
- * - 自动提取内容总结区块的 H1-H4 标题
- * - PC 端：右侧浮动，悬停展开，支持 Pin 固定
- * - 移动端：底部浮动按钮，点击弹出半屏面板
- * - 滚动自动高亮当前标题
- * - 点击平滑跳转
- * - 主题自适应
+ * Features:
+ * - Auto-extract H1-H4 from the summary section
+ * - Chapters group: jump to #dlg-{start_seg} when data-jump-ok=1
+ * - Desktop: right-side floating panel with pin
+ * - Mobile: bottom FAB + half-screen panel
+ * - Scroll highlight + smooth jump
+ * - XSS: build all user/chapter titles via DOM API + textContent
+ *   (never insertAdjacentHTML / innerHTML string concat of titles)
  */
 
 (function() {
     'use strict';
 
-    // ========== 配置常量 ==========
+    // ========== Config ==========
     const CONFIG = {
-        // 本地存储键名
         STORAGE_KEY: 'vta_toc_pinned',
-
-        // 标题选择器：仅从"内容总结"区块提取 H1-H4
-        HEADING_SELECTOR: '.section:has(h2:contains("内容总结")) .content h1, ' +
-                         '.section:has(h2:contains("内容总结")) .content h2, ' +
-                         '.section:has(h2:contains("内容总结")) .content h3, ' +
-                         '.section:has(h2:contains("内容总结")) .content h4',
-
-        // 校对文本区块选择器
-        CALIBRATED_SELECTOR: '.section:has(h2:contains("校对文本"))',
-
-        // IntersectionObserver 配置
         OBSERVER_OPTIONS: {
             threshold: 0.5,
             rootMargin: '-100px 0px -60% 0px'
         },
-
-        // 移动端断点
         MOBILE_BREAKPOINT: 768
     };
 
-    // ========== 全局变量 ==========
+    // ========== State ==========
     let tocData = {
         headings: [],
-        calibratedSection: null
+        calibratedSection: null,
+        chapters: []
     };
 
     let observer = null;
     let isPinned = false;
     let isMobile = false;
 
-    // ========== 工具函数 ==========
+    // ========== Utils ==========
 
-    /**
-     * 检查是否为移动设备
-     */
     function checkMobile() {
         return window.innerWidth <= CONFIG.MOBILE_BREAKPOINT;
     }
 
-    /**
-     * 生成唯一 ID
-     */
     function generateId(text, index) {
         const slug = text
             .toLowerCase()
@@ -69,9 +51,6 @@
         return `toc-heading-${slug}-${index}`;
     }
 
-    /**
-     * 获取 Pin 状态
-     */
     function loadPinState() {
         try {
             const state = localStorage.getItem(CONFIG.STORAGE_KEY);
@@ -82,9 +61,6 @@
         }
     }
 
-    /**
-     * 保存 Pin 状态
-     */
     function savePinState(pinned) {
         try {
             localStorage.setItem(CONFIG.STORAGE_KEY, pinned.toString());
@@ -93,41 +69,74 @@
         }
     }
 
-    // ========== 数据提取 ==========
+    /**
+     * Create an element with optional className and safe textContent.
+     */
+    function createEl(tag, className, text) {
+        const el = document.createElement(tag);
+        if (className) {
+            el.className = className;
+        }
+        if (text != null && text !== '') {
+            el.textContent = text;
+        }
+        return el;
+    }
 
     /**
-     * 提取页面标题数据
+     * Append a TOC link item using DOM API only (textContent for labels).
      */
+    function appendTocLink(listEl, options) {
+        const item = createEl('div', 'toc-item');
+        const link = createEl('a', options.className || 'toc-link');
+        link.setAttribute('href', options.href || '#');
+        if (options.id != null) {
+            link.dataset.id = String(options.id);
+        }
+        if (options.level != null) {
+            link.setAttribute('data-level', String(options.level));
+        }
+        // XSS-safe: never interpolate user text into HTML strings
+        link.textContent = options.text || '';
+        item.appendChild(link);
+        listEl.appendChild(item);
+        return link;
+    }
+
+    function appendSectionTitle(listEl, text) {
+        const title = createEl('div', 'toc-section-title', text);
+        listEl.appendChild(title);
+    }
+
+    // ========== Data extraction ==========
+
     function extractHeadings() {
         const headings = [];
 
-        // 由于 :contains 不是标准选择器，我们需要手动查找
         const summarySection = Array.from(document.querySelectorAll('.section')).find(section => {
             const h2 = section.querySelector('h2');
             return h2 && h2.textContent.includes('内容总结');
         });
 
         if (!summarySection) {
-            console.warn('未找到"内容总结"区块');
+            console.warn('Summary section not found');
             return headings;
         }
 
         const contentDiv = summarySection.querySelector('.content');
         if (!contentDiv) {
-            console.warn('未找到内容区域');
+            console.warn('Summary content area not found');
             return headings;
         }
 
-        // 提取 H1-H4 标题
         const headingElements = contentDiv.querySelectorAll('h1, h2, h3, h4');
 
         headingElements.forEach((element, index) => {
-            const level = parseInt(element.tagName.substring(1));
+            const level = parseInt(element.tagName.substring(1), 10);
             const text = element.textContent.trim();
 
             if (!text) return;
 
-            // 确保标题有 ID
             if (!element.id) {
                 element.id = generateId(text, index);
             }
@@ -140,135 +149,181 @@
             });
         });
 
-        console.log(`提取到 ${headings.length} 个标题`);
+        console.log('Extracted headings: ' + headings.length);
         return headings;
     }
 
-    /**
-     * 查找校对文本区块
-     */
     function findCalibratedSection() {
         const sections = Array.from(document.querySelectorAll('.section'));
         return sections.find(section => {
             const h2 = section.querySelector('h2');
             return h2 && h2.textContent.includes('校对文本');
+        }) || null;
+    }
+
+    /**
+     * Extract chapters from the server-rendered chapters section.
+     * Only jumpable chapters (data-jump-ok=1) get a #dlg-{start_seg} target.
+     */
+    function extractChapters() {
+        const section = document.getElementById('chapters-section');
+        if (!section) {
+            return [];
+        }
+
+        const cards = section.querySelectorAll('.chapter-card');
+        const chapters = [];
+
+        cards.forEach((card) => {
+            const startSeg = card.getAttribute('data-start-seg');
+            const jumpOk = card.getAttribute('data-jump-ok') === '1';
+            const titleEl = card.querySelector('.chapter-title-link, .chapter-title');
+            const text = titleEl ? titleEl.textContent.trim() : '';
+            if (!text) return;
+
+            const dlgId = (jumpOk && startSeg !== null && startSeg !== '')
+                ? ('dlg-' + startSeg)
+                : null;
+
+            chapters.push({
+                text: text,
+                id: dlgId,
+                startSeg: startSeg,
+                jumpOk: jumpOk,
+                element: dlgId ? document.getElementById(dlgId) : null
+            });
         });
+
+        console.log('Extracted chapters: ' + chapters.length);
+        return chapters;
     }
 
-    // ========== UI 渲染 ==========
+    // ========== UI (DOM API) ==========
 
-    /**
-     * 创建 PC 端 TOC 结构
-     */
-    function createPCTocHTML() {
+    function buildTocList(listEl, options) {
         const headings = tocData.headings;
         const hasCalibratedSection = !!tocData.calibratedSection;
-
-        let headingsHTML = '';
+        const chapters = tocData.chapters;
+        const showSectionTitles = !!options.showSectionTitles;
 
         if (headings.length > 0) {
-            headingsHTML += '<div class="toc-section-title">📝 内容总结</div>';
+            if (showSectionTitles) {
+                appendSectionTitle(listEl, '内容总结');
+            }
             headings.forEach(heading => {
-                const levelClass = `data-level="${heading.level}"`;
-                headingsHTML += `
-                    <div class="toc-item">
-                        <a class="toc-link" href="#${heading.id}" ${levelClass} data-id="${heading.id}">
-                            ${heading.text}
-                        </a>
-                    </div>
-                `;
+                appendTocLink(listEl, {
+                    href: '#' + heading.id,
+                    text: heading.text,
+                    level: heading.level,
+                    id: heading.id,
+                    className: 'toc-link'
+                });
+            });
+        }
+
+        if (chapters.length > 0) {
+            if (showSectionTitles) {
+                appendSectionTitle(listEl, '章节梗概');
+            }
+            chapters.forEach((chapter, idx) => {
+                if (chapter.jumpOk && chapter.id) {
+                    appendTocLink(listEl, {
+                        href: '#' + chapter.id,
+                        text: chapter.text,
+                        id: chapter.id,
+                        className: 'toc-link toc-chapter'
+                    });
+                } else {
+                    // Fingerprint mismatch: show label without jump
+                    const item = createEl('div', 'toc-item');
+                    const span = createEl('span', 'toc-link toc-chapter toc-nolink', chapter.text);
+                    item.appendChild(span);
+                    listEl.appendChild(item);
+                }
             });
         }
 
         if (hasCalibratedSection) {
-            headingsHTML += `
-                <div class="toc-item">
-                    <a class="toc-link toc-anchor" href="#calibrated-section" data-id="calibrated-section">
-                        ✨ 校对文本
-                    </a>
-                </div>
-            `;
-        }
-
-        return `
-            <div class="floating-toc-container collapsed" id="floating-toc">
-                <div class="toc-indicator">
-                    <div class="toc-indicator-line"></div>
-                    <div class="toc-indicator-line"></div>
-                    <div class="toc-indicator-line"></div>
-                    <div class="toc-indicator-line"></div>
-                </div>
-                <div class="toc-header">
-                    <div class="toc-title">📑 目录</div>
-                    <button class="toc-pin-btn" id="toc-pin-btn" title="固定目录（点击保持展开）">📌</button>
-                </div>
-                <div class="toc-content">
-                    <ul class="toc-list">
-                        ${headingsHTML}
-                    </ul>
-                </div>
-            </div>
-        `;
-    }
-
-    /**
-     * 创建移动端 TOC 结构
-     */
-    function createMobileTocHTML() {
-        const headings = tocData.headings;
-        const hasCalibratedSection = !!tocData.calibratedSection;
-
-        let headingsHTML = '';
-
-        if (headings.length > 0) {
-            headings.forEach(heading => {
-                const levelClass = `data-level="${heading.level}"`;
-                headingsHTML += `
-                    <div class="toc-item">
-                        <a class="toc-link" href="#${heading.id}" ${levelClass} data-id="${heading.id}">
-                            ${heading.text}
-                        </a>
-                    </div>
-                `;
+            appendTocLink(listEl, {
+                href: '#calibrated-section',
+                text: '校对文本',
+                id: 'calibrated-section',
+                className: 'toc-link toc-anchor'
             });
         }
-
-        if (hasCalibratedSection) {
-            headingsHTML += `
-                <div class="toc-item">
-                    <a class="toc-link toc-anchor" href="#calibrated-section" data-id="calibrated-section">
-                        ✨ 校对文本
-                    </a>
-                </div>
-            `;
-        }
-
-        return `
-            <button class="floating-toc-mobile-btn" id="toc-mobile-btn" title="目录">
-                📑
-            </button>
-            <div class="floating-toc-mobile-panel" id="toc-mobile-panel">
-                <div class="toc-mobile-overlay" id="toc-mobile-overlay"></div>
-                <div class="toc-mobile-content">
-                    <div class="toc-mobile-header">
-                        <div class="toc-mobile-title">📑 目录</div>
-                        <button class="toc-mobile-close-btn" id="toc-mobile-close-btn">✕</button>
-                    </div>
-                    <div class="toc-mobile-body">
-                        <ul class="toc-list">
-                            ${headingsHTML}
-                        </ul>
-                    </div>
-                </div>
-            </div>
-        `;
     }
 
-    /**
-     * 渲染 TOC 到页面
-     */
+    function createPCToc() {
+        const container = createEl('div', 'floating-toc-container collapsed');
+        container.id = 'floating-toc';
+
+        const indicator = createEl('div', 'toc-indicator');
+        for (let i = 0; i < 4; i++) {
+            indicator.appendChild(createEl('div', 'toc-indicator-line'));
+        }
+        container.appendChild(indicator);
+
+        const header = createEl('div', 'toc-header');
+        header.appendChild(createEl('div', 'toc-title', '目录'));
+        const pinBtn = createEl('button', 'toc-pin-btn');
+        pinBtn.id = 'toc-pin-btn';
+        pinBtn.title = '固定目录（点击保持展开）';
+        pinBtn.type = 'button';
+        pinBtn.textContent = '📌';
+        header.appendChild(pinBtn);
+        container.appendChild(header);
+
+        const content = createEl('div', 'toc-content');
+        const list = createEl('ul', 'toc-list');
+        // Use div children (existing CSS targets .toc-item inside .toc-list)
+        buildTocList(list, { showSectionTitles: true });
+        content.appendChild(list);
+        container.appendChild(content);
+
+        return container;
+    }
+
+    function createMobileTocParts() {
+        const btn = createEl('button', 'floating-toc-mobile-btn');
+        btn.id = 'toc-mobile-btn';
+        btn.title = '目录';
+        btn.type = 'button';
+        btn.textContent = '📑';
+
+        const panel = createEl('div', 'floating-toc-mobile-panel');
+        panel.id = 'toc-mobile-panel';
+
+        const overlay = createEl('div', 'toc-mobile-overlay');
+        overlay.id = 'toc-mobile-overlay';
+        panel.appendChild(overlay);
+
+        const mobileContent = createEl('div', 'toc-mobile-content');
+        const mobileHeader = createEl('div', 'toc-mobile-header');
+        mobileHeader.appendChild(createEl('div', 'toc-mobile-title', '目录'));
+        const closeBtn = createEl('button', 'toc-mobile-close-btn');
+        closeBtn.id = 'toc-mobile-close-btn';
+        closeBtn.type = 'button';
+        closeBtn.textContent = '✕';
+        mobileHeader.appendChild(closeBtn);
+        mobileContent.appendChild(mobileHeader);
+
+        const body = createEl('div', 'toc-mobile-body');
+        const list = createEl('ul', 'toc-list');
+        buildTocList(list, { showSectionTitles: true });
+        body.appendChild(list);
+        mobileContent.appendChild(body);
+        panel.appendChild(mobileContent);
+
+        return { btn: btn, panel: panel };
+    }
+
+    function hasTocContent() {
+        return tocData.headings.length > 0
+            || !!tocData.calibratedSection
+            || tocData.chapters.length > 0;
+    }
+
     function renderTOC() {
-        // 移除已存在的 TOC
         const existingPC = document.getElementById('floating-toc');
         const existingMobileBtn = document.getElementById('toc-mobile-btn');
         const existingMobilePanel = document.getElementById('toc-mobile-panel');
@@ -277,69 +332,56 @@
         if (existingMobileBtn) existingMobileBtn.remove();
         if (existingMobilePanel) existingMobilePanel.remove();
 
-        // 如果没有标题，不渲染
-        if (tocData.headings.length === 0 && !tocData.calibratedSection) {
-            console.log('没有标题数据，跳过 TOC 渲染');
+        if (!hasTocContent()) {
+            console.log('No TOC data, skip render');
             return;
         }
 
-        // 创建并插入 PC 端 TOC
-        const pcTocHTML = createPCTocHTML();
-        document.body.insertAdjacentHTML('beforeend', pcTocHTML);
+        // Pure DOM append — no insertAdjacentHTML for titles
+        document.body.appendChild(createPCToc());
+        const mobile = createMobileTocParts();
+        document.body.appendChild(mobile.btn);
+        document.body.appendChild(mobile.panel);
 
-        // 创建并插入移动端 TOC
-        const mobileTocHTML = createMobileTocHTML();
-        document.body.insertAdjacentHTML('beforeend', mobileTocHTML);
-
-        console.log('TOC 渲染完成');
+        console.log('TOC render complete');
     }
 
-    // ========== 事件处理 ==========
+    // ========== Events ==========
 
-    /**
-     * 处理 TOC 链接点击
-     */
     function handleTocClick(e) {
         const link = e.target.closest('.toc-link');
-        if (!link) return;
+        if (!link || link.tagName !== 'A') return;
 
         e.preventDefault();
 
         const targetId = link.dataset.id;
         let targetElement = null;
 
-        // 查找目标元素
         if (targetId === 'calibrated-section') {
             targetElement = tocData.calibratedSection;
-        } else {
+        } else if (targetId) {
             targetElement = document.getElementById(targetId);
         }
 
         if (!targetElement) {
-            console.warn('未找到目标元素:', targetId);
+            console.warn('TOC target not found:', targetId);
             return;
         }
 
-        // 平滑滚动
         targetElement.scrollIntoView({
             behavior: 'smooth',
             block: 'start'
         });
 
-        // 移动端：关闭面板
         if (isMobile) {
             closeMobilePanel();
         }
 
-        // 更新激活状态
         setTimeout(() => {
             updateActiveLink(targetId);
         }, 100);
     }
 
-    /**
-     * 处理 Pin 按钮点击
-     */
     function handlePinClick() {
         const container = document.getElementById('floating-toc');
         const pinBtn = document.getElementById('toc-pin-btn');
@@ -348,9 +390,7 @@
 
         isPinned = !isPinned;
 
-        // 添加点击动画
         if (isPinned) {
-            // 固定动画
             pinBtn.classList.add('animating-pin');
             setTimeout(() => {
                 pinBtn.classList.remove('animating-pin');
@@ -361,7 +401,6 @@
             pinBtn.classList.add('pinned');
             pinBtn.title = '取消固定目录（已固定）';
         } else {
-            // 取消固定动画
             pinBtn.classList.add('animating-unpin');
             setTimeout(() => {
                 pinBtn.classList.remove('animating-unpin');
@@ -376,9 +415,6 @@
         savePinState(isPinned);
     }
 
-    /**
-     * 打开移动端面板
-     */
     function openMobilePanel() {
         const panel = document.getElementById('toc-mobile-panel');
         if (panel) {
@@ -387,9 +423,6 @@
         }
     }
 
-    /**
-     * 关闭移动端面板
-     */
     function closeMobilePanel() {
         const panel = document.getElementById('toc-mobile-panel');
         if (panel) {
@@ -398,13 +431,10 @@
         }
     }
 
-    /**
-     * 更新激活的链接
-     */
     function updateActiveLink(activeId) {
         const links = document.querySelectorAll('.toc-link');
         links.forEach(link => {
-            if (link.dataset.id === activeId) {
+            if (link.dataset && link.dataset.id === activeId) {
                 link.classList.add('active');
             } else {
                 link.classList.remove('active');
@@ -412,26 +442,25 @@
         });
     }
 
-    // ========== 滚动监听 ==========
+    // ========== Scroll observer ==========
 
-    /**
-     * 设置 IntersectionObserver
-     */
     function setupScrollObserver() {
-        // 清理旧的 observer
         if (observer) {
             observer.disconnect();
         }
 
-        // 获取所有需要观察的元素
         const elements = tocData.headings.map(h => h.element);
         if (tocData.calibratedSection) {
             elements.push(tocData.calibratedSection);
         }
+        tocData.chapters.forEach(ch => {
+            if (ch.element) {
+                elements.push(ch.element);
+            }
+        });
 
         if (elements.length === 0) return;
 
-        // 创建 observer
         observer = new IntersectionObserver((entries) => {
             entries.forEach(entry => {
                 if (entry.isIntersecting) {
@@ -441,50 +470,38 @@
             });
         }, CONFIG.OBSERVER_OPTIONS);
 
-        // 观察所有元素
         elements.forEach(element => {
             if (element) observer.observe(element);
         });
 
-        console.log('滚动监听已设置');
+        console.log('Scroll observer ready');
     }
 
-    // ========== 响应式处理 ==========
+    // ========== Responsive ==========
 
-    /**
-     * 处理窗口大小变化
-     */
     function handleResize() {
         const wasMobile = isMobile;
         isMobile = checkMobile();
 
-        // 移动端切换时，关闭移动端面板
         if (wasMobile && !isMobile) {
             closeMobilePanel();
         }
     }
 
-    // ========== 初始化 ==========
+    // ========== Init ==========
 
-    /**
-     * 绑定事件监听器
-     */
     function bindEvents() {
-        // 使用事件委托绑定所有点击事件
         document.addEventListener('click', (e) => {
-            // PC 端 Pin 按钮
             if (e.target.closest('#toc-pin-btn')) {
                 handlePinClick();
                 return;
             }
 
-            // 移动端浮动按钮
             if (e.target.closest('#toc-mobile-btn')) {
                 openMobilePanel();
                 return;
             }
 
-            // 移动端关闭按钮
             if (e.target.closest('#toc-mobile-close-btn')) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -492,56 +509,43 @@
                 return;
             }
 
-            // 移动端遮罩层
             if (e.target.closest('#toc-mobile-overlay')) {
                 closeMobilePanel();
                 return;
             }
 
-            // TOC 链接点击
-            if (e.target.closest('.toc-link')) {
+            if (e.target.closest('a.toc-link')) {
                 handleTocClick(e);
                 return;
             }
         });
 
-        // 窗口大小变化
         window.addEventListener('resize', handleResize);
 
-        console.log('事件监听器已绑定');
+        console.log('TOC events bound');
     }
 
-    /**
-     * 初始化 TOC
-     */
     function init() {
-        console.log('初始化浮动 TOC...');
+        console.log('Init floating TOC...');
 
-        // 检测设备类型
         isMobile = checkMobile();
 
-        // 提取数据
         tocData.headings = extractHeadings();
         tocData.calibratedSection = findCalibratedSection();
+        tocData.chapters = extractChapters();
 
-        // 为校对文本区块添加 ID
         if (tocData.calibratedSection && !tocData.calibratedSection.id) {
             tocData.calibratedSection.id = 'calibrated-section';
         }
 
-        // 如果没有任何内容，退出
-        if (tocData.headings.length === 0 && !tocData.calibratedSection) {
-            console.log('页面没有可用的标题或区块，跳过 TOC 初始化');
+        if (!hasTocContent()) {
+            console.log('No headings/chapters/calibrated section; skip TOC');
             return;
         }
 
-        // 渲染 TOC
         renderTOC();
-
-        // 绑定事件
         bindEvents();
 
-        // 恢复 Pin 状态
         isPinned = loadPinState();
         if (isPinned && !isMobile) {
             const container = document.getElementById('floating-toc');
@@ -553,26 +557,20 @@
                 pinBtn.title = '取消固定目录（已固定）';
             }
         } else {
-            // 确保初始状态的 tooltip 正确
             const pinBtn = document.getElementById('toc-pin-btn');
             if (pinBtn) {
                 pinBtn.title = '固定目录（点击保持展开）';
             }
         }
 
-        // 设置滚动监听
         setupScrollObserver();
 
-        console.log('浮动 TOC 初始化完成');
+        console.log('Floating TOC ready');
     }
 
-    // ========== 启动 ==========
-
-    // 等待 DOM 完全加载后初始化
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {
-        // DOM 已经加载完成
         init();
     }
 

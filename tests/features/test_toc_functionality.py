@@ -148,17 +148,20 @@ class TOCFunctionalityTest:
 
         content = self.js_file.read_text(encoding='utf-8')
 
-        # 检查核心函数
+        # 检查核心函数（T7: DOM API 构建，createPCTocHTML -> createPCToc）
         required_functions = [
             'extractHeadings',
             'findCalibratedSection',
-            'createPCTocHTML',
-            'createMobileTocHTML',
+            'extractChapters',
+            'createPCToc',
+            'createMobileTocParts',
             'renderTOC',
             'handleTocClick',
             'handlePinClick',
             'setupScrollObserver',
-            'updateActiveLink'
+            'updateActiveLink',
+            'createEl',
+            'appendTocLink',
         ]
 
         for func_name in required_functions:

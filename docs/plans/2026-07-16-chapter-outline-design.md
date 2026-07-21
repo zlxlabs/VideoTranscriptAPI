@@ -1,6 +1,6 @@
-# 长逐字稿章节梗概（chapters）功能设计 v2.1.1
+# 长逐字稿章节梗概（chapters）功能设计 v2.1.2
 
-- **日期**：2026-07-16（v2.1）；**接线规格修订 2026-07-19（v2.1.1）**
+- **日期**：2026-07-16（v2.1）；**接线规格修订 2026-07-19（v2.1.1）**；**阶段二方案修订 2026-07-19（v2.1.2）**
 - **状态**：**安全批已完成并通过 Codex gate**（30 轮，R29+R30 连续两轮无实质新意见）；**pr3（#12/#13/#14）已合入 origin/main**；**2026-07-19 已 rebase 到 origin/main**（无冲突，unit+llm 2292 passed）；接线批（T1/T6–T10）可开工。全量 Eng Review **不重跑**（架构仍 CLEAR）；接线按 §5.7。
 - **分支**：`feat/chapters-foundation`（已含 pr3 基线 + 安全批 + v2.1.1 文档；未 push）
 - **依据**：三份代码调研 + 关键路径逐行核验 + Codex 独立复核；2026-07-19 对照 origin/main 只读核对 §5.x
@@ -11,6 +11,7 @@
 - **v1 → v2**：存量任务忽略（D4）；路线从"按来源分期"改为"先地基后功能"；校对拍板方案甲（D5）。
 - **v2 → v2.1**（Codex 复核后）：**章节与校对切换解耦**——章节只依赖 timeline 数据层，阶段二变为带开关的独立升级；实施顺序调整为 **阶段一 → 阶段三 → 阶段二**；恢复 chapters-only 补层（失败可恢复）；章节输出 schema 改为 starts-only；跳转改直接 seg 锚点；json_object 模式替代 json_schema；`has_speaker` 模式贯穿全链路；XSS 修复扩展到现有 TOC；其余见 §13 处置表。
 - **v2.1 → v2.1.1**（2026-07-19，pr3 合入后只读核对）：不改产品决策 D1–D6；修订接线落点与 pr3 加固约束——`ProcessingOptions` 路径、`chapters` 默认跟随 summarize 的建模、分层 `need_chapters` 状态敏感判定、`_save_llm_results` 的 media_lock / write-ahead `invalidate_llm_status`、recalibrate 与 summary backfill 的差异。详见 §5.7。**不重跑全量 Eng Review**。
+- **v2.1.1 → v2.1.2**（2026-07-19，用户拍板阶段二方案，不改 D1–D6）：**校对与段落化解耦**——校对结构保持（id 映射、禁止合并/拆分/重排），段落化只选边界、不动文本，**先校准后段落化**；§6 第 3 点原"按长度上限合并"作废（语义盲），改为校准后确定性段落化（长度预算 + 句末/停顿授权，规格见 TASKS T8）；开关 `structured_calibration_for_plain` 默认由 true 改为 **false 暗启动**（T9 验证后再翻）；v2 LLM 语义段落化（提议+吸附，starts-only 契约）列为可选后续升级。沿用 v2.1.1 先例：**不重跑全量 Eng Review**，仅对 T8 变化面做增量核对。同日增量 review（判 NEEDS_REVISION 后收敛）：手术点补全为 speaker 6 处 + 时间 2 处；钉死段落化集成点（processor 内、三者同一列表）；`_prepare_llm_content` 仅 calibrate 请求时返回 list；算法终端规则补全（ASCII 标点、2×hard_max 硬切、授权点取向）；key_info 提取保留（仅跳 SpeakerInferencer.infer）；开关回退语义定为方案 b（provenance 标记 + 开关关时渲染忽略）；渲染器一处防御性修改（`d["speaker"]`→`.get`）。
 
 ---
 
@@ -175,20 +176,24 @@ class ChaptersStatus(StrEnum):
 
 ## 6. 阶段二：逐段校对推广（方案甲，配置开关独立发布）
 
-**开关**：`llm.structured_calibration_for_plain`（默认 true，可一键回退到整篇重写路径）。关闭时系统行为与现状完全一致（plain 源章节仍可生成，仅无精准跳转）。
+**开关**：`llm.structured_calibration_for_plain`（**默认 false，暗启动**——v2.1.2 修订，原为默认 true；T9 真实样本验证通过后再翻 true）。关闭时系统行为与现状完全一致（plain 源章节仍可生成，仅无精准跳转）。
+
+**校对与段落化解耦（v2.1.2 核心修订）**：校对结构保持（id 映射、禁止合并/拆分/重排），段落化只选边界、不动文本；**先校准、后段落化**——校准先修好标点，段落化再消费标点信号选边界。落盘的 `llm_processed.json` dialogs 即段落（与 FunASR 同构），渲染/章节/指纹契约零改动复用。确定性段落化算法完整规格（句末授权 / 停顿授权 / 硬上限兜底 / 时间缺失降级）见 TASKS.md T8 卡。v2 LLM 语义段落化（LLM 提议断点 + 本地吸附，starts-only 契约，失败回退 v1）为可选后续升级，由 T9 读感评估决定是否启动。
 
 **`has_speaker` 模式贯穿全链路（Codex #1，已核验 `speaker_aware_processor.py:228` 缺 speaker 强塞 "unknown"）**：
 
 1. `_coerce_dialogs`：无 speaker 保留缺省，不塞 "unknown"
 2. 说话人推断（`:107-127`）：has_speaker=False 时整步跳过（省一次 LLM 调用）
-3. `_normalize_and_merge_dialogs`（`:129-132`）：现按"连续同说话人"合并，无说话人会全文并成一坨——改按长度上限合并（300-500 字/块，保首段 start、末段 end）。**本阶段最关键正确性修改**
+3. `_normalize_and_merge_dialogs`（`:129-132`）：现按"连续同说话人"合并，无说话人会全文并成一坨——has_speaker=False 时**不按 speaker 合并**，保持原始 segments 粒度进校准，校准后再做确定性段落化（v2.1.2 修订；原"按长度上限合并"作废）。**本阶段最关键正确性修改**
 4. `_build_text_from_dialogs` / 格式化：不输出 "unknown："前缀
 5. 校对 prompt 无说话人变体
 6. 渲染：无 speaker 不出 speaker-tag，仅 time-tag
 
+> **增量 review（2026-07-19）补录**：手术点最终清单以 TASKS T8 卡为准——speaker 维度 6 处（上述 1/2/3/4 之外，新增 `_normalize_dialog`、`_apply_corrections_by_id` 两处 unknown 注回点；第 2 点明确为仅跳 SpeakerInferencer.infer，**key_info 提取保留**，它喂养校对 prompt、与 speaker 无关）+ 时间维度 2 处（None 时间不兜底 `"00:00:00"`）；段落化集成点钉死在 processor 内 `structured_data` 返回前（`llm_processed.json`、章节输入、渲染锚点三者同一列表），且消费原始 float 秒而非 HH:MM:SS 截断字符串；`_prepare_llm_content` 仅 calibrate 请求时返回 list（防补层永久 nolink）；算法终端规则补全（ASCII 标点、2×hard_max 硬切、授权点取向）；渲染器一处防御性修改（`d["speaker"]`→`.get`，缺键 KeyError 会崩主视图）；开关回退语义定为方案 b（plain 结构化产物写 provenance `"mode": "plain_structured"`，开关关时渲染忽略、不删文件）。
+
 **分块与性能（Codex #7 修正）**：结构化路径 dataclass 默认 `preferred=800/max=1500/并发3`（`config.py:73-78`），示例配置 `2000/3000/10`——此前估算误用示例值。无说话人模式增设**独立分块参数**（含 max，建议 `preferred=3000/max=4000`），墙钟影响以生产配置实测为准，实测超预期则调参。
 
-**YouTube 字幕预合并**：进校对前按标点/时间间隔合并成句级。`PlainTextProcessor` 保留为"无 segments 纯文本"降级路径。老数据不迁移。
+**YouTube 字幕预合并**：进校对前按标点/时间间隔合并成句级（与段落化共用同一确定性边界工具、不同参数；段落断点必为预合并 unit 边界，两步不打架）。`PlainTextProcessor` 保留为"无 segments 纯文本"降级路径。老数据不迁移。
 
 ## 7. 测试计划
 
@@ -196,7 +201,7 @@ class ChaptersStatus(StrEnum):
 
 **阶段三**：chapters_processor（SKIPPED_SHORT / SKIPPED_NO_TIMELINE / 正常 / starts 去重排序校验 / 语义重试 / 密度 warning / 标题合并 / 非法 JSON 耗尽 FAILED）；输入梯度三级 fallback；`need_chapters` 各状态判定；状态合并不抹掉其他字段；迁移幂等；suppress；**recalibrate 联动重算**；fingerprint 不一致去链接；audit 透传；`render_chapters_html` XSS 断言（`<script>`/`<img onerror>` 不逃逸）；TOC DOM API 构建断言；chapters 默认跟随 summarize 的组合矩阵；集成：三来源全链路（mock LLM）→ view 含章节与锚点。
 
-**阶段二**：has_speaker 全链路（不出 "unknown"、跳过推断零调用、合并上限、prompt 变体）；开关关闭 = 现状行为回归；开关开启渲染时间块；旧缓存回归不变。
+**阶段二**（v2.1.2 修订）：has_speaker 全链路（`llm_processed.json` 序列化全文不含 "unknown"、SpeakerInferencer.infer 零调用、key_info 保留、prompt 变体与 echo 拒绝正则对齐）；确定性段落化算法（句末/停顿/硬上限/终端硬切授权全集、时间 None、整篇无标点收敛、单段超 hard_max、target 前不提前断）；开关关闭 = 现状行为回归；开关开启 plain 源渲染 `dlg-{i}` 锚点 + `jump_ok=1` 集成；时间 None 段落无 "00:00:00" 标签；chapters-only 补层不触发本轮段落化（`_prepare_llm_content` 豁免）；开关回退（方案 b）渲染忽略 plain 结构化产物；recalibrate 姓名恢复 no-op；旧缓存回归不变。
 
 **质量验收（提前到实现阶段，Codex #14）**：用已有缓存的 3-5 个真实长转录本地跑章节生成，人工评估切分粒度与梗概信息量后再定稿 prompt，不等上线。
 
@@ -206,7 +211,7 @@ class ChaptersStatus(StrEnum):
 2. ~~【必须核实】`llm_processed.json` 时间格式~~ **已核实（同上）**：dialogs 的 `start_time`/`end_time` 是 `"00:00:41"` 形式的 hh:mm:ss 字符串（截断整秒），另含 `duration`/`original_text`。章节处理器与渲染层必须解析该格式；印证 Codex #10 整秒碰撞判断。
 3. 无说话人校对 prompt 变体质量未验证，真实数据试跑。
 4. CapsWriter timeline 是 best-effort（上游可能缺 tokens/timestamps），验收措辞已按"尽力+诚实降级"。
-5. 阶段二开启后 plain 源校对展示从流式段落变时间块（UX 变化，已接受；开关可回退）。
+5. 阶段二开启后 plain 源校对展示从流式段落变时间块（UX 变化，已接受）。开关回退语义（v2.1.2 方案 b）：关 = 新任务走旧路径；已产出的 plain 结构化产物凭 provenance `"mode": "plain_structured"` 标记在开关关时被渲染忽略，**不删除**（只增不减）。
 
 ## 9. NOT in scope
 

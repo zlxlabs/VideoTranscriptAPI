@@ -102,6 +102,7 @@ class CacheManager:
         "llm_summary.txt",
         "llm_status.json",
         "llm_processed.json",
+        "llm_chapters.json",
         "speaker_mapping.json",
     )
 
@@ -424,6 +425,14 @@ class CacheManager:
                     if column not in columns:
                         cursor.execute(f"ALTER TABLE task_status ADD COLUMN {column} TEXT")
 
+                # 迁移7: 章节梗概诚实状态（ChaptersStatus）镜像列，供 history 透出。
+                cursor.execute("PRAGMA table_info(task_status)")
+                columns = [col[1] for col in cursor.fetchall()]
+                if 'chapters_status' not in columns:
+                    logger.info("添加 chapters_status 字段到 task_status 表...")
+                    cursor.execute("ALTER TABLE task_status ADD COLUMN chapters_status TEXT")
+                    logger.info("chapters_status 字段添加成功")
+
                 if all(c in columns for c in ('calibration_status', 'summary_status', 'error_message')):
                     logger.debug("数据库结构正常，无需迁移")
 
@@ -469,6 +478,7 @@ class CacheManager:
                 error_message TEXT,
                 calibration_status TEXT,
                 summary_status TEXT,
+                chapters_status TEXT,
                 processing_options TEXT,
                 submitted_by TEXT,
                 terminal_snapshot TEXT,
@@ -504,6 +514,7 @@ class CacheManager:
                 row_map.get("error_message"),
                 row_map.get("calibration_status"),
                 row_map.get("summary_status"),
+                row_map.get("chapters_status"),
                 row_map.get("processing_options"),
                 row_map.get("submitted_by"),
                 row_map.get("terminal_snapshot"),
@@ -513,9 +524,9 @@ class CacheManager:
                 INSERT INTO task_status
                 (task_id, view_token, url, download_url, platform, media_id, use_speaker_recognition,
                  status, title, author, created_at, completed_at, cache_id, llm_config,
-                 error_message, calibration_status, summary_status, processing_options,
-                 submitted_by, terminal_snapshot)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 error_message, calibration_status, summary_status, chapters_status,
+                 processing_options, submitted_by, terminal_snapshot)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', new_row_data)
 
         logger.info(f"数据库迁移完成，恢复了 {len(existing_data)} 条记录")
@@ -896,6 +907,15 @@ class CacheManager:
                             cache_data['llm_processed'] = json.load(f)
                     except (OSError, json.JSONDecodeError) as processed_exc:
                         logger.warning(f"读取 llm_processed.json 失败，忽略: {processed_exc}")
+
+                # 章节梗概产物（仅 GENERATED 时落盘；见 save_llm_result llm_type=chapters）
+                llm_chapters_file = file_path / "llm_chapters.json"
+                if llm_chapters_file.exists():
+                    try:
+                        with open(llm_chapters_file, 'r', encoding='utf-8') as f:
+                            cache_data['llm_chapters'] = json.load(f)
+                    except (OSError, json.JSONDecodeError) as chapters_exc:
+                        logger.warning(f"读取 llm_chapters.json 失败，忽略: {chapters_exc}")
 
                 # Timeline segments 侧车：经统一适配器 load_segments 读回
                 # transcript_funasr.json / transcript_capswriter.json。权威读法
@@ -1325,10 +1345,11 @@ class CacheManager:
             platform: 平台名称
             media_id: 媒体ID
             use_speaker_recognition: 是否使用了说话人识别
-            llm_type: LLM 类型 (calibrated/summary/structured)
+            llm_type: LLM 类型 (calibrated/summary/structured/chapters)
             content: LLM 处理后的内容
                 - calibrated/summary: 纯文本字符串
                 - structured: 结构化数据字典（自动添加 format_version）
+                - chapters: 章节产物字典（format_version / source / chapters）
 
         Returns:
             bool: 是否保存成功
@@ -1377,6 +1398,38 @@ class CacheManager:
                     lambda f: json.dump(structured_data, f, ensure_ascii=False, indent=2),
                 )
 
+            elif llm_type == "chapters":
+                # llm_chapters.json 契约（T6 / T7 依赖；start_seg/end_seg 为
+                # 原始输入列表下标，可直接用于 #dlg-{start_seg} 锚点）：
+                # {
+                #   "format_version": "v1",
+                #   "source": {
+                #     "kind": "dialogs|segments|...",
+                #     "segment_count": N,
+                #     "fingerprint": "...",
+                #     "generated_at": "ISO8601"
+                #   },
+                #   "chapters": [
+                #     {"index": 0, "title": "...", "gist": "...",
+                #      "start_seg": 0, "end_seg": 5,
+                #      "start_time": 0.0, "end_time": 12.3}
+                #   ]
+                # }
+                # 仅 GENERATED 时调用本分支；SKIPPED_*/FAILED/DISABLED 只写状态。
+                llm_file = file_path / "llm_chapters.json"
+                if not isinstance(content, dict):
+                    logger.error(
+                        f"chapters 类型要求 content 为字典，实际类型: {type(content)}"
+                    )
+                    return False
+                # Caller may already set format_version; default to v1.
+                chapters_payload = dict(content)
+                chapters_payload.setdefault("format_version", "v1")
+                self._atomic_write(
+                    llm_file,
+                    lambda f: json.dump(chapters_payload, f, ensure_ascii=False, indent=2),
+                )
+
             else:
                 logger.error(f"未知的 LLM 类型: {llm_type}")
                 return False
@@ -1396,6 +1449,7 @@ class CacheManager:
         calibration_status: Optional[str] = None,
         calibration_stats: Optional[Dict[str, Any]] = None,
         summary_status: Optional[str] = None,
+        chapters_status: Optional[str] = None,
     ) -> Dict[str, Any]:
         """写入/合并 llm_status.json（"诚实状态模型"统一落盘文件）。
 
@@ -1403,7 +1457,7 @@ class CacheManager:
         保留旧值不变。这是关键设计——recalibrate（calibrate_only=True 且未补跑
         summary）场景下，本次调用只知道新的 calibration_status，若整份覆盖会把
         已有的 summary_status（如 generated）静默抹掉，退回到"看起来总结缺失"
-        的旧 bug。
+        的旧 bug。chapters_status 同样遵循「非 None 才更新」的合并语义。
 
         Args:
             platform: 平台名称
@@ -1413,6 +1467,8 @@ class CacheManager:
             calibration_stats: 校对统计详情（分段/分块数据，结构随处理器而异），None 表示不更新
             summary_status: SummaryStatus 取值（generated/skipped_short/failed/pending），
                 None 表示不更新（保留旧值，见上方合并语义说明）
+            chapters_status: ChaptersStatus 取值（generated/skipped_short/
+                skipped_no_timeline/failed/pending/disabled），None 表示不更新
 
         Returns:
             dict: 锁内完成写入后的完整合并快照
@@ -1447,6 +1503,8 @@ class CacheManager:
                     existing['calibration_stats'] = calibration_stats
                 if summary_status is not None:
                     existing['summary_status'] = summary_status
+                if chapters_status is not None:
+                    existing['chapters_status'] = chapters_status
                 existing['updated_at'] = datetime.datetime.now(datetime.timezone.utc).strftime(
                     '%Y-%m-%d %H:%M:%S'
                 )
@@ -2139,16 +2197,31 @@ class CacheManager:
         # api/routes/tasks.py 的 /api/transcribe 路由。未提供（None，旧调用方的既有行为）时
         # 仍由本方法内部生成。
         task_id = task_id if task_id is not None else self.generate_task_id()
+        # chapters defaults follow summarize when omitted (same contract as
+        # api.processing_options.normalize_processing_options / R2). Do not
+        # seed chapters=True before merge — that would ignore summarize=false.
         normalized_options = {
             "calibrate": True,
             "summarize": True,
             "infer_speaker_names": True,
         }
+        allowed_option_keys = set(normalized_options) | {"chapters"}
         if processing_options:
-            unexpected = set(processing_options) - set(normalized_options)
+            unexpected = set(processing_options) - allowed_option_keys
             if unexpected:
                 raise ValueError(f"unknown processing option: {sorted(unexpected)[0]}")
-            normalized_options.update(processing_options)
+            for key, value in processing_options.items():
+                if key == "chapters":
+                    continue
+                normalized_options[key] = value
+            if "chapters" in processing_options and processing_options["chapters"] is not None:
+                normalized_options["chapters"] = processing_options["chapters"]
+            else:
+                normalized_options["chapters"] = bool(
+                    normalized_options.get("summarize", True)
+                )
+        else:
+            normalized_options["chapters"] = True
         if any(not isinstance(value, bool) for value in normalized_options.values()):
             raise ValueError("processing_options values must be booleans")
 
@@ -2199,6 +2272,7 @@ class CacheManager:
                           cache_id: int = None, download_url: str = None,
                           force: bool = False, error_message: str = None,
                           calibration_status: str = None, summary_status: str = None,
+                          chapters_status: str = None,
                           terminal_snapshot: Optional[dict] = None,
                           skip_archive: bool = False) -> bool:
         """
@@ -2229,6 +2303,7 @@ class CacheManager:
                 None 表示不更新该列。
             summary_status: SummaryStatus 取值(generated/skipped_short/failed/pending)，
                 None 表示不更新该列。
+            chapters_status: ChaptersStatus 取值，None 表示不更新该列。
             skip_archive: 为 True 时跳过终态写入附带的同步审计快照归档
                 （archive_task_snapshot）。默认 False 与原有行为一致：正常终态写入
                 仍同步归档，保证 /api/audit/history 等查询可以立即看到
@@ -2277,6 +2352,9 @@ class CacheManager:
                 if summary_status is not None:
                     update_fields.append("summary_status = ?")
                     params.append(summary_status)
+                if chapters_status is not None:
+                    update_fields.append("chapters_status = ?")
+                    params.append(chapters_status)
 
                 if status in ['success', 'failed']:
                     update_fields.append("completed_at = CURRENT_TIMESTAMP")
@@ -2294,6 +2372,8 @@ class CacheManager:
                         snapshot["calibration_status"] = calibration_status
                     if summary_status is not None:
                         snapshot["summary_status"] = summary_status
+                    if chapters_status is not None:
+                        snapshot["chapters_status"] = chapters_status
                     if error_message is not None:
                         snapshot["error_message"] = error_message
                     update_fields.append("terminal_snapshot = ?")
