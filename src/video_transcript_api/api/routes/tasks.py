@@ -17,11 +17,13 @@ from ..context import (
 from .audit import check_view_token_ownership
 from ..services.transcription import (
     RecalibrateRequest,
+    ResummarizeRequest,
     TranscribeRequest,
     TranscribeResponse,
     normalize_processing_options,
     verify_token,
 )
+from ...utils.llm_status import SummaryStatus
 from ...utils.notifications import send_view_link_wechat, get_notification_router
 from ...utils.task_status import TaskStatus, http_code_for_status
 
@@ -775,6 +777,280 @@ async def recalibrate(
         return TranscribeResponse(
             code=202,
             message="重新校对任务已提交",
+            data={"task_id": task_id, "view_token": view_token},
+        )
+    finally:
+        if registration_owned:
+            inflight_registry.release("llm", task_id)
+
+
+@router.post("/resummarize", response_model=TranscribeResponse)
+async def resummarize(
+    request_body: ResummarizeRequest,
+    request: Request,
+    user_info: dict = Depends(verify_token),
+):
+    """重新生成总结接口
+
+    只重跑总结层（跳过下载、转录、校对和章节），复用缓存里已有的
+    llm_calibrated 校对文本作为总结输入。权限复用 "recalibrate"——
+    两者的爆炸半径同级（消耗 LLM 配额、写共享产物），不新增权限名，
+    避免 users.json 迁移。llm_task 构造镜像 transcription.py 分层缓存
+    部分命中分支的 else 路径（calibrate=False + transcription_data=None +
+    cached_speaker_count 回传），校对层文件/状态均不动，只写总结层。
+    """
+    view_token = request_body.view_token
+    user_id = user_info.get("user_id")
+    api_key = user_info.get("api_key")
+
+    start_time = datetime.datetime.now()
+
+    audit_logger.log_api_call(
+        api_key=api_key,
+        user_id=user_id,
+        endpoint="/api/resummarize",
+        user_agent=request.headers.get("User-Agent"),
+        remote_ip=request.client.host if request.client else None,
+    )
+
+    # 权限检查：与 recalibrate 共用同一个权限名（见 docstring），user_manager
+    # 同样走 runtime 优先的 DI 来源，与 verify_token 鉴权用同一个实例。
+    if not user_manager.check_permission(user_info, "recalibrate"):
+        logger.warning(f"用户 {user_id} 无 recalibrate 权限")
+        raise HTTPException(status_code=403, detail="无重新生成总结权限")
+
+    # 通过 view_token 获取缓存数据
+    cache_data = cache_manager.get_cache_by_view_token(view_token)
+    if not cache_data:
+        logger.warning(f"view_token 对应的缓存不存在: {view_token}")
+        raise HTTPException(status_code=404, detail="未找到对应的转录数据")
+
+    # 验证有转录数据（llm_calibrated 取不到时要回退到原始转录）
+    transcript_data = cache_data.get("transcript_data")
+    if not transcript_data:
+        logger.warning(f"缓存中无转录数据: {view_token}")
+        raise HTTPException(status_code=400, detail="缓存中没有转录数据，无法重新生成总结")
+
+    task_info = cache_data.get("task_info", {})
+
+    # 归属校验：与 recalibrate 完全同一套判定（check_view_token_ownership +
+    # asyncio.to_thread，fail-closed）——resummarize 同样会创建新任务、
+    # 消耗 LLM 配额并覆盖共享媒体的总结产物，不能对公开分享的 view_token
+    # 一律放行。
+    original_task_id = task_info.get("task_id")
+    if original_task_id:
+        try:
+            owned = await asyncio.to_thread(
+                check_view_token_ownership,
+                view_token, original_task_id, user_id, cache_manager, audit_logger,
+            )
+        except Exception as e:
+            logger.error(f"resummarize 归属校验暂时不可用(fail-closed 拒绝): {e}")
+            raise HTTPException(status_code=503, detail="归属校验暂时不可用，请稍后重试")
+        if not owned:
+            logger.warning(
+                f"用户 {user_id} 无权对 view_token={view_token} 发起 resummarize"
+                f"（非该任务的权威提交者）"
+            )
+            raise HTTPException(status_code=403, detail="无权对该任务发起重新生成总结")
+
+    # 前置校验（在归属校验之后，避免向非任务归属方泄露总结层状态）：总结
+    # 已真实生成过（文件非空且状态为 generated）时直接 400，防止误点重复
+    # 消耗 LLM 配额；failed/pending/缺失等情况放行，这正是本接口要补的场景。
+    existing_summary = (cache_data.get("llm_summary") or "").strip()
+    existing_summary_status = (cache_data.get("llm_status") or {}).get("summary_status")
+    if existing_summary and existing_summary_status == SummaryStatus.GENERATED:
+        logger.warning(f"总结已存在，拒绝重复生成: {view_token}")
+        raise HTTPException(status_code=400, detail="总结已存在，无需重新生成")
+
+    platform = cache_data.get("platform")
+    media_id = cache_data.get("media_id")
+    use_speaker_recognition = cache_data.get("use_speaker_recognition", False)
+    video_title = cache_data.get("title", "")
+    author = cache_data.get("author", "")
+    description = cache_data.get("description", "")
+    cache_file_path = cache_data.get("file_path")
+
+    # resummarize 与 RecalibrateRequest 一样没有请求级 processing_options
+    # 字段：管线语义固定为"只跑总结层"——校对层不动（calibrate=False，供
+    # llm_ops._save_llm_results 的 suppress_calibration 保护已有校对产物）、
+    # 章节不动（chapters=False，llm_status 合并语义保留旧值）、不做二次说话
+    # 人姓名推断（infer_speaker_names=False）。INSERT 落库的值与下面交给
+    # llm_ops 的 llm_task 里的值同源，保证创建行与终态快照语义一致。
+    resummarize_processing_options = {
+        "calibrate": False,
+        "summarize": True,
+        "infer_speaker_names": False,
+        "chapters": False,
+    }
+
+    # 创建新任务（复用原 view_token）。准入即登记：与 recalibrate 相同的
+    # inflight registry 容量语义（llm 桶，容量取 LLM_QUEUE_MAXSIZE），
+    # 满载拒绝不落库。
+    from ..context import get_inflight_registry, get_llm_queue
+
+    task_id = cache_manager.generate_task_id()
+    inflight_registry = get_inflight_registry()
+    if not inflight_registry.try_register("llm", task_id):
+        logger.warning("在途 LLM 任务已达受理上限，拒绝重新生成总结任务: %s", view_token)
+        raise HTTPException(status_code=503, detail="任务处理已达上限，请稍后重试")
+
+    # 登记表配额从这里开始"归属"这次 HTTP 请求，直到下面 llm_queue.
+    # put_nowait 成功把任务交给消费者——中途任何异常都必须在最下面的
+    # finally 里释放，否则名额永久占用。
+    registration_owned = True
+    try:
+        try:
+            with cache_manager._get_cursor() as cursor:
+                cursor.execute('''
+                    INSERT INTO task_status
+                    (task_id, view_token, url, platform, media_id,
+                     use_speaker_recognition, status, title, author,
+                     processing_options, submitted_by)
+                    VALUES (?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?)
+                ''', (
+                    task_id, view_token, task_info.get("url", ""),
+                    platform, media_id, use_speaker_recognition,
+                    video_title, author,
+                    json.dumps(resummarize_processing_options, sort_keys=True),
+                    user_id,
+                ))
+            logger.info(f"重新生成总结任务创建成功: {task_id}, view_token: {view_token}")
+        except Exception as e:
+            logger.error(f"创建重新生成总结任务失败: {e}")
+            raise HTTPException(status_code=500, detail=f"创建重新生成总结任务失败: {e}")
+
+        # 状态以 DB 为唯一真相源；上方 INSERT 已写入 status='processing'
+
+        # 说话人识别任务：读缓存里已落盘的结构化产物（llm_processed.json）
+        # 把真实说话人数回传给协调器，供总结环节选择正确的多/单说话人
+        # Prompt——下面强制走纯文本路径（transcription_data=None），协调器
+        # 的自动推断必然判成单说话人，必须用这个缓存值覆盖（与
+        # transcription.py 分层缓存 else 分支同款逻辑）。
+        cached_speaker_count = None
+        if use_speaker_recognition:
+            cached_structured = cache_data.get("llm_processed") or {}
+            cached_speaker_mapping = cached_structured.get("speaker_mapping")
+            if cached_speaker_mapping:
+                cached_speaker_count = len(cached_speaker_mapping)
+
+        # 总结输入优先取已有校对文本（质量更高）；取不到时回退原始转录
+        # （覆盖"原任务未启用校对"的场景），funasr 格式化处理与 recalibrate
+        # 同款，且同样必须在"落库成功、交接成功前"的窗口内 try/except 收口
+        # 成 failed 终态，否则客户端会永久轮询一个不会被消费的任务。
+        try:
+            transcript_text = cache_data.get("llm_calibrated")
+            if not transcript_text:
+                if cache_data.get("transcript_type") == "funasr":
+                    from ...transcriber import FunASRSpeakerClient
+                    funasr_client = FunASRSpeakerClient()
+                    transcript_text = funasr_client.format_transcript_with_speakers(
+                        transcript_data
+                    )
+                else:
+                    transcript_text = transcript_data
+        except Exception as format_exc:
+            logger.exception(
+                f"重新生成总结任务转录数据格式化失败: {task_id}, 错误: {format_exc}"
+            )
+            terminal_write_ok = _fail_task_after_creation(
+                task_id, f"转录数据格式化失败: {format_exc}",
+                log_context="转录数据格式化失败后写入 failed 终态失败",
+            )
+            detail = f"重新生成总结任务转录数据格式化失败: {format_exc}"
+            if not terminal_write_ok:
+                detail += _TERMINAL_WRITE_FAILURE_NOTE
+            raise HTTPException(status_code=500, detail=detail)
+
+        # Build per-channel webhooks
+        resum_webhooks = {}
+        wechat_wh = (
+            request_body.wechat_webhook
+            or user_info.get("wechat_webhook")
+            or config.get("wechat", {}).get("webhook")
+        )
+        if wechat_wh:
+            resum_webhooks["wechat"] = wechat_wh
+        feishu_wh = (
+            user_info.get("feishu_webhook")
+            or config.get("feishu", {}).get("webhook")
+        )
+        if feishu_wh:
+            resum_webhooks["feishu"] = feishu_wh
+
+        # 放入 LLM 队列
+        llm_queue = get_llm_queue()
+
+        llm_task = {
+            "task_id": task_id,
+            "url": task_info.get("url", ""),
+            "display_url": task_info.get("url", ""),
+            "platform": platform,
+            "media_id": media_id,
+            "video_title": video_title,
+            "author": author,
+            "description": description,
+            "transcript": transcript_text,
+            "use_speaker_recognition": use_speaker_recognition,
+            # 强制纯文本路由（transcription_data=None），避免二次说话人推断
+            # 浪费 LLM 调用；真实说话人数由上面的 cached_speaker_count 回传。
+            "transcription_data": None,
+            "cached_speaker_count": cached_speaker_count,
+            "is_generic": False,
+            "wechat_webhook": resum_webhooks.get("wechat"),
+            "notification_webhooks": resum_webhooks,
+            # 不传 calibrate_only：它不是"重新校对"语义，避免走 llm_ops 的
+            # "保留总结"分支；层选择完全由 processing_options 表达。
+            "processing_options": resummarize_processing_options,
+        }
+
+        try:
+            # put_nowait 而非阻塞 put：与 recalibrate 同款收口——同步
+            # queue.Queue 在 async 路由里裸 put 会阻塞整个事件循环；满了
+            # 抛 queue.Full 转成下面的 503，同时把已落库为 processing 的
+            # 任务行 CAS 成 failed。
+            llm_queue.put_nowait(llm_task)
+            registration_owned = False
+            logger.info(f"重新生成总结任务已加入 LLM 队列: {task_id}")
+        except queue.Full:
+            logger.warning("LLM 队列已满，拒绝重新生成总结任务: %s", task_id)
+            terminal_write_ok = _fail_task_after_creation(
+                task_id, "LLM 队列已满，重新生成总结提交被拒绝",
+                log_context="LLM 队列已满后写入 failed 终态失败",
+            )
+            detail = "LLM 队列已满，请稍后重试"
+            if not terminal_write_ok:
+                detail += _TERMINAL_WRITE_FAILURE_NOTE
+            raise HTTPException(status_code=503, detail=detail)
+        except Exception as e:
+            logger.error(f"重新生成总结任务加入队列失败: {e}")
+            terminal_write_ok = _fail_task_after_creation(
+                task_id, f"任务加入队列失败: {e}",
+                log_context="任务加入队列失败后写入 failed 终态失败",
+            )
+            detail = f"任务加入队列失败: {e}"
+            if not terminal_write_ok:
+                detail += _TERMINAL_WRITE_FAILURE_NOTE
+            raise HTTPException(status_code=500, detail=detail)
+
+        processing_time_ms = int(
+            (datetime.datetime.now() - start_time).total_seconds() * 1000
+        )
+        audit_logger.log_api_call(
+            api_key=api_key,
+            user_id=user_id,
+            endpoint="/api/resummarize",
+            processing_time_ms=processing_time_ms,
+            status_code=202,
+            task_id=task_id,
+            user_agent=request.headers.get("User-Agent"),
+            remote_ip=request.client.host if request.client else None,
+            wechat_webhook=resum_webhooks.get("wechat"),
+        )
+
+        return TranscribeResponse(
+            code=202,
+            message="重新生成总结任务已提交",
             data={"task_id": task_id, "view_token": view_token},
         )
     finally:

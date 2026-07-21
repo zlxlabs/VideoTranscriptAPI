@@ -152,7 +152,8 @@ curl -X GET "http://localhost:8000/api/task/{task_id}" \
 |------|------|------|
 | `/api/transcribe` | POST | 提交转录任务（支持 `processing_options` 处理深度开关） |
 | `/api/task/{task_id}` | GET | 查询任务状态 |
-| `/api/recalibrate` | POST | 重新校对（唯一强制重做例外，忽略分层缓存保护） |
+| `/api/recalibrate` | POST | 重新校对（唯一强制重做例外，忽略分层缓存保护；总结缺失时仍会自动补跑，但单独重跑总结请用 `/api/resummarize`） |
+| `/api/resummarize` | POST | 只重新生成总结（跳过下载、转录、校对和章节，复用已有校对文本） |
 | `/api/audit/stats` | GET | 调用统计，含 LLM token 用量聚合（按阶段汇总 prompt/completion/total tokens） |
 | `/api/audit/calls` | GET | 调用记录 |
 | `/api/audit/history` | GET | audit.db 独立终态任务历史（状态仅支持 `success`、`failed`、`all`；支持过滤、分页、关键词搜索），含处理状态与 `content_expired` |
