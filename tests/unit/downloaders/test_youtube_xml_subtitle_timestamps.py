@@ -11,7 +11,16 @@ timing information entirely. These tests lock down:
 - The new return type is a SubtitleResult carrying segments with
   start_time / end_time (seconds) / text.
 - Timestamp parsing failures (malformed "start"/"dur" attributes) never
-  break text extraction: segments falls back to None, text stays normal.
+  break text extraction, and never drop that entry from segments either
+  ("text is never lost" invariant): only the offending entry's
+  start_time/end_time is nulled out; the rest of the batch is untouched.
+- Missing "start"/"dur" attributes must NOT be faked as 0 -- that would
+  fabricate a bogus "starts at 0" or "zero duration" timestamp, violating
+  the "bad/missing time -> None" invariant. A missing "start" nulls
+  start_time (and therefore end_time, which depends on it); a missing
+  "dur" (with a valid start) nulls only end_time. Text is unaffected either
+  way, and the "start" sort key still treats a missing attribute as 0 for
+  ordering purposes only (unchanged legacy behavior).
 - Empty subtitle XML (no <text> elements): text == "" and segments is None.
 - Fully invalid XML still returns None (unchanged from before).
 
@@ -38,8 +47,24 @@ XML_MISSING_DUR = (
     '<transcript><text start="1.0">No duration</text></transcript>'
 )
 
+XML_MISSING_START = (
+    '<transcript><text dur="3.0">No start</text></transcript>'
+)
+
+XML_MISSING_BOTH = (
+    '<transcript><text>No timing at all</text></transcript>'
+)
+
 XML_BAD_START_ATTR = (
     '<transcript><text start="not-a-number" dur="2.0">Bad start segment</text></transcript>'
+)
+
+XML_MIXED_VALID_AND_BROKEN = (
+    '<transcript>'
+    '<text start="0.0" dur="2.5">Hello first</text>'
+    '<text start="not-a-number" dur="2.0">Bad start segment</text>'
+    '<text start="5.0" dur="3.0">World second</text>'
+    '</transcript>'
 )
 
 XML_EMPTY = "<transcript></transcript>"
@@ -61,25 +86,78 @@ def test_parses_and_sorts_by_start_time_text_unchanged():
     ]
 
 
-def test_missing_dur_attribute_defaults_to_zero_duration():
+def test_missing_dur_attribute_yields_none_end_time():
+    """A missing "dur" attribute must not be faked as a zero-length duration
+    (end_time == start_time). start_time is still valid (parsed from
+    "start"), but end_time depends on a real duration -- with none
+    available, it must be None rather than a fabricated zero-length cue."""
     downloader = _make_downloader()
 
     result = downloader._parse_youtube_subtitle_xml(XML_MISSING_DUR)
 
     assert result.text == "No duration"
     assert result.segments == [
-        {"start_time": 1.0, "end_time": 1.0, "text": "No duration"},
+        {"start_time": 1.0, "end_time": None, "text": "No duration"},
     ]
 
 
-def test_malformed_start_attribute_falls_back_to_none_segments_text_unaffected():
-    """A malformed 'start' attribute must not break text extraction."""
+def test_missing_start_attribute_yields_none_start_and_end_time():
+    """A missing "start" attribute must not be faked as "starts at 0" --
+    start_time must be None. end_time depends on start_time, so it must be
+    None too even though "dur" is present and valid. Text is unaffected,
+    and the item still sorts (via the 0-fallback sort key, unchanged legacy
+    behavior for ordering purposes only) without raising."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_MISSING_START)
+
+    assert result.text == "No start"
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "No start"},
+    ]
+
+
+def test_missing_both_start_and_dur_attributes_yields_none_times_text_kept():
+    """Both attributes missing: both time fields are None, but the cue's
+    text is still preserved in segments (text is never lost)."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_MISSING_BOTH)
+
+    assert result.text == "No timing at all"
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "No timing at all"},
+    ]
+
+
+def test_malformed_start_attribute_keeps_entry_with_none_time():
+    """A malformed 'start' attribute must not break text extraction, and the
+    entry must still land in segments (text is never lost) with both time
+    fields nulled out (end_time depends on a valid start)."""
     downloader = _make_downloader()
 
     result = downloader._parse_youtube_subtitle_xml(XML_BAD_START_ATTR)
 
     assert result.text == "Bad start segment"
-    assert result.segments is None
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Bad start segment"},
+    ]
+
+
+def test_mixed_valid_and_broken_start_attribute_keeps_all_text_in_segments():
+    """Mixed batch: two valid entries and one with a malformed 'start'. All
+    three must appear in segments -- the broken one with both time fields
+    None -- and text stays byte-identical to the legacy sorted-merge join."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_MIXED_VALID_AND_BROKEN)
+
+    assert result.text == "Hello first Bad start segment World second"
+    assert result.segments == [
+        {"start_time": 0.0, "end_time": 2.5, "text": "Hello first"},
+        {"start_time": None, "end_time": None, "text": "Bad start segment"},
+        {"start_time": 5.0, "end_time": 8.0, "text": "World second"},
+    ]
 
 
 def test_empty_subtitle_xml():
@@ -98,3 +176,151 @@ def test_invalid_xml_returns_none_unchanged():
     result = downloader._parse_youtube_subtitle_xml(XML_INVALID)
 
     assert result is None
+
+
+XML_START_PLUS_DUR_OVERFLOWS = (
+    '<transcript>'
+    '<text start="1e308" dur="1e308">Overflowing</text>'
+    '<text start="1.5" dur="2.0">World</text>'
+    '</transcript>'
+)
+
+
+XML_NEGATIVE_START = (
+    '<transcript><text start="-5.0" dur="2.0">Negative start</text></transcript>'
+)
+
+XML_NEGATIVE_DURATION = (
+    '<transcript><text start="5.0" dur="-10.0">Negative duration</text></transcript>'
+)
+
+XML_REVERSED_INTERVAL = (
+    '<transcript><text start="5.0" dur="-2.0">Reversed interval</text></transcript>'
+)
+
+
+def test_negative_start_attribute_yields_none_start_and_end_time():
+    """A negative "start" attribute has no physical meaning -- start_time
+    must be nulled. end_time, computed from this same (now invalid) start,
+    is also nulled since it depends on a valid start. Text is unaffected."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_NEGATIVE_START)
+
+    assert result.text == "Negative start"
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Negative start"},
+    ]
+
+
+def test_negative_duration_attribute_yields_none_end_time():
+    """A negative "dur" large enough to push end_time itself negative must
+    null end_time; start_time (valid on its own) is kept."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_NEGATIVE_DURATION)
+
+    assert result.text == "Negative duration"
+    assert result.segments == [
+        {"start_time": 5.0, "end_time": None, "text": "Negative duration"},
+    ]
+
+
+def test_reversed_interval_end_before_start_yields_none_end_time():
+    """A small negative "dur" whose sum with start is still non-negative but
+    ends up before start (end < start) must null end_time; start_time is
+    kept, text is unaffected."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_REVERSED_INTERVAL)
+
+    assert result.text == "Reversed interval"
+    assert result.segments == [
+        {"start_time": 5.0, "end_time": None, "text": "Reversed interval"},
+    ]
+
+
+XML_NAN_START = (
+    '<transcript>'
+    '<text start="5.0" dur="1.0">Five</text>'
+    '<text start="nan" dur="1.0">NanEntry</text>'
+    '<text start="1.0" dur="1.0">One</text>'
+    '</transcript>'
+)
+
+
+def test_nan_start_attribute_does_not_corrupt_sort_order_of_other_entries():
+    """Regression for `_safe_start`'s sort key: `float("nan")` does not raise
+    (unlike `float("not-a-number")`), so it used to slip straight through the
+    try/except and become the literal sort key `nan`. NaN comparisons are
+    always False, which can corrupt the relative order of *other*, perfectly
+    legal entries too (Python's sort is not robust to a NaN key breaking the
+    total order) -- e.g. sort([5, nan, 1], ...) can leave 5 sorted before 1.
+    After the fix, non-finite start values (nan/inf) are treated the same as
+    unparseable ones: sort key 0.0, used only for ordering. The corrupt
+    entry's own start_time/end_time (a separate, already-correct code path)
+    stays None; its text is preserved; and -- the actual bug under test --
+    the two legitimate entries (start=1.0, start=5.0) must sort correctly
+    relative to each other."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_NAN_START)
+
+    assert result.text == "NanEntry One Five"
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "NanEntry"},
+        {"start_time": 1.0, "end_time": 2.0, "text": "One"},
+        {"start_time": 5.0, "end_time": 6.0, "text": "Five"},
+    ]
+
+
+XML_NEGATIVE_START_POSITIVE_DURATION = (
+    '<transcript><text start="-5.0" dur="10.0">Negative start leak</text></transcript>'
+)
+
+
+def test_negative_start_with_positive_duration_does_not_leak_end_time():
+    """Regression for a real leak in the derivation order: start=-5 (invalid,
+    must be nulled) with dur=10 naively computes end = -5 + 10 = 5 -- a
+    *positive* number that slips past sanitize_time_pair's "end negative"
+    rule (unlike the -5.0/dur=2.0 case in
+    test_negative_start_attribute_yields_none_start_and_end_time, where end
+    stays negative and gets caught anyway). Before the fix, end was derived
+    from start BEFORE start's own negativity was cleaned, so a meaningless
+    end=5 (derived from an already-invalid start) leaked through as
+    (None, 5.0). After the fix, start is cleaned first; end is only ever
+    derived from an already-validated start, so an invalid start yields
+    (None, None)."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_NEGATIVE_START_POSITIVE_DURATION)
+
+    assert result.text == "Negative start leak"
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Negative start leak"},
+    ]
+
+
+def test_start_plus_dur_sum_overflow_yields_none_end_time():
+    """"start" and "dur" are each individually finite (1e308 parses fine and
+    passes math.isfinite() on its own), so neither raises ValueError/TypeError.
+    But float addition does not raise OverflowError like int->float
+    conversion does -- it silently saturates to inf (1e308 + 1e308 == inf).
+    Before the fix, end = start + duration was never re-checked after the
+    sum, producing an end_time of inf and violating the "time field is None
+    or finite non-negative" invariant. After the fix, the sum itself is
+    validated with math.isfinite(): start_time is kept (valid on its own),
+    end_time is nulled out, text is preserved, and the rest of the batch
+    (including its own end_time) is untouched.
+
+    Entries are sorted by start time (legacy behavior), so the start=1.5
+    entry ("World") sorts before the start=1e308 entry ("Overflowing")."""
+    downloader = _make_downloader()
+
+    result = downloader._parse_youtube_subtitle_xml(XML_START_PLUS_DUR_OVERFLOWS)
+
+    assert result.text == "World Overflowing"
+    assert result.segments == [
+        {"start_time": 1.5, "end_time": 3.5, "text": "World"},
+        {"start_time": 1e308, "end_time": None, "text": "Overflowing"},
+    ]

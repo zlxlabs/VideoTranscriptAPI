@@ -26,10 +26,6 @@ class LLMConfig:
     speaker_model: Optional[str] = None  # 默认使用 calibrate_model
     speaker_reasoning_effort: Optional[str] = None
 
-    # 章节梗概生成模型
-    chapters_model: Optional[str] = None  # 默认使用 calibrate_model
-    chapters_reasoning_effort: Optional[str] = None
-
     # 说话人推断采样配置（按说话人采样，而非全局前 N 字符截断）
     speaker_samples_per_speaker: int = 3       # 每个说话人采样的发言条数上限
     speaker_max_chars_per_speaker: int = 400   # 每个说话人采样文本的总字符上限
@@ -50,10 +46,6 @@ class LLMConfig:
     # 质量配置
     min_calibrate_ratio: float = 0.80
     min_summary_threshold: int = 500
-    min_chapters_threshold: int = 10000  # 原文字符数低于此值不生成章节（正常跳过，非失败）
-    # 章节生成输入的字符数上限：超过此值直接判为 FAILED，而不是把超大输入硬塞给模型。
-    # 须与 chapters_model 的上下文窗口能力匹配——换用上下文更小/更大的模型时需同步调整。
-    max_chapters_input_chars: int = 500000
 
     # 统一质量验证配置
     quality_score_weights: Dict[str, float] = field(
@@ -103,6 +95,17 @@ class LLMConfig:
     collector_api_key: str = ""
     refusal_keywords_url: Optional[Union[str, List[str]]] = None
     total_timeout: float = 300.0
+
+    # 章节梗概生成模型（默认使用 calibrate_model）
+    # 注：本段落字段（含以下 3 个）追加于 dataclass 字段列表末尾，而非插在中间——
+    # 插在中间会移位既有的可选位置参数，老代码若按位置传参（例如 speaker 相关
+    # 配置）会静默写进这里，新增字段一律追加到最后以保持位置参数兼容。
+    chapters_model: Optional[str] = None
+    chapters_reasoning_effort: Optional[str] = None
+    min_chapters_threshold: int = 10000  # 原文字符数低于此值不生成章节（正常跳过，非失败）
+    # 章节生成输入的字符数上限：超过此值直接判为 FAILED，而不是把超大输入硬塞给模型。
+    # 须与 chapters_model 的上下文窗口能力匹配——换用上下文更小/更大的模型时需同步调整。
+    max_chapters_input_chars: int = 500000
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> "LLMConfig":

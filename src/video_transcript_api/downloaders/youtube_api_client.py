@@ -15,7 +15,7 @@ from typing import Optional
 import requests
 
 from ..utils.logging import setup_logger
-from .subtitle_types import SubtitleResult
+from .subtitle_types import SubtitleResult, sanitize_time_pair
 from .youtube_api_errors import (
     YouTubeApiError,
     YouTubeApiTimeoutError,
@@ -588,6 +588,11 @@ class YouTubeApiClient:
     _SRT_TIMESTAMP_RANGE_PATTERN = re.compile(
         r"(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})"
     )
+    # "时间样式片段"宽松正则：只要求形如 "12:34" 的数字+冒号结构（不要求三段
+    # 齐全、不要求毫秒），用于 _looks_like_timeline_attempt 判断一条格式已损坏
+    # 的 "-->" 行是否至少有一侧"长得像"时间，从而把它和纯文本里偶然出现的
+    # "-->"（如 "Settings --> Privacy"）区分开。
+    _TIME_STYLE_FRAGMENT_PATTERN = re.compile(r"\d{1,2}:\d{2}")
 
     @staticmethod
     def parse_srt_to_text(srt_content: str) -> str:
@@ -618,8 +623,10 @@ class YouTubeApiClient:
 
         文本提取算法与历史版本的 parse_srt_to_text 完全一致（逐字节兼容，未识别
         为时间轴的行会和以前一样被当作普通文本保留）；时间戳分段提取是独立的
-        容错步骤，解析失败或没有可用时间轴时 segments 会被置为 None，绝不会
-        影响 text 字段（容错铁律）。
+        容错步骤，绝不会影响 text 字段（容错铁律）。segments 一旦非 None，
+        所有 cue 的文本必须都在其中——单条 cue 的时间轴格式损坏时，只会让该
+        条的 start_time/end_time 置为 None，不会把整条 cue 从 segments 里丢
+        掉；只有整段 SRT 完全没有任何可识别的 cue 时，segments 才会是 None。
 
         Args:
             srt_content: SRT 格式的字幕内容
@@ -671,19 +678,75 @@ class YouTubeApiClient:
         return SubtitleResult(text=text, segments=segments)
 
     @staticmethod
+    def _looks_like_timeline_attempt(line: str, prev_line: str) -> bool:
+        """
+        判断某一行是否"像"一条 SRT 时间轴声明行，即使其数字格式已经损坏
+
+        用箭头符号 "-->" 作为宽松判定依据：正常 SRT 里只有时间轴行会包含这个
+        符号，字幕正文几乎不会出现。这样即便一条 cue 的时间轴因为格式错误
+        (缺位数字、分隔符错误等) 匹配不上 `_SRT_TIMESTAMP_RANGE_PATTERN`，也
+        能被识别为"这里本应是一条时间轴"，从而正确切出 cue 边界，避免把下一条
+        cue 的内容错误地拼接为当前 cue 的文本（反之亦然）。
+
+        但这个宽松匹配不能无条件生效：字幕正文本身偶尔会出现 "-->"（如操作
+        指引 "Settings --> Privacy"），若不加约束会被误判成下一条 cue 的时间
+        轴，导致该文本行从当前 cue 的文本里静默丢失。SRT 的标准结构是
+        "索引行(纯数字) -> 时间轴行 -> 文本行... -> 空行分隔"，因此只有当
+        "-->" 行紧跟在一个纯数字索引行之后（即处于"预期时间轴位置"）时，才
+        可能是一条（哪怕格式已损坏的）时间轴声明。
+
+        但即便处于"预期时间轴位置"，也不能仅凭 "-->" 出现就判定为时间轴：
+        像 "Settings --> Privacy" 这样纯文本的操作指引，如果恰好是某个 cue
+        的第一行正文（该 cue 的真实时间轴行整行缺失），也会紧跟在索引行之
+        后，此时若无条件当作损坏的时间轴，会导致这行正文的文本收集从 j=i+1
+        开始（即从它自己之后算起）而丢失自身，最终在 segments 里整条消失
+        （legacy parse_srt_to_text 的严格正则不识别它、仍会把它当正文保留，
+        造成 text 与 segments 背离）。因此这里再加一层"长得像时间"的约束：
+        "-->" 两侧至少要有一侧命中 `_TIME_STYLE_FRAGMENT_PATTERN`（形如
+        "12:34" 的数字+冒号片段），如 "00:00:0X --> 00:00:04" 两侧都命中，
+        仍判定为损坏的时间轴；"Settings --> Privacy" 两侧都不含任何时间样式
+        片段，判定为普通正文，交由调用方的孤儿文本路径（R6）兜底收集。
+
+        Args:
+            line: 已经 strip 过的单行文本
+            prev_line: 已经 strip 过的上一行文本，用于判断当前行是否紧跟在
+                纯数字索引行之后
+
+        Returns:
+            bool: 是否应被当作一条时间轴声明（不论格式是否合法）
+        """
+        if "-->" not in line or not prev_line.isdigit():
+            return False
+        left, _, right = line.partition("-->")
+        return bool(
+            YouTubeApiClient._TIME_STYLE_FRAGMENT_PATTERN.search(left)
+            or YouTubeApiClient._TIME_STYLE_FRAGMENT_PATTERN.search(right)
+        )
+
+    @staticmethod
     def _extract_srt_segments(lines: list) -> list:
         """
         从 SRT 文本行中提取时间戳分段信息
 
-        仅在遇到形如 "HH:MM:SS,mmm --> HH:MM:SS,mmm" 的时间轴行时才会生成分段；
-        无法识别的时间轴行（缺失、格式错误）不会产生分段，也不会抛出异常影响
-        上层的文本提取。
+        核心不变式（文本永不丢失）：只要一条 cue 有非空文本，就必须出现在
+        返回的 segments 里——哪怕它的时间轴行格式已经损坏无法解析，甚至
+        整行缺失（索引行后面直接是正文，完全没有任何含 "-->" 的行）。前两
+        种情况下该条目的 start_time / end_time 会被置为 None，但 text 依旧
+        完整保留；第三种"孤儿文本"（无法归属到任何 cue 的正文块）同样会被
+        落成一条独立 segment（start_time / end_time 均为 None），保证不会
+        出现"进了 result.text 却不进 segments"的静默丢字幕。只有当整段
+        SRT 里完全没有任何可识别的 cue（既没有合法时间轴，也没有看起来像
+        时间轴的行）时，才会返回空列表（由调用方转换为 None）——此时孤儿
+        文本也一并丢弃，维持历史行为不变。
+
+        任何异常都不会向上抛出影响文本提取（由调用方 try/except 兜底）。
 
         Args:
             lines: parse_srt_to_subtitle_result 已经按行 split 好的原始行列表
 
         Returns:
-            list[dict]: 每项形如 {"start_time": float, "end_time": float, "text": str}
+            list[dict]: 每项形如
+                {"start_time": float|None, "end_time": float|None, "text": str}
         """
 
         def to_seconds(hours: str, minutes: str, seconds: str, millis: str) -> float:
@@ -691,26 +754,109 @@ class YouTubeApiClient:
 
         segments = []
         i = 0
+        # 上一行（已 strip），用于判断当前行是否紧跟纯数字索引行——只有处于
+        # "预期时间轴位置" 的 "-->" 行才可能是（损坏的）时间轴，正文中偶然
+        # 出现的 "-->" 一律当普通文本，见 _looks_like_timeline_attempt。
+        prev_line = ""
+        # 孤儿文本缓冲区：收集尚未归属到任何 cue 的正文行——典型场景是某条
+        # cue 的时间轴行整行缺失（索引行后面直接接正文，没有任何 "-->" 行），
+        # 导致这段正文既不在任何 cue 的时间轴之后，也没有自己的时间轴可以
+        # 开启一条新 cue。收集规则与主文本提取（parse_srt_to_text）保持一致：
+        # 纯数字行当索引行无条件跳过，空行是块边界，其余非空行收集为文本。
+        orphan_text_parts: list = []
+        # 整份 SRT 是否曾出现过至少一个可识别的 cue（合法时间轴或损坏但
+        # "看起来像"时间轴的行）。只有出现过，孤儿文本才会被落地为独立
+        # segment；如果整份文件压根没有任何可识别的 cue 结构，维持历史行为
+        # 返回空列表（由调用方转换为 None），孤儿文本全部丢弃不落地——避免
+        # 把"根本不是字幕格式的纯文本"伪装成一条时间为 None 的 segment。
+        found_any_cue = False
+
+        def flush_orphan_text() -> None:
+            """把当前孤儿文本缓冲区落地为一条独立 segment（时间均为 None）"""
+            nonlocal orphan_text_parts
+            text = " ".join(t for t in orphan_text_parts if t).strip()
+            if text:
+                segments.append({"start_time": None, "end_time": None, "text": text})
+            orphan_text_parts = []
+
         while i < len(lines):
             line = lines[i].strip()
             match = YouTubeApiClient._SRT_TIMESTAMP_RANGE_PATTERN.match(line)
+            is_timeline_attempt = bool(match) or YouTubeApiClient._looks_like_timeline_attempt(
+                line, prev_line
+            )
 
-            if not match:
+            if not is_timeline_attempt:
+                if not line:
+                    # 空行：块边界，把已缓冲的孤儿文本落地成一条 segment
+                    flush_orphan_text()
+                elif not line.isdigit():
+                    # 非空、非纯数字：与主文本提取的规则一致，当作正文内容
+                    # 缓冲起来（纯数字行按索引行无条件跳过，不计入文本；这
+                    # 里不做 R4 式 lookahead——那只在已确认的 cue 内部文本
+                    # 收集里生效，孤儿区没有"当前 cue"可言）
+                    orphan_text_parts.append(re.sub(r"<[^>]+>", "", line))
+                prev_line = line
                 i += 1
                 continue
 
-            h1, m1, s1, ms1, h2, m2, s2, ms2 = match.groups()
-            start_time = to_seconds(h1, m1, s1, ms1)
-            end_time = to_seconds(h2, m2, s2, ms2)
+            # 命中一条 cue 的时间轴（或其损坏后的宽松尝试）：先把此前尚未
+            # 归属的孤儿文本落地，再按原逻辑处理这条 cue
+            flush_orphan_text()
+            found_any_cue = True
 
-            # 收集该时间轴对应的文本行，直到遇到空行/序号行/下一个时间轴行
+            if match:
+                h1, m1, s1, ms1, h2, m2, s2, ms2 = match.groups()
+                start_time = to_seconds(h1, m1, s1, ms1)
+                end_time = to_seconds(h2, m2, s2, ms2)
+                # 区间倒挂校验（如时间轴顺序写反）一律诚实降级为 None，绝不
+                # 影响文本保留（详见 sanitize_time_pair 文档）。数字捕获组
+                # 本身不可能为负，因此这里实际只会触发"end < start"这条规则
+                start_time, end_time = sanitize_time_pair(start_time, end_time)
+            else:
+                # 时间轴行格式损坏（如缺位数字、分隔符错误），无法解析出具体
+                # 秒数，但仍需保留该 cue 的文本，时间字段置 None
+                start_time = None
+                end_time = None
+
+            # 收集该时间轴对应的文本行，直到遇到空行/下一条 cue 的索引行/下一个
+            # 时间轴行（下一个时间轴行同样按"宽松判定"处理，避免误吞下一条
+            # cue；判定时同样要求紧跟纯数字索引行，正文里的 "-->" 不会被当作
+            # 边界）。
             text_lines = []
             j = i + 1
+            prev_candidate = line  # 时间轴行本身作为文本收集循环的"上一行"
             while j < len(lines):
                 candidate = lines[j].strip()
-                if not candidate or candidate.isdigit() or YouTubeApiClient._SRT_TIMESTAMP_LINE_PATTERN.match(candidate):
+
+                if not candidate:
+                    break
+
+                if candidate.isdigit():
+                    # 纯数字行本身可能是真正的"下一条 cue 的索引行"，也可能只是
+                    # 正文里恰好出现的一个数字（如歌词/台词就是个数字 "42"）。
+                    # 只有它的下一行"像"一条时间轴（含损坏时间轴的宽松尝试）时，
+                    # 才当作索引行、结束当前 cue 的文本收集；否则按普通正文继续
+                    # 收集，避免把该行之后的正文从这条 cue 的 segments 里丢掉。
+                    next_line = lines[j + 1].strip() if j + 1 < len(lines) else ""
+                    next_is_timeline = bool(
+                        YouTubeApiClient._SRT_TIMESTAMP_RANGE_PATTERN.match(next_line)
+                    ) or YouTubeApiClient._looks_like_timeline_attempt(next_line, candidate)
+                    if next_is_timeline:
+                        break
+                    text_lines.append(re.sub(r"<[^>]+>", "", candidate))
+                    prev_candidate = candidate
+                    j += 1
+                    continue
+
+                candidate_match = YouTubeApiClient._SRT_TIMESTAMP_RANGE_PATTERN.match(candidate)
+                candidate_is_timeline_attempt = bool(
+                    candidate_match
+                ) or YouTubeApiClient._looks_like_timeline_attempt(candidate, prev_candidate)
+                if candidate_is_timeline_attempt:
                     break
                 text_lines.append(re.sub(r"<[^>]+>", "", candidate))
+                prev_candidate = candidate
                 j += 1
 
             segment_text = " ".join(t for t in text_lines if t).strip()
@@ -721,7 +867,16 @@ class YouTubeApiClient:
                     "text": segment_text,
                 })
 
+            prev_line = lines[j - 1].strip()
             i = j
+
+        # 文件结尾仍有残留孤儿文本（文件未以空行收尾）：一并落地
+        flush_orphan_text()
+
+        if not found_any_cue:
+            # 整份 SRT 没有任何可识别的 cue：维持历史行为返回空列表（调用方
+            # 会转换成 None），孤儿文本一律不落地
+            return []
 
         return segments
 

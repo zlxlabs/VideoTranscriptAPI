@@ -120,6 +120,49 @@ class TestDownloadInfoMapping:
         with pytest.raises(ResolverResponseError):
             dl.get_download_info("https://www.douyin.com/video/7123")
 
+    def test_astronomically_large_duration_degrades_to_none_without_raising(self):
+        """A JSON-legal but astronomically large integer duration (e.g.
+        10**400, which can survive response.json() deserialization as a
+        legit Python int -- json.loads has no size limit on integers) makes
+        float() raise OverflowError instead of the TypeError/ValueError this
+        call site already guards against. get_metadata() must not blow up on
+        a malformed/adversarial resolver response -- it should degrade
+        duration to None like any other unparseable value."""
+        data = dict(DOUYIN_DATA, duration=10 ** 400)
+        dl = make_downloader([data])
+        md = dl.get_metadata("https://www.douyin.com/video/7123")  # must not raise
+        assert md.duration is None
+
+    def test_string_overflow_duration_degrades_to_none(self):
+        """A string duration like "1e309" does NOT raise OverflowError --
+        Python's float() str-parsing silently overflows to inf instead of
+        throwing -- so the existing try/except (TypeError, ValueError,
+        OverflowError) around float() never even fires. Without an explicit
+        isfinite check afterwards, VideoMetadata.duration ends up holding
+        inf, a non-finite value exposed straight to downstream callers."""
+        data = dict(DOUYIN_DATA, duration="1e309")
+        dl = make_downloader([data])
+        md = dl.get_metadata("https://www.douyin.com/video/7123")
+        assert md.duration is None
+
+    def test_numeric_overflow_duration_degrades_to_none(self):
+        """A JSON-decoded float duration that is already inf (e.g. the
+        literal 1e309, which overflows to inf at parse time since it exceeds
+        the double range) must degrade to None just like the string case."""
+        data = dict(DOUYIN_DATA, duration=1e309)
+        dl = make_downloader([data])
+        md = dl.get_metadata("https://www.douyin.com/video/7123")
+        assert md.duration is None
+
+    def test_negative_duration_degrades_to_none(self):
+        """Duration can never be negative -- a negative value from a
+        malformed/adversarial resolver response must be treated as invalid,
+        same as an unparseable or non-finite one."""
+        data = dict(DOUYIN_DATA, duration=-10.0)
+        dl = make_downloader([data])
+        md = dl.get_metadata("https://www.douyin.com/video/7123")
+        assert md.duration is None
+
 
 # --------------------------------------------------------------------------- #
 # P0-2: SSRF validation on resolver-returned video_url

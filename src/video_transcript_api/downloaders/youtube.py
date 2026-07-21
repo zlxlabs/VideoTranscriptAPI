@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import math
 import time
 import datetime
 import xml.etree.ElementTree as ET
@@ -12,7 +13,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, VideoUnavailable, IpBlocked, NoTranscriptFound
 from .base import BaseDownloader
 from .models import VideoMetadata, DownloadInfo
-from .subtitle_types import SubtitleResult
+from .subtitle_types import SubtitleResult, sanitize_time_pair
 from ..utils.logging import setup_logger
 from ..utils import create_debug_dir
 from ..utils.ytdlp import YtdlpConfigBuilder
@@ -521,7 +522,13 @@ class YoutubeDownloader(BaseDownloader):
 
                 try:
                     subtitle_result = self._youtube_api_client.fetch_transcript_result(video_id)
-                    if subtitle_result and subtitle_result.text and subtitle_result.text.strip():
+                    # 有效性判定：text 非空 或 segments 非空 即视为"有字幕"。
+                    # 旧的逐字节兼容文本提取（parse_srt_to_text）会把纯数字
+                    # 正文行误判为 SRT 序号行而跳过，导致 text 为空；而新的
+                    # segments 提取用 lookahead 正确识别并保留了这些内容。
+                    # 只看 text 会把这种"文本丢了但时间轴还在"的结果连同
+                    # segments 一起当成"没有字幕"整体丢弃
+                    if subtitle_result and (subtitle_result.text.strip() or subtitle_result.segments):
                         logger.info(
                             f"[字幕获取] youtube_api_server 成功: "
                             f"length={len(subtitle_result.text)} chars"
@@ -559,7 +566,9 @@ class YoutubeDownloader(BaseDownloader):
                 elif transcript_result == "TRANSCRIPTS_DISABLED":
                     logger.info(f"[字幕获取] 视频字幕已被禁用: {video_id}")
                     return None
-                elif isinstance(transcript_result, SubtitleResult) and transcript_result.text.strip():
+                elif isinstance(transcript_result, SubtitleResult) and (
+                    transcript_result.text.strip() or transcript_result.segments
+                ):
                     logger.info(
                         f"[字幕获取] 本地方案成功: length={len(transcript_result.text)} chars"
                     )
@@ -746,8 +755,12 @@ class YoutubeDownloader(BaseDownloader):
         将 youtube-transcript-api 返回的字幕条目转换为 SubtitleResult
 
         文本拼接逻辑（item.text.strip() 后用空格 join）与历史版本逐字节一致；
-        时间戳（item.start / item.duration）提取是独立的容错步骤，条目缺少
-        这些属性或数值非法时，segments 整体降级为 None，不影响 text 字段。
+        时间戳（item.start / item.duration）提取是独立的容错步骤，按条目
+        (per-item) 容错：单条 snippet 的 .start / .duration 缺失或数值非法，
+        只会让该条的 start_time / end_time 置为 None，不会连累其余条目、也
+        不会让整个 segments 降级为 None（文本永不丢失的不变式：segments 一旦
+        非 None，所有条目的文本必须都在其中）。只有全部条目都没有文本时，
+        segments 才会是 None。
 
         参数:
             fetched_transcript: 可迭代的字幕条目（每项需有 .text 属性，
@@ -763,19 +776,60 @@ class YoutubeDownloader(BaseDownloader):
         text_parts = [item.text.strip() for item in raw_items]
         text = ' '.join(text_parts)
 
-        segments = None
-        try:
-            segments = [
-                {
-                    "start_time": float(item.start),
-                    "end_time": float(item.start) + float(item.duration),
-                    "text": item.text.strip(),
-                }
-                for item in raw_items
-            ] or None
-        except Exception as e:
-            logger.warning(f"字幕时间戳解析失败，segments 置空: {e}")
-            segments = None
+        candidate_segments = []
+        for item in raw_items:
+            # start_time 单独解析：缺失属性 / 非数字 / 非有限值（inf、nan）/
+            # 超出 float 可表示范围的天文数字（如反序列化后的 10**400，
+            # float() 转换会抛 OverflowError 而不是静默变成 inf——因为
+            # int->float 与 str->float 走不同的转换路径，只有前者会溢出
+            # 抛异常）都视为该条时间不可用，置 None，但绝不影响 text 的保留
+            try:
+                start_time = float(item.start)
+                if not math.isfinite(start_time):
+                    start_time = None
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                start_time = None
+
+            # 负 start 在派生 end_time 之前立刻清洗（不能等到最后统一调用
+            # sanitize_time_pair 才清洗）：end_time = start_time + duration，
+            # 若在 start_time 还带着非法负值时就用它计算 end，一个负 start
+            # （如 -5）配上足够大的正 duration（如 10）会算出看似合法的正数
+            # end（5），而这个 end 本身毫无意义——它是从一个已知非法的起点
+            # 派生出来的，不能因为数值本身非负就蒙混过关。提前清洗保证
+            # end_time 只可能从"已验证合法的 start_time"派生。
+            if start_time is not None and start_time < 0:
+                start_time = None
+
+            # end_time 依赖 start_time + duration，两者任一不可用则整体置 None；
+            # duration 同样可能是天文数字，同上需要捕获 OverflowError
+            end_time = None
+            if start_time is not None:
+                try:
+                    duration = float(item.duration)
+                    if math.isfinite(duration):
+                        # start_time 与 duration 各自有限，不代表二者之和有限：
+                        # float 加法不像 int->float 转换那样会抛 OverflowError，
+                        # 而是静默饱和为 inf（如二者均为 1e308）。相加后必须
+                        # 再校验一次，非有限值同样置 None，维持“时间字段要么
+                        # None 要么有限非负”的不变式
+                        candidate_end_time = start_time + duration
+                        if math.isfinite(candidate_end_time):
+                            end_time = candidate_end_time
+                except (AttributeError, TypeError, ValueError, OverflowError):
+                    end_time = None
+
+            # 负值与区间倒挂校验：负 start / 负 duration（体现为负 end 或
+            # end < start）一律诚实降级为 None，绝不影响文本保留（详见
+            # sanitize_time_pair 文档）
+            start_time, end_time = sanitize_time_pair(start_time, end_time)
+
+            candidate_segments.append({
+                "start_time": start_time,
+                "end_time": end_time,
+                "text": item.text.strip(),
+            })
+
+        segments = candidate_segments or None
 
         return SubtitleResult(text=text, segments=segments)
 
@@ -850,9 +904,11 @@ class YoutubeDownloader(BaseDownloader):
         解析YouTube字幕XML
 
         文本提取算法与历史版本逐字节兼容（按 start 排序后拼接）；时间戳分段
-        提取是独立的容错步骤，"start"/"dur" 属性缺失或格式错误时不会影响文本
-        拼接，只会让 segments 整体降级为 None（容错铁律：时间解析失败绝不能
-        影响文本提取）。
+        提取是独立的容错步骤，按条目 (per-item) 容错："start"/"dur" 属性缺失
+        或格式错误只会让该条的 start_time / end_time 置为 None，不会连累其余
+        条目、也不会让整个 segments 降级为 None（容错铁律：时间解析失败绝不
+        能影响文本提取；文本永不丢失：segments 一旦非 None，所有有文本的条目
+        必须都在其中）。
 
         参数:
             xml_content: XML字幕内容
@@ -866,22 +922,32 @@ class YoutubeDownloader(BaseDownloader):
             root = ET.fromstring(xml_content)
 
             # 提取文本内容与原始时间属性字符串。start/dur 在此处不做数值转换，
-            # 避免个别条目属性格式错误时连带影响文本提取（见下方独立的
-            # 时间戳分段提取步骤）。
+            # 也不做默认值填充——`.get()` 不传 default，属性缺失时得到 None，
+            # 而不是伪造成字符串 "0"。伪造成 "0" 会在下方解析出一个虚假的
+            # "起点为 0" 或"零时长"时间戳，违反"坏/缺时间 -> None"的不变式。
+            # 属性缺失与格式错误统一交给下方独立的时间戳分段提取步骤处理
+            # （两者都会走 except 分支，最终落到 None，不影响文本提取）。
             raw_items = []
             for text_element in root.findall(".//text"):
                 raw_items.append({
-                    "start_raw": text_element.get("start", "0"),
-                    "dur_raw": text_element.get("dur", "0"),
+                    "start_raw": text_element.get("start"),
+                    "dur_raw": text_element.get("dur"),
                     "content": (text_element.text or "").strip(),
                 })
 
-            # 按开始时间排序；无法解析为数字的 start 视为 0，不影响排序继续
+            # 按开始时间排序；无法解析为数字的 start（含属性缺失的 None）视为
+            # 0，仅用于决定排序位置，不影响下方 start_time 字段本身的 None 判定。
+            # 非有限值（nan/inf）同样视为 0：float("nan") 不会抛异常，若不校验
+            # isfinite 会把字面量 nan 当作排序 key 直接喂给 sort()——NaN 与任何
+            # 数比较恒为 False，会破坏其它合法条目之间原本正确的相对顺序（不只
+            # 是这条脏数据自己排错位置），而不仅仅是不可解析字符串那种能被
+            # except 捕获的情况。
             def _safe_start(item):
                 try:
-                    return float(item["start_raw"])
+                    value = float(item["start_raw"])
                 except (TypeError, ValueError):
                     return 0.0
+                return value if math.isfinite(value) else 0.0
 
             raw_items.sort(key=_safe_start)
 
@@ -892,19 +958,60 @@ class YoutubeDownloader(BaseDownloader):
                     merged_text += item["content"] + " "
             text = merged_text.strip()
 
-            # 独立提取时间戳分段：整体解析失败（如属性非数字）时降级为 None，
-            # 不影响上面已经算好的 text
+            # 独立提取时间戳分段：按条目容错，单条 start/dur 属性非法只影响
+            # 该条的时间字段，不影响上面已经算好的 text，也不连累其余条目；
+            # 外层 try/except 是最后一道防线，兜底任何未预料的异常，同样只让
+            # segments 降级为 None，绝不影响 text
             segments = None
             try:
                 candidate_segments = []
                 for item in raw_items:
                     if not item["content"]:
                         continue
-                    start = float(item["start_raw"])
-                    duration = float(item["dur_raw"])
+
+                    # start_time 单独解析：非数字 / 非有限值（inf、nan）都视为
+                    # 该条时间不可用，置 None，但绝不影响文本的保留
+                    try:
+                        start = float(item["start_raw"])
+                        if not math.isfinite(start):
+                            start = None
+                    except (TypeError, ValueError):
+                        start = None
+
+                    # 负 start 在派生 end 之前立刻清洗（同 snippet 路径的处理，见
+                    # _build_subtitle_result_from_snippets 的同名注释）：负 start
+                    # 配正 duration 可能算出一个看似合法的正 end，但那是从已知
+                    # 非法的起点派生出来的，不能放行——必须先清洗 start，end
+                    # 只从已验证合法的 start 派生
+                    if start is not None and start < 0:
+                        start = None
+
+                    # end_time 依赖 start + duration，两者任一不可用则整体置 None
+                    end = None
+                    if start is not None:
+                        try:
+                            duration = float(item["dur_raw"])
+                            if math.isfinite(duration):
+                                # start 与 duration 各自有限，不代表二者之和有限：
+                                # float 加法不像 int->float 转换那样会抛
+                                # OverflowError，而是静默饱和为 inf（如二者均
+                                # 为 1e308）。相加后必须再校验一次，非有限值
+                                # 同样置 None，维持“时间字段要么 None 要么有限
+                                # 非负”的不变式
+                                candidate_end = start + duration
+                                if math.isfinite(candidate_end):
+                                    end = candidate_end
+                        except (TypeError, ValueError):
+                            end = None
+
+                    # 负值与区间倒挂校验：负 start / 负 duration（体现为负
+                    # end 或 end < start）一律诚实降级为 None，绝不影响文本
+                    # 保留（详见 sanitize_time_pair 文档）
+                    start, end = sanitize_time_pair(start, end)
+
                     candidate_segments.append({
                         "start_time": start,
-                        "end_time": start + duration,
+                        "end_time": end,
                         "text": item["content"],
                     })
                 segments = candidate_segments or None

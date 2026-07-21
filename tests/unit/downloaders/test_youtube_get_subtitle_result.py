@@ -53,6 +53,53 @@ def test_api_server_success_returns_subtitle_result():
     downloader._youtube_api_client.fetch_transcript_result.assert_called_once()
 
 
+def test_api_server_empty_text_but_nonempty_segments_is_still_valid_subtitle():
+    """Regression for the all-numeric-body SRT bug: the legacy line-based
+    text extraction can end up with text="" (every cue body line looked like
+    an index line) while the lookahead-based segments extraction still found
+    real content. get_subtitle_result()'s validity check must accept this as
+    "has subtitles" (text non-empty OR segments non-empty) rather than
+    discarding the whole result -- including its timestamps -- as None."""
+    downloader = _make_downloader()
+    downloader.config["youtube_api_server"] = {"enabled": True, "base_url": "http://x", "api_key": "k"}
+
+    all_digit_result = SubtitleResult(
+        text="",
+        segments=[
+            {"start_time": 1.0, "end_time": 4.0, "text": "42"},
+            {"start_time": 5.0, "end_time": 8.0, "text": "100"},
+        ],
+    )
+    downloader._youtube_api_client = Mock()
+    downloader._youtube_api_client.fetch_transcript_result = Mock(return_value=all_digit_result)
+    downloader._get_subtitle_result_with_tikhub_api = Mock()
+
+    result = downloader.get_subtitle_result("https://www.youtube.com/watch?v=test")
+
+    assert result is all_digit_result
+    assert result.text == ""
+    assert result.segments == all_digit_result.segments
+    assert not downloader._get_subtitle_result_with_tikhub_api.called
+
+
+def test_api_server_empty_text_and_no_segments_still_treated_as_no_subtitle():
+    """Sanity check for the other side of the validity check: text=="" AND
+    segments is None/empty must still be treated as "no subtitles" (returns
+    None, no TikHub fallback attempted -- API Server already confirmed)."""
+    downloader = _make_downloader()
+    downloader.config["youtube_api_server"] = {"enabled": True, "base_url": "http://x", "api_key": "k"}
+
+    empty_result = SubtitleResult(text="", segments=None)
+    downloader._youtube_api_client = Mock()
+    downloader._youtube_api_client.fetch_transcript_result = Mock(return_value=empty_result)
+    downloader._get_subtitle_result_with_tikhub_api = Mock()
+
+    result = downloader.get_subtitle_result("https://www.youtube.com/watch?v=test")
+
+    assert result is None
+    assert not downloader._get_subtitle_result_with_tikhub_api.called
+
+
 def test_api_server_no_transcript_returns_none_without_tikhub_fallback():
     downloader = _make_downloader()
     downloader.config["youtube_api_server"] = {"enabled": True, "base_url": "http://x", "api_key": "k"}
@@ -97,6 +144,32 @@ def test_local_success_returns_subtitle_result():
     result = downloader.get_subtitle_result("https://www.youtube.com/watch?v=test")
 
     assert result is expected
+
+
+def test_local_empty_text_but_nonempty_segments_is_still_valid_subtitle():
+    """Same validity-check unification applied to the local branch (line 563
+    in youtube.py): a SubtitleResult with text=="" but non-empty segments
+    must be returned as-is, not discarded as None. In practice
+    _fetch_youtube_transcript_result() never actually produces this shape
+    (its own per-language gate only accepts non-empty text), but the
+    validity check at this call site is unified defensively so the two
+    branches of get_subtitle_result() never diverge in what counts as "has
+    subtitles"."""
+    downloader = _make_downloader()
+    downloader.config["youtube_api_server"] = {"enabled": False}
+    downloader._youtube_api_client = None
+
+    all_digit_result = SubtitleResult(
+        text="",
+        segments=[{"start_time": 1.0, "end_time": 4.0, "text": "42"}],
+    )
+    downloader._fetch_youtube_transcript_result = Mock(return_value=all_digit_result)
+    downloader._get_subtitle_result_with_tikhub_api = Mock()
+
+    result = downloader.get_subtitle_result("https://www.youtube.com/watch?v=test")
+
+    assert result is all_digit_result
+    assert not downloader._get_subtitle_result_with_tikhub_api.called
 
 
 def test_local_ip_blocked_falls_back_to_tikhub_result():
@@ -156,3 +229,24 @@ def test_get_subtitle_end_to_end_unchanged_while_get_subtitle_result_carries_seg
         {"start_time": 0.0, "end_time": 1.0, "text": "Hello"},
         {"start_time": 1.0, "end_time": 2.0, "text": "world"},
     ]
+
+
+def test_get_subtitle_api_server_all_numeric_srt_still_returns_none_unchanged():
+    """Locks the historical str-only semantics of get_subtitle() (API Server
+    branch): it calls YouTubeApiClient.fetch_transcript() (str-returning,
+    driven by parse_srt_to_text -- a completely separate code path from
+    fetch_transcript_result()/parse_srt_to_subtitle_result()). For an
+    all-numeric-body SRT, parse_srt_to_text() has always returned "" (each
+    body line is mistaken for the next cue's index line), so get_subtitle()
+    must keep returning None exactly as before -- this fix only changes
+    get_subtitle_result()'s validity check, never get_subtitle()'s."""
+    downloader = _make_downloader()
+    downloader.config["youtube_api_server"] = {"enabled": True, "base_url": "http://x", "api_key": "k"}
+    downloader._youtube_api_client = Mock()
+    downloader._youtube_api_client.fetch_transcript = Mock(return_value="")
+    downloader._get_subtitle_with_tikhub_api = Mock()
+
+    result = downloader.get_subtitle("https://www.youtube.com/watch?v=test")
+
+    assert result is None
+    assert not downloader._get_subtitle_with_tikhub_api.called
