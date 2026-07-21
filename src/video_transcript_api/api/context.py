@@ -9,6 +9,7 @@ import asyncio
 import concurrent.futures
 import contextvars
 import datetime
+import hashlib
 import os
 import queue
 import re
@@ -1891,8 +1892,32 @@ def get_template_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "web" / "templates"
 
 
+def compute_asset_version(static_dir: Path) -> str:
+    """计算静态资源版本令牌：对目录下全部文件的相对路径与内容做合并
+    sha256，取前 8 位十六进制。
+
+    文件内容不变则令牌不变，不破坏既有缓存收益；任何文件增删或内容变化
+    都会改变令牌，使模板里的 ``?v={{ asset_v }}`` URL 随之变化，穿透
+    中间代理/浏览器持有的旧缓存。
+    """
+    hasher = hashlib.sha256()
+    if static_dir.exists():
+        for path in sorted(static_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            hasher.update(str(path.relative_to(static_dir)).encode("utf-8"))
+            hasher.update(b"\0")
+            hasher.update(path.read_bytes())
+            hasher.update(b"\0")
+    return hasher.hexdigest()[:8]
+
+
 def get_templates() -> Jinja2Templates:
-    return Jinja2Templates(directory=str(get_template_dir()))
+    templates = Jinja2Templates(directory=str(get_template_dir()))
+    # 启动时（模块加载、进程内一次）计算资产版本令牌并注入模板全局上下文，
+    # 模板以 ``?v={{ asset_v }}`` 引用静态资源实现缓存指纹。
+    templates.env.globals["asset_v"] = compute_asset_version(get_static_dir())
+    return templates
 
 
 def get_static_dir() -> Path:

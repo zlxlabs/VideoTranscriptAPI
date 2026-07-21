@@ -6,7 +6,7 @@
 {% block og_description %}{{ title or "视频转录" }} 的转录校对结果{% endblock %}
 
 {% block extra_css %}
-<link rel="stylesheet" href="/static/css/floating-toc.css">
+<link rel="stylesheet" href="/static/css/floating-toc.css?v={{ asset_v }}">
 <style>
 /* Section header with inline action */
 .section-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
@@ -274,7 +274,7 @@
 {% endblock %}
 
 {% block extra_js %}
-<script src="/static/js/floating-toc.js"></script>
+<script src="/static/js/floating-toc.js?v={{ asset_v }}"></script>
 {% if view_token %}
 <script>
 (function() {

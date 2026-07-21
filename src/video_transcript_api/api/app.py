@@ -32,6 +32,21 @@ from .routes import audit, health, tasks, users, views
 from .services.transcription import process_llm_queue, process_task_queue
 
 
+class NoCacheStaticFiles(StaticFiles):
+    """StaticFiles 子类：所有 /static/ 响应统一附加 ``Cache-Control: no-cache``。
+
+    no-cache 语义为每次回源验证（ETag 命中仍返回 304、节省带宽），不是
+    no-store。配合模板里的 ``?v={{ asset_v }}`` 内容指纹：版本令牌穿透
+    中间代理/浏览器的旧缓存，no-cache 保证 HTML 与指纹未覆盖的资源也
+    每次都回源验证，根治"部署后用户拿不到新静态文件"的缓存顽疾。
+    """
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def _repair_all_task_snapshots(audit_logger, cache_manager) -> int:
     """Backfill all legacy terminal rows through bounded 500-row operations."""
     total = 0
@@ -298,7 +313,7 @@ def create_app(
 
     static_dir = get_static_dir()
     if static_dir.exists():
-        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+        app.mount("/static", NoCacheStaticFiles(directory=str(static_dir)), name="static")
 
     # 调试中间件：记录 /view/ 请求的详细信息，用于排查外部 AI 工具的访问问题
     @app.middleware("http")
