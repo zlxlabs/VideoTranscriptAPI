@@ -91,6 +91,7 @@ class YoutubeDownloader(BaseDownloader):
                 - description: str
                 - platform: "youtube"
                 - transcript: str | None (字幕文本，已解析为纯文本)
+                - transcript_segments: list | None (SRT 时间戳分段；无则 None)
                 - audio_path: str | None (本地音频文件路径)
                 - need_transcription: bool (是否需要调用转录服务)
 
@@ -129,6 +130,8 @@ class YoutubeDownloader(BaseDownloader):
         description = video_info.description if video_info else ""
 
         transcript = None
+        # SRT 解析出的时间戳分段（有则落盘，无则诚实降级为 None）
+        transcript_segments = None
         audio_path = None
         need_transcription = False
 
@@ -147,13 +150,16 @@ class YoutubeDownloader(BaseDownloader):
         else:
             # 优先使用字幕
             if result.has_transcript and not result.audio_fallback and result.transcript:
-                # 有字幕，下载并解析
+                # 有字幕，下载并解析（保留 segments 供 timeline 落盘）
                 srt_content = self._youtube_api_client.download_content(result.transcript.url)
-                transcript = YouTubeApiClient.parse_srt_to_text(srt_content)
+                subtitle_result = YouTubeApiClient.parse_srt_to_subtitle_result(srt_content)
+                transcript = subtitle_result.text
+                transcript_segments = subtitle_result.segments
                 need_transcription = False
                 logger.info(
                     f"[youtube] Transcript downloaded and parsed, "
-                    f"length={len(transcript)} chars"
+                    f"length={len(transcript)} chars, "
+                    f"segments={len(transcript_segments) if transcript_segments else 0}"
                 )
             elif result.audio and result.audio.url:
                 # 无字幕，下载 fallback 的音频
@@ -174,6 +180,7 @@ class YoutubeDownloader(BaseDownloader):
             "description": description,
             "platform": "youtube",
             "transcript": transcript,
+            "transcript_segments": transcript_segments,
             "audio_path": audio_path,
             "need_transcription": need_transcription,
         }
@@ -400,7 +407,24 @@ class YoutubeDownloader(BaseDownloader):
     
     def get_subtitle(self, url):
         """
-        获取字幕，按优先级策略执行
+        获取字幕纯文本（向后兼容入口）。
+
+        薄委托 get_subtitle_result()：统一走同一套优先级 / 回退策略，
+        只取其中的 text 字段。需要时间戳分段的调用方应直接使用
+        get_subtitle_result()。
+
+        参数:
+            url: 视频URL
+
+        返回:
+            str | None: 字幕文本；无字幕时返回 None
+        """
+        result = self.get_subtitle_result(url)
+        return result.text if result else None
+
+    def get_subtitle_result(self, url):
+        """
+        获取字幕，保留时间戳分段信息（权威入口）。
 
         优先级策略：
         - 如果启用 youtube_api_server：
@@ -410,95 +434,7 @@ class YoutubeDownloader(BaseDownloader):
           1. 本地 youtube-transcript-api
           2. TikHub API（备用）
 
-        参数:
-            url: 视频URL
-
-        返回:
-            str: 字幕文本，如果有的话
-        """
-        try:
-            video_id = self._extract_video_id(url)
-            if not video_id:
-                logger.warning("[字幕获取] 无法提取视频ID")
-                return None
-
-            # ============================================================
-            # 分支 A：启用了 youtube_api_server
-            # ============================================================
-            if self.use_api_server:
-                logger.info(
-                    f"[字幕获取] 使用 youtube_api_server 优先策略: video_id={video_id}"
-                )
-
-                # 尝试通过 API Server 获取字幕
-                try:
-                    transcript = self._youtube_api_client.fetch_transcript(video_id)
-                    if transcript and transcript.strip():
-                        logger.info(
-                            f"[字幕获取] youtube_api_server 成功: "
-                            f"length={len(transcript)} chars"
-                        )
-                        return transcript
-                    else:
-                        # 返回 None 或空字符串 = 视频没有字幕，不需要重试
-                        logger.info(
-                            f"[字幕获取] 视频没有可用字幕（已由 API Server 确认）: {video_id}"
-                        )
-                        return None
-                except Exception as api_error:
-                    # 只有失败（异常）时才回退到 TikHub
-                    logger.warning(
-                        f"[字幕获取] youtube_api_server 失败: {api_error}, "
-                        f"回退到 TikHub API（跳过本地方案）"
-                    )
-                    return self._get_subtitle_with_tikhub_api(url)
-
-            # ============================================================
-            # 分支 B：未启用 youtube_api_server，使用本地方案
-            # ============================================================
-            else:
-                logger.info(
-                    f"[字幕获取] 使用本地方案: video_id={video_id}"
-                )
-
-                # 首先尝试使用 youtube-transcript-api
-                transcript = self._fetch_youtube_transcript(video_id)
-
-                if transcript and transcript.strip():
-                    # 检查是否是IP被阻止的标记
-                    if transcript == "IP_BLOCKED":
-                        logger.warning(
-                            f"[字幕获取] 本地方案 IP 被封，回退到 TikHub API: {video_id}"
-                        )
-                        return self._get_subtitle_with_tikhub_api(url)
-                    elif transcript == "TRANSCRIPTS_DISABLED":
-                        logger.info(f"[字幕获取] 视频字幕已被禁用: {video_id}")
-                        return None
-                    else:
-                        logger.info(
-                            f"[字幕获取] 本地方案成功: length={len(transcript)} chars"
-                        )
-                        return transcript
-
-                # 如果 youtube-transcript-api 失败，尝试使用 TikHub API
-                logger.info(
-                    f"[字幕获取] 本地方案失败，回退到 TikHub API: {video_id}"
-                )
-                return self._get_subtitle_with_tikhub_api(url)
-
-        except Exception as e:
-            logger.exception(f"[字幕获取] 异常: {str(e)}")
-            return None
-
-    def get_subtitle_result(self, url):
-        """
-        获取字幕，保留时间戳分段信息（get_subtitle 的完整版，供后续接线使用）
-
-        行为策略与 get_subtitle 完全一致（同样的优先级、同样的回退顺序），
-        唯一区别是成功时返回 SubtitleResult（text + 可选 segments）而不是纯
-        文本。get_subtitle 出于向后兼容需要保持字符串返回值不变，因此这里
-        单独实现一份平行的分支逻辑，而不是让 get_subtitle 反过来委托本方法
-        （否则 mock 了 get_subtitle 内部旧方法名的既有测试会失效）。
+        get_subtitle() 薄委托本方法并只返回 text，避免维护两套平行分支。
 
         参数:
             url: 视频URL

@@ -10,6 +10,7 @@ import os
 import sys
 import json
 import base64
+import math
 import time
 import asyncio
 import re
@@ -25,6 +26,8 @@ from loguru import logger
 # 添加项目根目录到系统路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ..utils.logging import load_config
+# 时间解析唯一权威：禁止在本模块另起一套 isfinite/parse 逻辑
+from .segments import parse_time_to_seconds
 
 
 class Config:
@@ -197,8 +200,25 @@ def _optimize_segment_lengths(
     return final
 
 
+def _finite_time_or_none(value: Any) -> Optional[float]:
+    """把任意时间值规整为有限 float，否则 None。
+
+    复用 transcriber.segments.parse_time_to_seconds（唯一权威时间解析），
+    其内部已用 math.isfinite 拒绝 NaN/Inf；本函数再对已是 float 的路径
+    做一层防御，避免上游直接传入非有限值时写出 NaN/Inf 到下游 JSON。
+    """
+    parsed = parse_time_to_seconds(value)
+    if parsed is None:
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
 def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str, Any]]:
-    """在次级标点处分割超长句子"""
+    """在次级标点处分割超长句子。
+
+    时间插值必须拒绝非有限值：start_time / duration 任一非有限时，诚实
+    降级为 start_time=end_time=None，文本照常切分、永不丢字。
+    """
     text = segment["text"]
     secondary_punct = r"([，,；;])"
     parts = re.split(secondary_punct, text)
@@ -208,8 +228,20 @@ def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str,
 
     split_segments = []
     current = ""
-    start_time = segment["start_time"]
-    duration = segment["end_time"] - segment["start_time"]
+    orig_start = _finite_time_or_none(segment.get("start_time"))
+    orig_end = _finite_time_or_none(segment.get("end_time"))
+    # 仅当两端时间都有限且区间非倒挂时才做线性插值；否则全程 None。
+    # end < start 的倒挂区间（上游 duration 为负、或时间轴书写顺序颠倒）
+    # 不是可用时间轴：对它插值会生成递减的时间序列，比"没有时间"更误导
+    # 下游——与 sanitize_time_pair 同一口径，文本照常保留、时间诚实降级。
+    times_usable = (
+        orig_start is not None
+        and orig_end is not None
+        and math.isfinite(orig_end - orig_start)
+        and orig_end >= orig_start
+    )
+    start_time = orig_start if times_usable else None
+    duration = (orig_end - orig_start) if times_usable else None
     total_len = segment["length"]
 
     for part in parts:
@@ -217,28 +249,44 @@ def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str,
             current += part
         else:
             if current:
-                progress = len(current) / total_len
-                end_time = start_time + duration * progress
+                if times_usable and total_len > 0 and start_time is not None:
+                    progress = len(current) / total_len
+                    end_time = start_time + duration * progress
+                    if not math.isfinite(end_time):
+                        end_time = None
+                        start_for_seg = None
+                    else:
+                        start_for_seg = round(start_time, 2)
+                        end_time = round(end_time, 2)
+                        start_time = end_time
+                else:
+                    start_for_seg = None
+                    end_time = None
 
                 split_segments.append(
                     {
-                        "start_time": round(start_time, 2),
-                        "end_time": round(end_time, 2),
+                        "start_time": start_for_seg,
+                        "end_time": end_time,
                         "text": current,
                         "length": len(current),
                     }
                 )
 
-                start_time = end_time
                 current = part
             else:
                 current = part
 
     if current:
+        if times_usable and start_time is not None and orig_end is not None:
+            final_start = round(start_time, 2) if math.isfinite(start_time) else None
+            final_end = round(orig_end, 2) if math.isfinite(orig_end) else None
+        else:
+            final_start = None
+            final_end = None
         split_segments.append(
             {
-                "start_time": round(start_time, 2),
-                "end_time": round(segment["end_time"], 2),
+                "start_time": final_start,
+                "end_time": final_end,
                 "text": current,
                 "length": len(current),
             }
@@ -325,21 +373,24 @@ def _create_segments_from_capswriter(
         start_token_idx = max(0, min(start_token_idx, len(timestamps) - 1))
         end_token_idx = max(0, min(end_token_idx, len(timestamps) - 1))
 
-        # 提取时间
-        start_time = timestamps[start_token_idx]
-        end_time = timestamps[end_token_idx]
+        # 提取时间：NaN/Inf/缺失（None）等无效值经唯一权威解析统一降级为
+        # None（与 _split_long_segment 的诚实降级同一口径）——文本永不丢失，
+        # 时间宁可为 None 也不能让 round(None)/round(nan) 之类的异常或
+        # NaN/Inf 字面量污染整个 FunASR 兼容侧车的生成。
+        start_time = _finite_time_or_none(timestamps[start_token_idx])
+        end_time = _finite_time_or_none(timestamps[end_token_idx])
 
         segments.append(
             {
-                "start_time": round(start_time, 2),
-                "end_time": round(end_time, 2),
+                "start_time": round(start_time, 2) if start_time is not None else None,
+                "end_time": round(end_time, 2) if end_time is not None else None,
                 "text": sentence,
                 "length": len(sentence),
             }
         )
 
         logger.debug(
-            f"句子 {idx + 1}: {sentence_len} 字符 -> tokens[{start_token_idx}:{end_token_idx}] -> {start_time:.2f}s-{end_time:.2f}s"
+            f"句子 {idx + 1}: {sentence_len} 字符 -> tokens[{start_token_idx}:{end_token_idx}] -> {start_time}s-{end_time}s"
         )
 
         char_offset += sentence_len
@@ -735,9 +786,15 @@ class CapsWriterClient:
                         "error": None,
                     }
 
-                    # 统计信息
+                    # 统计信息：无效时间已降级为 None 的 segment（见
+                    # _create_segments_from_capswriter / _split_long_segment
+                    # 的诚实降级）没有可统计的时长，直接跳过——不能无条件做
+                    # end - start 算术，否则 None - None 抛 TypeError，整个
+                    # FunASR 兼容侧车会被 except 吞掉、跳过生成。
                     total_duration = sum(
-                        seg["end_time"] - seg["start_time"] for seg in segments
+                        seg["end_time"] - seg["start_time"]
+                        for seg in segments
+                        if seg["start_time"] is not None and seg["end_time"] is not None
                     )
                     avg_length = (
                         sum(len(seg["text"]) for seg in segments) / len(segments)
