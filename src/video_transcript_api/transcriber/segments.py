@@ -18,6 +18,7 @@
 
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -28,6 +29,15 @@ logger = setup_logger("segments_adapter")
 # 允许作为"时间片段来源文件"的候选文件名，按优先级从高到低排列。
 # funasr 原生输出优先；capswriter 的 FunASR 兼容 JSON（无 speaker 字段）次之。
 _SEGMENT_SOURCE_FILENAMES = ("transcript_funasr.json", "transcript_capswriter.json")
+
+# "HH:MM:SS"/"MM:SS" 字符串里，非末位分量（小时/分钟）合法的写法：纯数字。
+# 用于在 float() 转换之前拒绝 float() 能接受、但时钟分量不该出现的写法——
+# 小数（"0.5"）、科学计数法（"1e2"）、PEP 515 数字分组下划线（"1_0"）——
+# 见 parse_time_to_seconds 中的用法说明（gate-r25 P2）。
+_CLOCK_INTEGER_COMPONENT_PATTERN = re.compile(r"\d+")
+# 末位分量（秒）额外放宽：允许一个可选的小数部分，兼容 "00:01:23.4" 这类
+# 带小数秒精度的合法写法——秒是唯一可以合法带小数的时钟单位。
+_CLOCK_SECONDS_COMPONENT_PATTERN = re.compile(r"\d+(\.\d+)?")
 
 
 def parse_time_to_seconds(value: Any) -> Optional[float]:
@@ -47,6 +57,13 @@ def parse_time_to_seconds(value: Any) -> Optional[float]:
     以及会因溢出变成 `inf` 的超大数字字符串（如 `"1e309"`）都不例外——
     否则下游对时间做 `int()` 转换时会直接崩溃。用 `math.isfinite` 兜底，
     覆盖 int/float 直传和字符串解析两类入口。
+
+    损坏的时钟分量不得伪装成合法时间：`"HH:MM:SS"`（三段）要求分钟、秒
+    分量均 `< 60`（小时不限——长录音的小时数可以合法超过 99）；
+    `"MM:SS"`（两段）只要求秒分量 `< 60`（分钟不限，`"125:30"` 这类
+    "总分钟数" 表示是合法输入）。任一分量越界（如 `"00:99:00"`、
+    `"00:00:99"`）一律返回 `None`，而不是像 `total = h*3600+m*60+s` 那样
+    静默换算出一个看似合理、实则被污染的秒数。
 
     JSON 允许任意精度整数，反序列化后可能拿到 `10**400` 这类超出 double 可
     表示范围的 Python int——`float()` 转换会抛 `OverflowError`（而不是像
@@ -84,14 +101,29 @@ def parse_time_to_seconds(value: Any) -> Optional[float]:
             parts = [p.strip() for p in text.split(":")]
             if len(parts) not in (2, 3):
                 return None
-            # 逐分量校验负号，而不是只看最终总秒数的正负：像 "01:-01:00" 这样
-            # 单个分量为负、但 hours*3600+minutes*60+seconds 累加后总和恰好仍
-            # 是正数的畸形时间，之前会被总和校验放过。这里在数值转换前先按
-            # 字符串前缀判断——不能等 float() 转换完再用 `n < 0` 判断，因为
-            # "-00" 会被解析成 -0.0，而 -0.0 < 0 在 IEEE 754 下为 False（-0.0
-            # 与 0.0 数值相等），会漏掉这类"看起来负、数值上不负"的分量。
-            if any(p.startswith("-") for p in parts):
-                return None
+            # 逐分量校验格式，而不是等 float() 转换完再兜底（gate-r25 P2）：
+            # float() 能接受的写法比"时钟分量"该有的写法宽得多——小数
+            # ("0.5")、科学计数法（"1e2"）、PEP 515 数字分组下划线
+            # ("1_0")——这些对小时/分钟这类整数时钟单位而言都是非法输入，
+            # 不能被静默接受成合法时间（如 "0.5:00:00"、"1e2:00"、"1_0:00"
+            # 均须判定为非法）。唯一例外是末位分量（秒）：额外放宽允许一个
+            # 可选的小数部分，兼容 "00:01:23.4" 这类带小数秒的合法写法。
+            #
+            # 这层校验同时覆盖了负号分量的拒绝：像 "01:-01:00" 这样单个分量
+            # 为负、但 hours*3600+minutes*60+seconds 累加后总和恰好仍是正数
+            # 的畸形时间，之前需要专门的字符串前缀判断（不能等 float() 转换
+            # 完再用 `n < 0` 判断，因为 "-00" 会被解析成 -0.0，而 -0.0 < 0
+            # 在 IEEE 754 下为 False）——纯数字正则天然不匹配任何带 "-" 前缀
+            # 的分量，因此这条规则不需要再单独写一遍。
+            for idx, part in enumerate(parts):
+                is_seconds_component = idx == len(parts) - 1
+                component_pattern = (
+                    _CLOCK_SECONDS_COMPONENT_PATTERN
+                    if is_seconds_component
+                    else _CLOCK_INTEGER_COMPONENT_PATTERN
+                )
+                if not component_pattern.fullmatch(part):
+                    return None
             try:
                 numbers = [float(p) for p in parts]
             except ValueError:
@@ -101,8 +133,17 @@ def parse_time_to_seconds(value: Any) -> Optional[float]:
             if len(numbers) == 2:
                 hours = 0.0
                 minutes, seconds_part = numbers
+                # 两段 "MM:SS"：分钟不设上限（"125:30" 这类总分钟数表示是
+                # 合法输入），但秒分量仍是一个真实的时钟单位，必须 < 60，
+                # 否则 "00:99" 这类损坏值会被静默换算成 99 秒。
+                if not (seconds_part < 60):
+                    return None
             else:
                 hours, minutes, seconds_part = numbers
+                # 三段 "HH:MM:SS"：分钟、秒都是时钟单位，均须 < 60；小时
+                # 不限（长录音的小时数可以合法超过 99）。
+                if not (minutes < 60 and seconds_part < 60):
+                    return None
             total = hours * 3600 + minutes * 60 + seconds_part
             return total if math.isfinite(total) and total >= 0 else None
 
@@ -245,17 +286,37 @@ def load_segments(cache_dir: Path) -> Optional[List[Dict[str, Any]]]:
 
     for filename in _SEGMENT_SOURCE_FILENAMES:
         file_path = cache_dir / filename
-        if not file_path.exists():
-            continue
 
         try:
+            # `exists()` 也纳入这同一个 try：pathlib 只静默 ENOENT/ENOTDIR 之类
+            # "路径本就不存在"的错误，但当缓存目录的父目录缺少执行位（EACCES，
+            # 如生产环境权限配置错误）时会重抛 PermissionError（OSError 子类）。
+            # 若 `exists()` 留在 try 之外，这种权限问题会让本函数破坏"从不抛
+            # 异常"的契约，直接崩溃给调用方，而非按现有语义降级到下一来源。
+            if not file_path.exists():
+                continue
             with file_path.open("r", encoding="utf-8") as f:
                 raw = json.load(f)
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-            # UnicodeDecodeError 是 ValueError 的子类而非 OSError，必须单独列出，
-            # 否则遇到非法 UTF-8 字节（如生产环境偶发的编码损坏文件）会绕过这个
-            # except 直接抛出，违反本模块"从不抛异常"的契约。与 OSError/
-            # JSONDecodeError 同等对待：记 warning，尝试下一优先级来源。
+        except (OSError, ValueError, RecursionError) as exc:
+            # 用 ValueError（而非只列 json.JSONDecodeError）兜底，覆盖三类子类
+            # 场景，缺一都会破坏本模块"从不抛异常"的契约：
+            #   - json.JSONDecodeError 本身就是 ValueError 子类，JSON 语法损坏
+            #     （如截断的 "{not valid json"）走这条路径。
+            #   - UnicodeDecodeError 也是 ValueError 子类（经 UnicodeError），
+            #     非法 UTF-8 字节（如生产环境偶发的编码损坏文件）会触发它。
+            #   - gate-r26 P2：Python 3.11+ 对 int<->str 转换设了 4300 位数字
+            #     上限（sys.set_int_max_str_digits），json.load() 解析含超长
+            #     整数（如损坏导出文件里被污染成天文数字的时间字段）的 JSON
+            #     时，会在 int() 解析内部抛出一个**裸** ValueError——它不是
+            #     json.JSONDecodeError 的实例，之前只列 json.JSONDecodeError
+            #     的 except 元组会漏接它，导致 load_segments() 直接崩溃而不是
+            #     按现有语义降级到下一优先级来源。三者统一用 ValueError 兜底，
+            #     不必再逐个子类列出。
+            # RecursionError 是 RuntimeError 的子类而非 OSError/ValueError——
+            # 病态深度嵌套的 JSON（如构造攻击或损坏导出文件里的 "[[[[...]]]]"）
+            # 会让 json.load() 的递归下降解析器超出 Python 默认递归深度抛出
+            # RecursionError，同样必须单独列出。四者同等对待：记 warning，尝试
+            # 下一优先级来源。PermissionError 是 OSError 子类，同样被覆盖。
             logger.warning(f"读取时间片段文件失败，尝试下一优先级来源: {file_path} ({exc})")
             continue
 

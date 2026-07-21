@@ -782,8 +782,21 @@ class YoutubeDownloader(BaseDownloader):
             # 超出 float 可表示范围的天文数字（如反序列化后的 10**400，
             # float() 转换会抛 OverflowError 而不是静默变成 inf——因为
             # int->float 与 str->float 走不同的转换路径，只有前者会溢出
-            # 抛异常）都视为该条时间不可用，置 None，但绝不影响 text 的保留
+            # 抛异常）都视为该条时间不可用，置 None，但绝不影响 text 的保留。
+            #
+            # bool 必须在 float() 之前显式排除（gate-r21 P3）：bool 是 int
+            # 的子类，float(True) == 1.0、float(False) == 0.0 会被 float()
+            # 静默当成合法的小数值时间戳接受，但上游（无论是库本身的缺陷
+            # 数据，还是反序列化混入的脏值）传来的 bool 从不代表真实时间，
+            # 与统一适配器 transcriber.segments.parse_time_to_seconds
+            # "bool 一律拒绝"的口径保持一致，这里显式拒绝。判断必须留在
+            # try 内部（借用 TypeError 走进已有的 except 分支）：`.start`
+            # 属性本身也可能缺失，判断必须和属性访问共享同一层异常保护，
+            # 不能在 try 之外单独访问 item.start，否则会把"属性缺失"这种
+            # 本该被容忍的场景变成未捕获异常。
             try:
+                if isinstance(item.start, bool):
+                    raise TypeError("start is bool, not a genuine time value")
                 start_time = float(item.start)
                 if not math.isfinite(start_time):
                     start_time = None
@@ -801,10 +814,16 @@ class YoutubeDownloader(BaseDownloader):
                 start_time = None
 
             # end_time 依赖 start_time + duration，两者任一不可用则整体置 None；
-            # duration 同样可能是天文数字，同上需要捕获 OverflowError
+            # duration 同样可能是天文数字，同上需要捕获 OverflowError。同样
+            # 要先排除 bool（理由同 start_time 的处理，见上方注释）——
+            # float(True)/float(False) 若不拦截会被当成合法的 1 秒/0 秒时长。
+            # 判断同样留在 try 内部：`.duration` 属性本身可能缺失（见
+            # FakeSnippetMissingDuration 场景），不能在 try 之外单独访问。
             end_time = None
             if start_time is not None:
                 try:
+                    if isinstance(item.duration, bool):
+                        raise TypeError("duration is bool, not a genuine time value")
                     duration = float(item.duration)
                     if math.isfinite(duration):
                         # start_time 与 duration 各自有限，不代表二者之和有限：
@@ -909,6 +928,15 @@ class YoutubeDownloader(BaseDownloader):
         条目、也不会让整个 segments 降级为 None（容错铁律：时间解析失败绝不
         能影响文本提取；文本永不丢失：segments 一旦非 None，所有有文本的条目
         必须都在其中）。
+
+        注（gate-r21 P3 排查结论）：本路径天然不受 bool 时间值污染——下方
+        `start_raw`/`dur_raw` 全部来自 `Element.get("start"/"dur")`，
+        ElementTree 对 XML 属性的取值恒为 `str`（属性缺失时才是 `None`），
+        不存在 `youtube-transcript-api` 那个 snippet 对象路径里"库返回的
+        属性可能是任意 Python 类型（含 bool）"的问题，因此无需、也不会加
+        `isinstance(..., bool)` 判断——`float("True")` 本身就会因
+        `ValueError` 走进下方已有的 except 分支，按现有"格式错误->None"的
+        容错逻辑处理，不会被误判成合法时间。
 
         参数:
             xml_content: XML字幕内容

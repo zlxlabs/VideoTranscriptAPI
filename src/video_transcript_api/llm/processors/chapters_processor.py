@@ -18,10 +18,11 @@
 import hashlib
 import json
 import math
+import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from ...transcriber.segments import parse_time_to_seconds
+from ...transcriber.segments import parse_time_to_seconds, sanitize_time_pair
 from ...utils.logging import setup_logger
 from ...utils.llm_status import ChaptersStatus
 from ..core.config import LLMConfig
@@ -81,6 +82,40 @@ _MAX_CHAPTER_SECONDS = 40 * 60     # 平均章节时长上限（秒）
 _TITLE_MAX_CHARS = 24
 _TITLE_TRUNCATE_TO = 23
 
+# description 来自外部平台（视频简介），长度不受本服务控制，理论上可以达到
+# 数 KB 甚至更长；防御性截断到此长度，只记 warning、不算失败（与 title 超长
+# 截断同一级别的软处理），详见 `_truncate_description`。
+_DESCRIPTION_MAX_CHARS = 2000
+
+# 语义校验失败信息会把 LLM 自己返回的非法值（如超长 title/gist 原文）通过
+# repr 回显进错误描述，这份描述又会被拼进第二次调用的 retry_hint——如果不
+# 加限制，LLM 首次返回一个超长垃圾值就能让第二次 prompt 远超
+# `max_chapters_input_chars`，绕过门控 4"只测量首次 prompt"的输入安全上限
+# （gate-r24 P2）。两级防线，详见 `_truncate_repr_for_hint`/`_build_retry_hint`：
+# 1. 逐值截断——校验函数拼错误信息时，对每个被 repr 回显的非法值单独限长；
+# 2. 整体截断 + 压平——构造最终 retry_hint 前的兜底，不依赖上游是否记得
+#    逐值截断。
+_RETRY_HINT_VALUE_MAX_CHARS = 200
+_RETRY_HINT_VALUE_TRUNCATE_TO = 199
+_RETRY_HINT_MAX_CHARS = 1000
+_RETRY_HINT_TRUNCATE_TO = 999
+
+# gate-r27 P3：`_generate_with_retry` 两次尝试（首次 + 单次语义重试）都失败
+# 后，`_process_impl` 会把最后一次的原始 raw_chapters（LLM 返回的整份
+# chapters 列表，未经任何截断）通过 repr 整体拼进最终 FAILED 结果的 error
+# 字段（同时原样写入 error 日志）。这条路径与上面的 retry_hint 两级防线是
+# 完全独立的："语义校验错误信息"（validation_error）只在命中第一处非法字段
+# 时提前返回、只回显一个被截断的值，本身已经有界；但这里拼的是"最后一次
+# 尝试的完整原始返回"，如果 LLM 两次都返回同一个超大非法 title/gist（如
+# 50 万字符垃圾），未经限长的 repr 会让 result.error 与日志膨胀到相同量级，
+# 拖慢下游消费方（前端展示、日志采集）并浪费存储。这里复用与 retry_hint
+# 同款截断策略（`_truncate_repr_for_hint`），但配一套独立的、更宽松的长度
+# 上限：终态错误面向人工排查，允许比"回显进下一次 LLM prompt"的 retry_hint
+# 单值（200 字符）更长的截断样本，但仍要有硬上限，不能放行"错误类别 +
+# 全量原文"意义上的无界拼接。
+_FINAL_ERROR_RAW_CHAPTERS_MAX_CHARS = 2000
+_FINAL_ERROR_RAW_CHAPTERS_TRUNCATE_TO = 1999
+
 
 # ============================================================
 # 结果类型
@@ -90,12 +125,25 @@ _TITLE_TRUNCATE_TO = 23
 class Chapter:
     """单个章节。
 
-    start_seg/end_seg 是 segments 列表里的下标（闭区间）；start_time/end_time
-    是反查对应 segment 的时间戳后转换出的秒数，上游缺失时间信息时可能为 None。
+    start_seg/end_seg 是调用方传入的**原始** segments 列表（过滤前）里的下标
+    （闭区间），不是入口过滤后内部列表的位置——process() 的入口会跳过非 dict/
+    空文本的脏条目，若 start_seg/end_seg 改为对着过滤后列表重新编号，调用方
+    （包括未来基于原始列表构造的页面锚点，如 `#dlg-{start_seg}`）会用错误的
+    下标去索引自己手上的原始列表，锚定到错误的位置。因此全程保留原始索引：
+    入口过滤只决定"哪些原始下标幸存"，幸存原始下标序列可能不连续（中间的
+    下标对应被过滤掉的条目），但 start_seg/end_seg 取值永远来自这个幸存原始
+    下标集合，从不重新编号（见 `_derive_end_segs`/`_derive_times`）。
+
+    start_time/end_time 是按 start_seg/end_seg 这两个原始下标反查对应 segment
+    的时间戳后转换出的秒数，上游缺失时间信息时可能为 None。
 
     若推导出 end_time < start_time（segments 时间乱序/脏数据导致），end_time
     会被诚实降级为 None，绝不产出非法区间；不改变 start_seg/end_seg 的顺序
-    语义——索引顺序仍是正文顺序，不做重排（见 `_sanitize_end_time`）。
+    语义——索引顺序仍是正文顺序，不做重排（见 `_sanitize_end_time`）。这层
+    校验捕获的是**跨** segment 的时间乱序；某条 segment **自身**的
+    start_time/end_time 若已经倒挂（如 start=240, end=200），在更早的入口
+    阶段就已经被 `_sanitize_segment_time_fields` 逐段清洗为 end=None
+    （gate-r23 P2），不会流入这里的反查结果。
     """
 
     index: int
@@ -169,7 +217,69 @@ def _to_seconds(value: Union[float, int, str, None]) -> Optional[float]:
     return seconds
 
 
-def _compute_fingerprint(segments: List[Dict[str, Any]]) -> str:
+def _sanitize_segment_time_fields(seg: Dict[str, Any], orig_idx: int) -> Dict[str, Any]:
+    """对单条 segment **自身**的 start_time/end_time 做诚实清洗，返回新 dict
+    （浅拷贝，其余字段原样保留），供入口过滤之后、后续所有环节使用。
+
+    gate-r23 P2 修复背景：本处理器此前只在"章节级"做倒挂校验（用章节起始
+    segment 的 start_time 与章节末尾 segment 的 end_time 比较，见
+    `_sanitize_end_time`），却完全没有校验每条 segment **自身**的
+    start_time/end_time 是否倒挂。如果某条幸存 segment 自身的时间就已经
+    矛盾（如 start_time=240、end_time=200，同一条 segment 内部倒挂——这类
+    脏数据可能来自未经 `transcriber.segments.normalize_segments` 清洗、
+    直接被上游喂给本处理器的原始 dialogs），章节级校验可能完全看不出问题：
+    只要章节起始 segment 的 start_time（如 0）小于这条倒挂 segment 的
+    end_time（200），旧的章节级检查 "0 < 200" 依然成立、照常放行，但语义上
+    200 早于它自己所在 segment 的 start_time（240），是一段自相矛盾的区间
+    ——直接采用就会产出"章节结束时间早于其末段开始时间"的矛盾输出，且这个
+    矛盾不会被任何现有校验拦下。
+
+    修复：处理器入口过滤后，对每条幸存 segment 单独调用权威实现
+    `transcriber.segments.sanitize_time_pair`（负值置 None、end<start 时
+    end 置 None）清洗一遍，清洗后的时间用于后续所有环节——时间反查
+    （`_derive_times` 读取的 `segment_by_index`）、prompt 展示
+    （`_build_segment_lines`）、门控 2 的 `has_any_start_time` 判断等——与
+    `transcriber.segments.normalize_segments` 对每条 segment 的清洗口径
+    完全对齐。段内倒挂的 segment 一旦被选为某章的 end_seg，其 end_time 在
+    这一步就已经是 None，矛盾从根上消失，不再依赖章节级 `_sanitize_end_time`
+    兜底（章节级校验仍然保留，用于捕获跨 segment 的时间乱序，两者互补，
+    不是替代关系）。
+
+    **指纹例外**：`_compute_fingerprint` 必须继续使用清洗前的原始值（如实
+    反映输入内容本身，见 `ChaptersResult` 类文档）。本函数只返回一份新的
+    浅拷贝 dict，从不修改传入的 `seg` 原始对象——调用方对未经处理的原始
+    `filtered_pairs` 计算指纹时，拿到的仍是清洗前的原始时间值，不受本函数
+    影响。
+
+    Args:
+        seg: 单条幸存 segment（已通过入口过滤，text 非空）
+        orig_idx: 该 segment 的原始下标（过滤前的位置），仅用于清洗触发时
+            的日志定位
+
+    Returns:
+        Dict[str, Any]: seg 的浅拷贝，start_time/end_time 替换为清洗后的
+        秒数（float 或 None，已经过 `_to_seconds` 解析），其余字段（text/
+        speaker 等）原样保留
+    """
+    start = _to_seconds(seg.get("start_time"))
+    end = _to_seconds(seg.get("end_time"))
+    sanitized_start, sanitized_end = sanitize_time_pair(start, end)
+    if sanitized_end is None and end is not None:
+        # 到这里 start/end 都已经过 `_to_seconds`（负数已被解析为 None），
+        # sanitize_time_pair 唯一还能触发的规则就是"两者均非 None 且
+        # end < start"——即这条 segment 自身的时间倒挂,才会打印这条警告。
+        logger.warning(
+            f"[CHAPTERS] segment[{orig_idx}] end_time ({end}) < its own "
+            f"start_time ({start}), discarding this segment's end_time "
+            f"(segment-level time inversion, likely un-sanitized upstream dialogs)"
+        )
+    sanitized_seg = dict(seg)
+    sanitized_seg["start_time"] = sanitized_start
+    sanitized_seg["end_time"] = sanitized_end
+    return sanitized_seg
+
+
+def _compute_fingerprint(indexed_segments: List[Tuple[int, Dict[str, Any]]]) -> str:
     """计算 segments 的指纹（sha1 十六进制摘要），用于上层判断"原文是否变化"。
 
     指纹覆盖每条 segment 的 text + 规范化后的 start_time/end_time + speaker，
@@ -206,21 +316,34 @@ def _compute_fingerprint(segments: List[Dict[str, Any]]) -> str:
       保证同一逻辑输入不论 dict 构造顺序如何都序列化成同一段字节，指纹
       仍然稳定可复现。
 
+    每条目额外携带 "i"（原始下标，过滤前的位置，即调用方传入的
+    `filtered_pairs`）——gate-r17 P2 修复：若不带原始下标，"幸存内容不变，
+    但前面多插入/删除了一个会被过滤掉的空白/非法条目" 这种输入会让所有
+    幸存条目的原始下标整体平移（如 0,1,2 -> 1,2,3），而 text/start_time/
+    end_time/speaker 均未变化，指纹会被误判为"内容未变"；但 start_seg/
+    end_seg 锚点（见 `Chapter` 类文档）恰恰就是按原始下标写死的，一旦缓存
+    层日后接入指纹判重，会复用一份锚点已经整体错位、指向完全不同 segment
+    的旧章节结果。带上 "i" 后，任何导致原始下标平移的输入变化都会被指纹
+    捕获到。
+
     start_time/end_time 在写入前先用 `_to_seconds` 规范化（同一个时间不论用
     float 还是 "HH:MM:SS" 字符串表示，指纹片段都一致）。speaker 写入前强转
     str（上游 FunASR 原始 dict 的 speaker 可能是裸 int），避免类型不一致
     导致同一说话人因表示类型不同（int 2 与字符串 "2"）产生不同指纹。
 
     Args:
-        segments: 原始 segment 列表（未经任何处理），每条形如
-            {"text": str, "start_time": ..., "end_time": ..., "speaker": 可选, ...}
+        indexed_segments: (原始下标, segment) 二元组列表——原始下标必须是
+            过滤前的位置（调用方应直接传入 `filtered_pairs`），每条 segment
+            形如 {"text": str, "start_time": ..., "end_time": ...,
+            "speaker": 可选, ...}
 
     Returns:
         str: sha1 十六进制摘要
     """
     entries: List[Dict[str, Any]] = []
-    for seg in segments:
+    for orig_idx, seg in indexed_segments:
         entry: Dict[str, Any] = {
+            "i": orig_idx,
             "t": seg.get("text") or "",
             "s": _to_seconds(seg.get("start_time")),
             "e": _to_seconds(seg.get("end_time")),
@@ -257,15 +380,97 @@ def _format_timestamp(seconds: Optional[float]) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def _build_segment_lines(segments: List[Dict[str, Any]]) -> str:
-    """把 segments 压缩为带编号的正文，供拼进 user prompt。
+# 匹配任意一段连续空白字符（含 "\n"/"\r"/"\t"/普通空格及其任意组合）。用于
+# `_flatten_for_prompt` 把任意外部字符串压平成单行——见该函数文档。
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
 
-    每行格式：`[i] mm:ss (speaker:)? text`
+
+def _flatten_for_prompt(value: str) -> str:
+    """把任意外部字符串压平为单行，供拼进章节 prompt（安全边界，务必读完）。
+
+    **安全边界**：章节 prompt 的行结构——每一行要么是 `[i] mm:ss (speaker:)?
+    text` 形式的真实编号行，要么是与编号无关的固定文案/元数据行——是章节生成
+    语义校验（`_validate_and_normalize_start_segs` 按幸存原始下标的成员关系
+    校验 LLM 返回的 `start_seg`）的信任基础。这份校验只能确认"LLM 返回的编号
+    在正文里出现过"，却无法区分某一行 `[i] ...` 是真实的 segment 边界，还是
+    由某段外部字符串的内容伪造出来的——只要伪造出的编号 i 恰好是某个真实的
+    幸存原始下标，校验就会把它当作合法值放行，但其真实对应的是伪造内容的
+    边界，而非下标 i 真正的 segment 边界（时间/内容归属由此出错，且不会被
+    任何现有校验拦下）。
+
+    因此：**任何外部字符串一旦要拼进章节 prompt，就不允许保留原始换行**。
+    这不是某一个字段的问题，而是一整类风险——凡是来源不受本服务控制的字符串
+    （视频 title/author/description 来自外部平台，完全可能含换行；speaker/
+    text 来自转录结果，同样不可信）都必须先经本函数压平，才能进入 prompt，
+    不允许任何遗漏入口。`_build_segment_lines` 对 text/speaker 的处理、
+    `ChaptersProcessor._process_impl` 对 title/author/description 的处理，
+    都必须统一调用这一个函数，而不是各自维护一份相似的空白折叠逻辑。
+
+    实现：复用 `_build_segment_lines` 原有的空白折叠正则 `_WHITESPACE_RUN_RE`
+    ——连续空白（含换行/回车/制表符）折叠为单个空格，再 strip 首尾空白。
+
+    Args:
+        value: 待压平的原始字符串，可能为 None、空串、含前后空白、含任意
+            数量/任意位置的换行
+
+    Returns:
+        str: 空白折叠为单个空格并 strip 后的单行字符串；value 为 None 或
+            空串时返回空串
+    """
+    return _WHITESPACE_RUN_RE.sub(" ", value or "").strip()
+
+
+def _build_segment_lines(indexed_segments: List[Tuple[int, Dict[str, Any]]]) -> str:
+    """把 (原始索引, segment) 对压缩为带编号的正文，供拼进 user prompt。
+
+    每行格式：`[i] mm:ss (speaker:)? text`，其中 `i` 是调用方传入的**原始**
+    segments 列表下标（即入口过滤前的位置），而不是本函数内部重新计数的
+    位置。入口过滤（跳过非 dict/空文本条目）发生在调用方，幸存条目的原始
+    下标可能不连续（如 0, 2, 5...，中间的下标对应被跳过的条目）——这是正常
+    现象：LLM 只需按正文里实际出现的编号引用 start_seg，不要求编号连续，
+    见 `CHAPTERS_SYSTEM_PROMPT` 里"编号可能不连续"的说明。这样 LLM 返回的
+    start_seg 天然就是原始下标，后续校验/推导（`_validate_and_normalize_start_segs`
+    /`_derive_end_segs`/`_derive_times`）不需要再做一次"过滤后位置 -> 原始
+    下标"的换算，也就不存在换算遗漏导致的锚点偏移（见 `Chapter` 类文档）。
+
     （时间缺失则省略时间部分，没有 speaker 字段则省略说话人前缀）。
+
+    text 中的换行/回车会被压成单个空格（连续空白进一步折叠为一个）：这是
+    "一个 segment 恰好一行"这个结构性不变式的安全边界——若不处理，text 里
+    只要含有形如 "正常内容\\n[5] 00:00 fake" 的内容，拼进 prompt 后就会在
+    编号列表里凭空多出一行、看起来与真实编号条目别无二致，LLM 可能把
+    start_seg 错误地锚定到这条由 text 内容伪造出来的"行"上，而不是任何真实
+    的 segment 边界。压平后，无论 text 里塞了多少个换行或形如 "[n] mm:ss"
+    的字面内容，都只会作为该 segment 唯一一行里的普通文本片段出现，不可能
+    被解读成独立的编号行。
+
+    speaker 同样要压平（gate-r18 P2）：speaker 经 `str()` 强转后会原样拼进
+    prefix，如果不做同样的空白折叠处理，"一个 segment 恰好一行"这个不变式
+    就仍有一个未封死的入口——speaker 含换行的 segment（如
+    `speaker="Alice\\n[5] 00:00 假正文"`，其中 5 恰好是某个幸存原始索引）
+    会在 prompt 里凭空多出一行伪造的编号行，且这条伪造行引用的下标 5 属于
+    `survived_indices`，能通过 `_validate_and_normalize_start_segs` 的成员
+    校验——LLM 返回 start_seg=5 时会被当作合法值接受，但其真实对应的是被
+    伪造出来的 "假正文" 边界，而非下标 5 那条 segment 真正的内容边界，
+    章节的时间/内容归属由此出错且不会被任何现有校验拦下。处理方式与 text
+    完全一致：复用同一个 `_flatten_for_prompt`（gate-r21 P2 起，text/speaker
+    的压平逻辑与 title/author/description 的压平逻辑合并为这一个统一 helper，
+    见其文档——本函数不再直接调用 `_WHITESPACE_RUN_RE`）。
+
+    仅影响这里构建的 prompt 文本，不改变 segment 原始数据：
+    - 指纹计算（`_compute_fingerprint`）直接使用原始 seg["text"]/speaker，
+      不经过本函数——指纹要如实反映输入内容本身，不应因展示形态的处理而
+      变化（哪怕这份"原始输入"本身就含有换行等异常字符）；
+    - 门控 3（`min_chapters_threshold`）用未压平的 full_text 衡量"内容量是否
+      值得分章"，这个语义与文本如何展示给 LLM 无关，同样不应受影响；
+    - 门控 4（`max_chapters_input_chars`）测量的正是本函数的输出
+      `segment_lines`，压平后的换行往往比原始换行更短（多个连续空白折叠成
+      一个空格），门控测量"实际发送的 prompt 长度"这个语义与压平后的结果本
+      就应该一致，不存在需要额外处理的分歧。
     """
     lines = []
-    for i, seg in enumerate(segments):
-        text = (seg.get("text") or "").strip()
+    for i, seg in indexed_segments:
+        text = _flatten_for_prompt(seg.get("text") or "")
         timestamp = _format_timestamp(_to_seconds(seg.get("start_time")))
         speaker = seg.get("speaker")
 
@@ -279,7 +484,12 @@ def _build_segment_lines(segments: List[Dict[str, Any]]) -> str:
             # f-string 插值本身不会因此报错，这里显式转换只为类型意图明确、
             # 与指纹计算侧（`_compute_fingerprint` 同样用 is not None）保持
             # 一致，不依赖插值的隐式转换。
-            prefix += f" {str(speaker)}:"
+            #
+            # 强转后同样要压平空白（gate-r18 P2）：与 text 的处理理由完全
+            # 一致——不压平的话，含换行的 speaker 就是"一个 segment 恰好
+            # 一行"这个不变式唯一未封死的入口，见本函数文档的专门说明。
+            speaker_flat = _flatten_for_prompt(str(speaker))
+            prefix += f" {speaker_flat}:"
 
         lines.append(f"{prefix} {text}".strip())
     return "\n".join(lines)
@@ -313,16 +523,127 @@ def _normalize_title_length(title: str, idx: int) -> str:
     return truncated
 
 
+def _truncate_description(description: Optional[str]) -> str:
+    """防御性截断 description：进 prompt 前的最后一道长度防线（gate-r21 P3）。
+
+    description 来自外部平台（视频简介），长度不受本服务控制，理论上可以
+    达到数 KB 甚至更长。若不截断，两个问题会叠加发生：
+    1. 门控 4（`max_chapters_input_chars`）此前只测量 `segment_lines`，完全
+       没有把 title/author/description 计入"实际发送给 LLM 的 prompt 总
+       长度"——一份 segment_lines 略低于上限、但 description 长达数十万字符
+       的输入能悄悄绕过门控，送进 LLM 的实际 prompt 远超预期开销（详见
+       `ChaptersProcessor._process_impl` 门控 4 处的注释）；
+    2. 即便修正门控测量口径，若不先截断，一条数十万字符的 description 本身
+       就会让门控测量值失真到失去意义。
+
+    截断到 `_DESCRIPTION_MAX_CHARS` 字符，只记一条 warning、不影响结果状态
+    ——截断本身不是语义错误，不值得为它触发重试或判 FAILED，与
+    `_normalize_title_length` 对超长 title 的软处理同一级别。
+
+    Args:
+        description: 原始 description，可能为 None/空串，也可能长达数十万
+            字符（None 按空串处理，调用方无需自行判空）
+
+    Returns:
+        str: 长度 <= `_DESCRIPTION_MAX_CHARS` 的 description（未超长时原样
+            返回）。不做压平/strip——那是 `_flatten_for_prompt` 的职责，
+            两者刻意分开：一个管长度上限，一个管行结构安全，避免一个函数
+            承担两种不相关的校验语义。
+    """
+    description = description or ""
+    if len(description) <= _DESCRIPTION_MAX_CHARS:
+        return description
+    truncated = description[:_DESCRIPTION_MAX_CHARS]
+    logger.warning(
+        f"[CHAPTERS] description exceeds {_DESCRIPTION_MAX_CHARS} chars "
+        f"({len(description)}), truncating before building prompt"
+    )
+    return truncated
+
+
+def _truncate_repr_for_hint(
+    value: Any,
+    max_chars: int = _RETRY_HINT_VALUE_MAX_CHARS,
+    truncate_to: int = _RETRY_HINT_VALUE_TRUNCATE_TO,
+) -> str:
+    """把即将拼进错误信息/日志的不可信值转成安全长度的 repr（gate-r24 P2，
+    gate-r27 P3 扩展为通用截断 helper）。
+
+    原始动机（gate-r24 P2）：供 `_validate_and_normalize_start_segs` 内部拼
+    错误信息时替代裸的 `{value!r}` 插值——value 是 LLM 返回的原始字段
+    （start_seg 类型错误时的整个值、title、gist），完全不受本服务控制，
+    理论上可以长达数十万字符（如 LLM 返回大段垃圾填充）。不做限长的话，
+    这个 repr 会原样进入 `_validate_and_normalize_start_segs` 的返回值，
+    最终拼进第二次调用的 retry_hint，让第二次 prompt 的长度失控。
+
+    gate-r27 P3：`max_chars`/`truncate_to` 开放为可选参数（默认沿用原来的
+    retry-hint 单值上限，调用方不传时行为完全不变），供 `_process_impl`
+    终态失败 error 拼接 raw_chapters 时复用同一套"截断 + 省略号"策略、但配
+    一套更宽松的独立上限（`_FINAL_ERROR_RAW_CHAPTERS_MAX_CHARS` 等）——那
+    条路径与 retry_hint 无关（不会被回显进下一次 prompt），允许比 retry
+    单值场景更长的诊断样本，但同样需要硬上限，不能无界拼接全量原文。
+
+    Args:
+        value: 待展示的非法值，任意类型（未必是 str——start_seg 类型错误
+            分支可能传入任意 JSON 类型）
+        max_chars: 不截断的长度上限，默认 `_RETRY_HINT_VALUE_MAX_CHARS`
+        truncate_to: 超限时保留的前缀长度，默认 `_RETRY_HINT_VALUE_TRUNCATE_TO`
+
+    Returns:
+        str: repr(value) 的结果，长度 <= max_chars
+            （超长时截断为前 truncate_to 字符 + "…"）
+    """
+    text = repr(value)
+    if len(text) <= max_chars:
+        return text
+    return text[:truncate_to] + "…"
+
+
+def _build_retry_hint(validation_error: str) -> str:
+    """把语义校验错误信息转换为安全的 retry_hint（gate-r24 P2 第二层防线）。
+
+    独立于 `_truncate_repr_for_hint` 的逐值截断——这里是构造 retry_hint 前
+    的最后一道兜底，不依赖调用方是否记得对每个被回显的值做限长：
+    1. 整体截断到 `_RETRY_HINT_MAX_CHARS`：即使未来某条新增的校验错误信息
+       忘记做逐值截断，也不会让第二次 prompt 的长度失控、绕过门控 4
+       （`max_chapters_input_chars` 只测量首次 prompt，见
+       `ChaptersProcessor._process_impl` 门控 4 注释）；
+    2. 经 `_flatten_for_prompt` 压平：错误信息本身也是拼进 prompt 的外部
+       不可信内容（含 LLM 自己返回的原始 title/gist 片段），必须与
+       title/author/description/text/speaker 走同一道压平防线，防止换行
+       伪造出形如 "[i] mm:ss text" 的假编号行（见 `_flatten_for_prompt`
+       文档）。
+
+    Args:
+        validation_error: `_validate_and_normalize_start_segs` 返回的错误
+            描述原文
+
+    Returns:
+        str: 压平后长度 <= `_RETRY_HINT_MAX_CHARS` 的安全 retry_hint
+    """
+    flattened = _flatten_for_prompt(validation_error)
+    if len(flattened) <= _RETRY_HINT_MAX_CHARS:
+        return flattened
+    return flattened[:_RETRY_HINT_TRUNCATE_TO] + "…"
+
+
 def _validate_and_normalize_start_segs(
     raw_chapters: Any,
-    segment_count: int,
+    survived_indices: List[int],
 ) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
     """校验并规范化 LLM 返回的 chapters 列表的 start_seg 序列。
 
     校验以下内容：
-    1. 每项 start_seg 必须是 int（排除 bool）且落在 [0, segment_count) 范围内
+    1. 每项 start_seg 必须是 int（排除 bool）且属于 `survived_indices`——即
+       调用方传入的**原始** segments 列表里、经入口过滤后幸存下来的原始下标
+       集合。这里不再用 `[0, segment_count)` 区间校验：入口过滤后幸存的原始
+       下标可能不连续（中间的下标对应被过滤掉的条目），区间校验会放行一个
+       "数值上在范围内、但实际已被过滤掉"的下标（见 `Chapter` 类文档的锚点
+       偏移问题），必须严格按幸存下标集合的成员关系校验。
     2. 按 start_seg 去重（保留首次出现），去重后的序列必须严格递增
-    3. 去重后若首项 start_seg > 0，钳制为 0（覆盖开头；这是自动修正，不算校验失败）
+    3. 去重后若首项 start_seg 不是幸存下标里最小的那个，钳制为最小幸存下标
+       （覆盖开头；这是自动修正，不算校验失败）——同样不能再硬编码钳制为字面
+       量 0：0 本身就可能已被过滤掉，不在幸存下标集合里。
     4. title、gist 必须是非空字符串（strip 后非空）——曾经缺失/非字符串/空白值
        会被 `str(x or "").strip()` 强转成空串照样成章，导致章节标题/梗概为空。
        与 start_seg 越界/重复同等对待：视为语义校验失败，触发重试。
@@ -336,17 +657,23 @@ def _validate_and_normalize_start_segs(
 
     Args:
         raw_chapters: response.structured_output.get("chapters") 的原始返回
-        segment_count: 输入 segments 的总条数（N），用于范围校验
+        survived_indices: 入口过滤后幸存的原始下标列表，按原始顺序升序排列
+            （由调用方保证非空——`segment_count < _MIN_CHAPTER_COUNT` 的门控
+            已经在调用前拦下了空/单元素的情况）
 
     Returns:
         (normalized, error):
         - 成功：normalized 是去重 + 钳制后的 [{"title","gist","start_seg"}, ...]
-          列表（按 start_seg 升序），title 为未截断的完整原文，error 为 None
+          列表（按 start_seg 升序，start_seg 取值来自 survived_indices），
+          title 为未截断的完整原文，error 为 None
         - 失败：normalized 为 None，error 是具体原因描述（用于拼进重试 prompt
           或写入最终失败结果的 error 字段）
     """
     if not isinstance(raw_chapters, list) or not raw_chapters:
         return None, "chapters field is missing, not a list, or empty"
+
+    survived_set = set(survived_indices)
+    min_survived = survived_indices[0]  # survived_indices 按原始顺序升序排列
 
     items: List[Dict[str, Any]] = []
     for idx, item in enumerate(raw_chapters):
@@ -355,22 +682,29 @@ def _validate_and_normalize_start_segs(
 
         start_seg = item.get("start_seg")
         if not isinstance(start_seg, int) or isinstance(start_seg, bool):
-            return None, f"chapters[{idx}].start_seg is not an int: {start_seg!r}"
-        if not (0 <= start_seg < segment_count):
             return None, (
-                f"chapters[{idx}].start_seg={start_seg} out of range [0, {segment_count})"
+                f"chapters[{idx}].start_seg is not an int: "
+                f"{_truncate_repr_for_hint(start_seg)}"
+            )
+        if start_seg not in survived_set:
+            return None, (
+                f"chapters[{idx}].start_seg={start_seg} out of range (not among the "
+                f"{len(survived_indices)} surviving segment indices in "
+                f"[{survived_indices[0]}, {survived_indices[-1]}])"
             )
 
         raw_title = item.get("title")
         if not isinstance(raw_title, str) or not raw_title.strip():
             return None, (
-                f"chapters[{idx}].title is missing, not a string, or blank: {raw_title!r}"
+                f"chapters[{idx}].title is missing, not a string, or blank: "
+                f"{_truncate_repr_for_hint(raw_title)}"
             )
 
         raw_gist = item.get("gist")
         if not isinstance(raw_gist, str) or not raw_gist.strip():
             return None, (
-                f"chapters[{idx}].gist is missing, not a string, or blank: {raw_gist!r}"
+                f"chapters[{idx}].gist is missing, not a string, or blank: "
+                f"{_truncate_repr_for_hint(raw_gist)}"
             )
 
         items.append({
@@ -394,32 +728,79 @@ def _validate_and_normalize_start_segs(
             seq = [d["start_seg"] for d in deduped]
             return None, f"start_seg sequence not strictly increasing after dedup: {seq}"
 
-    # 首项若 > 0，钳制为 0（覆盖开头，不算失败）
-    if deduped[0]["start_seg"] > 0:
+    # 首项若不是最小幸存下标，钳制为最小幸存下标（覆盖开头，不算失败）。
+    # 不能钳制为字面量 0——0 本身可能已被入口过滤掉、不在幸存下标集合里。
+    if deduped[0]["start_seg"] > min_survived:
         logger.info(
             f"[CHAPTERS] Clamping first chapter start_seg from "
-            f"{deduped[0]['start_seg']} to 0"
+            f"{deduped[0]['start_seg']} to {min_survived} (smallest surviving segment index)"
         )
-        deduped[0] = {**deduped[0], "start_seg": 0}
+        deduped[0] = {**deduped[0], "start_seg": min_survived}
 
     return deduped, None
 
 
-def _derive_end_segs(chapters: List[Dict[str, Any]], segment_count: int) -> None:
-    """原地为每章填充 end_seg：下一章起点的前一个位置，末章到最后一条 segment。"""
+def _derive_end_segs(chapters: List[Dict[str, Any]], survived_indices: List[int]) -> None:
+    """原地为每章填充 end_seg（原始 segments 列表里的下标，非过滤后位置）。
+
+    末章 end_seg = 最大幸存原始下标；非末章 end_seg = "下一章 start_seg 在幸存
+    序列中的前一个元素"的原始下标。不能简单用 `下一章 start_seg - 1`——幸存
+    下标一旦因过滤而不连续（如 [0, 2, 3, 4]，1 已被过滤），`3 - 1 = 2` 恰好
+    还能碰对，但 `4 - 1 = 3` 就会指向一个仍然幸存、但不是"紧邻前一个"的下标
+    （当中间还有更大跨度的空洞时更明显，如幸存 [0, 5, 8]，下一章 start=8 时
+    `8 - 1 = 7` 根本不是幸存下标，直接错误）。这里改为先建立"幸存下标 ->
+    在幸存序列中的位置"的映射，再用该位置回退一位取值，保证 end_seg 永远
+    落在幸存下标集合内、且是真正紧邻的前一个元素。
+
+    Args:
+        chapters: 已通过语义校验、按 start_seg 升序排列的章节列表（原地修改）
+        survived_indices: 入口过滤后幸存的原始下标列表，按原始顺序升序排列
+    """
+    # 幸存原始下标 -> 在幸存序列中的位置。每章的 start_seg 必然是幸存下标之一
+    # （已经过 `_validate_and_normalize_start_segs` 校验），所以这里查表不会
+    # 缺键；又因为序列严格递增且首项已钳制为最小幸存下标，非首章的位置必然
+    # >= 1，`position - 1` 不会越界到负数。
+    position_by_index = {idx: pos for pos, idx in enumerate(survived_indices)}
     n = len(chapters)
     for i, chapter in enumerate(chapters):
         if i + 1 < n:
-            chapter["end_seg"] = chapters[i + 1]["start_seg"] - 1
+            next_start = chapters[i + 1]["start_seg"]
+            chapter["end_seg"] = survived_indices[position_by_index[next_start] - 1]
         else:
-            chapter["end_seg"] = segment_count - 1
+            chapter["end_seg"] = survived_indices[-1]
 
 
-def _derive_times(chapters: List[Dict[str, Any]], segments: List[Dict[str, Any]]) -> None:
-    """原地为每章填充 start_time/end_time：反查对应 segment 的时间戳并转秒（None 容忍）。"""
+def _derive_times(
+    chapters: List[Dict[str, Any]],
+    segment_by_index: Dict[int, Dict[str, Any]],
+) -> None:
+    """原地为每章填充 start_time/end_time：按原始下标反查对应 segment 的时间戳
+    并转秒（None 容忍）。
+
+    start_seg/end_seg 是**原始** segments 列表的下标，不是过滤后列表的位置——
+    反查必须通过 `segment_by_index`（原始下标 -> 幸存 segment 的映射）完成，
+    不能再用 `filtered_segments[start_seg]` 这种按位置切片的写法：一旦发生
+    过滤，原始下标与过滤后列表的位置会分道扬镳，位置切片会静默取到错误的
+    （在过滤跨度较大时甚至是越界的）segment。
+
+    调用方（`_process_impl`）传入的 `segment_by_index` 里每条 segment 的
+    start_time/end_time 已经过 `_sanitize_segment_time_fields` 逐段清洗
+    （gate-r23 P2）：自身倒挂（如 start=240, end=200）的 segment 在这里查到
+    的 end_time 已经是 None，不会把段内矛盾的时间值反查出来。本函数仍然会
+    再调用一次 `_to_seconds`，但对已经是 float/None 的清洗后取值而言这是
+    幂等操作，不做任何改变。
+
+    Args:
+        chapters: 已推导出 start_seg/end_seg 的章节列表（原地修改）
+        segment_by_index: 原始下标 -> 幸存 segment（时间字段已逐段清洗）的映射
+    """
     for chapter in chapters:
-        chapter["start_time"] = _to_seconds(segments[chapter["start_seg"]].get("start_time"))
-        chapter["end_time"] = _to_seconds(segments[chapter["end_seg"]].get("end_time"))
+        chapter["start_time"] = _to_seconds(
+            segment_by_index[chapter["start_seg"]].get("start_time")
+        )
+        chapter["end_time"] = _to_seconds(
+            segment_by_index[chapter["end_seg"]].get("end_time")
+        )
 
 
 def _sanitize_end_time(
@@ -605,36 +986,103 @@ class ChaptersProcessor:
                 error=None, fingerprint=None, segment_count=0,
             )
 
-        # 入口过滤：segments 混入非 dict 条目时（如 JSON null 反序列化成
-        # None，或上游脏数据混进裸字符串），下面所有逻辑都假设每条 segment
-        # 是 dict、可以 .get(...)，非 dict 条目会直接抛 AttributeError，
-        # 违反"处理器永远返回诚实状态、不崩溃"的契约。这里直接跳过非 dict
-        # 条目，语义与 transcriber.segments.normalize_segments 对非 dict
-        # 条目"直接跳过"保持一致，避免同一类脏数据在两处产生不同的容忍口径。
+        # 入口过滤：跳过两类没有留存价值的脏条目，过滤后才进入下面的门控/LLM
+        # 调用流程：
+        # 1. 非 dict 条目（如 JSON null 反序列化成 None，或上游脏数据混进裸
+        #    字符串）——下面所有逻辑都假设每条 segment 是 dict、可以
+        #    .get(...)，非 dict 条目会直接抛 AttributeError，违反"处理器
+        #    永远返回诚实状态、不崩溃"的契约。
+        # 2. text 缺失/非 str/strip 后为空（含纯空白）的条目——这类条目对
+        #    章节生成没有任何留存价值：不贡献任何可读正文，却仍会占用一个
+        #    编号、计入 segment_count。若不过滤，"一个长正文 segment + 一个
+        #    空白 cue"就能绕开门控 2.5（有效 segment 数 < 2 时跳过 LLM 调用）
+        #    ——空白 cue 让 segment_count 虚高到 2，实际只有一条有内容的
+        #    segment，同样没有可分章的内部边界；更进一步，即便侥幸通过门控
+        #    也可能被 LLM 选为某章的 start_seg，生成一个内容为空的"幽灵章节"。
+        #
+        # 两类过滤合并为一次遍历、共用同一份 warning 语义，与
+        # transcriber.segments.normalize_segments 对非 dict"直接跳过"、对
+        # 空文本"没有留存价值，跳过"的口径保持一致，避免同一类脏数据在两处
+        # 产生不同的容忍口径。
+        #
+        # 关键：过滤时保留每条幸存 segment 的**原始下标**（`enumerate(segments)`
+        # 里的 orig_idx，过滤前的位置），而不是丢弃原始下标、事后用
+        # `enumerate(filtered_segments)` 重新编号。原始下标才是调用方手上那份
+        # 原始 segments 列表的真实坐标——后续编号正文、语义校验、end_seg/时间
+        # 推导全部围绕这份原始下标进行，start_seg/end_seg 才能一直索引调用方
+        # 的原始列表，不因过滤而错位（见 `Chapter` 类文档）。
         original_count = len(segments)
-        segments = [seg for seg in segments if isinstance(seg, dict)]
-        filtered_count = original_count - len(segments)
-        if filtered_count > 0:
+        filtered_pairs: List[Tuple[int, Dict[str, Any]]] = []
+        non_dict_count = 0
+        blank_text_count = 0
+        for orig_idx, seg in enumerate(segments):
+            if not isinstance(seg, dict):
+                non_dict_count += 1
+                continue
+            text = seg.get("text")
+            if not isinstance(text, str) or not text.strip():
+                blank_text_count += 1
+                continue
+            filtered_pairs.append((orig_idx, seg))
+        segments = [seg for _, seg in filtered_pairs]
+
+        if non_dict_count > 0:
             logger.warning(
-                f"[CHAPTERS] Filtered {filtered_count} non-dict segment "
+                f"[CHAPTERS] Filtered {non_dict_count} non-dict segment "
                 f"entries out of {original_count} (upstream data quality issue)"
+            )
+        if blank_text_count > 0:
+            logger.warning(
+                f"[CHAPTERS] Filtered {blank_text_count} blank-text segment "
+                f"entries out of {original_count} (text missing, non-string, "
+                f"or blank after strip -- no retention value)"
             )
         if not segments:
             logger.info(
-                "[CHAPTERS] All segments were non-dict entries after "
-                "filtering, skipping (no timeline)"
+                "[CHAPTERS] All segments were filtered out (non-dict or "
+                "blank text), skipping (no timeline)"
             )
             return ChaptersResult(
                 chapters=[], status=ChaptersStatus.SKIPPED_NO_TIMELINE,
                 error=None, fingerprint=None, segment_count=0,
             )
 
-        segment_count = len(segments)
-        full_text = "".join((seg.get("text") or "") for seg in segments)
-        # 指纹覆盖每条 segment 的 text + 规范化后的 start_time/end_time（细节见
-        # `_compute_fingerprint`），而不是只哈希文本拼接——full_text 本身继续
-        # 只用于下面的长度门控，不受指纹算法影响。
-        fingerprint = _compute_fingerprint(segments)
+        # 幸存原始下标列表（按原始顺序升序，enumerate 天然保证），供后面语义
+        # 校验（成员关系）、end_seg 推导（在幸存序列中回退一位）复用，避免
+        # 各处各自重新计算、口径不一致。
+        survived_indices: List[int] = [idx for idx, _ in filtered_pairs]
+
+        segment_count = len(filtered_pairs)
+        full_text = "".join((seg.get("text") or "") for _, seg in filtered_pairs)
+        # 指纹覆盖每条 segment 的原始下标 + text + 规范化后的 start_time/
+        # end_time（细节见 `_compute_fingerprint`），而不是只哈希文本拼接
+        # ——full_text 本身继续只用于下面的长度门控，不受指纹算法影响。传入
+        # filtered_pairs（原始下标, segment）而非下面清洗后的 sanitized_pairs：
+        # 指纹必须如实反映输入本身，用清洗前的原始时间值，不能用
+        # `_sanitize_segment_time_fields` 清洗后的值（gate-r23 P2，详见该
+        # 函数文档的"指纹例外"说明）；原始下标同样必须随过滤前的位置一并
+        # 进入指纹，否则"幸存内容不变、但前面多插了一个会被过滤掉的空白
+        # 条目"这类导致原始下标整体平移的输入会被误判为指纹未变（gate-r17
+        # P2，详见 `_compute_fingerprint` 文档）。
+        fingerprint = _compute_fingerprint(filtered_pairs)
+
+        # gate-r23 P2 修复：入口过滤只保证每条幸存 segment 有非空 text，并不
+        # 保证其 start_time/end_time 本身自洽——调用方可能直接喂进未经
+        # `transcriber.segments.normalize_segments` 清洗的原始 dialogs，
+        # 某条 segment 完全可能自身倒挂（如 start=240, end=200）。对每条幸存
+        # segment 单独跑一遍权威清洗 `sanitize_time_pair`（见
+        # `_sanitize_segment_time_fields` 文档），清洗后的时间用于下面
+        # has_any_start_time 判断、`_build_segment_lines` 构建 prompt、以及
+        # 后面 `_derive_times` 的时间反查——指纹已在上面用清洗前的
+        # filtered_pairs 算完，不受这一步影响。
+        sanitized_pairs: List[Tuple[int, Dict[str, Any]]] = [
+            (orig_idx, _sanitize_segment_time_fields(seg, orig_idx))
+            for orig_idx, seg in filtered_pairs
+        ]
+        segments = [seg for _, seg in sanitized_pairs]
+        # 原始下标 -> 清洗后 segment 的映射，供 end_seg 推导（在幸存序列中
+        # 回退一位）、时间反查（按原始下标查表）复用。
+        segment_by_index: Dict[int, Dict[str, Any]] = dict(sanitized_pairs)
 
         # 门控 2：segments 非空，但没有任何一条能解析出 start_time —— 章节功能
         # 的核心价值就是时间范围，完全没有时间信息时生成出来的章节也没有意义。
@@ -689,12 +1137,38 @@ class ChaptersProcessor:
         # 仅测量 full_text 会漏判，实际发送的 prompt 仍可能远超模型上限。
         # 注：门控 3（min_chapters_threshold）语义是"内容量是否值得分章"，与发送
         # 开销无关，继续用 full_text 测量，不受这里影响。
-        segment_lines = _build_segment_lines(segments)
+        # 传入 sanitized_pairs（原始下标, 已清洗时间的 segment）而非 segments：
+        # 编号必须用原始下标，见 `_build_segment_lines` 文档；时间戳展示同样
+        # 要用清洗后的值（gate-r23 P2），与 has_any_start_time 判断、
+        # `_derive_times` 时间反查口径一致，指纹已单独用清洗前的 filtered_pairs
+        # 算过，不受此处影响。
+        segment_lines = _build_segment_lines(sanitized_pairs)
 
-        # 门控 4：原文过长，直接判失败而不是把超大输入硬塞给模型
-        if len(segment_lines) > self.config.max_chapters_input_chars:
+        # title/author/description 同样会拼进 user prompt（见
+        # `build_chapters_user_prompt`），门控 4 若只测 segment_lines 会漏算
+        # 这部分开销——description 尤其可能长达数 KB 甚至更长（gate-r21 P3）。
+        # 这里先做防御性截断（`_truncate_description`），再统一压平
+        # （`_flatten_for_prompt`——同时也是"伪造编号行"问题的统一防线，见其
+        # 文档）。压平/截断后的结果既用于下面的门控测量，也直接传给
+        # `_generate_with_retry` 构建实际 prompt：两处用的是同一份字符串，
+        # 门控测量的长度与真正发送的内容不会产生分歧。
+        description = _truncate_description(description)
+        flat_title = _flatten_for_prompt(title)
+        flat_author = _flatten_for_prompt(author)
+        flat_description = _flatten_for_prompt(description)
+
+        # 门控 4：原文过长，直接判失败而不是把超大输入硬塞给模型。测量口径是
+        # segment_lines 长度 + 压平后元数据（title/author/description）长度
+        # 之和——user prompt 里固定的模板文案（"**内容辅助信息**："、
+        # "**编号正文**（请基于以下编号划分章节）："等字面量）开销只有几十
+        # 字符，相对 max_chapters_input_chars 的量级（通常是万级以上）可以
+        # 忽略不计，不纳入测量。
+        metadata_chars = len(flat_title) + len(flat_author) + len(flat_description)
+        prompt_chars = len(segment_lines) + metadata_chars
+        if prompt_chars > self.config.max_chapters_input_chars:
             error = (
-                f"Input too long for chapters: {len(segment_lines)} chars > "
+                f"Input too long for chapters: {prompt_chars} chars "
+                f"(segment_lines={len(segment_lines)} + metadata={metadata_chars}) > "
                 f"max_chapters_input_chars={self.config.max_chapters_input_chars}"
             )
             logger.error(f"[CHAPTERS] {error}")
@@ -730,21 +1204,40 @@ class ChaptersProcessor:
             )
 
         # 步骤 2：调用 LLM（内含语义校验失败时的单次重试）——segment_lines 已在
-        # 门控 4 处构建完毕，此处直接复用，避免重复压缩同一份输入。
+        # 门控 4 处构建完毕，此处直接复用，避免重复压缩同一份输入。传入
+        # survived_indices（原始下标集合）而非 segment_count：语义校验必须
+        # 按幸存原始下标的成员关系判定，不是简单的区间校验，见
+        # `_validate_and_normalize_start_segs` 文档。传入 flat_title/
+        # flat_author/flat_description（已截断 + 压平）而非原始 title/
+        # author/description：门控 4 的长度测量与实际发送给 LLM 的内容必须
+        # 是同一份字符串，且压平是"伪造编号行"问题的统一防线（见
+        # `_flatten_for_prompt` 文档），不能在这里退回未压平的原始值。
         normalized, raw_chapters, call_error = self._generate_with_retry(
             segment_lines=segment_lines,
-            title=title,
-            author=author,
-            description=description,
+            title=flat_title,
+            author=flat_author,
+            description=flat_description,
             model=model,
             reasoning_effort=reasoning_effort,
-            segment_count=segment_count,
+            survived_indices=survived_indices,
         )
 
         if normalized is None:
             error = call_error or "chapters generation failed"
             if raw_chapters is not None:
-                error = f"{error} | raw={raw_chapters!r}"
+                # gate-r27 P3：raw_chapters 是 LLM 最后一次尝试的完整原始
+                # 返回，未经任何截断——两次尝试都返回超大非法 title/gist
+                # （如 50 万字符垃圾）时，裸 `{raw_chapters!r}` 会让这里的
+                # error（连带下面的日志）膨胀到同一量级。诊断留痕只需要
+                # "错误类别（error 本身）+ 截断样本"，不需要全量原文，复用
+                # `_truncate_repr_for_hint` 的截断策略，但配一套独立的、
+                # 更宽松的上限（终态诊断场景，不像 retry_hint 那样会被回显
+                # 进下一次 prompt），详见 `_FINAL_ERROR_RAW_CHAPTERS_MAX_CHARS`
+                # 文档。
+                error = (
+                    f"{error} | raw="
+                    f"{_truncate_repr_for_hint(raw_chapters, _FINAL_ERROR_RAW_CHAPTERS_MAX_CHARS, _FINAL_ERROR_RAW_CHAPTERS_TRUNCATE_TO)}"
+                )
             logger.error(f"[CHAPTERS] {error}")
             return ChaptersResult(
                 chapters=[], status=ChaptersStatus.FAILED,
@@ -763,9 +1256,11 @@ class ChaptersProcessor:
                 error=error, fingerprint=fingerprint, segment_count=segment_count,
             )
 
-        # 步骤 4：推导 end_seg 与 start_time/end_time
-        _derive_end_segs(normalized, segment_count)
-        _derive_times(normalized, segments)
+        # 步骤 4：推导 end_seg 与 start_time/end_time——均按原始下标进行
+        # （survived_indices/segment_by_index），不能再用 segment_count/
+        # segments 做位置换算，见 `_derive_end_segs`/`_derive_times` 文档。
+        _derive_end_segs(normalized, survived_indices)
+        _derive_times(normalized, segment_by_index)
 
         # 步骤 5：合并相邻同名章节
         merged = _merge_adjacent_same_title(normalized)
@@ -827,13 +1322,22 @@ class ChaptersProcessor:
         description: str,
         model: str,
         reasoning_effort: Optional[str],
-        segment_count: int,
+        survived_indices: List[int],
     ) -> tuple[Optional[List[Dict[str, Any]]], Any, Optional[str]]:
         """调用 LLM 生成章节，若语义校验失败则携带具体错误重试一次。
 
         LLM 调用强制走 json_object 模式（force_json_mode="json_object"）：
         json_schema 严格模式失败即返回、没有重试，本方法依赖的"重试"语义完全
         建立在 json_object 模式的 Self-Correction 能力之上。
+
+        Args:
+            title/author/description: 调用方（`_process_impl`）必须已经用
+                `_truncate_description`（仅 description）+ `_flatten_for_prompt`
+                处理过——本方法不重复压平/截断，直接原样拼进 prompt。这是
+                "伪造编号行"防线（见 `_flatten_for_prompt` 文档）与门控 4
+                长度测量口径一致性（见 `_process_impl` 门控 4 注释）共同要求
+                的前提：门控测量的必须是"实际发送的那份字符串"，若本方法再
+                自行处理一遍，测量口径与实际发送内容就可能产生分歧。
 
         Returns:
             (normalized_chapters, raw_chapters, error):
@@ -872,7 +1376,7 @@ class ChaptersProcessor:
 
             raw_chapters = (response.structured_output or {}).get("chapters")
             normalized, validation_error = _validate_and_normalize_start_segs(
-                raw_chapters, segment_count
+                raw_chapters, survived_indices
             )
 
             if normalized is not None:
@@ -890,7 +1394,10 @@ class ChaptersProcessor:
                     video_title=title,
                     author=author,
                     description=description,
-                    retry_hint=validation_error,
+                    # 不能直接传 validation_error 原文——它可能回显了 LLM
+                    # 自己返回的非法 title/gist 原文（gate-r24 P2），必须先
+                    # 经 `_build_retry_hint` 做整体截断 + 压平，见其文档。
+                    retry_hint=_build_retry_hint(validation_error),
                 )
 
         return None, raw_chapters, f"Semantic validation failed after retry: {validation_error}"

@@ -12,6 +12,9 @@ per project convention.
 """
 
 import json
+import os
+
+import pytest
 
 from video_transcript_api.transcriber.segments import (
     load_segments,
@@ -47,6 +50,34 @@ class TestParseTimeToSeconds:
 
     def test_mm_ss_string(self):
         assert parse_time_to_seconds("02:03") == 123.0
+
+    def test_hh_mm_ss_invalid_minutes_component_returns_none(self):
+        # gate-r17 P2: "corrupted clock components must not masquerade as a
+        # real time" -- a three-segment HH:MM:SS string's minutes component
+        # must be < 60. Before this fix, "00:99:00" silently converted to
+        # 99*60 = 5940 seconds, a fabricated timestamp.
+        assert parse_time_to_seconds("00:99:00") is None
+
+    def test_hh_mm_ss_invalid_seconds_component_returns_none(self):
+        # Same rule applied to the seconds component of a three-segment
+        # HH:MM:SS string: "00:00:99" used to silently convert to 99 seconds.
+        assert parse_time_to_seconds("00:00:99") is None
+
+    def test_hh_mm_ss_unbounded_hours_component_is_valid(self):
+        # Only minutes/seconds are clock-bounded; hours has no upper bound
+        # (a long recording can legitimately exceed 99 hours).
+        assert parse_time_to_seconds("120:00:00") == 432000.0
+
+    def test_mm_ss_invalid_seconds_component_returns_none(self):
+        # Two-segment MM:SS: seconds must be < 60. "00:99" used to silently
+        # convert to 99 seconds.
+        assert parse_time_to_seconds("00:99") is None
+
+    def test_mm_ss_unbounded_minutes_component_is_valid(self):
+        # Minutes has no upper bound in the two-segment MM:SS form -- this is
+        # a legitimate "total minutes" representation (e.g. from a duration
+        # counter), unlike the three-segment HH:MM:SS clock form.
+        assert parse_time_to_seconds("125:30") == 7530.0
 
     def test_none_returns_none(self):
         assert parse_time_to_seconds(None) is None
@@ -136,6 +167,45 @@ class TestParseTimeToSeconds:
         # huge-but-valid timestamp.
         assert parse_time_to_seconds("1e309") is None
         assert parse_time_to_seconds("-1e309") is None
+
+    # -- gate-r25 P2: clock components must be plain digit strings, not --
+    # -- anything float() happens to accept (decimals / sci-notation /  --
+    # -- underscore digit grouping) -- except the trailing seconds      --
+    # -- component, which may carry an optional decimal fraction.      --
+
+    def test_decimal_hours_component_returns_none(self):
+        # "0.5:00:00" -- a non-last (hours) component with a decimal point.
+        # float("0.5") happily parses to 0.5, so before this fix this
+        # silently became 0.5*3600 = 1800.0 seconds -- a fabricated time from
+        # a component that is not the legal trailing "seconds" position.
+        assert parse_time_to_seconds("0.5:00:00") is None
+
+    def test_scientific_notation_component_returns_none(self):
+        # "1e2:00" -- a non-last (minutes) component in scientific notation.
+        # float("1e2") == 100.0, so before this fix this silently became
+        # 100*60 = 6000.0 seconds.
+        assert parse_time_to_seconds("1e2:00") is None
+
+    def test_underscore_digit_grouping_component_returns_none(self):
+        # "1_0:00" -- Python's float() accepts PEP 515 digit-grouping
+        # underscores in numeric strings (float("1_0") == 10.0), so before
+        # this fix this silently became 10*60 = 600.0 seconds.
+        assert parse_time_to_seconds("1_0:00") is None
+
+    def test_trailing_seconds_component_with_decimal_fraction_is_valid(self):
+        # The one deliberate exception: the last (seconds) component may
+        # carry a decimal fraction -- "00:01:23.4" is a legitimate
+        # sub-second-precision timestamp and must still resolve to 83.4,
+        # not be rejected by the new stricter per-component check.
+        assert parse_time_to_seconds("00:01:23.4") == 83.4
+
+    def test_non_last_component_with_decimal_fraction_still_rejected(self):
+        # The decimal-fraction exception is scoped to the trailing
+        # (seconds) component only -- "01:23.4:00" (decimal in the middle
+        # "minutes" slot of a 3-part HH:MM:SS string) must still be
+        # rejected, confirming the exception isn't accidentally applied to
+        # every component.
+        assert parse_time_to_seconds("01:23.4:00") is None
 
 
 # ---------------------------------------------------------------------------
@@ -365,3 +435,100 @@ class TestLoadSegments:
             b'{"segments": [{"start_time": 0.0, "end_time": 1.0, "text": "bad \xff\xfe byte"}]}'
         )
         assert load_segments(tmp_path) is None
+
+    def test_deeply_nested_json_recursion_error_returns_none_without_raising(self, tmp_path):
+        # gate-r17 P3: json.load() on pathologically deep nesting raises
+        # RecursionError, which is a RuntimeError subclass -- NOT covered by
+        # the (OSError, json.JSONDecodeError, UnicodeDecodeError) except
+        # tuple. Before this fix, this would propagate uncaught, violating
+        # this module's "never raises, fall back to the next source" contract.
+        deeply_nested = "[" * 100_000 + "]" * 100_000
+        (tmp_path / "transcript_funasr.json").write_text(deeply_nested, encoding="utf-8")
+        assert load_segments(tmp_path) is None
+
+    def test_deeply_nested_json_falls_back_to_valid_capswriter(self, tmp_path):
+        # Same as other corrupted-primary-source cases: a RecursionError on
+        # transcript_funasr.json must not block falling back to a valid
+        # transcript_capswriter.json.
+        deeply_nested = "[" * 100_000 + "]" * 100_000
+        (tmp_path / "transcript_funasr.json").write_text(deeply_nested, encoding="utf-8")
+        capswriter_data = {
+            "segments": [{"start_time": 0.0, "end_time": 1.0, "text": "fallback ok"}]
+        }
+        (tmp_path / "transcript_capswriter.json").write_text(
+            json.dumps(capswriter_data, ensure_ascii=False), encoding="utf-8"
+        )
+        result = load_segments(tmp_path)
+        assert result == [{"start_time": 0.0, "end_time": 1.0, "text": "fallback ok"}]
+
+    def test_int_digit_limit_value_error_falls_back_to_valid_capswriter(self, tmp_path):
+        # gate-r26 P2: Python 3.11+ enforces a 4300-digit limit on int<->str
+        # conversion (bpo-95778 / sys.set_int_max_str_digits). json.load() on
+        # a document containing an integer literal with more digits than
+        # that raises a BARE ValueError deep inside int() parsing -- NOT a
+        # json.JSONDecodeError, even though JSONDecodeError is itself a
+        # ValueError subclass. An except tuple that only lists
+        # json.JSONDecodeError (rather than the broader ValueError) misses
+        # this case entirely, so it used to propagate uncaught and break
+        # this module's "never raises, fall back to the next source"
+        # contract. The corrupted primary source must be treated the same
+        # as any other malformed one: fall back to the next-priority source.
+        huge_digits = "9" * 5000
+        (tmp_path / "transcript_funasr.json").write_text(
+            '{"segments": [{"start_time": ' + huge_digits + ', "end_time": 1.0, "text": "huge int"}]}',
+            encoding="utf-8",
+        )
+        capswriter_data = {
+            "segments": [{"start_time": 0.0, "end_time": 1.0, "text": "fallback ok"}]
+        }
+        (tmp_path / "transcript_capswriter.json").write_text(
+            json.dumps(capswriter_data, ensure_ascii=False), encoding="utf-8"
+        )
+        result = load_segments(tmp_path)
+        assert result == [{"start_time": 0.0, "end_time": 1.0, "text": "fallback ok"}]
+
+    def test_int_digit_limit_value_error_only_returns_none_without_raising(self, tmp_path):
+        # Same trigger as above, but with no fallback source available: must
+        # degrade to None rather than raising.
+        huge_digits = "9" * 5000
+        (tmp_path / "transcript_funasr.json").write_text(
+            '{"segments": [{"start_time": ' + huge_digits + ', "end_time": 1.0, "text": "huge int"}]}',
+            encoding="utf-8",
+        )
+        assert load_segments(tmp_path) is None
+
+    def test_unreadable_cache_dir_returns_none_without_raising(self, tmp_path):
+        # gate-r19 P2: Path.exists() only silently swallows ENOENT/ENOTDIR-style
+        # errors -- it re-raises PermissionError (EACCES). The previous
+        # implementation called `file_path.exists()` OUTSIDE the try block, so
+        # a cache directory whose parent lacks the execute bit (unreadable by
+        # this process, e.g. a permissions misconfiguration in production)
+        # would make load_segments() raise PermissionError instead of
+        # returning None, violating this module's "never raises" contract.
+        locked_dir = tmp_path / "locked_cache"
+        locked_dir.mkdir()
+        # A file need not actually exist inside locked_dir -- the point is
+        # that *stat'ing* anything under it fails once the directory itself
+        # is inaccessible (its execute/search bit is required to resolve any
+        # path beneath it).
+        os.chmod(locked_dir, 0o000)
+        try:
+            probe = locked_dir / "transcript_funasr.json"
+            try:
+                probe.exists()
+            except PermissionError:
+                pass
+            else:
+                # chmod 0o000 did not actually block traversal in this
+                # environment (e.g. running as root, where the kernel's
+                # permission checks are bypassed) -- the experiment is moot,
+                # skip rather than reporting a false pass.
+                pytest.skip(
+                    "chmod 0o000 did not block directory access in this "
+                    "environment (likely running as root); cannot exercise "
+                    "the PermissionError path"
+                )
+            assert load_segments(locked_dir) is None
+        finally:
+            # Restore access so pytest's tmp_path cleanup can remove the dir.
+            os.chmod(locked_dir, 0o755)

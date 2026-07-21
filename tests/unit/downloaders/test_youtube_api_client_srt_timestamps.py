@@ -22,7 +22,7 @@ timestamp lines entirely. These tests lock down:
 All console output must be in English only (no emoji, no Chinese).
 """
 
-from video_transcript_api.downloaders.subtitle_types import SubtitleResult
+from video_transcript_api.downloaders.subtitle_types import SubtitleResult, sanitize_time_pair
 from video_transcript_api.downloaders.youtube_api_client import YouTubeApiClient
 
 
@@ -166,7 +166,309 @@ SRT_CORRUPTED_TIMELINE_WITH_LETTER = (
     "Hello world\n"
 )
 
+# gate-r17 P2: syntactically well-formed (two digits per field) but
+# semantically bogus -- "99" seconds is not a valid clock value (seconds
+# must be < 60). Before that fix, the regex only checked digit COUNT, not
+# clock-VALIDITY, so this silently converted to 99 seconds via
+# hours*3600+minutes*60+seconds -- the same "corrupted time masquerading as
+# real time" bug fixed for parse_time_to_seconds in transcriber/segments.py.
+#
+# gate-r26 P2: start/end are now validated independently. Only the START
+# side is malformed here -- the END side ("00:00:04,000") is perfectly
+# well formed, so end_time must be preserved (4.0), not nulled out just
+# because its sibling side is corrupted.
+SRT_INVALID_SECONDS_COMPONENT = (
+    "1\n"
+    "00:00:99,000 --> 00:00:04,000\n"
+    "Hello world\n"
+)
+
+# Same rule applied to the minutes component: "00:99:00,000" claims 99
+# minutes, also invalid. gate-r26 P2: only start_time is nulled; end_time
+# (4.0) is preserved.
+SRT_INVALID_MINUTES_COMPONENT = (
+    "1\n"
+    "00:99:00,000 --> 00:00:04,000\n"
+    "Hello world\n"
+)
+
+# gate-r24 P2: _SRT_TIMESTAMP_RANGE_PATTERN is used with .match(), which only
+# anchors the START of the line -- a fourth trailing millisecond digit past
+# the well-formed 3-digit field is simply left unconsumed and ignored, so the
+# loose match still "succeeds" and extracts a start/end time as if the line
+# were perfectly well-formed. The loose match still recognizes the line as a
+# cue boundary (so the cue's text is not lost, and legacy parse_srt_to_text's
+# output is completely unaffected -- that path is untouched), but the time
+# VALUES must come from a strict, fully-anchored match and fall back to None
+# for whichever side isn't exactly a well-formed timestamp.
+#
+# gate-r26 P2: only the corrupted END side (the extra trailing ms digit) is
+# nulled; the well-formed START side ("00:00:01,000") must be preserved.
+SRT_TRAILING_EXTRA_MS_DIGIT = (
+    "1\n"
+    "00:00:01,000 --> 00:00:04,0000\n"
+    "Hello world\n"
+)
+
+# Same bug, different shape: arbitrary trailing garbage characters after an
+# otherwise perfectly well-formed END timestamp. gate-r26 P2: only end_time
+# is nulled; start_time (1.0) is preserved.
+SRT_TRAILING_GARBAGE_AFTER_TIMESTAMP = (
+    "1\n"
+    "00:00:01,000 --> 00:00:04,000 garbage\n"
+    "Hello world\n"
+)
+
+# gate-r25 P2: _SRT_TIMESTAMP_STRICT_PATTERN's millisecond groups were
+# `\d{1,3}` (1-3 digits), while the standard SRT millisecond field is always
+# exactly 3 digits (zero-padded, e.g. "000"). A non-standard digit count
+# (1 or 2 digits) is a corrupted timestamp, not a legitimately-formatted
+# alternative -- it must be treated the same as any other corrupted side
+# (that side's time = None), not silently accepted as a real time.
+#
+# gate-r26 P2: the malformed side here is START ("00:00:01,1"); the
+# well-formed END side ("00:00:04,000") must be preserved (4.0), not
+# nulled out just because its sibling side is corrupted.
+SRT_SINGLE_DIGIT_MILLISECOND = (
+    "1\n"
+    "00:00:01,1 --> 00:00:04,000\n"
+    "Hello world\n"
+)
+
+# Same rule for a 2-digit millisecond field ("...,12") on the START side.
+SRT_TWO_DIGIT_MILLISECOND = (
+    "1\n"
+    "00:00:01,12 --> 00:00:04,000\n"
+    "Hello world\n"
+)
+
+# gate-r26 P2: dedicated fixtures for the independent-side-validation fix
+# itself (the fixtures above predate the fix and happen to also exercise it
+# once their expectations are updated; these are the motivating examples
+# from the fix description).
+#
+# Only the END side's minutes component is invalid ("99" minutes); the
+# START side is perfectly well formed. A legitimate start time must not be
+# discarded just because the end of the same cue is corrupted -- start is
+# what chapter anchoring needs most.
+SRT_END_MINUTES_INVALID = (
+    "1\n"
+    "00:00:01,000 --> 00:99:04,000\n"
+    "Hello world\n"
+)
+
+# Only the END side's millisecond field is malformed (2 digits instead of
+# the standard 3); the START side is perfectly well formed.
+SRT_END_MS_NOT_THREE_DIGITS = (
+    "1\n"
+    "00:00:01,000 --> 00:00:04,12\n"
+    "Hello world\n"
+)
+
+# BOTH sides malformed (invalid minutes component on each side) -- this must
+# degrade to the same result as full corruption: both start_time and
+# end_time are None.
+SRT_BOTH_SIDES_INVALID = (
+    "1\n"
+    "00:99:01,000 --> 00:99:04,000\n"
+    "Hello world\n"
+)
+
+# gate-r27 P2: a cue whose timeline row is entirely missing (mirrors
+# SRT_ORPHAN_ARROW_BODY_NO_TIME_STYLE's structure), where the orphaned body
+# text itself contains "-->" AND happens to have a "12:34"-style time
+# fragment on exactly one side ("12:30" on the left of "Meet at 12:30 -->
+# lobby"; "lobby" on the right has no digits at all). Before the AND fix,
+# the old "at least one side" (OR) rule misclassified this as a corrupted
+# timeline declaration, silently swallowing the body text itself (the
+# text-collection loop for the "next cue" starts scanning *after* this
+# line, so the line's own content is never captured anywhere).
+SRT_CUE_BODY_ONE_SIDED_TIME_STYLE_THEN_GARBAGE_SIDE = (
+    "1\n"
+    "00:00:01,000 --> 00:00:02,000\n"
+    "First line\n"
+    "\n"
+    "42\n"
+    "Meet at 12:30 --> lobby\n"
+    "\n"
+    "3\n"
+    "00:00:05,000 --> 00:00:06,000\n"
+    "Third line\n"
+)
+
+# gate-r28 P2: the AND fix (gate-r27) still isn't enough -- it only guards
+# against ONE side having a time-style fragment. When a cue's timeline row is
+# entirely missing and the orphaned body text's first line contains "-->"
+# with a time-style fragment on BOTH sides ("12:30" on the left of "Meet at
+# 12:30 --> leave at 13:00", "13:00" on the right), the old AND rule (both
+# sides must match) is satisfied and this line is misclassified as a
+# corrupted timeline declaration -- silently swallowing the body text itself
+# (the "next cue" text-collection loop starts scanning *after* this line, so
+# its own content never lands anywhere). Legacy `parse_srt_to_text` never
+# recognized this line as a timeline row in the first place (it doesn't match
+# the full "HH:MM:SS,mmm --> HH:MM:SS,mmm" shape), so it keeps the line as
+# literal body text -- text and segments disagree.
+SRT_CUE_BODY_BOTH_SIDES_TIME_STYLE_NOT_LEGACY_TIMELINE = (
+    "1\n"
+    "00:00:01,000 --> 00:00:02,000\n"
+    "First line\n"
+    "\n"
+    "42\n"
+    "Meet at 12:30 --> leave at 13:00\n"
+    "\n"
+    "3\n"
+    "00:00:05,000 --> 00:00:06,000\n"
+    "Third line\n"
+)
+
+# gate-r27 P2: dedicated non-regression fixture for the AND fix -- a
+# genuinely corrupted timeline row where BOTH sides still contain a
+# "12:34"-style digit+colon fragment ("00:00" / "00:00:04") must keep being
+# recognized as a damaged timeline boundary (not reclassified as body text
+# just because the AND guard was tightened).
+SRT_GATE_R27_BOTH_SIDES_TIME_STYLE_STILL_BROKEN = (
+    "1\n"
+    "00:00:0Y --> 00:00:04\n"
+    "Hello world\n"
+)
+
+# gate-r27 P2: consistency fixture for a "-->" row where one side is a
+# complete, well-formed timestamp and the other side is arbitrary garbage
+# with no digit+colon fragment at all ("00:00:01,000 --> garbage"). Placed
+# after a normal, fully recognized cue so `found_any_cue` is already True,
+# letting us directly observe how this specific row is classified (rather
+# than the whole SRT collapsing to segments=None for having no recognizable
+# cue at all).
+SRT_ONE_SIDE_FULL_TIMESTAMP_OTHER_SIDE_GARBAGE = (
+    "1\n"
+    "00:00:01,000 --> 00:00:04,000\n"
+    "Hello world\n"
+    "\n"
+    "2\n"
+    "00:00:01,000 --> garbage\n"
+    "Second cue text\n"
+)
+
 SRT_EMPTY = ""
+
+# gate-r16 P2: a UTF-8 BOM (U+FEFF) prepended to the file content (as many
+# editors/exporters do) lands on the very first index line, turning "1" into
+# "﻿1". str.strip() does NOT remove U+FEFF (it is not whitespace by
+# Python's definition), so the segments-extraction path's index-row
+# recognition ("﻿1".isdigit() is False) used to misclassify it as
+# ordinary orphan body text instead of a real index row -- producing a bogus
+# leading segment (text="﻿1", start_time/end_time=None) ahead of the
+# real first cue.
+SRT_WITH_BOM = (
+    "﻿1\n"
+    "00:00:01,000 --> 00:00:04,000\n"
+    "Hello world\n"
+    "\n"
+    "2\n"
+    "00:00:05,000 --> 00:00:08,000\n"
+    "This is a test\n"
+)
+
+# ---------------------------------------------------------------------------
+# gate-r28 P2: additional property-test-only fixtures, covering edge shapes
+# not already exercised by a fixture above (see
+# test_property_segments_text_concatenation_matches_result_text_for_any_srt).
+# ---------------------------------------------------------------------------
+
+# A bare "-->" with nothing on either side (no digits at all) as orphan body
+# text -- must not crash the time-style/strict-side regex matching and must
+# be treated as ordinary text, same as legacy.
+SRT_BARE_ARROW_NO_CONTENT = (
+    "1\n"
+    "00:00:01,000 --> 00:00:02,000\n"
+    "First line\n"
+    "\n"
+    "42\n"
+    "-->\n"
+    "\n"
+    "3\n"
+    "00:00:05,000 --> 00:00:06,000\n"
+    "Third line\n"
+)
+
+# Two consecutive "looks broken" attempts stacked back to back in the same
+# orphan block -- stress-tests that the shared judgment function is applied
+# uniformly line by line, not just to the first offender.
+SRT_STACKED_BROKEN_LOOKING_LINES = (
+    "1\n"
+    "0:00:01 --> 0:00:02\n"
+    "Meet at 12:30 --> leave at 13:00\n"
+    "\n"
+    "2\n"
+    "00:00:05,000 --> 00:00:06,000\n"
+    "Real cue\n"
+)
+
+# Digit-dash-digit body text with no colon at all ("5 --> 10") -- never a
+# time-style fragment in the first place, must land as ordinary text.
+SRT_DASH_DIGITS_NO_COLON = (
+    "1\n"
+    "00:00:01,000 --> 00:00:02,000\n"
+    "First line\n"
+    "\n"
+    "42\n"
+    "5 --> 10\n"
+    "\n"
+    "3\n"
+    "00:00:05,000 --> 00:00:06,000\n"
+    "Third line\n"
+)
+
+# Tab characters around the arrow (instead of spaces) -- `_SRT_TIMESTAMP_
+# LINE_PATTERN`'s `\s*` matches any whitespace, including tabs, so this must
+# still be recognized as a valid timeline row exactly like the space-padded
+# form.
+SRT_TAB_PADDED_ARROW = (
+    "1\n"
+    "00:00:01,000\t-->\t00:00:04,000\n"
+    "Hello world\n"
+)
+
+# Unicode/emoji cue body content -- the timeline judgment and text
+# concatenation must be encoding-agnostic (project-wide cross-platform
+# encoding requirement).
+SRT_UNICODE_EMOJI_BODY = (
+    "1\n"
+    "00:00:01,000 --> 00:00:04,000\n"
+    "你好世界 🎬🎉\n"
+)
+
+# Multiple consecutive blank lines between cues -- must not produce a bogus
+# empty orphan segment or otherwise disturb cue boundary detection.
+SRT_MULTIPLE_BLANK_LINES_BETWEEN_CUES = (
+    "1\n"
+    "00:00:01,000 --> 00:00:02,000\n"
+    "First line\n"
+    "\n"
+    "\n"
+    "\n"
+    "2\n"
+    "00:00:05,000 --> 00:00:06,000\n"
+    "Second line\n"
+)
+
+# A "negative-looking" timestamp body line ("-1:00 --> -2:00") -- the leading
+# "-" means it never satisfies `\d{2}` at the start, so both legacy and
+# segments must treat it purely as text (it also happens to have a
+# colon+digit style on both sides, exercising the same shape as the
+# gate-r28 bug but with a leading minus sign).
+SRT_NEGATIVE_LOOKING_TIME_BODY = (
+    "1\n"
+    "00:00:01,000 --> 00:00:02,000\n"
+    "First line\n"
+    "\n"
+    "42\n"
+    "-1:00 --> -2:00\n"
+    "\n"
+    "3\n"
+    "00:00:05,000 --> 00:00:06,000\n"
+    "Third line\n"
+)
 
 
 def test_parse_srt_to_text_unchanged_for_normal_srt():
@@ -208,28 +510,45 @@ def test_missing_timestamp_falls_back_to_none_segments_text_unaffected():
     assert YouTubeApiClient.parse_srt_to_text(SRT_MISSING_TIMESTAMP) == result.text
 
 
-def test_malformed_timestamp_format_keeps_cue_in_segments_with_none_time():
-    """Malformed timestamp (single-digit hour) is not recognized as a valid
-    range, but it still contains the "-->" arrow, so it is recognized as a
-    (broken) cue boundary. Per the "text is never lost" invariant, the cue's
-    text must still land in segments, just with start_time/end_time = None.
-    Text extraction itself proceeds exactly like the legacy parser (the
-    unrecognized timestamp line is treated as literal text, unchanged)."""
+def test_malformed_timestamp_format_yields_none_segments_since_legacy_keeps_it_as_text():
+    """Malformed timestamp (single-digit hour on the START side, "0:00:01,000"
+    instead of "00:00:01,000") does not match `_SRT_TIMESTAMP_LINE_PATTERN`
+    at all -- and that pattern (via `_is_srt_timeline_declaration_line`) is
+    now the ONLY judge of "is this a timeline row", shared verbatim with
+    legacy `parse_srt_to_text`. Legacy therefore treats this whole line as
+    literal body content (it never recognized this line as a timeline row in
+    the first place), so the segments path must reach the identical verdict.
+
+    gate-r28 P2 (supersedes gate-r26's expectation for this fixture): this
+    SRT has no OTHER line that satisfies the strict timeline judgment either,
+    so once this line stops being treated as a (broken) cue boundary, the
+    whole file has no recognizable cue at all -- segments degrades to None,
+    mirroring legacy's "nothing recognized" case exactly. Text extraction is
+    completely unaffected (still byte-identical to the legacy parser)."""
     result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_BAD_TIMESTAMP_FORMAT)
 
-    assert result.segments == [
-        {"start_time": None, "end_time": None, "text": "Hello world"},
-    ]
+    assert result.segments is None
     assert result.text == "0:00:01,000 --> 00:00:04,000 Hello world"
     assert YouTubeApiClient.parse_srt_to_text(SRT_BAD_TIMESTAMP_FORMAT) == result.text
 
 
 def test_mixed_valid_and_broken_timeline_keeps_all_cue_text_in_segments():
-    """Mixed SRT: a valid cue, a cue with a corrupted timeline, and another
-    valid cue. All three cues' text must appear in segments (the corrupted
-    one with start_time/end_time = None) -- a downstream consumer iterating
-    segments must never silently lose the corrupted cue's text. The plain
-    text output is completely unaffected (byte-identical to legacy)."""
+    """Mixed SRT: a valid cue, a cue whose timeline row ("0:00:05,000 -->
+    00:00:08,000", single-digit hour) does not satisfy the strict
+    `_is_srt_timeline_declaration_line` judgment shared with legacy, and
+    another valid cue. All text must appear in segments -- a downstream
+    consumer iterating segments must never silently lose any of it. The
+    plain text output is completely unaffected (byte-identical to legacy).
+
+    gate-r28 P2 (supersedes gate-r26's expectation for this fixture): since
+    "0:00:05,000 --> 00:00:08,000" is not a timeline row from legacy's point
+    of view either (it never matches `_SRT_TIMESTAMP_LINE_PATTERN`), the
+    segments path now treats it the same way legacy does -- as literal body
+    text, not as a (broken) cue boundary. It merges into the surrounding
+    orphan text block with "Broken timestamp cue" as a single segment with
+    BOTH start_time and end_time None (not just start_time, since this line
+    is no longer recognized as a timeline declaration at all -- there is no
+    "end side" to independently preserve)."""
     result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_MIXED_VALID_AND_BROKEN_TIMELINE)
 
     assert result.text == (
@@ -240,12 +559,20 @@ def test_mixed_valid_and_broken_timeline_keeps_all_cue_text_in_segments():
 
     assert result.segments == [
         {"start_time": 1.0, "end_time": 4.0, "text": "Hello world"},
-        {"start_time": None, "end_time": None, "text": "Broken timestamp cue"},
+        {
+            "start_time": None,
+            "end_time": None,
+            "text": "0:00:05,000 --> 00:00:08,000 Broken timestamp cue",
+        },
         {"start_time": 9.0, "end_time": 10.0, "text": "Trailing valid cue"},
     ]
-    # Every cue's text must be present in segments -- nothing silently dropped.
-    segment_texts = {seg["text"] for seg in result.segments}
-    assert segment_texts == {"Hello world", "Broken timestamp cue", "Trailing valid cue"}
+    # Every cue's text must be present in segments -- nothing silently
+    # dropped. Concatenating segment texts (whitespace-normalized) must
+    # equal result.text (whitespace-normalized) -- the core invariant this
+    # gate-r28 fix guarantees constructively; see also
+    # test_property_segments_text_concatenation_matches_result_text_for_any_srt.
+    segment_texts = " ".join(seg["text"] for seg in result.segments)
+    assert segment_texts == result.text
 
 
 def test_body_text_containing_arrow_stays_in_cue_text_and_segments():
@@ -449,25 +776,221 @@ def test_orphan_body_text_containing_arrow_with_no_time_style_lands_as_none_time
     ) == result.text
 
 
-def test_corrupted_timeline_with_letter_and_time_style_still_treated_as_broken_timeline():
+def test_corrupted_timeline_with_letter_yields_none_segments_since_legacy_keeps_it_as_text():
     """A genuinely corrupted timeline row (e.g. a stray letter replacing a
-    digit: "00:00:0X --> 00:00:04") must NOT be reclassified as body text by
-    the new "looks like a time" guard -- both sides still contain a
-    "12:34"-style digit+colon fragment ("00:00" / "00:00:04"), so it must
-    keep being recognized as a damaged timeline boundary: the cue's text is
-    preserved with start_time/end_time = None (the regex itself still fails
-    to match, since "X" isn't a digit)."""
+    digit: "00:00:0X --> 00:00:04") does not match
+    `_SRT_TIMESTAMP_LINE_PATTERN` (no comma+millisecond field on either
+    side at all, since "X" isn't a digit) -- legacy `parse_srt_to_text` has
+    therefore always kept this whole line as literal body text, never
+    consumed it as a timeline row.
+
+    gate-r28 P2 (supersedes gate-r27's expectation for this fixture): the
+    old `_looks_like_timeline_attempt` heuristic used to "rescue" this line
+    as a damaged-but-recognized cue boundary (both sides have a "12:34"-style
+    digit+colon fragment). That heuristic is now removed entirely -- cue
+    boundary judgment is exactly legacy's own `.match()` decision, no more,
+    no less. Since this fixture is a single-cue SRT and this is its only
+    "-->" line, once it stops being recognized as a timeline declaration
+    there is no recognizable cue left in the whole file -- segments
+    degrades to None (mirroring legacy's "found nothing" case), while text
+    stays byte-identical to the legacy parser."""
     result = YouTubeApiClient.parse_srt_to_subtitle_result(
         SRT_CORRUPTED_TIMELINE_WITH_LETTER
     )
 
-    assert result.segments == [
-        {"start_time": None, "end_time": None, "text": "Hello world"},
-    ]
+    assert result.segments is None
     assert result.text == "00:00:0X --> 00:00:04 Hello world"
     assert YouTubeApiClient.parse_srt_to_text(
         SRT_CORRUPTED_TIMELINE_WITH_LETTER
     ) == result.text
+
+
+def test_invalid_seconds_component_nulls_only_start_end_preserved():
+    """A timestamp line can fully match the digit-count regex while still
+    carrying an out-of-range clock component: "00:00:99,000" claims 99
+    seconds, which is not a valid clock value. Per the same "corrupted clock
+    components must not masquerade as a real time" policy enforced by
+    parse_time_to_seconds (transcriber/segments.py, gate-r17 P2/P3), this
+    must NOT be silently converted to 99 seconds.
+
+    gate-r26 P2: only the malformed side (start) is nulled -- the
+    well-formed end side ("00:00:04,000") must be preserved as 4.0, not
+    discarded just because its sibling side is corrupted. Text preserved,
+    plain text output byte-identical to the legacy parser (which never
+    consumes the time value in the first place)."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_INVALID_SECONDS_COMPONENT)
+
+    assert result.segments == [
+        {"start_time": None, "end_time": 4.0, "text": "Hello world"},
+    ]
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_INVALID_SECONDS_COMPONENT
+    ) == result.text
+
+
+def test_invalid_minutes_component_nulls_only_start_end_preserved():
+    """Same rule applied to the minutes component: "00:99:00,000" claims 99
+    minutes, also invalid. gate-r26 P2: only start_time is nulled; end_time
+    (4.0) is preserved."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_INVALID_MINUTES_COMPONENT)
+
+    assert result.segments == [
+        {"start_time": None, "end_time": 4.0, "text": "Hello world"},
+    ]
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_INVALID_MINUTES_COMPONENT
+    ) == result.text
+
+
+def test_trailing_extra_ms_digit_nulls_only_end_start_preserved():
+    """gate-r24 P2: a fourth trailing millisecond digit ("...,0000" instead of
+    the well-formed 3-digit "...,000") must not be silently accepted as a
+    legal time -- the loose .match()-based cue-boundary detection still
+    recognizes the line as a timeline row (so the cue text is preserved and
+    legacy parse_srt_to_text output is unaffected), but the strict,
+    fully-anchored check used to extract the actual time VALUE for that side
+    must reject it, falling back to None.
+
+    gate-r26 P2: the extra digit only corrupts the END side -- the
+    well-formed START side ("00:00:01,000") must be preserved as 1.0, not
+    discarded along with it."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_TRAILING_EXTRA_MS_DIGIT)
+
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": None, "text": "Hello world"},
+    ]
+    # legacy text path is untouched by this fix -- byte-identical output
+    assert YouTubeApiClient.parse_srt_to_text(SRT_TRAILING_EXTRA_MS_DIGIT) == result.text
+
+
+def test_trailing_garbage_after_timestamp_nulls_only_end_start_preserved():
+    """Same rule for arbitrary trailing garbage characters after an otherwise
+    well-formed END timestamp -- the loose match ignores everything after the
+    recognized prefix, but the strict per-side check must reject that side.
+    gate-r26 P2: only end_time is nulled; start_time (1.0) is preserved."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(
+        SRT_TRAILING_GARBAGE_AFTER_TIMESTAMP
+    )
+
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": None, "text": "Hello world"},
+    ]
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_TRAILING_GARBAGE_AFTER_TIMESTAMP
+    ) == result.text
+
+
+def test_single_digit_millisecond_yields_none_segments_since_legacy_keeps_it_as_text():
+    """gate-r25 P2 originally established: a millisecond field with only 1
+    digit ("...,1" instead of the standard zero-padded 3-digit "...,000")
+    must not be silently accepted as a legal time.
+
+    gate-r28 P2 (supersedes gate-r26's expectation for this fixture): a
+    1-digit millisecond field also fails `_SRT_TIMESTAMP_LINE_PATTERN`
+    (which requires exactly `\\d{3}`) -- and legacy `parse_srt_to_text` uses
+    that exact same pattern to decide "is this a timeline row", so legacy
+    has always kept "00:00:01,1 --> 00:00:04,000" as literal body text. The
+    old `_looks_like_timeline_attempt` fallback used to "rescue" this line
+    as a recognized (if malformed) cue boundary; that fallback is now
+    removed, so the segments path reaches legacy's exact verdict too. Since
+    this fixture is a single-cue SRT and this is its only "-->" line,
+    segments degrades to None once this line is no longer recognized as a
+    timeline declaration -- text stays byte-identical to the legacy
+    parser."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_SINGLE_DIGIT_MILLISECOND)
+
+    assert result.segments is None
+    # legacy text path is untouched by this fix -- byte-identical output
+    assert YouTubeApiClient.parse_srt_to_text(SRT_SINGLE_DIGIT_MILLISECOND) == result.text
+
+
+def test_two_digit_millisecond_yields_none_segments_since_legacy_keeps_it_as_text():
+    """Same rule for a 2-digit millisecond field ("...,12") -- also
+    non-standard, fails `_SRT_TIMESTAMP_LINE_PATTERN` the same way as the
+    1-digit case above. gate-r28 P2 (supersedes gate-r26's expectation for
+    this fixture): segments degrades to None for the same reason (see
+    test_single_digit_millisecond_yields_none_segments_since_legacy_keeps_it_as_text)."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_TWO_DIGIT_MILLISECOND)
+
+    assert result.segments is None
+    assert YouTubeApiClient.parse_srt_to_text(SRT_TWO_DIGIT_MILLISECOND) == result.text
+
+
+def test_end_minutes_invalid_nulls_only_end_start_preserved():
+    """gate-r26 P2 motivating example: only the END side's minutes component
+    is invalid ("00:99:04,000" claims 99 minutes) while the START side
+    ("00:00:01,000") is perfectly well formed. A legitimate start time must
+    not be discarded just because the end of the same cue is corrupted --
+    start is what chapter anchoring needs most. Only end_time is nulled;
+    start_time (1.0) is preserved."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_END_MINUTES_INVALID)
+
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": None, "text": "Hello world"},
+    ]
+    assert YouTubeApiClient.parse_srt_to_text(SRT_END_MINUTES_INVALID) == result.text
+
+
+def test_end_ms_not_three_digits_yields_none_segments_since_legacy_keeps_it_as_text():
+    """gate-r26 P2 originally established: only the END side's millisecond
+    field is malformed (2 digits instead of the standard 3) while the START
+    side is perfectly well formed -- only end_time should be nulled.
+
+    gate-r28 P2 (supersedes that expectation for this fixture): unlike
+    SRT_END_MINUTES_INVALID (an out-of-RANGE value, "99" minutes, which
+    still satisfies the digit-COUNT-only `_SRT_TIMESTAMP_LINE_PATTERN`),
+    a 2-digit millisecond field is a digit-COUNT failure -- the full line
+    "00:00:01,000 --> 00:00:04,12" does not match
+    `_SRT_TIMESTAMP_LINE_PATTERN` at all (the pattern requires `\\d{3}`, and
+    only 2 digits remain before end-of-string). Legacy `parse_srt_to_text`
+    uses that exact same pattern, so it has always kept this whole line as
+    literal body text -- there was never a legacy-recognized "END side" to
+    selectively null in the first place. Since this fixture is a
+    single-cue SRT and this is its only "-->" line, segments degrades to
+    None once this line is no longer recognized as a timeline declaration."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_END_MS_NOT_THREE_DIGITS)
+
+    assert result.segments is None
+    assert YouTubeApiClient.parse_srt_to_text(SRT_END_MS_NOT_THREE_DIGITS) == result.text
+
+
+def test_both_sides_invalid_nulls_both_matches_prior_full_corruption_behavior():
+    """gate-r26 P2: when BOTH sides are independently invalid (invalid
+    minutes component on each side), the result must be identical to the
+    pre-fix "whole timeline corrupted" behavior: both start_time and
+    end_time are None, text preserved."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_BOTH_SIDES_INVALID)
+
+    assert result.segments == [
+        {"start_time": None, "end_time": None, "text": "Hello world"},
+    ]
+    assert YouTubeApiClient.parse_srt_to_text(SRT_BOTH_SIDES_INVALID) == result.text
+
+
+def test_only_end_survives_sanitize_time_pair_keeps_it_not_nulled():
+    """gate-r26 P2 lock: sanitize_time_pair's rule 3 (end < start -> end =
+    None) only fires when BOTH start and end are non-None. When start is
+    None (its side was corrupted) and end alone is a legitimate value, that
+    end value must survive sanitize_time_pair untouched -- it must not be
+    incorrectly nulled just because start is absent. This locks in the exact
+    scenario from SRT_INVALID_SECONDS_COMPONENT at the sanitize_time_pair
+    level, independent of SRT parsing."""
+    assert sanitize_time_pair(None, 4.0) == (None, 4.0)
+
+
+def test_normal_timeline_still_parses_after_strict_check_added():
+    """Regression: a perfectly well-formed timestamp range must still parse
+    to real start/end times under the new strict full-line check -- this is
+    covered implicitly by test_parse_srt_to_subtitle_result_normal_srt, but
+    is asserted explicitly here alongside the two adversarial cases above so
+    the three tests read as one coherent before/after/regression trio."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_NORMAL)
+
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": 4.0, "text": "Hello world"},
+        {"start_time": 5.0, "end_time": 8.0, "text": "This is a test"},
+    ]
+    assert YouTubeApiClient.parse_srt_to_text(SRT_NORMAL) == result.text
 
 
 def test_empty_srt_content():
@@ -477,3 +1000,330 @@ def test_empty_srt_content():
     assert result.text == ""
     assert result.segments is None
     assert YouTubeApiClient.parse_srt_to_text(SRT_EMPTY) == ""
+
+
+def test_bom_prefixed_srt_first_cue_parses_cleanly_with_no_bogus_segment():
+    """gate-r16 P2 regression: a BOM on the first index line ("﻿1") must not
+    produce a leading bogus segment (text="﻿1", start_time/end_time=None)
+    ahead of the real first cue. The segments-extraction path must recognize
+    "﻿1" as a genuine index row (BOM-tolerant isdigit check) and skip it,
+    same as an ordinary "1" -- leaving segments with exactly the two real
+    cues, correct start/end times, no extra entry."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_WITH_BOM)
+
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": 4.0, "text": "Hello world"},
+        {"start_time": 5.0, "end_time": 8.0, "text": "This is a test"},
+    ]
+
+
+def test_bom_prefixed_srt_legacy_parse_srt_to_text_keeps_historical_quirk():
+    """The BOM-tolerance fix is scoped to the segments-extraction path only.
+    parse_srt_to_text() (and the `text` field of parse_srt_to_subtitle_result)
+    must stay byte-identical to main's historical behavior, quirk included:
+    main's line-by-line text loop never strips BOM, so "﻿1" fails its
+    strict `line.isdigit()` check and gets kept as literal body text (the
+    BOM character embedded in it) rather than being recognized and skipped
+    as an index row. This divergence between the two paths (segments: BOM
+    tolerant / text: BOM-naive legacy quirk) is intentional -- the task's
+    hard constraint is that legacy text output must never change, even
+    though it means text and segments briefly disagree on how cue 1's index
+    line should be classified."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(SRT_WITH_BOM)
+
+    assert result.text == "﻿1 Hello world This is a test"
+    assert YouTubeApiClient.parse_srt_to_text(SRT_WITH_BOM) == result.text
+
+
+def test_gate_r27_cue_body_first_line_with_one_sided_time_style_lands_as_text_not_broken_timeline():
+    """gate-r27 P2: "Meet at 12:30 --> lobby" as a cue's orphaned body text
+    (its real timeline row is missing entirely, index line followed
+    directly by this body line) must NOT be misjudged as a damaged timeline
+    just because its LEFT side ("12:30") happens to look like a time -- the
+    RIGHT side ("lobby") has no digit+colon fragment at all. The old "at
+    least one side" (OR) rule swallowed this line whole (treated as a
+    corrupted timeline boundary, so the text-collection for whatever
+    "follows" it starts scanning from the line *after* it, losing this
+    line's own content everywhere). The tightened "both sides" (AND) rule
+    correctly falls through to the orphan-text path (R6): the line lands in
+    segments as its own entry with start_time/end_time = None, and text
+    stays byte-identical to the legacy parser (which never recognized this
+    line as a timeline row in the first place, since it doesn't match the
+    full "HH:MM:SS,mmm --> HH:MM:SS,mmm" shape)."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(
+        SRT_CUE_BODY_ONE_SIDED_TIME_STYLE_THEN_GARBAGE_SIDE
+    )
+
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": 2.0, "text": "First line"},
+        {"start_time": None, "end_time": None, "text": "Meet at 12:30 --> lobby"},
+        {"start_time": 5.0, "end_time": 6.0, "text": "Third line"},
+    ]
+    assert result.text == "First line Meet at 12:30 --> lobby Third line"
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_CUE_BODY_ONE_SIDED_TIME_STYLE_THEN_GARBAGE_SIDE
+    ) == result.text
+
+
+def test_gate_r28_cue_body_first_line_with_both_sided_time_style_lands_as_text_not_swallowed():
+    """gate-r28 P2: the bug this fix targets. "Meet at 12:30 --> leave at
+    13:00" as a cue's orphaned body text (its real timeline row is missing
+    entirely, index line followed directly by this body line) has a
+    time-style fragment on BOTH sides ("12:30" on the left, "13:00" on the
+    right of "leave at 13:00") -- the old gate-r27 "both sides" (AND) rule
+    was satisfied, so `_looks_like_timeline_attempt` misjudged this as a
+    damaged timeline declaration and swallowed the line whole (the
+    text-collection loop for whatever "follows" it starts scanning from the
+    line *after* it, losing this line's own content everywhere -- it stayed
+    in result.text but vanished from segments).
+
+    Root fix (not another heuristic patch): the segments path no longer
+    maintains any independent "looks like a timeline" heuristic at all. It
+    reuses the exact same judgment legacy `parse_srt_to_text` uses
+    (`_is_srt_timeline_declaration_line`, a thin wrapper around
+    `_SRT_TIMESTAMP_LINE_PATTERN.match()`) -- legacy never recognized "Meet
+    at 12:30 --> leave at 13:00" as a timeline row (it doesn't match the
+    full "HH:MM:SS,mmm --> HH:MM:SS,mmm" shape), so the segments path now
+    reaches the identical verdict: this line is orphan body text, lands in
+    segments with start_time/end_time = None, and text stays byte-identical
+    to the legacy parser."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(
+        SRT_CUE_BODY_BOTH_SIDES_TIME_STYLE_NOT_LEGACY_TIMELINE
+    )
+
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": 2.0, "text": "First line"},
+        {"start_time": None, "end_time": None, "text": "Meet at 12:30 --> leave at 13:00"},
+        {"start_time": 5.0, "end_time": 6.0, "text": "Third line"},
+    ]
+    assert result.text == "First line Meet at 12:30 --> leave at 13:00 Third line"
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_CUE_BODY_BOTH_SIDES_TIME_STYLE_NOT_LEGACY_TIMELINE
+    ) == result.text
+
+
+def test_gate_r27_both_sides_time_style_corrupted_timeline_no_longer_broken_but_kept_as_text():
+    """gate-r27 P2 originally asserted that "00:00:0Y --> 00:00:04" (a stray
+    letter breaking the strict digit-count regex, but with a "12:34"-style
+    digit+colon fragment on both sides) must keep being classified as a
+    damaged timeline boundary via the (then just-tightened) "both sides"
+    heuristic.
+
+    gate-r28 P2 supersedes that: the whole "looks like a damaged timeline"
+    heuristic (`_looks_like_timeline_attempt`) is removed. Cue-boundary
+    judgment is now exactly legacy's own `_SRT_TIMESTAMP_LINE_PATTERN.match()`
+    decision (via `_is_srt_timeline_declaration_line`), no more, no less.
+    Legacy's `.match()` also fails on "00:00:0Y --> 00:00:04" (the "Y" isn't
+    a digit and there's no comma+millisecond field on either side at all),
+    so legacy has always kept this whole line as literal body text -- it was
+    never "damaged timeline, text preserved with None times" from legacy's
+    point of view, that was purely the old heuristic's own invention.
+
+    User-visible outcome for THIS fixture specifically: since the fixture is
+    a single-cue SRT and this is its only "-->" line, once it stops being
+    recognized as a timeline declaration there is no recognizable cue left
+    in the whole file at all -- segments degrades to None (mirroring
+    legacy's "found nothing" case), while text is untouched and still
+    byte-identical to the legacy parser."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(
+        SRT_GATE_R27_BOTH_SIDES_TIME_STYLE_STILL_BROKEN
+    )
+
+    assert result.segments is None
+    assert result.text == "00:00:0Y --> 00:00:04 Hello world"
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_GATE_R27_BOTH_SIDES_TIME_STYLE_STILL_BROKEN
+    ) == result.text
+
+
+def test_gate_r27_one_side_time_style_other_side_garbage_matches_legacy_text_handling():
+    """gate-r27 P2 consistency check: for a "-->" row where one side is a
+    complete, well-formed timestamp and the other side is arbitrary garbage
+    with no digit+colon fragment ("00:00:01,000 --> garbage"), the tightened
+    AND rule no longer treats it as a (corrupted) timeline candidate -- it
+    falls through to plain text/orphan-text handling.
+
+    Consistency conclusion (verified against legacy `parse_srt_to_text`):
+    legacy's own timeline-line recognition (`_SRT_TIMESTAMP_LINE_PATTERN`,
+    matched with a plain, non-strict regex) requires BOTH sides to be a
+    fully-formed "HH:MM:SS,mmm" timestamp to match at all -- "garbage" on
+    the right never matches, so legacy's `.match()` fails and legacy keeps
+    this entire line as literal body text (never consumed as a timeline
+    row). After the AND fix, the segments path reaches exactly the same
+    verdict: this row is not a recognized timeline row, so it is collected
+    as literal text into the orphan-text buffer alongside the following
+    body line. Both paths agree -- "preserve as text, never consume as a
+    timeline" -- so text and segments stay consistent (the hard invariant:
+    segments-side text must never be lost, and legacy text must stay
+    byte-identical)."""
+    result = YouTubeApiClient.parse_srt_to_subtitle_result(
+        SRT_ONE_SIDE_FULL_TIMESTAMP_OTHER_SIDE_GARBAGE
+    )
+
+    assert result.segments == [
+        {"start_time": 1.0, "end_time": 4.0, "text": "Hello world"},
+        {
+            "start_time": None,
+            "end_time": None,
+            "text": "00:00:01,000 --> garbage Second cue text",
+        },
+    ]
+    assert (
+        result.text == "Hello world 00:00:01,000 --> garbage Second cue text"
+    )
+    assert YouTubeApiClient.parse_srt_to_text(
+        SRT_ONE_SIDE_FULL_TIMESTAMP_OTHER_SIDE_GARBAGE
+    ) == result.text
+
+
+# ---------------------------------------------------------------------------
+# gate-r28 P2 property test: this is the structural guard against the whole
+# class of bug this fix targets (segments-path heuristic silently disagreeing
+# with legacy about which lines count as "content"). Rather than adding one
+# more hand-picked regression fixture whenever a new adversarial shape is
+# found, this test asserts the core invariant across a wide net of crafted
+# SRT inputs at once: whenever segments is non-None, every line legacy
+# considers "content" must be present in segments (text concatenation, once
+# whitespace-normalized, must equal result.text, also whitespace-normalized).
+# Any future change to the timeline-line judgment that reintroduces a
+# text/segments divergence -- for ANY of these shapes, not just the ones
+# gate-r28 happened to name -- will fail this test automatically.
+# ---------------------------------------------------------------------------
+
+def _normalize_whitespace(value: str) -> str:
+    """Collapse all whitespace runs to single spaces and strip the ends, so
+    the invariant check below is insensitive to incidental spacing
+    differences (e.g. how orphan-text blocks happen to be joined) and only
+    cares about actual textual content."""
+    return " ".join(value.split())
+
+
+# Each entry: (case name, SRT content). Deliberately reuses every
+# corrupted/adversarial fixture already defined above (single source of
+# truth for the SRT shapes) plus a handful of new shapes crafted specifically
+# for this property test (see the "additional property-test-only fixtures"
+# block above SRT_BARE_ARROW_NO_CONTENT). Covers: cue body containing "-->",
+# cue body with a time-style fragment on one or both sides, pure-digit body
+# lines, BOM, missing timeline rows, corrupted timelines (letter substitution,
+# missing ms field, wrong digit counts, tab whitespace), out-of-range clock
+# components, trailing garbage after a valid timestamp, reversed timelines,
+# unicode/emoji content, multiple blank lines, and fully mixed scenarios.
+SRT_PROPERTY_TEST_CASES = [
+    ("normal_two_cues", SRT_NORMAL),
+    ("multiline_html_tags", SRT_MULTILINE_WITH_HTML_TAGS),
+    ("missing_timestamp_entirely", SRT_MISSING_TIMESTAMP),
+    ("bad_timestamp_format_single_digit_hour", SRT_BAD_TIMESTAMP_FORMAT),
+    ("mixed_valid_and_broken_timeline", SRT_MIXED_VALID_AND_BROKEN_TIMELINE),
+    ("body_text_with_arrow", SRT_BODY_TEXT_WITH_ARROW),
+    ("body_text_with_arrow_then_next_cue", SRT_BODY_TEXT_WITH_ARROW_THEN_NEXT_CUE),
+    ("standalone_digit_line_in_body", SRT_BODY_TEXT_WITH_STANDALONE_DIGIT_LINE),
+    (
+        "standalone_digit_line_in_body_then_next_cue",
+        SRT_BODY_TEXT_WITH_STANDALONE_DIGIT_LINE_THEN_NEXT_CUE,
+    ),
+    ("body_ends_with_standalone_digit_line", SRT_BODY_ENDS_WITH_STANDALONE_DIGIT_LINE),
+    ("middle_cue_missing_timeline_row", SRT_MIDDLE_CUE_MISSING_TIMELINE_ROW),
+    ("reversed_timeline", SRT_REVERSED_TIMELINE),
+    ("reversed_timeline_then_next_cue", SRT_REVERSED_TIMELINE_THEN_NEXT_CUE),
+    ("all_numeric_body", SRT_ALL_NUMERIC_BODY),
+    ("orphan_arrow_body_no_time_style", SRT_ORPHAN_ARROW_BODY_NO_TIME_STYLE),
+    ("corrupted_timeline_with_letter", SRT_CORRUPTED_TIMELINE_WITH_LETTER),
+    ("invalid_seconds_component", SRT_INVALID_SECONDS_COMPONENT),
+    ("invalid_minutes_component", SRT_INVALID_MINUTES_COMPONENT),
+    ("trailing_extra_ms_digit", SRT_TRAILING_EXTRA_MS_DIGIT),
+    ("trailing_garbage_after_timestamp", SRT_TRAILING_GARBAGE_AFTER_TIMESTAMP),
+    ("single_digit_millisecond", SRT_SINGLE_DIGIT_MILLISECOND),
+    ("two_digit_millisecond", SRT_TWO_DIGIT_MILLISECOND),
+    ("end_minutes_invalid", SRT_END_MINUTES_INVALID),
+    ("end_ms_not_three_digits", SRT_END_MS_NOT_THREE_DIGITS),
+    ("both_sides_invalid", SRT_BOTH_SIDES_INVALID),
+    ("gate_r27_both_sides_time_style_broken", SRT_GATE_R27_BOTH_SIDES_TIME_STYLE_STILL_BROKEN),
+    ("one_side_full_timestamp_other_side_garbage", SRT_ONE_SIDE_FULL_TIMESTAMP_OTHER_SIDE_GARBAGE),
+    (
+        "cue_body_one_sided_time_style_then_garbage_side",
+        SRT_CUE_BODY_ONE_SIDED_TIME_STYLE_THEN_GARBAGE_SIDE,
+    ),
+    (
+        "gate_r28_cue_body_both_sides_time_style",
+        SRT_CUE_BODY_BOTH_SIDES_TIME_STYLE_NOT_LEGACY_TIMELINE,
+    ),
+    ("bom_prefixed_srt", SRT_WITH_BOM),
+    ("bare_arrow_no_content", SRT_BARE_ARROW_NO_CONTENT),
+    ("stacked_broken_looking_lines", SRT_STACKED_BROKEN_LOOKING_LINES),
+    ("dash_digits_no_colon", SRT_DASH_DIGITS_NO_COLON),
+    ("tab_padded_arrow", SRT_TAB_PADDED_ARROW),
+    ("unicode_emoji_body", SRT_UNICODE_EMOJI_BODY),
+    ("multiple_blank_lines_between_cues", SRT_MULTIPLE_BLANK_LINES_BETWEEN_CUES),
+    ("negative_looking_time_body", SRT_NEGATIVE_LOOKING_TIME_BODY),
+    ("empty_srt", SRT_EMPTY),
+]
+
+# Cases deliberately EXCLUDED from the strict text==segments-text equality
+# check below -- not because the invariant doesn't hold for them, but because
+# they exercise a different, pre-existing, already-separately-locked-down
+# class of legacy/segments divergence that is unrelated to the timeline-line
+# judgment heuristic gate-r28 fixes, and where segments is a documented
+# STRICT SUPERSET of legacy text (segments has content legacy dropped, never
+# the other way around -- so the "text is never lost" invariant this property
+# test guards still holds, just not as an exact string match):
+#
+# - Standalone pure-digit body lines ("42" as a literal spoken number): the
+#   legacy line-by-line loop mistakes them for the next cue's index line and
+#   drops them unconditionally (`line.isdigit()` can't distinguish "index
+#   row" from "body text that happens to be a number"). The segments path is
+#   deliberately smarter here (lookahead: only treat a digit line as an index
+#   row if the NEXT line is a real timeline declaration) -- see
+#   test_standalone_digit_line_in_cue_body_is_kept_as_text_not_treated_as_index
+#   and its sibling tests, which lock this exact, intentional divergence in.
+# - All-numeric cue bodies: same root cause, compounding across an entire
+#   file -- see test_all_numeric_body_cues_yield_empty_text_but_populated_segments.
+# - BOM-prefixed first index line ("﻿1"): legacy's `line.isdigit()` never
+#   strips BOM (a hard, byte-identical backward-compat contract), so "﻿1"
+#   fails legacy's digit check and gets kept as body text; segments'
+#   `_strip_bom`-tolerant digit check correctly recognizes it as an index row
+#   and skips it -- see
+#   test_bom_prefixed_srt_legacy_parse_srt_to_text_keeps_historical_quirk.
+_KNOWN_PRE_EXISTING_SUPERSET_DIVERGENCE_CASES = {
+    "standalone_digit_line_in_body",
+    "standalone_digit_line_in_body_then_next_cue",
+    "body_ends_with_standalone_digit_line",
+    "all_numeric_body",
+    "bom_prefixed_srt",
+}
+
+
+def test_property_segments_text_concatenation_matches_result_text_for_any_srt():
+    """gate-r28 P2 root-cause guard: for every crafted SRT input above
+    (except the pre-existing, separately-locked-down superset divergences
+    documented next to `_KNOWN_PRE_EXISTING_SUPERSET_DIVERGENCE_CASES`),
+    whenever parse_srt_to_subtitle_result()'s segments is non-None, the
+    whitespace-normalized concatenation of all segment texts (in order) must
+    equal the whitespace-normalized result.text. This is exactly the
+    invariant that broke for "Meet at 12:30 --> leave at 13:00" (present in
+    text, silently missing from segments) -- any future heuristic tweak to
+    the segments-path timeline judgment that reintroduces a similar
+    divergence, for any of these 30+ shapes or ones like them, fails here
+    without needing a dedicated regression fixture."""
+    failures = []
+    for case_name, srt_content in SRT_PROPERTY_TEST_CASES:
+        if case_name in _KNOWN_PRE_EXISTING_SUPERSET_DIVERGENCE_CASES:
+            continue
+
+        result = YouTubeApiClient.parse_srt_to_subtitle_result(srt_content)
+
+        if result.segments is None:
+            # Nothing to check -- the invariant only constrains cases where
+            # segments claims to have found recognizable cues.
+            continue
+
+        concatenated = " ".join(seg["text"] for seg in result.segments)
+        normalized_segments_text = _normalize_whitespace(concatenated)
+        normalized_result_text = _normalize_whitespace(result.text)
+
+        if normalized_segments_text != normalized_result_text:
+            failures.append(
+                f"{case_name}: segments-text={normalized_segments_text!r} "
+                f"!= result.text={normalized_result_text!r}"
+            )
+
+    assert not failures, "Text/segments content mismatch for cases: " + "; ".join(failures)
