@@ -25,3 +25,36 @@
 | 2026-07-19 | R2 | N1 `_resolve_plain_structured_segments`：dict 形 transcription_data 无可用 "segments" 时直接 return None，跳过缓存侧车回退 | P3 | 现不可达（各入队点对 plain 任务都置 None）；若加固可 fall through 到缓存查询 |
 | 2026-07-19 | R2 | N2 单条 >plain_max(4000) 字符 segment 被拆分时子条时间戳复制，snapshot 条数失配后段落化回退消费 HH:MM:SS 截断值，停顿授权降级 | P3 | 病理输入限定；文本完整性不受影响（fuzz 验证覆盖不变式） |
 | 2026-07-19 | R2 | N3 侧车 get_cache 读取在 media_lock 外，与并发写者存在撕裂窗口 | P3 | 最坏结果 JSON 损坏 → 返回 None → 本轮诚实降级纯文本，下轮自愈；降级方向安全 |
+
+---
+
+# T11 章节 UI 重设计 —— review 日志与 backlog
+
+> 任务：T11 章节 UI 重设计（数据岛 + 内嵌章节头 + 章节速览面板 + 移动端吸顶条/抽屉），规格 `docs/sessions/260719-1155-t8-implementation/CHAPTER-UI-REDESIGN.md`
+> 代码提交：`43da8b3`（后端数据岛+内嵌章节头）、`fe5fdfb`（前端面板/抽屉/吸顶条）、`00d1191`（轮 1 修复）
+> 纪律：同 T8 —— P1 必修；P2/P3 可判「接受不修」记 backlog 并写理由；gate = 连续 2 轮无新增 P1；禁止为 P2/P3 新增机制。
+
+## Review 轮次记录
+
+| 轮次 | reviewer | 新增 P1 | P2/P3 新增 | 处置 |
+|------|----------|---------|------------|------|
+| R1（2026-07-20） | 独立 coder subagent | 0 | P2×2 + P3×6 | P2×2 已修（`00d1191`）：①数据岛仅转义 `</` 防不住 script-data double-escape（`<!--<script>` 可吞整页 DOM）→ 改为全量 `<`→`\u003c`；②宽屏 `margin-right:320px` 叠加 `margin:0 auto` 导致正文紧贴右侧面板 → 改为在面板左侧剩余空间居中（calc，按 content-box 实际 940px 验算 1400/2560px 几何）。P3×6：1 项修复（start_time Infinity 漏过 NaN 守卫 → `math.isfinite`），5 项接受进 backlog（理由见下表）。 |
+| R2（2026-07-20） | 独立 coder subagent（复验轮 1 修复 + 换角度新扫） | 0 | P3×6 | 无 P2。确认 R1 修复正确、无回归；P3×6 全部接受进 backlog（理由见下表）。**Gate 达成：连续 2 轮无新增 P1，review 循环关闭，通过。** |
+
+## Backlog（接受不修的 P2/P3）
+
+统一理由：触发条件均为损坏/退化的 LLM 输出或缓存，均有优雅兜底，且修复纪律禁止为 P2/P3 新增机制。下表「接受理由」列不再重复此句，仅补各条特有说明。
+
+| 日期 | 轮次 | 发现 | 级别 | 接受理由 |
+|------|------|------|------|----------|
+| 2026-07-20 | R1 | 损坏缓存多章缺 index 产生重复元素 id | P3 | 见统一理由 |
+| 2026-07-20 | R1 | start_seg 越界时条目看似可跳但点击无反应（仅 console.warn） | P3 | 见统一理由 |
+| 2026-07-20 | R1 | 吸顶条键盘不可达（div role=button 无 tabindex） | P3 | 见统一理由；另：a11y 增强，非正确性问题 |
+| 2026-07-20 | R1 | 当前章判定 Math.max(index) 假设 index 顺序 == 文档顺序 | P3 | 见统一理由；R2 跨轮重复确认 |
+| 2026-07-20 | R1 | 两条测试断言偏弱（约束集中在 test_no_innerhtml_anywhere） | P3 | 见统一理由 |
+| 2026-07-20 | R2 | start_seg 重复时 chapter_anchors 后者覆盖前者 | P3 | 见统一理由 |
+| 2026-07-20 | R2 | 当前章判定 Math.max(index) 假设 index 顺序 == 文档顺序（同 R1④，跨轮重复确认） | P3 | 见统一理由 |
+| 2026-07-20 | R2 | jump_ok 不校验 start_seg 范围 | P3 | 见统一理由 |
+| 2026-07-20 | R2 | 空 title 章前后端处理不一致（后端渲染锚点、前端跳过条目） | P3 | 见统一理由 |
+| 2026-07-20 | R2 | docked 宽 300px vs 预留 320px 视觉微差 ~10px（100vw 含滚动条再 ~8px） | P3 | 见统一理由；另：纯外观微差，无功能影响 |
+| 2026-07-20 | R2 | _format_chapter_seconds 不防 inf（当前不可达，上游 isfinite 已挡） | P3 | 见统一理由 |

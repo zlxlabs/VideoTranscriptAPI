@@ -3,7 +3,6 @@ from .dialog_renderer import (
     render_transcript_content,
     render_transcript_content_smart,
     render_calibrated_content_smart,
-    render_chapters_html,
 )
 from .markdown_renderer import render_markdown_to_html, get_base_url
 
@@ -12,7 +11,6 @@ __all__ = [
     "render_transcript_content",
     "render_transcript_content_smart",
     "render_calibrated_content_smart",
-    "render_chapters_html",
     "render_markdown_to_html",
     "get_base_url",
 ]

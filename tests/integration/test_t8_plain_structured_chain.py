@@ -14,14 +14,15 @@ SpeakerAwareProcessor / ChaptersProcessor and only the LLM client mocked
      id="dlg-{i}" anchors;
   3. chapters fingerprint stored in llm_chapters.json matches the
      fingerprint recomputed from the persisted dialogs via the real views
-     helpers -> rendered chapter cards carry data-jump-ok="1" and
-     href="#dlg-{start_seg}";
+     helpers -> the chapters data island marks every chapter jump_ok=True
+     and the transcript carries inline chapter-anchor headers;
   4. llm_calibrated.txt exists and has no "speaker:" prefix lines.
 
 Chain B (switch OFF, default): same task, same cache. Behavior must match
 the legacy plain path: PlainTextProcessor text route, no llm_processed.json,
-plain rendering (no dlg anchors), chapters generated but nolink
-(data-jump-ok="0") -- fingerprint matches yet the anchor gate blocks jumps.
+plain rendering (no dlg anchors), chapters generated but not jumpable
+(jump_ok=False, no inline anchors) -- fingerprint matches yet the anchor
+gate blocks jumps.
 
 Chain C: legacy plain cache WITHOUT a segments sidecar honestly degrades to
 the plain-text route even with the switch on (no llm_processed.json).
@@ -214,8 +215,9 @@ def _run_llm_task(cm, coordinator, task_id, *, switch_on, extra_patches=()):
 
 def _prepare_view(cache_dir, *, switch_on):
     """Run the real success-view preparation (rendering strategy, chapters
-    fingerprint re-check, anchor gate, render_chapters_html) with the switch
-    injected the same way views reads it in production."""
+    fingerprint re-check, anchor gate, chapters data island + inline chapter
+    anchors) with the switch injected the same way views reads it in
+    production."""
     view_data = {"cache_dir": str(cache_dir)}
     with patch.object(
         views,
@@ -318,20 +320,22 @@ class TestPlainStructuredChainSwitchOn:
         assert current_fp == stored_fp
 
         # ---- Assertions 2+3 (view level): real _prepare_success_view emits
-        # dlg anchors and jump-enabled chapter cards ----
+        # dlg anchors, a jump-enabled chapters data island, and inline
+        # chapter anchors in the transcript ----
         view_data = _prepare_view(cache_dir, switch_on=True)
         calibrated_html = view_data["calibrated_html"]
         assert 'id="dlg-0"' in calibrated_html
-        chapters_html = view_data["chapters_html"]
-        assert chapters_html is not None
-        assert 'data-jump-ok="1"' in chapters_html
-        assert 'href="#dlg-' in chapters_html
+        chapters = json.loads(view_data["chapters_data"])
+        assert chapters
+        assert all(ch["jump_ok"] is True for ch in chapters)
 
         # Every chapter start_seg must point at an anchor that actually
-        # exists on the rendered page.
+        # exists on the rendered page, with an inline chapter header before it.
         for chapter in chapters_payload["chapters"]:
             assert f'id="dlg-{chapter["start_seg"]}"' in calibrated_html
-            assert f'href="#dlg-{chapter["start_seg"]}"' in chapters_html
+            assert (
+                f'id="chapter-anchor-{chapter["index"]}"' in calibrated_html
+            )
 
 
 class TestPlainChainSwitchOffRegression:
@@ -373,14 +377,13 @@ class TestPlainChainSwitchOffRegression:
         current_fp = views._compute_anchor_fingerprint(anchor_source)
         assert current_fp == stored_fp
 
-        # View: plain rendering without dlg anchors, chapter cards nolink.
+        # View: plain rendering without dlg anchors, chapters not jumpable.
         view_data = _prepare_view(cache_dir, switch_on=False)
         assert 'id="dlg-' not in view_data["calibrated_html"]
-        chapters_html = view_data["chapters_html"]
-        assert chapters_html is not None
-        assert 'data-jump-ok="0"' in chapters_html
-        assert 'data-jump-ok="1"' not in chapters_html
-        assert 'href="#dlg-' not in chapters_html
+        assert "chapter-anchor" not in view_data["calibrated_html"]
+        chapters = json.loads(view_data["chapters_data"])
+        assert chapters
+        assert all(ch["jump_ok"] is False for ch in chapters)
 
 
 class TestPlainStructuredHonestDegradation:

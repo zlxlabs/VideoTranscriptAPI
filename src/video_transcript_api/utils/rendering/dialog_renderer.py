@@ -398,8 +398,17 @@ class DialogRenderer:
         )
         return "normal"
 
-    def _render_from_structured_data(self, cache_dir: str) -> str:
-        """从结构化数据渲染 - 最优路径"""
+    def _render_from_structured_data(
+        self, cache_dir: str, chapters: Optional[List[Dict]] = None
+    ) -> str:
+        """从结构化数据渲染 - 最优路径
+
+        Args:
+            cache_dir: 缓存目录路径
+            chapters: 可选的章节视图数据（views.py 已判好 jump_ok）。
+                仅 jump_ok 且 start_seg 落在某段 dlg_index 上的章节会在该段
+                前插入 .chapter-anchor 内嵌章节头。
+        """
         try:
             structured_file = os.path.join(cache_dir, "llm_processed.json")
 
@@ -419,6 +428,23 @@ class DialogRenderer:
             speakers = list(
                 dict.fromkeys(d["speaker"] for d in dialogs if d.get("speaker"))
             )
+
+            # 内嵌章节头：只收 jump_ok 且 start_seg 合法的章节，按 start_seg 索引。
+            chapter_anchors: Dict[int, Dict] = {}
+            if chapters:
+                for ch in chapters:
+                    if not isinstance(ch, dict) or not ch.get("jump_ok"):
+                        continue
+                    try:
+                        seg = (
+                            int(ch["start_seg"])
+                            if ch.get("start_seg") is not None
+                            else None
+                        )
+                    except (TypeError, ValueError):
+                        seg = None
+                    if seg is not None:
+                        chapter_anchors[seg] = ch
 
             html_parts = ['<div class="dialog-container">']
 
@@ -459,6 +485,12 @@ class DialogRenderer:
                 item_attrs = f'id="dlg-{dlg_index}" class="dialog-item"'
                 if start_time_attr:
                     item_attrs += f' data-start-time="{start_time_attr}"'
+
+                # Inline chapter header (T11): insert before the dialog whose
+                # index matches a jumpable chapter's start_seg.
+                anchor_html = _render_chapter_anchor(chapter_anchors.get(dlg_index))
+                if anchor_html:
+                    html_parts.append(anchor_html)
 
                 if speaker:
                     header_html = f"""
@@ -560,6 +592,7 @@ class DialogRenderer:
         cache_dir: str,
         fallback_text: Optional[str] = None,
         plain_structured_enabled: bool = False,
+        chapters: Optional[List[Dict]] = None,
     ) -> str:
         """
         基于缓存分析的智能渲染
@@ -570,6 +603,7 @@ class DialogRenderer:
             fallback_text: 降级文本内容
             plain_structured_enabled: llm.structured_calibration_for_plain 开关值，
                 透传给渲染策略判定（默认 False = 保守忽略 plain_structured 产物）
+            chapters: 可选章节视图数据，仅 structured 路径用来插入内嵌章节头
 
         Returns:
             str: 渲染后的HTML
@@ -584,7 +618,7 @@ class DialogRenderer:
             logger.info(f"  选择策略: {strategy}")
 
             if strategy == "structured":
-                return self._render_from_structured_data(cache_dir)
+                return self._render_from_structured_data(cache_dir, chapters=chapters)
             elif strategy == "capswriter_long_text":
                 return self._render_capswriter_long_text(cache_dir, fallback_text)
             else:  # normal
@@ -605,7 +639,10 @@ class DialogRenderer:
                 return '<p style="color: #666;">渲染失败，无法显示内容</p>'
 
     def render_calibrated_content_smart(
-        self, cache_dir: str, plain_structured_enabled: bool = False
+        self,
+        cache_dir: str,
+        plain_structured_enabled: bool = False,
+        chapters: Optional[List[Dict]] = None,
     ) -> Optional[str]:
         """
         智能渲染校对文本内容的便捷函数
@@ -615,6 +652,7 @@ class DialogRenderer:
             cache_dir: 缓存目录路径
             plain_structured_enabled: llm.structured_calibration_for_plain 开关值，
                 透传给渲染策略判定（默认 False = 保守忽略 plain_structured 产物）
+            chapters: 可选章节视图数据，仅 structured 路径用来插入内嵌章节头
 
         Returns:
             str: 渲染后的HTML，如果没有校对文本则返回None
@@ -632,7 +670,9 @@ class DialogRenderer:
         try:
             logger.info(f"开始校对文本专用渲染: {cache_dir}")
             return self.render_with_cache_analysis(
-                cache_dir, plain_structured_enabled=plain_structured_enabled
+                cache_dir,
+                plain_structured_enabled=plain_structured_enabled,
+                chapters=chapters,
             )
 
         except Exception as e:
@@ -658,104 +698,45 @@ def _format_chapter_seconds(seconds: Optional[float]) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def render_chapters_html(
-    chapters_payload: Optional[Dict],
-    *,
-    fingerprint_ok: bool,
-) -> str:
-    """Render the chapter outline block as escaped HTML.
+def _render_chapter_anchor(chapter: Optional[Dict]) -> str:
+    """Render an inline chapter header for the structured transcript body.
 
-    Security: ``title`` / ``gist`` are **always** passed through ``html.escape``.
-    When ``fingerprint_ok`` is False the cards are still shown but jump links
-    to ``#dlg-{start_seg}`` are omitted (stale anchor source after recalibrate).
+    T11 DOM contract::
 
-    Args:
-        chapters_payload: Contents of ``llm_chapters.json`` (or None).
-        fingerprint_ok: Whether the stored fingerprint matches the current
-            anchor source (dialogs / segments).
+        <div class="chapter-anchor" id="chapter-anchor-{index}"
+             data-chapter-index="{index}">
+          <span class="chapter-anchor-time">{mm:ss}</span>
+          <span class="chapter-anchor-title">{title}</span>
+          <p class="chapter-anchor-gist">{gist}</p>   <!-- only when gist -->
+        </div>
 
-    Returns:
-        HTML string for the chapters list, or empty string when there is
-        nothing to render.
+    Security: ``title`` and ``gist`` are always passed through
+    ``html.escape`` (LLM output). The gist paragraph is omitted entirely
+    when the gist is empty.
+    Callers must only pass chapters whose ``jump_ok`` is True.
     """
-    if not chapters_payload or not isinstance(chapters_payload, dict):
+    if not chapter:
         return ""
-
-    chapters = chapters_payload.get("chapters")
-    if not isinstance(chapters, list) or not chapters:
-        return ""
-
-    html_parts: List[str] = ['<div class="chapters-list">']
-
-    for ch in chapters:
-        if not isinstance(ch, dict):
-            continue
-
-        raw_title = ch.get("title")
-        raw_gist = ch.get("gist")
-        safe_title = html.escape("" if raw_title is None else str(raw_title))
-        safe_gist = html.escape("" if raw_gist is None else str(raw_gist))
-
-        try:
-            start_seg = int(ch["start_seg"]) if ch.get("start_seg") is not None else None
-        except (TypeError, ValueError):
-            start_seg = None
-
-        try:
-            index = int(ch["index"]) if ch.get("index") is not None else 0
-        except (TypeError, ValueError):
-            index = 0
-
-        start_label = _format_chapter_seconds(ch.get("start_time"))
-        end_label = _format_chapter_seconds(ch.get("end_time"))
-        if start_label and end_label:
-            time_range = f"{start_label} – {end_label}"
-        elif start_label:
-            time_range = start_label
-        else:
-            time_range = ""
-        safe_time = html.escape(time_range)
-
-        jump_ok = bool(fingerprint_ok and start_seg is not None)
-        jump_attr = "1" if jump_ok else "0"
-        start_seg_attr = "" if start_seg is None else str(start_seg)
-
-        if jump_ok:
-            title_html = (
-                f'<a class="chapter-title-link" href="#dlg-{start_seg}">{safe_title}</a>'
-            )
-        else:
-            title_html = f'<span class="chapter-title">{safe_title}</span>'
-
-        time_html = (
-            f'<span class="chapter-time">{safe_time}</span>' if safe_time else ""
-        )
-        gist_html = (
-            f'<p class="chapter-gist">{safe_gist}</p>' if safe_gist else ""
-        )
-
-        html_parts.append(
-            f'<div class="chapter-card" id="chapter-{index}" '
-            f'data-start-seg="{html.escape(start_seg_attr, quote=True)}" '
-            f'data-jump-ok="{jump_attr}">'
-            f'<div class="chapter-header">'
-            f'<span class="chapter-index">{index + 1}</span>'
-            f"{title_html}"
-            f"{time_html}"
-            f"</div>"
-            f"{gist_html}"
-            f"</div>"
-        )
-
-    html_parts.append("</div>")
-    result = "\n".join(html_parts)
-    # Guard: if every entry was skipped, do not emit an empty wrapper.
-    if 'class="chapter-card"' not in result:
-        return ""
-    logger.debug(
-        "Rendered chapters html: cards present, fingerprint_ok=%s", fingerprint_ok
+    try:
+        index = int(chapter.get("index"))
+    except (TypeError, ValueError):
+        index = 0
+    raw_title = chapter.get("title")
+    safe_title = html.escape("" if raw_title is None else str(raw_title))
+    safe_time = html.escape(_format_chapter_seconds(chapter.get("start_time")))
+    raw_gist = chapter.get("gist")
+    safe_gist = html.escape("" if raw_gist is None else str(raw_gist))
+    gist_html = (
+        f'<p class="chapter-anchor-gist">{safe_gist}</p>' if safe_gist else ""
     )
-    return result
+    return (
+        f'<div class="chapter-anchor" id="chapter-anchor-{index}" '
+        f'data-chapter-index="{index}">'
+        f'<span class="chapter-anchor-time">{safe_time}</span>'
+        f'<span class="chapter-anchor-title">{safe_title}</span>'
+        f"{gist_html}"
+        f"</div>"
+    )
 
 
 def render_transcript_content(text: str) -> str:
@@ -773,7 +754,9 @@ def render_transcript_content(text: str) -> str:
 
 
 def render_calibrated_content_smart(
-    cache_dir: str, plain_structured_enabled: bool = False
+    cache_dir: str,
+    plain_structured_enabled: bool = False,
+    chapters: Optional[List[Dict]] = None,
 ) -> Optional[str]:
     """
     智能渲染校对文本内容的便捷函数
@@ -782,13 +765,14 @@ def render_calibrated_content_smart(
         cache_dir: 缓存目录路径
         plain_structured_enabled: llm.structured_calibration_for_plain 开关值，
             透传给渲染策略判定（默认 False = 保守忽略 plain_structured 产物）
+        chapters: 可选章节视图数据，仅 structured 路径用来插入内嵌章节头
 
     Returns:
         str: 渲染后的HTML，如果没有校对文本则返回None
     """
     renderer = DialogRenderer()
     return renderer.render_calibrated_content_smart(
-        cache_dir, plain_structured_enabled=plain_structured_enabled
+        cache_dir, plain_structured_enabled=plain_structured_enabled, chapters=chapters
     )
 
 

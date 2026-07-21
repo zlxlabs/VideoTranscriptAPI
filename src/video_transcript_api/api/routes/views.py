@@ -19,7 +19,6 @@ from ..context import (
 from ...utils.rendering import (
     get_base_url,
     render_calibrated_content_smart,
-    render_chapters_html,
     render_markdown_to_html,
     render_transcript_content,
 )
@@ -861,8 +860,8 @@ def _page_has_dialog_anchors(
 
     Structured dialog rendering (``llm_processed.json`` with non-empty dialogs)
     is the only path that writes those ids. Timeline-only sources (YouTube
-    subtitle / CapsWriter sidecar) can still produce chapters cards, but
-    linking to ``#dlg-N`` would be a dead jump on the public view page.
+    subtitle / CapsWriter sidecar) can still produce chapters, but jumping to
+    ``#dlg-N`` would be a dead jump on the public view page.
 
     The gate must mirror the rendering strategy: a plain-source structured
     artifact (top-level ``"mode": "plain_structured"``) is ignored when the
@@ -962,17 +961,21 @@ def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
 
     包含大量同步文件读取与 Markdown 渲染，调用方需通过线程池执行，
     避免阻塞事件循环。会就地修改 view_data（summary_html / calibrated_html /
-    chapters_html），返回 stats。
+    chapters_data），返回 stats。
     """
     import json
+    import math
 
     if view_data.get("summary"):
         view_data["summary_html"] = render_markdown_to_html(view_data["summary"])
 
     cache_dir = view_data.get("cache_dir")
     stats: Dict[str, Any] = {"original_length": 0, "calibrated_length": 0, "summary_length": 0}
-    # Default: no chapters block (only GENERATED + file renders).
-    view_data["chapters_html"] = None
+    # Default: no chapters data island (only GENERATED + file renders).
+    view_data["chapters_data"] = None
+    # Chapters in the view shape, handed to the transcript renderer for
+    # inline .chapter-anchor headers (loaded before rendering below).
+    chapters_for_view: Optional[list] = None
 
     # T8 开关：plain 源结构化校对。开关关时渲染策略忽略 plain_structured 产物
     # （走原 plain 渲染），章节锚点判定必须遵守同一门控，否则会发出死链。
@@ -1072,9 +1075,11 @@ def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
                 except Exception as exc:
                     logger.error(f"读取校准统计失败: {exc}")
 
-        # 5. Chapters outline block (T7): only when status is GENERATED and
-        # llm_chapters.json exists. Fingerprint mismatch keeps the cards but
-        # drops #dlg-{start_seg} jump links so we never silently mis-jump.
+        # 5. Chapters data island (T11): only when status is GENERATED and
+        # llm_chapters.json exists. Fingerprint mismatch keeps the data island
+        # but marks every chapter jump_ok=False so the frontend never offers
+        # a stale #dlg-{start_seg} jump. jump_ok chapters also get inline
+        # .chapter-anchor headers in the transcript rendering below.
         if chapters_status == ChaptersStatus.GENERATED or chapters_status == "generated":
             chapters_file = cache_dir_path / "llm_chapters.json"
             if chapters_file.exists():
@@ -1093,7 +1098,7 @@ def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
                     )
                     # Jump targets require structured dialog anchors on the page
                     # (id="dlg-{i}"). Timeline-only sources may fingerprint-match
-                    # but still have no anchors — do not emit dead #dlg links.
+                    # but still have no anchors — do not offer dead #dlg jumps.
                     has_dlg_anchors = _page_has_dialog_anchors(
                         cache_dir_path, plain_structured_enabled
                     )
@@ -1101,24 +1106,77 @@ def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
                     if fingerprint_match and not has_dlg_anchors:
                         logger.info(
                             "Chapters fingerprint matches but page has no dlg anchors; "
-                            "rendering chapter cards without jump links"
+                            "marking chapters not jumpable"
                         )
                     elif stored_fp and current_fp and not fingerprint_match:
                         logger.info(
-                            "Chapters fingerprint mismatch; rendering without jump links "
+                            "Chapters fingerprint mismatch; marking chapters not jumpable "
                             f"(stored={stored_fp[:12]}..., current={current_fp[:12]}...)"
                         )
                     elif not current_fp:
                         logger.info(
-                            "Chapters fingerprint cannot be recomputed; rendering without jump links"
+                            "Chapters fingerprint cannot be recomputed; "
+                            "marking chapters not jumpable"
                         )
-                    view_data["chapters_html"] = render_chapters_html(
-                        chapters_payload if isinstance(chapters_payload, dict) else None,
-                        fingerprint_ok=fingerprint_ok,
-                    ) or None
+                    raw_chapters = (
+                        chapters_payload.get("chapters")
+                        if isinstance(chapters_payload, dict)
+                        else None
+                    )
+                    chapters_for_view = []
+                    if isinstance(raw_chapters, list):
+                        for ch in raw_chapters:
+                            if not isinstance(ch, dict):
+                                continue
+                            try:
+                                start_seg = (
+                                    int(ch["start_seg"])
+                                    if ch.get("start_seg") is not None
+                                    else None
+                                )
+                            except (TypeError, ValueError):
+                                start_seg = None
+                            try:
+                                index = (
+                                    int(ch["index"])
+                                    if ch.get("index") is not None
+                                    else 0
+                                )
+                            except (TypeError, ValueError):
+                                index = 0
+                            title = ch.get("title")
+                            gist = ch.get("gist")
+                            start_time = ch.get("start_time")
+                            if not (
+                                isinstance(start_time, (int, float))
+                                and math.isfinite(start_time)  # NaN/inf guard
+                            ):
+                                start_time = None
+                            chapters_for_view.append(
+                                {
+                                    "index": index,
+                                    "title": "" if title is None else str(title),
+                                    "gist": "" if gist is None else str(gist),
+                                    "start_time": start_time,
+                                    "start_seg": start_seg,
+                                    "jump_ok": bool(
+                                        fingerprint_ok and start_seg is not None
+                                    ),
+                                }
+                            )
+                    if chapters_for_view:
+                        data_json = json.dumps(chapters_for_view, ensure_ascii=False)
+                        # Escape every "<" as "\\u003c" (a valid JSON string
+                        # escape that JSON.parse round-trips) so LLM text can
+                        # neither close the data island nor re-open it via
+                        # script-data double-escape (e.g. <!--<script>).
+                        view_data["chapters_data"] = data_json.replace("<", "\\u003c")
+                    else:
+                        chapters_for_view = None
                 except Exception as exc:
-                    logger.error(f"Failed to render chapters block: {exc}")
-                    view_data["chapters_html"] = None
+                    logger.error(f"Failed to prepare chapters data: {exc}")
+                    view_data["chapters_data"] = None
+                    chapters_for_view = None
             else:
                 logger.debug(
                     "chapters_status=generated but llm_chapters.json missing; skip block"
@@ -1126,7 +1184,7 @@ def _prepare_success_view(view_data: Dict[str, Any]) -> Dict[str, Any]:
 
     # 简化渲染逻辑：直接调用 render_with_cache_analysis
     view_data["calibrated_html"] = render_calibrated_content_smart(
-        cache_dir, plain_structured_enabled
+        cache_dir, plain_structured_enabled, chapters=chapters_for_view
     )
     return stats
 
