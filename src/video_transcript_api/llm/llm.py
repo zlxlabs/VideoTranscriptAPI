@@ -413,9 +413,17 @@ def _call_with_text_output(
     prompt: str,
     system_prompt: str,
     reasoning_effort: Optional[str],
-    task_type: str
+    task_type: str,
+    config: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """纯文本输出调用（通过 llm-compat SyncLLMClient）"""
+    """纯文本输出调用（通过 llm-compat SyncLLMClient）
+
+    带"空响应重发"：思考模型偶发返回 HTTP 200 但 content 为空串（多因思考
+    预算耗尽），按 `llm.text_output.max_retries`（默认 2）原样重发；
+    第 2 次尝试起强制 reasoning_effort="disabled"（原样重发大概率复发）。
+    重试耗尽仍为空则返回空串，由上层（如 summary_processor）判失败——
+    行为与无重试时一致，只是多了重试机会。
+    """
     global _stats
     _stats.text_calls += 1
 
@@ -425,21 +433,48 @@ def _call_with_text_output(
         {"role": "user", "content": prompt},
     ]
 
-    start_time = time.time()
+    text_output_config = (config or {}).get("llm", {}).get("text_output", {})
+    text_retries = text_output_config.get("max_retries", 2)
+
     logger.info(f"[{task_type.upper()}] Model: {model} | text mode")
 
-    result = client.chat(model, messages, reasoning_effort=reasoning_effort, stream=False)
-    # 记录 usage 快照供 llm_client.call() 落审计库（token 用量审计，参见 usage_context.py）
-    _record_chat_usage(model, result)
-    content = str(result)
-    duration = time.time() - start_time
+    content = ""
+    for attempt in range(text_retries + 1):
+        # 第 1 次尝试用原始 effort；重试时若非 "disabled" 强制降档为 "disabled"
+        effort = reasoning_effort
+        if attempt > 0 and effort != "disabled":
+            effort = "disabled"
+            logger.warning(
+                f"[{task_type.upper()}] Empty-response retry {attempt}/{text_retries}: "
+                f"forcing reasoning_effort=disabled (was {reasoning_effort!r})"
+            )
 
-    if result.fallback_from:
+        start_time = time.time()
+        result = client.chat(model, messages, reasoning_effort=effort, stream=False)
+        # 记录 usage 快照供 llm_client.call() 落审计库（token 用量审计，参见 usage_context.py）
+        _record_chat_usage(model, result)
+        content = str(result)
+        duration = time.time() - start_time
+
+        if result.fallback_from:
+            logger.warning(
+                f"[{task_type.upper()}] Content fallback: {result.fallback_from} -> {result.model}"
+            )
+
+        if content.strip():
+            logger.info(f"[{task_type.upper()}] Succeeded | {len(content)} chars | {duration:.2f}s")
+            return content
+
         logger.warning(
-            f"[{task_type.upper()}] Content fallback: {result.fallback_from} -> {result.model}"
+            f"[{task_type.upper()}] Empty response | Model: {model} | "
+            f"Attempt {attempt + 1}/{text_retries + 1} | reasoning_effort={effort!r}"
         )
+        if attempt < text_retries:
+            time.sleep(1)
 
-    logger.info(f"[{task_type.upper()}] Succeeded | {len(content)} chars | {duration:.2f}s")
+    logger.error(
+        f"[{task_type.upper()}] Empty response after {text_retries + 1} attempts, returning empty string"
+    )
     return content
 
 
@@ -664,6 +699,7 @@ def call_llm_api(
             system_prompt=system_prompt,
             reasoning_effort=reasoning_effort,
             task_type=task_type,
+            config=config if config is not None else _default_config,
         )
 
     effective_config = config if config is not None else _default_config
