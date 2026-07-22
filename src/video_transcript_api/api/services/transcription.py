@@ -865,6 +865,7 @@ def process_transcription(
 
         # url 本身就是平台链接，直接解析
         check_url = url
+        parse_url = url
         logger.info(f"[URL解析] 开始解析 URL: {check_url[:100]}")
 
         with tracker.track("url_parse"):
@@ -875,6 +876,7 @@ def process_transcription(
 
                 platform = parsed_url.platform
                 video_id = parsed_url.video_id
+                parse_url = parsed_url.normalized_url or url
 
                 logger.info(
                     f"[URL解析] 解析成功: platform={platform}, video_id={video_id}, "
@@ -1530,7 +1532,6 @@ def process_transcription(
             metadata_downloader = None
             metadata_obj = None
             download_info_obj = None
-            parse_url = url
 
             # url 可能是外部系统提供的不透明标识符（如 recorder://...），并非真实
             # 可访问的 http/https 地址。这种情况下对 url 发起元数据请求必然会被
