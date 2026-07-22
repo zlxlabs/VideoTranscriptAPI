@@ -36,6 +36,7 @@ def test_task_persists_normalized_options_submitter_and_terminal_snapshot(manage
         "calibrate": False,
         "summarize": True,
         "infer_speaker_names": False,
+        "chapters": True,
     }
     assert task["submitted_by"] == "user-1"
     assert task["terminal_snapshot"] == {

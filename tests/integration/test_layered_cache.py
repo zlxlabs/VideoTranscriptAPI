@@ -29,7 +29,11 @@ import video_transcript_api.api.services.transcription as transcription
 from video_transcript_api.api.services import llm_ops
 from video_transcript_api.cache.cache_manager import CacheManager
 from video_transcript_api.utils.task_status import TaskStatus
-from video_transcript_api.utils.llm_status import CalibrationStatus, SummaryStatus
+from video_transcript_api.utils.llm_status import (
+    CalibrationStatus,
+    ChaptersStatus,
+    SummaryStatus,
+)
 
 
 class DummyQueue:
@@ -144,7 +148,10 @@ class TestLayeredCacheMatrix:
             **BASE_CACHE_DATA,
             "llm_calibrated": "real calibrated text",
             "llm_summary": "real summary",
-            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+            "llm_status": {
+                "calibration_status": CalibrationStatus.FULL,
+                "chapters_status": ChaptersStatus.SKIPPED_NO_TIMELINE,
+            },
         }
 
         result, queued = _run(
@@ -192,7 +199,10 @@ class TestLayeredCacheMatrix:
             "use_speaker_recognition": True,
             "llm_calibrated": "done",
             "llm_summary": "done",
-            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+            "llm_status": {
+                "calibration_status": CalibrationStatus.FULL,
+                "chapters_status": ChaptersStatus.SKIPPED_NO_TIMELINE,
+            },
             # 故意不带 "speaker_mapping"（mapping 缺失）和 "llm_processed"
             # （结构化产物缺失）。
         }
@@ -236,7 +246,10 @@ class TestLayeredCacheMatrix:
             "use_speaker_recognition": True,
             "llm_calibrated": "done",
             "llm_summary": "done",
-            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+            "llm_status": {
+                "calibration_status": CalibrationStatus.FULL,
+                "chapters_status": ChaptersStatus.SKIPPED_NO_TIMELINE,
+            },
             "llm_processed": {
                 # 混合 schema：一条带 speaker_id，一条不带——不满足
                 # structured_artifact_is_refreshable 的 schema 层
@@ -281,7 +294,10 @@ class TestLayeredCacheMatrix:
             "use_speaker_recognition": True,
             "llm_calibrated": "done",
             "llm_summary": "done",
-            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+            "llm_status": {
+                "calibration_status": CalibrationStatus.FULL,
+                "chapters_status": ChaptersStatus.SKIPPED_NO_TIMELINE,
+            },
             "llm_processed": {
                 "dialogs": [
                     {"speaker_id": "S1", "speaker": "说话人1", "text": "hello"},
@@ -302,6 +318,7 @@ class TestLayeredCacheMatrix:
             "calibrate": False,
             "summarize": False,
             "infer_speaker_names": True,
+            "chapters": False,
         }
 
     def test_explicitly_disabled_speaker_inference_does_not_require_artifact(
@@ -345,7 +362,12 @@ class TestLayeredCacheMatrix:
         assert result["status"] == "success"
         assert len(queued) == 1
         task = queued[0]
-        assert task["processing_options"] == {"calibrate": True, "summarize": True, "infer_speaker_names": False}
+        assert task["processing_options"] == {
+            "calibrate": True,
+            "summarize": True,
+            "infer_speaker_names": False,
+            "chapters": True,
+        }
         # Real calibration is needed -> feed the raw transcript, not the
         # disabled placeholder, and no download/transcription was re-run
         # (no save_cache call for a fresh transcript).
@@ -377,7 +399,12 @@ class TestLayeredCacheMatrix:
         assert result["status"] == "success"
         assert len(queued) == 1
         task = queued[0]
-        assert task["processing_options"] == {"calibrate": True, "summarize": True, "infer_speaker_names": False}
+        assert task["processing_options"] == {
+            "calibrate": True,
+            "summarize": True,
+            "infer_speaker_names": False,
+            "chapters": True,
+        }
         assert task["transcript"] == "RAW uncalibrated transcript"
 
     def test_calibrate_only_then_full_flow_requeues_summary_only(
@@ -402,7 +429,12 @@ class TestLayeredCacheMatrix:
         assert result["status"] == "success"
         assert len(queued) == 1
         task = queued[0]
-        assert task["processing_options"] == {"calibrate": False, "summarize": True, "infer_speaker_names": False}
+        assert task["processing_options"] == {
+            "calibrate": False,
+            "summarize": True,
+            "infer_speaker_names": False,
+            "chapters": True,
+        }
         assert task["transcript"] == "REAL calibrated text from a genuine LLM pass"
         # Force plain-text routing downstream (no re-diarization LLM call).
         assert task["transcription_data"] is None
@@ -449,7 +481,12 @@ class TestLayeredCacheMatrix:
         assert result["status"] == "success"
         assert len(queued) == 1
         task = queued[0]
-        assert task["processing_options"] == {"calibrate": False, "summarize": True, "infer_speaker_names": False}
+        assert task["processing_options"] == {
+            "calibrate": False,
+            "summarize": True,
+            "infer_speaker_names": False,
+            "chapters": True,
+        }
         assert task["transcription_data"] is None
         assert task["use_speaker_recognition"] is True
         assert task["cached_speaker_count"] == 3
@@ -476,7 +513,10 @@ class TestLayeredCacheMatrix:
             "use_speaker_recognition": True,
             "llm_calibrated": "REAL calibrated text",
             "llm_summary": "REAL summary",
-            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+            "llm_status": {
+                "calibration_status": CalibrationStatus.FULL,
+                "chapters_status": ChaptersStatus.SKIPPED_NO_TIMELINE,
+            },
             "llm_processed": {
                 # 新 schema：带 speaker_id，但姓名是过期的 "Old Name"——与
                 # 下面 speaker_mapping 里的权威映射 "New Name" 不一致。
@@ -503,7 +543,10 @@ class TestLayeredCacheMatrix:
         assert len(queued) == 1
         task = queued[0]
         assert task["processing_options"] == {
-            "calibrate": False, "summarize": False, "infer_speaker_names": True,
+            "calibrate": False,
+            "summarize": False,
+            "infer_speaker_names": True,
+            "chapters": False,
         }
 
     def test_missing_structured_artifact_with_completed_calibration_is_full_hit(
@@ -539,7 +582,10 @@ class TestLayeredCacheMatrix:
             "use_speaker_recognition": True,
             "llm_calibrated": "REAL calibrated text",
             "llm_summary": "REAL summary",
-            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+            "llm_status": {
+                "calibration_status": CalibrationStatus.FULL,
+                "chapters_status": ChaptersStatus.SKIPPED_NO_TIMELINE,
+            },
             # 故意不带 "llm_processed"。
             "speaker_mapping": {
                 "mapping": {"S0": "New Name"},
@@ -609,10 +655,13 @@ class TestLayeredCacheMatrix:
                 "low_confidence": [],
             },
         }
+        cache_data["llm_status"] = {
+            "chapters_status": ChaptersStatus.SKIPPED_NO_TIMELINE,
+        }
         if calibration_status is not None:
-            cache_data["llm_status"] = {"calibration_status": calibration_status}
-        # calibration_status is None -> 故意不带 "llm_status" 键，模拟诚实
-        # 状态模型上线之前的旧缓存（同样应被当作"未确认完成"处理）。
+            cache_data["llm_status"]["calibration_status"] = calibration_status
+        # calibration_status is None -> 只保留已经满足的章节层，模拟校对
+        # 状态缺失的旧缓存。
 
         # calibrate=False（用户本轮未请求重新校对）——单独把 need_speaker_names
         # 的判定隔离出来验证，不被 need_calibrated 一起触发的重排队掩盖。
@@ -624,7 +673,10 @@ class TestLayeredCacheMatrix:
         assert result["status"] == "success"
         assert len(queued) == 1
         assert queued[0]["processing_options"] == {
-            "calibrate": False, "summarize": False, "infer_speaker_names": True,
+            "calibrate": False,
+            "summarize": False,
+            "infer_speaker_names": True,
+            "chapters": False,
         }, f"calibration_status={calibration_status!r} 时 calibrate 被隐式升级"
 
     @pytest.mark.parametrize(
@@ -670,10 +722,13 @@ class TestLayeredCacheMatrix:
             # get_speaker_mapping 会返回 None（指纹未命中），驱动
             # need_speaker_names 走"映射缺失"这条腿。
         }
+        cache_data["llm_status"] = {
+            "chapters_status": ChaptersStatus.SKIPPED_NO_TIMELINE,
+        }
         if calibration_status is not None:
-            cache_data["llm_status"] = {"calibration_status": calibration_status}
-        # calibration_status is None -> 故意不带 "llm_status" 键，模拟诚实
-        # 状态模型上线之前的旧缓存。
+            cache_data["llm_status"]["calibration_status"] = calibration_status
+        # calibration_status is None -> 只保留已经满足的章节层，模拟校对
+        # 状态缺失的旧缓存。
 
         result, queued = _run(
             monkeypatch, patch_runtime, cache_data,
@@ -705,7 +760,10 @@ class TestLayeredCacheMatrix:
             "use_speaker_recognition": True,
             "llm_calibrated": "REAL calibrated text",
             "llm_summary": "REAL summary",
-            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+            "llm_status": {
+                "calibration_status": CalibrationStatus.FULL,
+                "chapters_status": ChaptersStatus.SKIPPED_NO_TIMELINE,
+            },
             "llm_processed": {
                 "dialogs": [{"speaker_id": "S0", "speaker": "New Name", "text": "hello"}],
                 "speaker_mapping": {"S0": "New Name"},
@@ -752,7 +810,10 @@ class TestLayeredCacheMatrix:
             **BASE_CACHE_DATA,
             "llm_calibrated": "real calibrated text",
             "llm_summary": "real summary",
-            "llm_status": {"calibration_status": CalibrationStatus.FULL},
+            "llm_status": {
+                "calibration_status": CalibrationStatus.FULL,
+                "chapters_status": ChaptersStatus.SKIPPED_NO_TIMELINE,
+            },
         }
 
         result1, queued1 = _run(
@@ -814,7 +875,12 @@ class TestLayeredCacheMatrix:
         assert len(queued) == 1
         # Legacy default (all True): calibrated layer already real and
         # confirmed by llm_status.json, so only summary is missing.
-        assert queued[0]["processing_options"] == {"calibrate": False, "summarize": True, "infer_speaker_names": False}
+        assert queued[0]["processing_options"] == {
+            "calibrate": False,
+            "summarize": True,
+            "infer_speaker_names": False,
+            "chapters": True,
+        }
 
     def test_missing_llm_status_does_not_trust_existing_calibrated_file(
         self, monkeypatch, patch_runtime
@@ -840,7 +906,12 @@ class TestLayeredCacheMatrix:
         assert len(queued) == 1
         task = queued[0]
         # 校对层被视为未确认完成，触发真实重新校对（不再是 False）。
-        assert task["processing_options"] == {"calibrate": True, "summarize": True, "infer_speaker_names": False}
+        assert task["processing_options"] == {
+            "calibrate": True,
+            "summarize": True,
+            "infer_speaker_names": False,
+            "chapters": True,
+        }
         # 重新校对必须喂原始转录文本，而不是那份未经确认的 calibrated 产物。
         assert task["transcript"] == "RAW uncalibrated transcript"
 
@@ -899,6 +970,7 @@ class TestFullHitMirrorsCacheStatusOnTaskRow:
                 platform="youtube", media_id="abc123", use_speaker_recognition=False,
                 calibration_status=CalibrationStatus.PARTIAL,
                 summary_status=SummaryStatus.GENERATED,
+                chapters_status=ChaptersStatus.SKIPPED_NO_TIMELINE,
             )
 
             # ---- Second request for the SAME URL: the endpoint handler
@@ -1226,7 +1298,12 @@ class TestTranscriptOnlyCacheBothSwitchesOffIsNotFullHit:
         assert result["status"] == "success"
         assert len(queued) == 1
         task = queued[0]
-        assert task["processing_options"] == {"calibrate": False, "summarize": False, "infer_speaker_names": False}
+        assert task["processing_options"] == {
+            "calibrate": False,
+            "summarize": False,
+            "infer_speaker_names": False,
+            "chapters": False,
+        }
         # Real (raw) transcript reused as input -- no re-download/re-transcribe.
         assert task["transcript"] == "RAW uncalibrated transcript"
 
