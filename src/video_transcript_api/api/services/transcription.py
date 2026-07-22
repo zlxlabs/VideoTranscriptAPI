@@ -348,6 +348,8 @@ async def process_task_queue():
             task = await task_queue.get()
             task_id = task["id"]
             url = task["url"]
+            preparsed_url = task.get("preparsed_url")
+            url_parse_attempted = task.get("url_parse_attempted", False)
             use_speaker_recognition = task.get("use_speaker_recognition", False)
             wechat_webhook = task.get("wechat_webhook")
             notification_channel = task.get("notification_channel")
@@ -366,6 +368,8 @@ async def process_task_queue():
                 def run_and_finalize(
                     task_id=task_id,
                     url=url,
+                    preparsed_url=preparsed_url,
+                    url_parse_attempted=url_parse_attempted,
                     use_speaker_recognition=use_speaker_recognition,
                     wechat_webhook=wechat_webhook,
                     download_url=download_url,
@@ -385,6 +389,8 @@ async def process_task_queue():
                             notification_channel=notification_channel,
                             notification_webhooks=notification_webhooks,
                             processing_options=processing_options,
+                            preparsed_url=preparsed_url,
+                            url_parse_attempted=url_parse_attempted,
                         )
                         logger.info(f"任务完成: {task_id}")
                     except Exception as exc:
@@ -693,7 +699,8 @@ def _handoff_to_llm_stage(
 def process_transcription(
     task_id, url, use_speaker_recognition=False, wechat_webhook=None,
     download_url=None, metadata_override=None, notification_channel=None,
-    notification_webhooks=None, processing_options=None,
+    notification_webhooks=None, processing_options=None, preparsed_url=None,
+    url_parse_attempted=False,
 ):
     """
     处理视频转录
@@ -709,6 +716,10 @@ def process_transcription(
         notification_webhooks: per-channel webhook dict {"wechat": "...", "feishu": "..."}
         processing_options: 处理深度开关 dict {"calibrate": bool, "summarize": bool}，
             None 时按全流程兜底（向后兼容旧调用方）
+        preparsed_url: API 首次解析后的 ParsedURL；提供时复用其 canonical URL，
+            不再解析原始 URL。
+        url_parse_attempted: API 是否已经尝试过 URL 解析。解析失败时为 True，
+            worker 直接走 generic 回退而不再尝试短链跳转。
     """
     if notification_webhooks is None:
         notification_webhooks = {}
@@ -869,26 +880,43 @@ def process_transcription(
         logger.info(f"[URL解析] 开始解析 URL: {check_url[:100]}")
 
         with tracker.track("url_parse"):
-            try:
-                # 使用 URLParser 统一解析（支持短链接自动解析）
-                url_parser = URLParser()
-                parsed_url = url_parser.parse(check_url)
-
-                platform = parsed_url.platform
-                video_id = parsed_url.video_id
-                parse_url = parsed_url.normalized_url or url
-
+            if preparsed_url is not None:
+                platform = preparsed_url.platform
+                video_id = preparsed_url.video_id
+                parse_url = preparsed_url.normalized_url or url
                 logger.info(
-                    f"[URL解析] 解析成功: platform={platform}, video_id={video_id}, "
-                    f"is_short_url={parsed_url.is_short_url}"
+                    f"[URL解析] 复用 API 预解析结果: platform={platform}, "
+                    f"video_id={video_id}, is_short_url={preparsed_url.is_short_url}"
                 )
-
-            except Exception as e:
-                # URL 解析失败，回退到 generic 模式
-                logger.warning(f"[URL解析] 解析失败: {e}，使用 generic 模式")
-                platform = 'generic'
+            elif url_parse_attempted:
+                # API 已经尝试解析但没有得到结果。常规 API 路径不得在 worker
+                # 中重新跳转短链；保持原有 generic 降级语义即可。
+                platform = "generic"
                 video_id = generate_media_id_from_url(url)
-                logger.info(f"[URL解析] 回退到通用标识: platform={platform}, video_id={video_id}")
+                logger.warning(
+                    "[URL解析] API 预解析失败，worker 直接使用 generic 模式"
+                )
+            else:
+                try:
+                    # 使用 URLParser 统一解析（支持短链接自动解析）
+                    url_parser = URLParser()
+                    parsed_url = url_parser.parse(check_url)
+
+                    platform = parsed_url.platform
+                    video_id = parsed_url.video_id
+                    parse_url = parsed_url.normalized_url or url
+
+                    logger.info(
+                        f"[URL解析] 解析成功: platform={platform}, video_id={video_id}, "
+                        f"is_short_url={parsed_url.is_short_url}"
+                    )
+
+                except Exception as e:
+                    # URL 解析失败，回退到 generic 模式
+                    logger.warning(f"[URL解析] 解析失败: {e}，使用 generic 模式")
+                    platform = 'generic'
+                    video_id = generate_media_id_from_url(url)
+                    logger.info(f"[URL解析] 回退到通用标识: platform={platform}, video_id={video_id}")
 
         # ==================== 阶段2: 缓存检测（在创建下载器之前）====================
         cache_data = None

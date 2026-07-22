@@ -83,3 +83,23 @@
 **Priority:** P2
 
 **Depends on:** BBDown 监督器根因修复已上线并持续观测
+
+---
+
+## P3: 转录服务换行格式与已接受的 CI Review nit
+
+**What:** 仅在单独的格式化 PR 中，评估将 `src/video_transcript_api/api/services/transcription.py` 的历史 CRLF 换行统一为项目格式，并在跨平台环境验证；同时再评估 PR #28 CI Agent Review 已接受的两个 nit：顶层配置/可执行检查异常少一层 `logger.exception`，以及成功路径的 `rmtree`/`untrack` 与 `finally` 的幂等重复。另记录 PR #29 CI Agent Review nit：`url_parse_attempted` 在 API 路径恒为 `True`、直接调用默认 `False`，名称可能让人误以为 API 内部存在 `False` 分支。
+
+**Why:** 当前文件的历史 CRLF 会让全文件 `git diff --check` 将新增行报告为 trailing whitespace，但不影响运行或测试。本次接受不修：统一换行会制造 2400+ 行无关 patch，违反小修复做减法。两个 CI Review nit 也都不影响正确性，本次不为诊断或可读性改变控制流。`url_parse_attempted` 的三分支语义和向后兼容均正确；改名仅改善认知且会扩大无收益改动，因此本次接受不修。
+
+**Pros:** 将格式化、跨平台验证与控制流可读性改进放在可独立审查的范围内，避免掩盖功能修复。
+
+**Cons:** 在单独 PR 排期前，`git diff --check` 对该 CRLF 文件的新增行仍会产生噪音；异常诊断层级和清理路径重复也暂时保留。
+
+**Context:** 只有在单独格式化 PR 且完成跨平台验证时处理换行；届时可一并决定是否补充顶层 `logger.exception` 或整理成功路径清理，但不能以这些 nit 回溯修改当前短链修复。
+
+**Effort:** S（人工）→ S（CC）
+
+**Priority:** P3
+
+**Depends on:** 无

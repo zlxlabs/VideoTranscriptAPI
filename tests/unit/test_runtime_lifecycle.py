@@ -500,6 +500,75 @@ def test_task_queue_normalizes_explicit_null_notification_webhooks(monkeypatch):
     assert observed == [{}]
 
 
+def test_task_queue_forwards_api_preparsed_url_without_reparsing(monkeypatch):
+    """The worker passes the API's canonical URL fact to transcription."""
+    from video_transcript_api.api.services import transcription
+    from video_transcript_api.utils.url_parser import ParsedURL
+
+    observed = {}
+    work_queue = asyncio.Queue()
+    parsed_url = ParsedURL(
+        platform="bilibili",
+        video_id="BV1AoEg6SEW4",
+        normalized_url="https://www.bilibili.com/video/BV1AoEg6SEW4?p=2",
+        is_short_url=True,
+        original_url="https://b23.tv/short-code",
+    )
+
+    class Cache:
+        def update_task_status(self, *args, **kwargs):
+            pass
+
+    class Runtime:
+        def track_future(self, *args, **kwargs):
+            pass
+
+    class ImmediateExecutor:
+        def submit(self, function, *args):
+            future = concurrent.futures.Future()
+            try:
+                future.set_result(function(*args))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+    monkeypatch.setattr(transcription, "task_queue", work_queue)
+    monkeypatch.setattr(transcription, "cache_manager", Cache())
+    monkeypatch.setattr(transcription, "executor", ImmediateExecutor())
+    monkeypatch.setattr(transcription, "get_runtime", lambda: Runtime())
+    monkeypatch.setattr(
+        transcription,
+        "process_transcription",
+        lambda *args, **kwargs: observed.update(
+            url=args[1],
+            preparsed_url=kwargs["preparsed_url"],
+            url_parse_attempted=kwargs["url_parse_attempted"],
+        ),
+    )
+
+    async def scenario():
+        processor = asyncio.create_task(transcription.process_task_queue())
+        await work_queue.put(
+            {
+                "id": "task-preparsed-url",
+                "url": parsed_url.original_url,
+                "preparsed_url": parsed_url,
+                "url_parse_attempted": True,
+            }
+        )
+        await work_queue.join()
+        processor.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await processor
+
+    asyncio.run(scenario())
+    assert observed == {
+        "url": parsed_url.original_url,
+        "preparsed_url": parsed_url,
+        "url_parse_attempted": True,
+    }
+
+
 def test_runtime_workers_close_before_notification_clients(monkeypatch):
     app_module = importlib.import_module("video_transcript_api.api.app")
 

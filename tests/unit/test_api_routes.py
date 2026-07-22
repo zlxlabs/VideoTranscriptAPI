@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from video_transcript_api.utils.url_parser import ParsedURL
 
 # ---------------------------------------------------------------------------
 # Helpers: build a minimal FastAPI app with mocked dependencies
@@ -320,6 +321,31 @@ class TestTranscribeEndpoint:
             json={"url": "https://www.youtube.com/watch?v=abc123"},
         )
         assert mock_audit_logger.log_api_call.call_count >= 2
+
+    def test_transcribe_enqueues_preparsed_short_url_for_worker(
+        self, client, mock_task_queue
+    ):
+        """A short URL is resolved by the API once and forwarded as a fact."""
+        parsed_url = ParsedURL(
+            platform="bilibili",
+            video_id="BV1AoEg6SEW4",
+            normalized_url="https://www.bilibili.com/video/BV1AoEg6SEW4?p=2",
+            is_short_url=True,
+            original_url="https://b23.tv/short-code",
+        )
+        with patch(
+            "video_transcript_api.utils.url_parser.URLParser.parse",
+            return_value=parsed_url,
+        ):
+            response = client.post(
+                "/api/transcribe", json={"url": parsed_url.original_url}
+            )
+
+        assert response.status_code == 200
+        queued_task = mock_task_queue.get_nowait()
+        assert queued_task["url"] == parsed_url.original_url
+        assert queued_task["preparsed_url"] == parsed_url
+        assert queued_task["url_parse_attempted"] is True
 
 
 class TestTranscribeQueueBackpressure:
