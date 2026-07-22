@@ -88,9 +88,9 @@
 
 ## P3: 转录服务换行格式与已接受的 CI Review nit
 
-**What:** 仅在单独的格式化 PR 中，评估将 `src/video_transcript_api/api/services/transcription.py` 的历史 CRLF 换行统一为项目格式，并在跨平台环境验证；同时再评估 PR #28 CI Agent Review 已接受的两个 nit：顶层配置/可执行检查异常少一层 `logger.exception`，以及成功路径的 `rmtree`/`untrack` 与 `finally` 的幂等重复。
+**What:** 仅在单独的格式化 PR 中，评估将 `src/video_transcript_api/api/services/transcription.py` 的历史 CRLF 换行统一为项目格式，并在跨平台环境验证；同时再评估 PR #28 CI Agent Review 已接受的两个 nit：顶层配置/可执行检查异常少一层 `logger.exception`，以及成功路径的 `rmtree`/`untrack` 与 `finally` 的幂等重复。另记录 PR #29 CI Agent Review nit：`url_parse_attempted` 在 API 路径恒为 `True`、直接调用默认 `False`，名称可能让人误以为 API 内部存在 `False` 分支。
 
-**Why:** 当前文件的历史 CRLF 会让全文件 `git diff --check` 将新增行报告为 trailing whitespace，但不影响运行或测试。本次接受不修：统一换行会制造 2400+ 行无关 patch，违反小修复做减法。两个 CI Review nit 也都不影响正确性，本次不为诊断或可读性改变控制流。
+**Why:** 当前文件的历史 CRLF 会让全文件 `git diff --check` 将新增行报告为 trailing whitespace，但不影响运行或测试。本次接受不修：统一换行会制造 2400+ 行无关 patch，违反小修复做减法。两个 CI Review nit 也都不影响正确性，本次不为诊断或可读性改变控制流。`url_parse_attempted` 的三分支语义和向后兼容均正确；改名仅改善认知且会扩大无收益改动，因此本次接受不修。
 
 **Pros:** 将格式化、跨平台验证与控制流可读性改进放在可独立审查的范围内，避免掩盖功能修复。
 
