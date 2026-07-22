@@ -132,6 +132,37 @@ class GenericDownloader:
         return "C:/tmp/direct.mp3"
 
 
+class OrderedDownloadInfoYoutubeDownloader(YoutubeDownloader):
+    """Record when download information is resolved relative to progress."""
+
+    def __init__(self, events):
+        super().__init__(subtitle=None, download_url="http://example.com/audio.mp3", filename="audio.mp3")
+        self.events = events
+
+    def get_download_info(self, url):
+        self.events.append("get_download_info")
+        return super().get_download_info(url)
+
+    def download_file(self, url, filename):
+        self.events.append("download_file")
+        return super().download_file(url, filename)
+
+
+class OrderedNotificationRouter:
+    """Record the user-visible download notification in a shared event list."""
+
+    def __init__(self, events):
+        self.events = events
+
+    def notify_task_status(self, *args, **kwargs):
+        status = kwargs.get("status", "")
+        if status.startswith("正在下载视频"):
+            self.events.append("notify_download")
+
+    def send_text(self, *args, **kwargs):
+        pass
+
+
 @pytest.fixture
 def patch_runtime(monkeypatch):
     queue = DummyQueue()
@@ -185,6 +216,37 @@ def test_flow_cache_hit(monkeypatch, patch_runtime):
     assert result["status"] == "success"
     assert result["data"]["cached"] is True
     assert len(patch_runtime.items) == 0
+
+
+def test_download_info_is_resolved_after_download_notification(
+    monkeypatch, patch_runtime
+):
+    """A downloader may perform real work while resolving download info.
+
+    BBDown is one such downloader: its ``get_download_info`` path invokes the
+    actual download. The user must see the download status before that call,
+    and the call must happen exactly once.
+    """
+    events = []
+    cache_manager = DummyCacheManager(cache_data=None)
+    downloader = OrderedDownloadInfoYoutubeDownloader(events)
+    router = OrderedNotificationRouter(events)
+
+    monkeypatch.setattr(transcription, "cache_manager", cache_manager)
+    monkeypatch.setattr(transcription, "create_downloader", lambda url: downloader)
+    monkeypatch.setattr(transcription, "get_notification_router", lambda: router)
+
+    result = transcription.process_transcription(
+        task_id="task_download_info_order",
+        url="https://www.youtube.com/watch?v=abc123",
+        use_speaker_recognition=False,
+        wechat_webhook=None,
+        download_url=None,
+        metadata_override=None,
+    )
+
+    assert result["status"] == "success"
+    assert events == ["notify_download", "get_download_info", "download_file"]
 
 
 def test_flow_cache_hit_with_disabled_calibration_notifies_disclaimer(monkeypatch, patch_runtime):
