@@ -7,6 +7,9 @@ import datetime
 import subprocess
 import platform
 import shutil
+import signal
+import threading
+from collections import deque
 import requests
 from .base import BaseDownloader, get_temp_manager
 from .models import VideoMetadata, DownloadInfo
@@ -21,6 +24,14 @@ DEBUG_DIR = create_debug_dir()
 _RETRYABLE_CODES = {-412, -799, -509}
 _OFFICIAL_API_MAX_RETRIES = 3      # 官方 API 最大尝试次数
 _OFFICIAL_API_BACKOFF_BASE = 0.5   # 指数退避基数（秒）
+
+_BBDOWN_MAX_ATTEMPTS = 3
+_BBDOWN_PREFLIGHT_IDLE_SECONDS = 20.0
+_BBDOWN_DOWNLOAD_IDLE_SECONDS = 60.0
+_BBDOWN_POLL_SECONDS = 1.0
+_BBDOWN_RETRY_BACKOFF_SECONDS = 0.5
+_BBDOWN_OUTPUT_TAIL_LINES = 8
+_BBDOWN_OUTPUT_TAIL_LINE_CHARS = 512
 
 
 def _generate_buvid3() -> str:
@@ -252,174 +263,259 @@ class BilibiliDownloader(BaseDownloader):
         返回:
             dict: 包含视频信息的字典
         """
+        resolved_url = self.resolve_short_url(url) if "b23.tv" in url else url
+        bv_id = self._extract_video_id(resolved_url)
+        canonical_url = f"https://www.bilibili.com/video/{bv_id}"
+        logger.info(f"使用BBDown下载Bilibili视频: bv_id={bv_id}, url={canonical_url}")
+
+        bbdown_config = self.config.get("bbdown", {})
+        system_platform = platform.system().lower()
+        executable_key = (
+            "executable" if system_platform == "windows"
+            else "executable_mac" if system_platform == "darwin"
+            else "executable_linux"
+        )
+        executable_default = (
+            "BBDown/BBDown.exe" if system_platform == "windows"
+            else "BBDown/BBDown_Mac" if system_platform == "darwin"
+            else "BBDown/BBDown"
+        )
+        bbdown_path = bbdown_config.get(executable_key, executable_default)
+        if not os.path.isabs(bbdown_path):
+            bbdown_path = os.path.join(os.path.abspath(os.getcwd()), bbdown_path)
+        if not os.path.exists(bbdown_path):
+            raise FileNotFoundError(f"BBDown可执行文件不存在: {bbdown_path}")
+
+        timeout = float(bbdown_config.get("timeout", 300))
+        if timeout <= 0:
+            raise ValueError("BBDown超时预算必须大于0秒")
+        page_num = self._extract_page_number(resolved_url)
+        download_args = [
+            bbdown_path,
+            canonical_url,
+            "-p", str(page_num),
+            "--skip-subtitle",
+            "--skip-cover",
+            "--skip-ai",
+        ]
+        if bbdown_config.get("audio_only", True):
+            download_args.append("--audio-only")
+
+        deadline = time.monotonic() + timeout
+        last_stage = "not_started"
+        last_output = ""
+        attempts_started = 0
+
+        for attempt in range(1, _BBDOWN_MAX_ATTEMPTS + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                last_stage = "total_budget_exhausted"
+                break
+
+            attempts_started = attempt
+            temp_dir = str(self.temp_manager.create_temp_dir(prefix=f"bbdown_{bv_id}_"))
+            output_tail = deque(maxlen=_BBDOWN_OUTPUT_TAIL_LINES)
+            activity = [time.monotonic()]
+            process = None
+            reader_threads = []
+            stage = "launch"
+
+            try:
+                popen_kwargs = {
+                    "cwd": temp_dir,
+                    "shell": False,
+                    "stdin": subprocess.DEVNULL,
+                    "stdout": subprocess.PIPE,
+                    "stderr": subprocess.PIPE,
+                }
+                if system_platform == "windows":
+                    popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+                else:
+                    popen_kwargs["start_new_session"] = True
+
+                logger.info(
+                    f"执行BBDown命令 (尝试 {attempt}/{_BBDOWN_MAX_ATTEMPTS}): "
+                    f"{' '.join(download_args)}"
+                )
+                process = subprocess.Popen(download_args, **popen_kwargs)
+                for stream in (process.stdout, process.stderr):
+                    thread = threading.Thread(
+                        target=self._collect_bbdown_output,
+                        args=(stream, output_tail, activity),
+                        daemon=True,
+                    )
+                    thread.start()
+                    reader_threads.append(thread)
+
+                previous_files = self._bbdown_file_signature(temp_dir)
+                while True:
+                    now = time.monotonic()
+                    returncode = process.poll()
+                    current_files = self._bbdown_file_signature(temp_dir)
+                    if current_files != previous_files:
+                        previous_files = current_files
+                        activity[0] = now
+
+                    has_download_progress = any(size > 0 for size, _ in current_files.values())
+                    idle_limit = (
+                        _BBDOWN_DOWNLOAD_IDLE_SECONDS if has_download_progress
+                        else _BBDOWN_PREFLIGHT_IDLE_SECONDS
+                    )
+                    if returncode is not None:
+                        break
+                    if now >= deadline:
+                        stage = "total_budget_exhausted"
+                        self._terminate_bbdown_process(
+                            process, max(0.0, deadline - now)
+                        )
+                        break
+                    if now - activity[0] >= idle_limit:
+                        stage = (
+                            "download_stalled" if has_download_progress
+                            else "preflight_stalled"
+                        )
+                        self._terminate_bbdown_process(
+                            process, max(0.0, deadline - now)
+                        )
+                        break
+                    time.sleep(min(_BBDOWN_POLL_SECONDS, deadline - now))
+
+                returncode = process.poll()
+                if stage in {"preflight_stalled", "download_stalled", "total_budget_exhausted"}:
+                    pass
+                elif returncode != 0:
+                    stage = f"process_exit_{returncode}"
+                else:
+                    media_files = self._bbdown_media_files(temp_dir)
+                    if not media_files:
+                        stage = "media_missing"
+                    else:
+                        latest_file = max(media_files, key=os.path.getmtime)
+                        if os.path.getsize(latest_file) <= 0:
+                            stage = "media_empty"
+                        elif not self._validate_media_file(latest_file):
+                            stage = "media_invalid"
+                        else:
+                            result = self._build_bbdown_result(latest_file, bv_id)
+                            shutil.rmtree(temp_dir, ignore_errors=True)
+                            self._untrack_bbdown_temp_dir(temp_dir)
+                            logger.info(
+                                f"成功使用BBDown下载Bilibili视频: ID={bv_id}, "
+                                f"标题={result['video_title']}"
+                            )
+                            return result
+            except Exception as exc:
+                stage = f"launch_or_monitor_error:{type(exc).__name__}"
+                output_tail.append(str(exc)[-_BBDOWN_OUTPUT_TAIL_LINE_CHARS:])
+                if process is not None:
+                    self._terminate_bbdown_process(process)
+            finally:
+                for thread in reader_threads:
+                    thread.join(timeout=0.1)
+                last_stage = stage
+                last_output = "".join(output_tail).strip()
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                self._untrack_bbdown_temp_dir(temp_dir)
+
+            if attempt < _BBDOWN_MAX_ATTEMPTS and deadline - time.monotonic() > 0:
+                time.sleep(min(_BBDOWN_RETRY_BACKOFF_SECONDS, deadline - time.monotonic()))
+
+        output_hint = f", output={last_output!r}" if last_output else ""
+        raise ValueError(
+            f"BBDown下载失败: attempt={attempts_started}, stage={last_stage}{output_hint}"
+        )
+
+    @staticmethod
+    def _bbdown_file_signature(temp_dir):
+        """返回尝试目录文件的大小与 mtime，用于检测下载进展。"""
+        signature = {}
+        for root, _, files in os.walk(temp_dir):
+            for filename in files:
+                path = os.path.join(root, filename)
+                try:
+                    stat = os.stat(path)
+                    signature[path] = (stat.st_size, stat.st_mtime_ns)
+                except OSError:
+                    continue
+        return signature
+
+    @staticmethod
+    def _bbdown_media_files(temp_dir):
+        """查找 BBDown 已生成的候选媒体文件。"""
+        files = []
+        for root, _, filenames in os.walk(temp_dir):
+            for filename in filenames:
+                if filename.lower().endswith((".mp3", ".m4a", ".mp4")):
+                    files.append(os.path.join(root, filename))
+        return files
+
+    @staticmethod
+    def _collect_bbdown_output(stream, output_tail, activity):
+        """读取有限输出尾部，同时把输出视为进程活动。"""
+        if stream is None:
+            return
         try:
-            # 提取视频BV号
-            bv_id = self._extract_video_id(url)
-            logger.info(f"使用BBDown下载Bilibili视频: bv_id={bv_id}, url={url}")
+            for line in iter(stream.readline, b""):
+                text = line.decode("utf-8", errors="replace")
+                output_tail.append(text[-_BBDOWN_OUTPUT_TAIL_LINE_CHARS:])
+                activity[0] = time.monotonic()
+        except (OSError, ValueError):
+            return
 
-            # 确定BBDown可执行文件路径
-            bbdown_config = self.config.get("bbdown", {})
-            system_platform = platform.system().lower()
-
-            # 获取当前工作目录
-            current_dir = os.path.abspath(os.getcwd())
-
-            if system_platform == "windows":
-                bbdown_path = bbdown_config.get("executable", "BBDown/BBDown.exe")
-            elif system_platform == "darwin":
-                # macOS
-                bbdown_path = bbdown_config.get("executable_mac", "BBDown/BBDown_Mac")
+    @staticmethod
+    def _terminate_bbdown_process(process, grace_seconds=2.0):
+        """停止当前 BBDown 及其子进程组，避免失败尝试遗留下载任务。"""
+        if process.poll() is not None:
+            return
+        try:
+            if os.name == "nt":
+                process.terminate()
             else:
-                # Linux
-                bbdown_path = bbdown_config.get("executable_linux", "BBDown/BBDown")
+                os.killpg(process.pid, signal.SIGTERM)
+        except (AttributeError, OSError, ProcessLookupError):
+            try:
+                process.terminate()
+            except OSError:
+                return
+        try:
+            process.wait(timeout=min(2.0, max(0.0, grace_seconds)))
+        except (subprocess.TimeoutExpired, OSError):
+            try:
+                process.kill()
+            except OSError:
+                pass
 
-            # 将相对路径转换为绝对路径
-            if not os.path.isabs(bbdown_path):
-                bbdown_path = os.path.join(current_dir, bbdown_path)
+    def _build_bbdown_result(self, latest_file, bv_id):
+        """将已验证媒体移动到统一临时文件并构造兼容旧接口的结果。"""
+        file_ext = os.path.splitext(latest_file)[1][1:]
+        file_basename = os.path.basename(latest_file)
+        video_title_match = re.search(r"\[(BV\w+)\](.*)\." + file_ext, file_basename)
+        video_title = (
+            video_title_match.group(2).strip() if video_title_match
+            else os.path.splitext(file_basename)[0].strip()
+        ) or f"bilibili_{bv_id}"
+        ext = os.path.splitext(latest_file)[1] or ".tmp"
+        target_path = self.temp_manager.create_temp_file(suffix=ext)
+        shutil.move(latest_file, target_path)
+        return {
+            "video_id": bv_id,
+            "video_title": video_title,
+            "author": "",
+            "download_url": None,
+            "filename": os.path.basename(target_path),
+            "local_file": str(target_path),
+            "platform": "bilibili",
+            "downloaded": True,
+        }
 
-            # 检查BBDown可执行文件是否存在
-            if not os.path.exists(bbdown_path):
-                logger.error(f"BBDown可执行文件不存在: {bbdown_path}")
-                raise FileNotFoundError(f"BBDown可执行文件不存在: {bbdown_path}")
-
-            audio_only = bbdown_config.get("audio_only", True)
-
-            temp_dir = self.temp_manager.create_temp_dir(prefix=f"bbdown_{bv_id}_")
-
-            # 提取分P号
-            page_num = self._extract_page_number(url)
-
-            # 统一使用列表形式执行命令（避免 shell=True 带来的命令注入风险）
-            if system_platform == "windows":
-                download_args = [bbdown_path, url, "-p", str(page_num)]
-                if audio_only:
-                    download_args.append("--audio-only")
-
-                logger.info(f"执行BBDown命令: {' '.join(download_args)}")
-                timeout = bbdown_config.get("timeout", 300)
-
-                try:
-                    process = subprocess.run(
-                        download_args,
-                        cwd=temp_dir,
-                        shell=False,
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        timeout=timeout,
-                    )
-
-                    # 记录BBDown输出
-                    logger.debug(f"BBDown输出: {process.stdout}")
-                    if process.stderr:
-                        logger.warning(f"BBDown错误输出: {process.stderr}")
-
-                except subprocess.CalledProcessError as e:
-                    logger.error(f"BBDown执行失败: {str(e)}")
-                    logger.error(f"BBDown输出: {e.stdout}")
-                    logger.error(f"BBDown错误: {e.stderr}")
-                    raise ValueError(f"BBDown执行失败: {str(e)}")
-                except subprocess.TimeoutExpired as e:
-                    logger.error(f"BBDown执行超时: {str(e)}")
-                    raise ValueError(f"BBDown执行超时，超过{timeout}秒")
-            else:
-                # 在Linux/macOS系统下使用列表参数执行命令
-                download_args = [bbdown_path, url, "-p", str(page_num)]
-                if audio_only:
-                    download_args.append("--audio-only")
-
-                logger.info(f"执行BBDown命令: {' '.join(download_args)}")
-                timeout = bbdown_config.get("timeout", 300)
-
-                try:
-                    process = subprocess.run(
-                        download_args,
-                        cwd=temp_dir,
-                        shell=False,
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",  # 显式指定UTF-8编码
-                        errors="replace",  # 替换无法解码的字符
-                        timeout=timeout,
-                    )
-
-                    # 记录BBDown输出
-                    logger.debug(f"BBDown输出: {process.stdout}")
-                    if process.stderr:
-                        logger.warning(f"BBDown错误输出: {process.stderr}")
-
-                except subprocess.CalledProcessError as e:
-                    logger.error(f"BBDown执行失败: {str(e)}")
-                    logger.error(f"BBDown输出: {e.stdout}")
-                    logger.error(f"BBDown错误: {e.stderr}")
-                    raise ValueError(f"BBDown执行失败: {str(e)}")
-                except subprocess.TimeoutExpired as e:
-                    logger.error(f"BBDown执行超时: {str(e)}")
-                    raise ValueError(f"BBDown执行超时，超过{timeout}秒")
-
-            # 查找下载的文件
-            downloaded_files = []
-            for root, dirs, files in os.walk(temp_dir):
-                for file in files:
-                    if file.endswith((".mp3", ".m4a", ".mp4")):
-                        downloaded_files.append(os.path.join(root, file))
-
-            if not downloaded_files:
-                logger.error(f"BBDown下载成功，但找不到下载的文件: {temp_dir}")
-                raise ValueError(f"BBDown下载成功，但找不到下载的文件")
-
-            # 找到最新的文件
-            latest_file = max(downloaded_files, key=os.path.getctime)
-            file_ext = os.path.splitext(latest_file)[1][1:]  # 获取扩展名，去除前面的点
-            logger.info(f"BBDown下载的文件: {latest_file}")
-
-            # 从文件名提取视频标题
-            file_basename = os.path.basename(latest_file)
-
-            # 提取视频标题的逻辑
-            # 首先尝试匹配 BBDown 的标准输出格式 "[BVxxx]视频标题.扩展名"
-            video_title_match = re.search(
-                r"\[(BV\w+)\](.*)\." + file_ext, file_basename
-            )
-            if video_title_match:
-                video_title = video_title_match.group(2).strip()
-                logger.info(f"从标准BBDown文件名格式提取到标题: {video_title}")
-            else:
-                # 如果标准格式匹配失败，直接使用文件名（去除扩展名）作为标题
-                video_title = os.path.splitext(file_basename)[0]
-                logger.info(f"从文件名直接提取标题: {video_title}")
-
-                # 如果文件名为空或只包含空白字符，则使用默认值
-                if not video_title or video_title.strip() == "":
-                    video_title = f"bilibili_{bv_id}"
-                    logger.warning(f"文件名为空，使用默认值作为标题: {video_title}")
-
-            ext = os.path.splitext(latest_file)[1] if "." in latest_file else ".tmp"
-            target_path = self.temp_manager.create_temp_file(suffix=ext)
-            shutil.move(latest_file, target_path)
-
-            result = {
-                "video_id": bv_id,
-                "video_title": video_title,
-                "author": "",
-                "download_url": None,
-                "filename": os.path.basename(target_path),
-                "local_file": str(target_path),
-                "platform": "bilibili",
-                "downloaded": True,
-            }
-
-            logger.info(
-                f"成功使用BBDown下载Bilibili视频: ID={bv_id}, 标题={video_title}"
-            )
-            return result
-
-        except Exception as e:
-            logger.exception(f"使用BBDown获取视频信息异常: {str(e)}")
-            raise
+    def _untrack_bbdown_temp_dir(self, temp_dir):
+        """目录被主动清理后，避免临时管理器保留失效跟踪项。"""
+        untrack = getattr(self.temp_manager, "untrack_file", None)
+        if untrack is not None:
+            try:
+                untrack(temp_dir)
+            except (OSError, TypeError):
+                logger.warning(f"取消跟踪BBDown临时目录失败: {temp_dir}")
 
     def _get_video_info_api(self, url):
         """
