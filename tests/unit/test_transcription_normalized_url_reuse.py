@@ -67,3 +67,54 @@ def test_bilibili_normalized_url_is_reused_for_metadata_and_download_info(monkey
     assert factory_urls == [NORMALIZED_URL]
     assert downloader.metadata_urls == [NORMALIZED_URL]
     assert downloader.download_info_urls == [NORMALIZED_URL]
+
+
+def test_preparsed_bilibili_url_skips_parser_and_preserves_original_notification(monkeypatch):
+    """The API-resolved canonical URL is authoritative for worker processing."""
+    fake_cache = MagicMock()
+    fake_cache.get_cache.return_value = None
+    monkeypatch.setattr(svc, "cache_manager", fake_cache)
+
+    notification_router = MagicMock()
+    monkeypatch.setattr(svc, "get_notification_router", lambda: notification_router)
+    monkeypatch.setattr(
+        "video_transcript_api.utils.url_parser.URLParser.parse",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("worker must not parse an API-preparsed URL")
+        ),
+    )
+
+    downloader = _RecordingDownloader()
+    factory_urls = []
+
+    def create_recording_downloader(url):
+        factory_urls.append(url)
+        return downloader
+
+    monkeypatch.setattr(svc, "create_downloader", create_recording_downloader)
+
+    parsed_url = ParsedURL(
+        platform="bilibili",
+        video_id="BV1AoEg6SEW4",
+        normalized_url=NORMALIZED_URL,
+        is_short_url=True,
+        original_url=SHORT_URL,
+    )
+
+    result = svc.process_transcription(
+        task_id="api-preparsed-url",
+        url=SHORT_URL,
+        preparsed_url=parsed_url,
+        url_parse_attempted=True,
+    )
+
+    assert result["status"] == "failed"
+    fake_cache.get_cache.assert_called_once_with(
+        platform="bilibili",
+        media_id="BV1AoEg6SEW4",
+        use_speaker_recognition=False,
+    )
+    assert factory_urls == [NORMALIZED_URL]
+    assert downloader.metadata_urls == [NORMALIZED_URL]
+    assert downloader.download_info_urls == [NORMALIZED_URL]
+    assert notification_router.notify_task_status.call_args.kwargs["url"] == SHORT_URL

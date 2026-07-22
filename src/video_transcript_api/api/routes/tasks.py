@@ -166,11 +166,13 @@ async def transcribe_video(
     # 提前解析 URL，提取 platform+media_id 用于同源视频去重
     parsed_platform = None
     parsed_media_id = None
+    preparsed_url = None
+    url_parse_attempted = True
     try:
         from ...utils.url_parser import URLParser
-        parsed_url = URLParser().parse(url)
-        parsed_platform = parsed_url.platform
-        parsed_media_id = parsed_url.video_id
+        preparsed_url = URLParser().parse(url)
+        parsed_platform = preparsed_url.platform
+        parsed_media_id = preparsed_url.video_id
         logger.info(f"URL预解析成功: platform={parsed_platform}, media_id={parsed_media_id}")
     except Exception as e:
         logger.warning(f"URL预解析失败，降级到精确URL匹配: {e}")
@@ -237,6 +239,10 @@ async def transcribe_video(
                 task = {
                     "id": task_id,
                     "url": url,
+                    # API 已经完成一次 URL 解析；worker 必须复用这份事实，避免
+                    # b23 等短链在后台再次跳转。原始 url 仍保留给通知和展示。
+                    "preparsed_url": preparsed_url,
+                    "url_parse_attempted": url_parse_attempted,
                     "use_speaker_recognition": request_body.use_speaker_recognition,
                     "wechat_webhook": notification_webhooks.get("wechat"),
                     "notification_webhooks": notification_webhooks,
