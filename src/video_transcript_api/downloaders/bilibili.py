@@ -319,6 +319,7 @@ class BilibiliDownloader(BaseDownloader):
             process = None
             reader_threads = []
             stage = "launch"
+            attempt_succeeded = False
 
             try:
                 popen_kwargs = {
@@ -365,17 +366,11 @@ class BilibiliDownloader(BaseDownloader):
                         break
                     if now >= deadline:
                         stage = "total_budget_exhausted"
-                        self._terminate_bbdown_process(
-                            process, max(0.0, deadline - now)
-                        )
                         break
                     if now - activity[0] >= idle_limit:
                         stage = (
                             "download_stalled" if has_download_progress
                             else "preflight_stalled"
-                        )
-                        self._terminate_bbdown_process(
-                            process, max(0.0, deadline - now)
                         )
                         break
                     time.sleep(min(_BBDOWN_POLL_SECONDS, deadline - now))
@@ -397,6 +392,7 @@ class BilibiliDownloader(BaseDownloader):
                             stage = "media_invalid"
                         else:
                             result = self._build_bbdown_result(latest_file, bv_id)
+                            attempt_succeeded = True
                             shutil.rmtree(temp_dir, ignore_errors=True)
                             self._untrack_bbdown_temp_dir(temp_dir)
                             logger.info(
@@ -407,9 +403,9 @@ class BilibiliDownloader(BaseDownloader):
             except Exception as exc:
                 stage = f"launch_or_monitor_error:{type(exc).__name__}"
                 output_tail.append(str(exc)[-_BBDOWN_OUTPUT_TAIL_LINE_CHARS:])
-                if process is not None:
-                    self._terminate_bbdown_process(process)
             finally:
+                if process is not None and not attempt_succeeded:
+                    self._terminate_bbdown_process(process)
                 for thread in reader_threads:
                     thread.join(timeout=0.1)
                 last_stage = stage
@@ -465,10 +461,18 @@ class BilibiliDownloader(BaseDownloader):
     @staticmethod
     def _terminate_bbdown_process(process, grace_seconds=2.0):
         """停止当前 BBDown 及其子进程组，避免失败尝试遗留下载任务。"""
-        if process.poll() is not None:
+        grace_timeout = min(2.0, max(0.0, grace_seconds))
+        try:
+            parent_exited = process.poll() is not None
+        except (AttributeError, OSError):
+            parent_exited = False
+
+        if os.name != "nt" and parent_exited:
+            if not BilibiliDownloader._bbdown_process_group_exists(process.pid):
+                return
+        elif os.name == "nt" and parent_exited:
             return
 
-        grace_timeout = min(2.0, max(0.0, grace_seconds))
         try:
             if os.name == "nt":
                 subprocess.run(
@@ -484,14 +488,17 @@ class BilibiliDownloader(BaseDownloader):
         except (AttributeError, OSError, subprocess.TimeoutExpired):
             pass
 
+        parent_reaped = parent_exited
         try:
             process.wait(timeout=grace_timeout)
-            return
+            parent_reaped = True
         except (AttributeError, OSError, subprocess.TimeoutExpired):
             pass
 
-        try:
-            if os.name == "nt":
+        if os.name == "nt":
+            if parent_reaped:
+                return
+            try:
                 subprocess.run(
                     ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                     check=False,
@@ -499,15 +506,32 @@ class BilibiliDownloader(BaseDownloader):
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-            else:
+            except (AttributeError, OSError, subprocess.TimeoutExpired):
+                pass
+        elif BilibiliDownloader._bbdown_process_group_exists(process.pid):
+            try:
                 os.killpg(process.pid, signal.SIGKILL)
-        except (AttributeError, OSError, subprocess.TimeoutExpired):
-            pass
+            except (AttributeError, OSError, subprocess.TimeoutExpired):
+                pass
 
+        if not parent_reaped:
+            try:
+                process.wait(timeout=grace_timeout)
+            except (AttributeError, OSError, subprocess.TimeoutExpired):
+                pass
+
+    @staticmethod
+    def _bbdown_process_group_exists(process_group_id):
+        """判断 POSIX BBDown 原进程组是否仍存在，避免向已消失的组发终止信号。"""
         try:
-            process.wait()
-        except (AttributeError, OSError, subprocess.TimeoutExpired):
-            pass
+            os.killpg(process_group_id, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except (AttributeError, OSError):
+            return False
 
     def _build_bbdown_result(self, latest_file, bv_id):
         """将已验证媒体移动到统一临时文件并构造兼容旧接口的结果。"""

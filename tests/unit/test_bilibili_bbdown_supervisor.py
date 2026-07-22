@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import io
+import shutil
 import signal
 import subprocess
 from pathlib import Path
@@ -123,9 +124,13 @@ def supervisor(tmp_path):
     return downloader
 
 
-def _run_with_fakes(downloader, processes, clock, url=CANONICAL_URL):
+def _run_with_fakes(
+    downloader, processes, clock, url=CANONICAL_URL, killpg_side_effect=None
+):
     """调用受测入口，同时替换进程、时间和可执行文件检查。"""
     def signal_process_group(pgid, sig):
+        if killpg_side_effect is not None:
+            return killpg_side_effect(pgid, sig)
         for process in processes:
             if process.pid != pgid:
                 continue
@@ -272,6 +277,46 @@ def test_success_does_not_start_later_attempt_and_cleans_attempt_dir(supervisor)
     assert not supervisor.temp_manager.attempt_dirs[0].exists()
 
 
+def test_nonzero_exit_cleans_process_group_before_retry_directory_cleanup(supervisor):
+    """非零退出且组仍存活时，必须杀净该组后才能删除目录并重试。"""
+    clock = FakeClock()
+    failed = FakeProcess([1])
+    success = FakeProcess([0])
+    supervisor._validate_media_file = lambda _: True
+    events = []
+
+    def write_media(count):
+        if count == 1:
+            (supervisor.temp_manager.attempt_dirs[1] / "good.m4a").write_bytes(b"good")
+
+    success.on_poll = write_media
+    real_rmtree = shutil.rmtree
+
+    def record_signal(pgid, sig):
+        events.append(("killpg", pgid, sig))
+
+    def record_rmtree(path, *args, **kwargs):
+        events.append(("rmtree", Path(path).name))
+        return real_rmtree(path, *args, **kwargs)
+
+    with patch(
+        "video_transcript_api.downloaders.bilibili.shutil.rmtree",
+        side_effect=record_rmtree,
+    ):
+        result, popen = _run_with_fakes(
+            supervisor,
+            [failed, success],
+            clock,
+            killpg_side_effect=record_signal,
+        )
+
+    assert popen.call_count == 2
+    assert Path(result["local_file"]).exists()
+    assert events.index(("killpg", failed.pid, signal.SIGKILL)) < events.index(
+        ("rmtree", supervisor.temp_manager.attempt_dirs[0].name)
+    )
+
+
 def test_terminate_bbdown_process_posix_terminates_group_then_kills_and_reaps_parent():
     """POSIX 超时后按 TERM、KILL 顺序处理整个会话组并等待父进程回收。"""
     process = TerminationProcess(
@@ -285,21 +330,40 @@ def test_terminate_bbdown_process_posix_terminates_group_then_kills_and_reaps_pa
 
     assert killpg.call_args_list == [
         call(process.pid, signal.SIGTERM),
+        call(process.pid, 0),
         call(process.pid, signal.SIGKILL),
     ]
-    assert process.wait.call_args_list == [call(timeout=1.5), call()]
+    assert process.wait.call_args_list == [call(timeout=1.5), call(timeout=1.5)]
 
 
-def test_terminate_bbdown_process_posix_does_not_signal_reused_group_after_exit():
-    """已退出的父进程已被 poll 回收，不能再对可能复用的 pgid 发信号。"""
-    process = TerminationProcess(poll_result=0)
+def test_terminate_bbdown_process_posix_kills_lingering_group_after_parent_exits():
+    """TERM 后父进程退出但组仍存活时，仍要 KILL 整个原进程组。"""
+    process = TerminationProcess(wait_results=[0])
 
     with patch("video_transcript_api.downloaders.bilibili.os.name", "posix"), patch(
         "video_transcript_api.downloaders.bilibili.os.killpg"
     ) as killpg:
         BilibiliDownloader._terminate_bbdown_process(process)
 
-    killpg.assert_not_called()
+    assert killpg.call_args_list == [
+        call(process.pid, signal.SIGTERM),
+        call(process.pid, 0),
+        call(process.pid, signal.SIGKILL),
+    ]
+    assert process.wait.call_args_list == [call(timeout=2.0)]
+
+
+def test_terminate_bbdown_process_posix_skips_termination_when_exited_group_is_gone():
+    """父进程已退出且原进程组不存在时，只探测而不能发送终止信号。"""
+    process = TerminationProcess(poll_result=0)
+
+    with patch("video_transcript_api.downloaders.bilibili.os.name", "posix"), patch(
+        "video_transcript_api.downloaders.bilibili.os.killpg",
+        side_effect=ProcessLookupError,
+    ) as killpg:
+        BilibiliDownloader._terminate_bbdown_process(process)
+
+    assert killpg.call_args_list == [call(process.pid, 0)]
     process.wait.assert_not_called()
 
 
@@ -331,7 +395,7 @@ def test_terminate_bbdown_process_windows_terminates_tree_and_reaps_parent():
             stderr=subprocess.DEVNULL,
         ),
     ]
-    assert process.wait.call_args_list == [call(timeout=1.5), call()]
+    assert process.wait.call_args_list == [call(timeout=1.5), call(timeout=1.5)]
 
 
 @pytest.mark.parametrize("os_name", ["posix", "nt"])
