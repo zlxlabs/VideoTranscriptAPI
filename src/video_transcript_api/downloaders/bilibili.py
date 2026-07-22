@@ -467,23 +467,47 @@ class BilibiliDownloader(BaseDownloader):
         """停止当前 BBDown 及其子进程组，避免失败尝试遗留下载任务。"""
         if process.poll() is not None:
             return
+
+        grace_timeout = min(2.0, max(0.0, grace_seconds))
         try:
             if os.name == "nt":
-                process.terminate()
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T"],
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=grace_timeout,
+                )
             else:
                 os.killpg(process.pid, signal.SIGTERM)
-        except (AttributeError, OSError, ProcessLookupError):
-            try:
-                process.terminate()
-            except OSError:
-                return
+        except (AttributeError, OSError, subprocess.TimeoutExpired):
+            pass
+
         try:
-            process.wait(timeout=min(2.0, max(0.0, grace_seconds)))
-        except (subprocess.TimeoutExpired, OSError):
-            try:
-                process.kill()
-            except OSError:
-                pass
+            process.wait(timeout=grace_timeout)
+            return
+        except (AttributeError, OSError, subprocess.TimeoutExpired):
+            pass
+
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                os.killpg(process.pid, signal.SIGKILL)
+        except (AttributeError, OSError, subprocess.TimeoutExpired):
+            pass
+
+        try:
+            process.wait()
+        except (AttributeError, OSError, subprocess.TimeoutExpired):
+            pass
 
     def _build_bbdown_result(self, latest_file, bv_id):
         """将已验证媒体移动到统一临时文件并构造兼容旧接口的结果。"""

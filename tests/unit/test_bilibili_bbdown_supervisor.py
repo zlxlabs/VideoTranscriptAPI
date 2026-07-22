@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import io
+import signal
+import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -73,6 +75,18 @@ class FakeProcess:
         return self.returncode if self.returncode is not None else -15
 
 
+class TerminationProcess:
+    """用于隔离验证进程树终止顺序的 Popen 替身。"""
+
+    def __init__(self, pid=4321, poll_result=None, wait_results=()):
+        self.pid = pid
+        self.poll_result = poll_result
+        self.wait = Mock(side_effect=wait_results)
+
+    def poll(self):
+        return self.poll_result
+
+
 class FakeTempManager:
     """为每次 BBDown 尝试分配可观察的独立目录。"""
 
@@ -111,6 +125,17 @@ def supervisor(tmp_path):
 
 def _run_with_fakes(downloader, processes, clock, url=CANONICAL_URL):
     """调用受测入口，同时替换进程、时间和可执行文件检查。"""
+    def signal_process_group(pgid, sig):
+        for process in processes:
+            if process.pid != pgid:
+                continue
+            if sig == signal.SIGTERM:
+                process.terminated = True
+                process.returncode = -15
+            elif sig == signal.SIGKILL:
+                process.killed = True
+                process.returncode = -9
+
     with patch("video_transcript_api.downloaders.bilibili.os.path.exists", return_value=True), patch(
         "video_transcript_api.downloaders.bilibili.subprocess.Popen",
         side_effect=processes,
@@ -122,7 +147,7 @@ def _run_with_fakes(downloader, processes, clock, url=CANONICAL_URL):
         side_effect=clock.sleep,
     ), patch(
         "video_transcript_api.downloaders.bilibili.os.killpg",
-        side_effect=ProcessLookupError,
+        side_effect=signal_process_group,
     ):
         return downloader._get_video_info_bbdown(url), popen
 
@@ -245,3 +270,96 @@ def test_success_does_not_start_later_attempt_and_cleans_attempt_dir(supervisor)
     assert popen.call_count == 1
     assert Path(result["local_file"]).exists()
     assert not supervisor.temp_manager.attempt_dirs[0].exists()
+
+
+def test_terminate_bbdown_process_posix_terminates_group_then_kills_and_reaps_parent():
+    """POSIX 超时后按 TERM、KILL 顺序处理整个会话组并等待父进程回收。"""
+    process = TerminationProcess(
+        wait_results=[subprocess.TimeoutExpired("BBDown", 1.5), -9]
+    )
+
+    with patch("video_transcript_api.downloaders.bilibili.os.name", "posix"), patch(
+        "video_transcript_api.downloaders.bilibili.os.killpg"
+    ) as killpg:
+        BilibiliDownloader._terminate_bbdown_process(process, grace_seconds=1.5)
+
+    assert killpg.call_args_list == [
+        call(process.pid, signal.SIGTERM),
+        call(process.pid, signal.SIGKILL),
+    ]
+    assert process.wait.call_args_list == [call(timeout=1.5), call()]
+
+
+def test_terminate_bbdown_process_posix_does_not_signal_reused_group_after_exit():
+    """已退出的父进程已被 poll 回收，不能再对可能复用的 pgid 发信号。"""
+    process = TerminationProcess(poll_result=0)
+
+    with patch("video_transcript_api.downloaders.bilibili.os.name", "posix"), patch(
+        "video_transcript_api.downloaders.bilibili.os.killpg"
+    ) as killpg:
+        BilibiliDownloader._terminate_bbdown_process(process)
+
+    killpg.assert_not_called()
+    process.wait.assert_not_called()
+
+
+def test_terminate_bbdown_process_windows_terminates_tree_and_reaps_parent():
+    """Windows 使用 taskkill /T 处理创建的新进程组，必要时强杀整个树。"""
+    process = TerminationProcess(
+        wait_results=[subprocess.TimeoutExpired("BBDown", 1.5), -9]
+    )
+
+    with patch("video_transcript_api.downloaders.bilibili.os.name", "nt"), patch(
+        "video_transcript_api.downloaders.bilibili.subprocess.run"
+    ) as run:
+        BilibiliDownloader._terminate_bbdown_process(process, grace_seconds=1.5)
+
+    assert run.call_args_list == [
+        call(
+            ["taskkill", "/PID", str(process.pid), "/T"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=1.5,
+        ),
+        call(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ),
+    ]
+    assert process.wait.call_args_list == [call(timeout=1.5), call()]
+
+
+@pytest.mark.parametrize("os_name", ["posix", "nt"])
+def test_termination_failures_do_not_mask_supervisor_download_error(supervisor, os_name):
+    """发送终止信号或 wait 出错时，调用方仍报告原始的下载监督失败。"""
+    clock = FakeClock()
+    processes = [FakeProcess([None] * 30) for _ in range(3)]
+    for process in processes:
+        process.wait = Mock(side_effect=OSError("termination failed"))
+
+    with patch("video_transcript_api.downloaders.bilibili.os.path.exists", return_value=True), patch(
+        "video_transcript_api.downloaders.bilibili.subprocess.Popen", side_effect=processes
+    ), patch(
+        "video_transcript_api.downloaders.bilibili.time.monotonic", side_effect=clock.monotonic
+    ), patch(
+        "video_transcript_api.downloaders.bilibili.time.sleep", side_effect=clock.sleep
+    ), patch("video_transcript_api.downloaders.bilibili.os.name", os_name):
+        if os_name == "nt":
+            termination = patch(
+                "video_transcript_api.downloaders.bilibili.subprocess.run",
+                side_effect=OSError("taskkill failed"),
+            )
+        else:
+            termination = patch(
+                "video_transcript_api.downloaders.bilibili.os.killpg",
+                side_effect=OSError("killpg failed"),
+            )
+        with termination, pytest.raises(
+            ValueError, match=r"stage=preflight_stalled"
+        ):
+            supervisor._get_video_info_bbdown(CANONICAL_URL)
