@@ -18,6 +18,7 @@ project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 sys.path.insert(0, os.path.join(project_root, 'src'))
 
 from video_transcript_api.downloaders.youtube import YoutubeDownloader
+from video_transcript_api.downloaders.subtitle_types import SubtitleResult
 from video_transcript_api.utils.logging import setup_logger
 
 logger = setup_logger("test_youtube_transcript_priority")
@@ -28,7 +29,7 @@ def test_api_server_enabled_success():
     测试场景 1：启用 API Server 且成功获取字幕
 
     预期：
-    - 调用 youtube_api_server.fetch_transcript()
+    - 调用 youtube_api_server.fetch_transcript_result()
     - 返回字幕文本
     - 不调用本地方案或 TikHub API
     """
@@ -49,10 +50,12 @@ def test_api_server_enabled_success():
         "max_wait_time": 3600
     }
 
-    # Mock youtube_api_client.fetch_transcript() 返回成功结果
+    # Mock the authoritative result API used by get_subtitle_result().
     mock_transcript = "This is a test transcript from API server."
     downloader._youtube_api_client = Mock()
-    downloader._youtube_api_client.fetch_transcript = Mock(return_value=mock_transcript)
+    downloader._youtube_api_client.fetch_transcript_result = Mock(
+        return_value=SubtitleResult(text=mock_transcript)
+    )
 
     # 测试 URL
     test_url = "https://www.youtube.com/watch?v=test_video_id"
@@ -62,7 +65,7 @@ def test_api_server_enabled_success():
 
     # 验证结果
     assert result == mock_transcript, f"Expected: {mock_transcript}, Got: {result}"
-    assert downloader._youtube_api_client.fetch_transcript.called, "API Server should be called"
+    assert downloader._youtube_api_client.fetch_transcript_result.called, "API Server should be called"
 
     logger.info(f"PASS: Got transcript from API Server: {result[:50]}...")
     logger.info("")
@@ -73,7 +76,7 @@ def test_api_server_enabled_no_transcript():
     测试场景 2：启用 API Server 但返回空字幕（视频无字幕）
 
     预期：
-    - 调用 youtube_api_server.fetch_transcript() 返回 None
+    - 调用 youtube_api_server.fetch_transcript_result() 返回 None
     - 直接返回 None（不调用 TikHub API）
     - 理由：API Server 已确认视频无字幕，不需要重试
     """
@@ -92,12 +95,12 @@ def test_api_server_enabled_no_transcript():
         "timeout": 30
     }
 
-    # Mock youtube_api_client.fetch_transcript() 返回 None（无字幕）
+    # Mock the authoritative result API returning no subtitles.
     downloader._youtube_api_client = Mock()
-    downloader._youtube_api_client.fetch_transcript = Mock(return_value=None)
+    downloader._youtube_api_client.fetch_transcript_result = Mock(return_value=None)
 
     # Mock TikHub API（不应该被调用）
-    downloader._get_subtitle_with_tikhub_api = Mock()
+    downloader._get_subtitle_result_with_tikhub_api = Mock()
 
     # 测试 URL
     test_url = "https://www.youtube.com/watch?v=test_video_id"
@@ -107,8 +110,8 @@ def test_api_server_enabled_no_transcript():
 
     # 验证结果
     assert result is None, f"Expected: None, Got: {result}"
-    assert downloader._youtube_api_client.fetch_transcript.called, "API Server should be called"
-    assert not downloader._get_subtitle_with_tikhub_api.called, "TikHub should NOT be called when no transcript"
+    assert downloader._youtube_api_client.fetch_transcript_result.called, "API Server should be called"
+    assert not downloader._get_subtitle_result_with_tikhub_api.called, "TikHub should NOT be called when no transcript"
 
     logger.info("PASS: API Server returned no transcript, correctly skipped TikHub")
     logger.info("")
@@ -119,7 +122,7 @@ def test_api_server_enabled_failure_fallback_to_tikhub():
     测试场景 3：启用 API Server 但失败（异常），直接回退到 TikHub
 
     预期：
-    - 调用 youtube_api_server.fetch_transcript() 抛出异常
+    - 调用 youtube_api_server.fetch_transcript_result() 抛出异常
     - 直接调用 TikHub API（跳过本地 youtube-transcript-api）
     - 返回 TikHub 的字幕文本
     """
@@ -138,15 +141,17 @@ def test_api_server_enabled_failure_fallback_to_tikhub():
         "timeout": 30
     }
 
-    # Mock youtube_api_client.fetch_transcript() 抛出异常
+    # Mock the authoritative result API raising an exception.
     downloader._youtube_api_client = Mock()
-    downloader._youtube_api_client.fetch_transcript = Mock(
+    downloader._youtube_api_client.fetch_transcript_result = Mock(
         side_effect=Exception("Network timeout")
     )
 
     # Mock TikHub API 返回成功
     tikhub_transcript = "This is a test transcript from TikHub API."
-    downloader._get_subtitle_with_tikhub_api = Mock(return_value=tikhub_transcript)
+    downloader._get_subtitle_result_with_tikhub_api = Mock(
+        return_value=SubtitleResult(text=tikhub_transcript)
+    )
 
     # 测试 URL
     test_url = "https://www.youtube.com/watch?v=test_video_id"
@@ -156,8 +161,8 @@ def test_api_server_enabled_failure_fallback_to_tikhub():
 
     # 验证结果
     assert result == tikhub_transcript, f"Expected: {tikhub_transcript}, Got: {result}"
-    assert downloader._youtube_api_client.fetch_transcript.called, "API Server should be called first"
-    assert downloader._get_subtitle_with_tikhub_api.called, "TikHub API should be called after API Server failed"
+    assert downloader._youtube_api_client.fetch_transcript_result.called, "API Server should be called first"
+    assert downloader._get_subtitle_result_with_tikhub_api.called, "TikHub API should be called after API Server failed"
 
     logger.info(f"PASS: API Server failed, got transcript from TikHub: {result[:50]}...")
     logger.info("")
@@ -183,9 +188,11 @@ def test_api_server_disabled_local_success():
     downloader.config["youtube_api_server"] = {"enabled": False}
     downloader._youtube_api_client = None
 
-    # Mock 本地 youtube-transcript-api 返回成功
+    # Mock the authoritative local result API.
     local_transcript = "This is a test transcript from local youtube-transcript-api."
-    downloader._fetch_youtube_transcript = Mock(return_value=local_transcript)
+    downloader._fetch_youtube_transcript_result = Mock(
+        return_value=SubtitleResult(text=local_transcript)
+    )
 
     # 测试 URL
     test_url = "https://www.youtube.com/watch?v=test_video_id"
@@ -195,7 +202,7 @@ def test_api_server_disabled_local_success():
 
     # 验证结果
     assert result == local_transcript, f"Expected: {local_transcript}, Got: {result}"
-    assert downloader._fetch_youtube_transcript.called, "Local method should be called"
+    assert downloader._fetch_youtube_transcript_result.called, "Local method should be called"
     assert downloader._youtube_api_client is None, "API Server should not be initialized"
 
     logger.info(f"PASS: Got transcript from local method: {result[:50]}...")
@@ -222,12 +229,14 @@ def test_api_server_disabled_local_ip_blocked_fallback_to_tikhub():
     downloader.config["youtube_api_server"] = {"enabled": False}
     downloader._youtube_api_client = None
 
-    # Mock 本地方案返回 IP_BLOCKED
-    downloader._fetch_youtube_transcript = Mock(return_value="IP_BLOCKED")
+    # Mock the authoritative local result API returning the IP block sentinel.
+    downloader._fetch_youtube_transcript_result = Mock(return_value="IP_BLOCKED")
 
     # Mock TikHub API 返回成功
     tikhub_transcript = "This is a test transcript from TikHub API after IP blocked."
-    downloader._get_subtitle_with_tikhub_api = Mock(return_value=tikhub_transcript)
+    downloader._get_subtitle_result_with_tikhub_api = Mock(
+        return_value=SubtitleResult(text=tikhub_transcript)
+    )
 
     # 测试 URL
     test_url = "https://www.youtube.com/watch?v=test_video_id"
@@ -237,8 +246,8 @@ def test_api_server_disabled_local_ip_blocked_fallback_to_tikhub():
 
     # 验证结果
     assert result == tikhub_transcript, f"Expected: {tikhub_transcript}, Got: {result}"
-    assert downloader._fetch_youtube_transcript.called, "Local method should be called first"
-    assert downloader._get_subtitle_with_tikhub_api.called, "TikHub API should be called after IP blocked"
+    assert downloader._fetch_youtube_transcript_result.called, "Local method should be called first"
+    assert downloader._get_subtitle_result_with_tikhub_api.called, "TikHub API should be called after IP blocked"
 
     logger.info(f"PASS: Local IP blocked, got transcript from TikHub: {result[:50]}...")
     logger.info("")

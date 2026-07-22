@@ -1622,21 +1622,6 @@ def process_transcription(
             else:
                 download_downloader = create_downloader(url)
 
-            # 获取下载信息（仅在需要使用解析URL下载时）
-            if not has_separate_download_url and download_downloader:
-                try:
-                    download_info_obj = download_downloader.get_download_info(parse_url)
-                    logger.info(
-                        f"[下载信息] 获取成功: platform={platform}, video_id={video_id}"
-                    )
-                except _TERMINAL_RESOLVER_ERRORS:
-                    # P0-1：解析终态异常直达用户，不走默认失败路径
-                    logger.error("[下载信息] 解析终态异常，向用户透传")
-                    raise
-                except Exception as e:
-                    logger.warning(f"[下载信息] 获取失败: {e}")
-                    download_info_obj = None
-
             # ========== YouTube API Server 快速路径 ==========
             # 如果提供了 download_url，则跳过 API Server，强制使用 download_url 下载
             if has_separate_download_url:
@@ -2104,7 +2089,8 @@ def process_transcription(
                     with tracker.track("download"):
                         local_file = download_downloader.download_file(actual_download_url, filename)
                 else:
-                    # 确保下载信息已获取
+                    # 下载信息可能触发真实下载（例如 BBDown），因此只能在已经
+                    # 通知“正在下载”之后获取，避免预取导致重复下载或长时间无进度。
                     if download_info_obj is None and download_downloader:
                         try:
                             download_info_obj = download_downloader.get_download_info(parse_url)

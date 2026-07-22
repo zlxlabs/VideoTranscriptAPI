@@ -15,6 +15,18 @@ YOUTUBE_API_KEY=your-api-key
 - **重试策略**: 对 5xx 错误自动重试 3 次，指数退避
 - **连接池**: 复用 HTTP 连接，避免频繁握手
 
+### 1.3 项目内字幕适配器约定
+
+项目内部的 `YoutubeDownloader` 统一以 `get_subtitle_result()` 作为字幕获取入口，返回
+`SubtitleResult(text, segments)`：`text` 用于兼容现有纯文本流程，`segments` 用于章节和
+时间轴功能。`get_subtitle()` 只是兼容旧调用方的薄封装，只返回 `result.text`；新增代码和
+测试应 mock `fetch_transcript_result()`、`_fetch_youtube_transcript_result()` 或
+`_get_subtitle_result_with_tikhub_api()`，不要再 mock 已被封装的字符串私有方法。
+
+API Server 返回“无字幕”时不会继续请求 TikHub；只有 API Server 异常，或本地字幕解析遇到
+`IP_BLOCKED`，才会进入 TikHub fallback。这能避免把“明确没有字幕”误判成网络失败并重复消耗
+外部 API 配额。
+
 ---
 
 ## 2. Python 客户端示例

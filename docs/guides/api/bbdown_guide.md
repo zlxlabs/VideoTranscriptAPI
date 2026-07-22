@@ -5,6 +5,17 @@
 # BBDown
 一个命令行式哔哩哔哩下载器. Bilibili Downloader.
 
+## 项目集成约定
+
+VideoTranscriptAPI 使用 Bilibili 官方 API 获取标题、作者等元数据，BBDown 只负责真正下载音频。
+不要在元数据阶段调用普通的 `BBDown <url>`：该命令会执行下载。如果只想查看可用流，BBDown
+提供 `-info` / `--only-show-info` 参数，该参数只解析、不下载。
+
+下载状态通知会先于 BBDown 调用发送，普通转录流程只在实际下载阶段获取一次下载信息。这样 BBDown
+卡住时不会被误认为是“获取元数据”，也不会因为前置探测和实际下载各调用一次而重复等待。
+
+上游 BBDown 的参数和行为以[官方 README](https://github.com/nilaoda/BBDown/tree/master)为准。
+
 # 注意
 本软件混流时需要外部程序：
 
