@@ -16,8 +16,18 @@
 
 ## 独立 Codex review
 
-- 状态：待执行；最多 5 轮，连续 2 轮无新增 P1 后解除门禁，不要求零意见。
+- 状态：第 1/5 轮完成；clean streak=0/2。最多 5 轮，连续 2 轮无新增 P1 后解除门禁，不要求零意见。
 - 处置规则：P1（正确性、安全、数据丢失）必须修复；P2/P3 可不修，但须记录 backlog 与理由。修复优先减法，禁止为 P2/P3 新增状态或机制；新机制仅可用于消除 P1。第 5 轮后仍有 P1 时停止并汇报用户决策。
+- 第 1 轮：
+  - P1 `MANUAL-GATE-SCOPE`：`tests/manual/conftest.py` 对混合 pytest 会话的全部
+    items 无条件添加 `slow`、`network` 和 skip，使 unit 项被跳过或被
+    `-m "not network"` 排除，属于正确性问题；
+  - 修复：以解析后的 `Path.relative_to(tests/manual)` 仅选择 manual items，
+    未新增状态或机制；新增 `tests/unit/test_manual_test_gate.py` 锁定混合会话；
+  - 证据：RED 为混合运行 7 skipped、混合 `not network` 7 deselected。GREEN 为
+    `1 passed, 6 skipped`、`1/7 tests collected (6 deselected)`，新增回归测试
+    2 passed，M1/M2 原验收仍通过，`make test` exit 0、112.57s；
+  - P2/P3 backlog：无。
 - 预 review 本地回归（尚不替代独立 review）：
   - `make test`：exit 0，102.88s（低于 180s）；
   - 未设置 `VTAPI_TESTS_MANUAL` 的企微手动测试：6 skipped；
