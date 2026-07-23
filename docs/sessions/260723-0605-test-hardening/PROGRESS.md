@@ -91,4 +91,24 @@
     `500964eadba390798c89582aa58db798bfa967fadc58a4001eafc5a8c598cbed`，
     程序内容保持原样。
 - 偏离：无。
+- 提交：`7c1498f8d0a28c1f38bf380238c6aecc6663d0dc`
+
+## M5：测试文档对账
+
+- 状态：完成。
+- RED：旧 README 仍引用已删除的
+  `tests/performance/test_concurrent.py`、`tests/integration/test_url.py` 与
+  `tests/integration/test_api.py`；也未说明 `VTAPI_TESTS_MANUAL` 强制门禁、
+  `network` marker 或当前 `make test` 的 `tests/unit tests/cache` 范围。
+- 实现：重写 `tests/README.md`，对齐当前测试目录、CI 基线、手动测试门禁、
+  已注册 marker、常用 uv 命令及迁移后的手工压测脚本风险。
+- GREEN：
+  - README 列出的所有本地目录与 `scripts/perf/concurrent_load.py` 均存在；
+  - README 的 CI 范围与 Makefile 的 `pytest tests/unit tests/cache -q` 一致，
+    marker 与 `pyproject.toml` 一致，且无已删除路径引用；
+  - `env -u VTAPI_TESTS_MANUAL uv run pytest tests/manual/test_wechat_real.py -rs`
+    结果为 6 skipped；
+  - `uv run pytest tests/manual -m "not network" --collect-only` 结果为
+    0 selected、77 deselected。
+- 偏离：无。
 - 提交：待本提交生成（后续里程碑补充哈希）。
