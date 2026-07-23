@@ -13,10 +13,11 @@
 | M3 | `730788d0957adf5cb45ceb24a334ed5e0117eef5` |
 | M4 | `7c1498f8d0a28c1f38bf380238c6aecc6663d0dc` |
 | M5 | `8429b888688741ddda578236f3aa7c1bf8e1be25` |
+| Review P1 修复 | `6a03c7f71ae9a16d1d8bb377e7d9f6dc0ab09011` |
 
 ## 独立 Codex review
 
-- 状态：第 1/5 轮完成；clean streak=0/2。最多 5 轮，连续 2 轮无新增 P1 后解除门禁，不要求零意见。
+- 状态：第 2/5 轮完成；clean streak=1/2。最多 5 轮，连续 2 轮无新增 P1 后解除门禁，不要求零意见。
 - 处置规则：P1（正确性、安全、数据丢失）必须修复；P2/P3 可不修，但须记录 backlog 与理由。修复优先减法，禁止为 P2/P3 新增状态或机制；新机制仅可用于消除 P1。第 5 轮后仍有 P1 时停止并汇报用户决策。
 - 第 1 轮：
   - P1 `MANUAL-GATE-SCOPE`：`tests/manual/conftest.py` 对混合 pytest 会话的全部
@@ -28,6 +29,11 @@
     `1 passed, 6 skipped`、`1/7 tests collected (6 deselected)`，新增回归测试
     2 passed，M1/M2 原验收仍通过，`make test` exit 0、112.57s；
   - P2/P3 backlog：无。
+- 第 2 轮：
+  - 完整 diff 审查未发现新增 P1/P2/P3；`MANUAL-GATE-SCOPE` 修复的路径过滤与
+    混合会话回归测试有效；
+  - 本轮只读环境未独立执行 pytest，沿用第 1 轮已记录的本地验证证据；
+  - P2/P3 backlog：仍为空。
 - 预 review 本地回归（尚不替代独立 review）：
   - `make test`：exit 0，102.88s（低于 180s）；
   - 未设置 `VTAPI_TESTS_MANUAL` 的企微手动测试：6 skipped；
