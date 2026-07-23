@@ -3026,132 +3026,19 @@ class CacheManager:
         return ViewTokenResolver(self).get_cache_by_view_token(view_token)
 
     def get_existing_task_by_url(self, url: str, use_speaker_recognition: bool = False) -> Optional[Dict[str, Any]]:
-        """
-        根据URL和说话人识别参数查找现有任务
+        # Deprecated: use TaskDedup
+        from ..api.services.task_dedup import TaskDedup
 
-        排序策略分三段，不穷举具体状态值，避免状态机演进（新增状态）时腐化：
-        - success 永远最高优先级（优先返回成功完成的任务）
-        - failed 永远垫底，避免旧的失败记录掩盖同一 URL 下更新的、
-          仍在处理中（queued/processing/calibrating 等）或已成功的任务
-        - 其余任何状态（不管是当前已知的还是未来新增的）统一排在中间优先级，
-          组内按 created_at DESC 排序，返回最新的一条
-        （具体排序表达式见类级常量 _TASK_STATUS_PRIORITY_ORDER_BY）
-
-        Args:
-            url: 视频URL
-            use_speaker_recognition: 是否使用说话人识别
-
-        Returns:
-            Optional[Dict]: 现有任务信息（包含task_id和view_token），如果没有找到则返回None
-        """
-        try:
-            with self._get_cursor() as cursor:
-                # 查找相同URL和说话人识别设置的任务
-                # success 最高优先级；failed 垫底；其余状态居中按最新排序
-                cursor.execute(f'''
-                    SELECT task_id, view_token, url, download_url, use_speaker_recognition, status,
-                           title, author, platform, media_id, cache_id, created_at
-                    FROM task_status
-                    WHERE url = ? AND use_speaker_recognition = ?
-                    ORDER BY
-                        {self._TASK_STATUS_PRIORITY_ORDER_BY}
-                    LIMIT 1
-                ''', (url, use_speaker_recognition))
-
-                row = cursor.fetchone()
-                if row:
-                    task_info = {
-                        'task_id': row[0],
-                        'view_token': row[1],
-                        'url': row[2],
-                        'download_url': row[3],
-                        'use_speaker_recognition': bool(row[4]),
-                        'status': row[5],
-                        'title': row[6],
-                        'author': row[7],
-                        'platform': row[8],
-                        'media_id': row[9],
-                        'cache_id': row[10],
-                        'created_at': row[11]
-                    }
-                    logger.debug(f"找到现有任务: {task_info['task_id']}, 状态: {task_info['status']}, URL: {url}")
-                    return task_info
-                else:
-                    logger.debug(f"未找到现有任务: URL={url}, use_speaker_recognition={use_speaker_recognition}")
-                    return None
-
-        except Exception as e:
-            logger.error(f"查找现有任务失败: {e}")
-            return None
+        return TaskDedup(self).get_existing_task_by_url(url, use_speaker_recognition)
 
     def get_existing_task_by_media(self, platform: str, media_id: str,
                                    use_speaker_recognition: bool = False) -> Optional[Dict[str, Any]]:
-        """
-        根据(platform, media_id)查找现有任务，用于同源视频不同URL格式的去重
+        # Deprecated: use TaskDedup
+        from ..api.services.task_dedup import TaskDedup
 
-        排序策略分三段，不穷举具体状态值，避免状态机演进（新增状态）时腐化：
-        - success 永远最高优先级（优先返回成功完成的任务）
-        - failed 永远垫底，避免旧的失败记录掩盖同一 (platform, media_id) 下
-          更新的、仍在处理中（queued/processing/calibrating 等）或已成功的任务
-        - 其余任何状态（不管是当前已知的还是未来新增的）统一排在中间优先级，
-          组内按 created_at DESC 排序，返回最新的一条
-        （具体排序表达式见类级常量 _TASK_STATUS_PRIORITY_ORDER_BY）
-
-        Args:
-            platform: 平台名称
-            media_id: 媒体ID
-            use_speaker_recognition: 是否使用说话人识别
-
-        Returns:
-            Optional[Dict]: 现有任务信息，如果没有找到则返回None
-        """
-        # 参数校验：platform 或 media_id 为 None 时跳过查询
-        if not platform or not media_id:
-            return None
-
-        try:
-            with self._get_cursor() as cursor:
-                # success 最高优先级；failed 垫底；其余状态居中按最新排序
-                cursor.execute(f'''
-                    SELECT task_id, view_token, url, download_url, use_speaker_recognition, status,
-                           title, author, platform, media_id, cache_id, created_at
-                    FROM task_status
-                    WHERE platform = ? AND media_id = ? AND use_speaker_recognition = ?
-                    ORDER BY
-                        {self._TASK_STATUS_PRIORITY_ORDER_BY}
-                    LIMIT 1
-                ''', (platform, media_id, use_speaker_recognition))
-
-                row = cursor.fetchone()
-                if row:
-                    task_info = {
-                        'task_id': row[0],
-                        'view_token': row[1],
-                        'url': row[2],
-                        'download_url': row[3],
-                        'use_speaker_recognition': bool(row[4]),
-                        'status': row[5],
-                        'title': row[6],
-                        'author': row[7],
-                        'platform': row[8],
-                        'media_id': row[9],
-                        'cache_id': row[10],
-                        'created_at': row[11]
-                    }
-                    logger.debug(
-                        f"通过平台+媒体ID找到现有任务: {task_info['task_id']}, "
-                        f"状态: {task_info['status']}, platform={platform}, media_id={media_id}"
-                    )
-                    return task_info
-                else:
-                    logger.debug(
-                        f"未通过平台+媒体ID找到现有任务: platform={platform}, media_id={media_id}"
-                    )
-                    return None
-
-        except Exception as e:
-            logger.error(f"通过平台+媒体ID查找现有任务失败: {e}")
-            return None
+        return TaskDedup(self).get_existing_task_by_media(
+            platform, media_id, use_speaker_recognition
+        )
 
     def update_task_llm_config(self, task_id: str, llm_config: Dict[str, Any]) -> bool:
         """

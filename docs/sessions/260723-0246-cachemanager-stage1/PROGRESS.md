@@ -29,4 +29,11 @@
 - RED：`uv run pytest tests/unit/test_view_token_resolver.py --junit-xml=/tmp/stage1-t3-red.xml` 如预期失败；收集阶段出现 1 个 `ModuleNotFoundError`，原因是 `api.services.view_token_resolver` 尚未实现。
 - GREEN：`python -m py_compile src/video_transcript_api/api/services/view_token_resolver.py src/video_transcript_api/cache/cache_manager.py` 成功；`uv run pytest tests/unit/test_view_token_resolver.py --junit-xml=/tmp/stage1-t3-green.xml` 通过（9 passed）。
 - 范围回归：`uv run pytest tests/unit tests/cache --junit-xml=/tmp/stage1-t3.xml` 通过；JUnit 记录为 2576 tests、0 failures、0 errors、0 skipped。首次同命令在外部进度消息期间未完成、未生成 XML，已重新完整执行，本结果以第二次 JUnit 为准。
-- T3：待本次实现提交后补充 hash；CacheManager 保留四个带 Deprecated 注释的薄委托，未修改 routes、dedup、连接池、锁或 schema。
+- T3：`7e7fcb15e8bb7d5c9f24fd9f39d36269324c7928` — 抽离 ViewTokenResolver 服务；CacheManager 保留四个带 Deprecated 注释的薄委托，未修改 routes、dedup、连接池、锁或 schema。
+
+## T4：TaskDedup
+
+- RED：`uv run pytest tests/unit/test_task_dedup.py --junit-xml=/tmp/stage1-t4-red.xml` 如预期失败；收集阶段出现 1 个 `ModuleNotFoundError`，原因是 `api.services.task_dedup` 尚未实现。
+- GREEN：`python -m py_compile src/video_transcript_api/api/services/task_dedup.py src/video_transcript_api/cache/cache_manager.py` 成功；`uv run pytest tests/unit/test_task_dedup.py --junit-xml=/tmp/stage1-t4-green.xml` 通过（10 passed）。
+- 范围回归：`uv run pytest tests/unit tests/cache --junit-xml=/tmp/stage1-t4.xml` 通过；JUnit 记录为 2586 tests、0 failures、0 errors、0 skipped。
+- T4：待本次实现提交后补充 hash；两个服务查询均通过注入实例直接复用 `_TASK_STATUS_PRIORITY_ORDER_BY`，未复制 CASE SQL 或创建连接。
