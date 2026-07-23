@@ -61,7 +61,7 @@
 3. console/日志输出纯英文；与用户沟通用中文。
 4. 每个 M 独立 commit，message 中文祈使句（如「给 tests/manual 加 VTAPI_TESTS_MANUAL 强制门控」）。
 5. 不动 `src/`、不动 `.github/workflows/`、不动 zlxlabs/gate 仓库。
-6. 完成后本地跑 codex review（read-only）复现 CI gate，连续 2 轮无实质新意见。
+6. 完成后本地跑独立 Codex review（read-only）复现 CI gate，最多 5 轮；gate 为连续 2 轮无新增 P1，不要求零意见。P1（正确性、安全、数据丢失）必须修复；P2/P3 可接受不修，但必须记录 backlog 与理由。修复优先减法，禁止为 P2/P3 新增状态或机制；新机制仅可用于消除 P1。第 5 轮后仍有 P1 时停止并汇报用户决策。
 7. 进度写本目录 `PROGRESS.md`（commit 列表、M3 计时决策表、测试结果）。
 
 ## 完成判据
@@ -73,7 +73,7 @@
 - [x] `tests/performance/` 压测脚本移出 pytest 收集面
 - [x] `tests/README.md` 与实际结构一致
 - [x] PROGRESS.md 记录全部 commit hash
-- [ ] 独立 Codex review 连续 2 轮无实质新意见
+- [ ] 独立 Codex review 门禁：最多 5 轮，连续 2 轮无新增 P1（不要求零意见）；P1 必修，P2/P3 未修须记录 backlog 与理由；第 5 轮仍有 P1 时停止并汇报用户决策
 
 ## 关键文件索引
 
