@@ -1,85 +1,86 @@
 # 测试说明
 
-本项目的测试已按功能分类组织到不同的子文件夹中，提升项目的可读性和维护性。
-
-## 文件夹结构
-
-### unit/ - 单元测试
-测试各个组件的独立功能，使用 unittest 框架。
-
-- `test_downloader.py` - 测试下载器工厂和各平台下载器
-- `test_transcriber.py` - 测试转录器功能
-- `test_generic_basic.py` - 通用下载器基础测试（网络请求已 mock）
-
-### integration/ - 集成测试
-测试组件之间的集成和端到端功能。
-
-- `test_url.py` - 测试URL转录功能的端到端测试
-- `test_api.py` - 测试TikHub API响应解析
-
-### performance/ - 性能测试
-测试系统的性能和并发能力。
-
-- `test_concurrent.py` - 并发测试：API的并发处理能力
-
-### manual/ - 手动测试脚本
-用于开发和调试的手动测试工具，需要真实网络/外部服务，默认不参与
-`pytest -q`（已在 pyproject.toml 的 norecursedirs 中排除）。
-
-- `test_transcribe.py` - 测试音视频文件转录功能
-- `llm_test.py` - 测试LLM文本校对和总结功能
-- `test_generic_url.py` - 通用下载器URL测试（含 input() 交互式提示，且会请求本地 API 服务）
-- `test_download_improvement.py` - 下载器改进测试（真实下载 soundhelix.com 大文件）
-- `test_summary_e2e_simple.py` - LLM 总结端到端测试（需要真实 LLM API 凭据）
-- `test_wechat_notification_flow.py` - 企业微信通知全流程测试（发送真实 webhook 消息）
-- `test_debug_webhook_order.py` - webhook 消息顺序调试脚本（无断言，仅供人工核对日志）
-- `test_feishu_real.py` - 飞书通知集成测试（发送真实 webhook 消息）
-- `test_bilibili_official_api_real.py` - Bilibili 官方 API 元数据抓取测试（真实请求 bilibili.com）
-
-## 运行测试
-
-部署脚本的纯本地 mock 回归（不会连接 Docker daemon、registry 或远程服务器）：
+测试使用 pytest，建议先同步开发依赖：
 
 ```bash
-uv run python -m pytest -q tests/deployment/test_pull_and_deploy.py
+uv sync --extra dev
 ```
 
-### 运行单元测试
+## 目录结构
+
+| 路径 | 用途 |
+| --- | --- |
+| `tests/unit/` | 快速单元测试。 |
+| `tests/cache/` | 缓存行为测试。 |
+| `tests/integration/` | 组件集成测试。 |
+| `tests/features/` | 功能级测试。 |
+| `tests/llm/` | LLM 相关的本地测试。 |
+| `tests/transcript/` | 转录兼容性与转换测试。 |
+| `tests/deployment/` | 部署及健康检查相关测试。 |
+| `tests/platforms/` | 平台适配器测试。 |
+| `tests/manual/` | 需要人工明确确认的网络、服务或真实凭据测试。 |
+| `tests/test_*.py` | 位于 `tests/` 根目录的补充测试。 |
+| `scripts/perf/concurrent_load.py` | 手工并发压测脚本，不属于 pytest 回归测试。 |
+
+## 常用命令
+
 ```bash
-# 运行所有单元测试
-python -m pytest tests/unit/
+# 当前 CI 基线：仅运行 unit 和 cache，不代表全套测试
+make test
 
-# 运行特定的单元测试
-python -m pytest tests/unit/test_downloader.py
+# 直接运行 CI 基线范围
+uv run pytest tests/unit tests/cache
+
+# 按需运行其他本地测试目录
+uv run pytest tests/integration
+uv run pytest tests/features
+uv run pytest tests/llm
+uv run pytest tests/transcript
+uv run pytest tests/deployment
 ```
 
-### 运行集成测试
+`make test` 当前只覆盖 `tests/unit tests/cache`。其他目录可以按需在本地单独
+运行，但并未被纳入该 CI 基线。
+
+## 手动测试门禁
+
+`tests/manual/` 默认自动发现时被排除；即使显式传入某个手动测试文件，未设置
+环境变量也会被跳过：
+
 ```bash
-# 运行所有集成测试
-python -m pytest tests/integration/
+# 安全：收集并显示手动测试在默认情况下会被 skip
+uv run pytest tests/manual/test_wechat_real.py -rs
 
-# 运行URL测试
-python tests/integration/test_url.py <video_url>
+# 仅验证已明确选择手动模式后的收集结果，不执行测试体
+VTAPI_TESTS_MANUAL=1 uv run pytest tests/manual/test_wechat_real.py --collect-only
 ```
 
-### 运行性能测试
+只有在明确了解真实网络、webhook 和凭据影响时，才设置
+`VTAPI_TESTS_MANUAL=1` 执行手动测试。请勿将会发送 webhook 的测试作为常规
+验收命令运行。
+
+## pytest markers
+
+项目已注册以下 marker：
+
+- `unit`：快速、无 I/O 的单元测试。
+- `integration`：可能依赖服务的集成测试。
+- `slow`：耗时较长或使用大数据的测试。
+- `network`：访问真实外部服务的测试。
+
+显式收集 `tests/manual/` 时，目录级配置会自动为所有项添加 `slow` 和
+`network`。例如，以下命令可验证 marker 兜底不会选择手动网络测试：
+
 ```bash
-# 运行并发测试
-python tests/performance/test_concurrent.py
+uv run pytest tests/manual -m "not network" --collect-only
 ```
 
-### 运行手动测试
+## 并发压测
+
+`scripts/perf/concurrent_load.py` 会提交本地 API 任务，并使用真实抖音和 B 站
+URL。它是手工压测工具，不会被 pytest 收集，也不应在 CI 或没有明确授权的环境
+运行。仅在本地服务、授权和外部访问均已确认后，才可手动运行：
+
 ```bash
-# 测试音视频转录
-python tests/manual/test_transcribe.py <audio_file_path>
-
-# 测试LLM功能
-python tests/manual/llm_test.py <text_file_path>
+uv run python scripts/perf/concurrent_load.py
 ```
-
-## 注意事项
-
-1. 运行测试前请确保已安装所有依赖项
-2. 集成测试和手动测试可能需要外部服务（如CapsWriter服务器）
-3. 性能测试可能需要较长时间完成
-4. 手动测试脚本通常需要命令行参数

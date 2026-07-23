@@ -50,12 +50,13 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-# Exclude manual/ and performance/ from auto-discovery
-norecursedirs = ["manual", "performance", ".git", "__pycache__", "data"]
+# Exclude manual/ from auto-discovery
+norecursedirs = ["manual", ".git", "__pycache__", "data"]
 markers = [
     "unit: Unit tests (fast, no I/O)",
     "integration: Integration tests (may require services)",
     "slow: Slow tests (network, large data)",
+    "network: tests that hit real external services",
 ]
 addopts = "-q --strict-markers"
 

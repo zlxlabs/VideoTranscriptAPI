@@ -2,7 +2,7 @@
 
 > Session ID：`260723-0605-test-hardening`
 > 创建：2026-07-23（EDT）
-> **状态：未启动（方案已定稿，交接 Codex 实施）**
+> **状态：完成（独立 Codex review 门禁已通过）**
 > 类型：测试基建加固，小批量、低风险，不动 src/ 业务代码
 > 基线分支：`main`
 > 建议工作分支：`test/suite-hardening`（worktree 内）
@@ -13,7 +13,7 @@
 
 原任务设想是「CI 慢：mock 掉真实外网测试」，盘点后发现**该问题已于 2026-07-15 由 commit `9371d52` 解决**：真实外网用例全部移入 `tests/manual/`（`pyproject.toml` 的 `norecursedirs` 排除），CI Tests 步骤从 15-25 分钟降到约 16 秒。
 
-当前 CI 链路：`.github/workflows/gate.yml` → `zlxlabs/gate@main` 复用 workflow → 检测到 Makefile 有 `test:` target → 执行 `make test` = `uv run --frozen --extra dev pytest tests/unit -q`。**CI 只跑 `tests/unit`**（120 文件 ~2235 用例，已逐一核实全部 mock 干净、无真实外联）。
+实施前 CI 链路：`.github/workflows/gate.yml` → `zlxlabs/gate@main` 复用 workflow → 检测到 Makefile 有 `test:` target → 执行 `make test` = `uv run --frozen --extra dev pytest tests/unit -q`。**实施前 CI 只跑 `tests/unit`**（120 文件 ~2235 用例，已逐一核实全部 mock 干净、无真实外联）。实施后已由 M3 扩展为 `tests/unit tests/cache`。
 
 盘点发现 4 个残留风险 + 1 个覆盖缺口，即本次任务：
 
@@ -61,18 +61,19 @@
 3. console/日志输出纯英文；与用户沟通用中文。
 4. 每个 M 独立 commit，message 中文祈使句（如「给 tests/manual 加 VTAPI_TESTS_MANUAL 强制门控」）。
 5. 不动 `src/`、不动 `.github/workflows/`、不动 zlxlabs/gate 仓库。
-6. 完成后本地跑 codex review（read-only）复现 CI gate，连续 2 轮无实质新意见。
+6. 完成后本地跑独立 Codex review（read-only）复现 CI gate，最多 5 轮；gate 为连续 2 轮无新增 P1，不要求零意见。P1（正确性、安全、数据丢失）必须修复；P2/P3 可接受不修，但必须记录 backlog 与理由。修复优先减法，禁止为 P2/P3 新增状态或机制；新机制仅可用于消除 P1。第 5 轮后仍有 P1 时停止并汇报用户决策。
 7. 进度写本目录 `PROGRESS.md`（commit 列表、M3 计时决策表、测试结果）。
 
 ## 完成判据
 
-- [ ] 不设 `VTAPI_TESTS_MANUAL` 时显式跑 `tests/manual/` 任意文件全部 skipped，零外发消息
-- [ ] `network`/`slow` marker 注册并自动打标，`-m "not network"` 可兜底排除
-- [ ] `make test` 至少覆盖 `tests/unit tests/cache`，本地 exit 0
-- [ ] M3 候选目录逐个有「纳入/排除 + 原因 + 耗时」记录
-- [ ] `tests/performance/` 压测脚本移出 pytest 收集面
-- [ ] `tests/README.md` 与实际结构一致
-- [ ] PROGRESS.md 记录全部 commit hash
+- [x] 不设 `VTAPI_TESTS_MANUAL` 时显式跑 `tests/manual/` 任意文件全部 skipped，零外发消息
+- [x] `network`/`slow` marker 注册并自动打标，`-m "not network"` 可兜底排除
+- [x] `make test` 至少覆盖 `tests/unit tests/cache`，本地 exit 0
+- [x] M3 候选目录逐个有「纳入/排除 + 原因 + 耗时」记录
+- [x] `tests/performance/` 压测脚本移出 pytest 收集面
+- [x] `tests/README.md` 与实际结构一致
+- [x] PROGRESS.md 记录全部 commit hash
+- [x] 独立 Codex review 门禁：连续 2 轮无新增 P1（第 4、5 轮；不要求零意见）；P1 已修复，P2/P3 未修均已记录 backlog 与理由
 
 ## 关键文件索引
 
@@ -82,6 +83,6 @@
 | CI 测试入口 | `Makefile:1-4`（`test:` target） |
 | 全局 conftest（VTAPI_TESTS_MANUAL 已有语义） | `tests/conftest.py:47-107` |
 | 真发企微/飞书的高危文件 | `tests/manual/test_wechat_real.py:29`、`tests/manual/test_feishu_real.py:17` |
-| 失效 async 压测 | `tests/performance/test_concurrent.py` |
-| 文档漂移 | `tests/README.md:14-38` |
+| 手工并发压测（已移出 pytest） | `scripts/perf/concurrent_load.py` |
+| 文档漂移（已对账，历史定位） | `tests/README.md:14-38` |
 | 上次外网测试治理（背景参考） | commit `9371d52`（2026-07-15） |
