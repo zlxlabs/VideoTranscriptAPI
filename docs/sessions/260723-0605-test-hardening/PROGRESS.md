@@ -17,7 +17,7 @@
 
 ## 独立 Codex review
 
-- 状态：第 2/5 轮完成；clean streak=1/2。最多 5 轮，连续 2 轮无新增 P1 后解除门禁，不要求零意见。
+- 状态：第 3/5 轮完成；clean streak=0/2。最多 5 轮，连续 2 轮无新增 P1 后解除门禁，不要求零意见。
 - 处置规则：P1（正确性、安全、数据丢失）必须修复；P2/P3 可不修，但须记录 backlog 与理由。修复优先减法，禁止为 P2/P3 新增状态或机制；新机制仅可用于消除 P1。第 5 轮后仍有 P1 时停止并汇报用户决策。
 - 第 1 轮：
   - P1 `MANUAL-GATE-SCOPE`：`tests/manual/conftest.py` 对混合 pytest 会话的全部
@@ -34,6 +34,18 @@
     混合会话回归测试有效；
   - 本轮只读环境未独立执行 pytest，沿用第 1 轮已记录的本地验证证据；
   - P2/P3 backlog：仍为空。
+- 第 3 轮：
+  - P1 `MANUAL-GATE-SELF-TEST-SIDE-EFFECT`：旧回归测试把真实 webhook 文件
+    `test_wechat_real.py` 作为普通子 pytest 执行目标；若门禁回归，测试可能在
+    报错前外发消息，属于安全问题；
+  - 修复：普通混合执行改用仅写本地日志的
+    `test_loguru_migration.py::test_logger`，并拆分
+    `SAFE_MANUAL_TEST_NODE` 与仅 `--collect-only` 使用的
+    `HIGH_RISK_MANUAL_TEST_FILE`；
+  - 证据：更新后的回归测试 2 passed；高危文件仅收集到 6 项、`not network`
+    时 6 deselected；安全日志节点未 opt-in 时 1 skipped；全 manual marker
+    验收为 77 deselected，`make test` exit 0、68.03s；
+  - P2/P3 backlog：无。
 - 预 review 本地回归（尚不替代独立 review）：
   - `make test`：exit 0，102.88s（低于 180s）；
   - 未设置 `VTAPI_TESTS_MANUAL` 的企微手动测试：6 skipped；
