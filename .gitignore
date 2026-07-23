@@ -104,6 +104,9 @@ tests/output
 # Claude Code 临时目录与本地配置
 tmpclaude-*
 .claude/
+.codex/
+.opencode/
+.omo/
 
 tests/unit/data
 
