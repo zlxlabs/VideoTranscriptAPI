@@ -14,10 +14,11 @@
 | M4 | `7c1498f8d0a28c1f38bf380238c6aecc6663d0dc` |
 | M5 | `8429b888688741ddda578236f3aa7c1bf8e1be25` |
 | Review P1 修复 | `6a03c7f71ae9a16d1d8bb377e7d9f6dc0ab09011` |
+| Review P1 安全修复 | `a8fb3d975e1cdc686c25aa2e23948f9d5a068155` |
 
 ## 独立 Codex review
 
-- 状态：第 3/5 轮完成；clean streak=0/2。最多 5 轮，连续 2 轮无新增 P1 后解除门禁，不要求零意见。
+- 状态：第 4/5 轮完成；clean streak=1/2。最多 5 轮，连续 2 轮无新增 P1 后解除门禁，不要求零意见。
 - 处置规则：P1（正确性、安全、数据丢失）必须修复；P2/P3 可不修，但须记录 backlog 与理由。修复优先减法，禁止为 P2/P3 新增状态或机制；新机制仅可用于消除 P1。第 5 轮后仍有 P1 时停止并汇报用户决策。
 - 第 1 轮：
   - P1 `MANUAL-GATE-SCOPE`：`tests/manual/conftest.py` 对混合 pytest 会话的全部
@@ -46,6 +47,11 @@
     时 6 deselected；安全日志节点未 opt-in 时 1 skipped；全 manual marker
     验收为 77 deselected，`make test` exit 0、68.03s；
   - P2/P3 backlog：无。
+- 第 4 轮：
+  - 完整 diff 审查未发现 P1/P2/P3；两个既有 P1 修复均有效；
+  - 复核 40 个 manual 文件无收集或 import 阶段副作用，压测迁移、Makefile、
+    pytest 配置与 README 一致，`git diff --check` 与语法检查通过；
+  - 本轮只读环境未运行 pytest；P2/P3 backlog：仍为空。
 - 预 review 本地回归（尚不替代独立 review）：
   - `make test`：exit 0，102.88s（低于 180s）；
   - 未设置 `VTAPI_TESTS_MANUAL` 的企微手动测试：6 skipped；
