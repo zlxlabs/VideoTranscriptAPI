@@ -13,7 +13,7 @@
 
 原任务设想是「CI 慢：mock 掉真实外网测试」，盘点后发现**该问题已于 2026-07-15 由 commit `9371d52` 解决**：真实外网用例全部移入 `tests/manual/`（`pyproject.toml` 的 `norecursedirs` 排除），CI Tests 步骤从 15-25 分钟降到约 16 秒。
 
-当前 CI 链路：`.github/workflows/gate.yml` → `zlxlabs/gate@main` 复用 workflow → 检测到 Makefile 有 `test:` target → 执行 `make test` = `uv run --frozen --extra dev pytest tests/unit -q`。**CI 只跑 `tests/unit`**（120 文件 ~2235 用例，已逐一核实全部 mock 干净、无真实外联）。
+实施前 CI 链路：`.github/workflows/gate.yml` → `zlxlabs/gate@main` 复用 workflow → 检测到 Makefile 有 `test:` target → 执行 `make test` = `uv run --frozen --extra dev pytest tests/unit -q`。**实施前 CI 只跑 `tests/unit`**（120 文件 ~2235 用例，已逐一核实全部 mock 干净、无真实外联）。实施后已由 M3 扩展为 `tests/unit tests/cache`。
 
 盘点发现 4 个残留风险 + 1 个覆盖缺口，即本次任务：
 
@@ -83,6 +83,6 @@
 | CI 测试入口 | `Makefile:1-4`（`test:` target） |
 | 全局 conftest（VTAPI_TESTS_MANUAL 已有语义） | `tests/conftest.py:47-107` |
 | 真发企微/飞书的高危文件 | `tests/manual/test_wechat_real.py:29`、`tests/manual/test_feishu_real.py:17` |
-| 失效 async 压测 | `tests/performance/test_concurrent.py` |
-| 文档漂移 | `tests/README.md:14-38` |
+| 手工并发压测（已移出 pytest） | `scripts/perf/concurrent_load.py` |
+| 文档漂移（已对账，历史定位） | `tests/README.md:14-38` |
 | 上次外网测试治理（背景参考） | commit `9371d52`（2026-07-15） |
