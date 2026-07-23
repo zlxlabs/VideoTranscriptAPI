@@ -11,7 +11,6 @@ import threading
 import time
 from ..utils.logging import setup_logger
 from ..utils.task_status import TaskStatus
-from ..utils.llm_status import SummaryStatus
 
 logger = setup_logger("cache_manager")
 
@@ -3009,193 +3008,22 @@ class CacheManager:
     def _resolve_summary_state(
         self, task_info: Dict[str, Any], cache_data: Dict[str, Any]
     ) -> tuple:
-        """解析总结的展示状态与展示文本（"诚实状态模型"，修复"总结处理中..."永久占位符 bug）。
+        # Deprecated: use ViewTokenResolver
+        from ..api.services.view_token_resolver import ViewTokenResolver
 
-        来源优先级：task_status.summary_status 列 > llm_status.json 里的
-        summary_status（两者本应一致，列是 JSON 的镜像，任一缺失时互为兜底）
-        > 历史兼容推断（两者都没有的旧任务，按 llm_summary.txt 是否存在推断）。
-
-        Args:
-            task_info: get_task_by_view_token 返回的任务行（dict，含 summary_status 列）
-            cache_data: get_cache 返回的缓存数据（含 llm_summary / llm_status 字段）
-
-        Returns:
-            (summary_state, summary_text) 元组：
-            - summary_state: SummaryStatus 取值之一，前端据此渲染四种文案
-            - summary_text: GENERATED 时为真实总结文本，其余状态一律为 None
-              （不再返回"总结处理中..."之类的占位字符串，占位交给前端按 state 渲染）
-        """
-        summary_status = task_info.get('summary_status')
-        if not summary_status:
-            llm_status = cache_data.get('llm_status') or {}
-            summary_status = llm_status.get('summary_status')
-
-        raw_summary = cache_data.get('llm_summary')
-        if raw_summary is not None and not isinstance(raw_summary, str):
-            raw_summary = str(raw_summary)
-        has_summary_text = bool(raw_summary)
-
-        if summary_status:
-            if summary_status == SummaryStatus.GENERATED:
-                return SummaryStatus.GENERATED, (raw_summary if has_summary_text else None)
-            # skipped_short / failed / pending：一律不展示占位文本，交给前端按状态渲染
-            return summary_status, None
-
-        # 历史兼容：既没有 task_status 列也没有 llm_status.json 的旧任务
-        # （早于本功能上线）——按是否存在 llm_summary.txt 推断，
-        # 无法进一步区分"文本过短"与"生成失败"，保守归入 skipped_short（非错误态）。
-        if has_summary_text:
-            return SummaryStatus.GENERATED, raw_summary
-        return SummaryStatus.SKIPPED_SHORT, None
+        return ViewTokenResolver(self)._resolve_summary_state(task_info, cache_data)
 
     def get_view_data_by_token(self, view_token: str) -> Optional[Dict[str, Any]]:
-        """
-        根据view_token获取查看页面数据
+        # Deprecated: use ViewTokenResolver
+        from ..api.services.view_token_resolver import ViewTokenResolver
 
-        Args:
-            view_token: 查看token
-
-        Returns:
-            Dict: 页面数据
-        """
-        try:
-            # 获取任务信息
-            task_info = self.get_task_by_view_token(view_token)
-            if not task_info:
-                return None
-
-            display_url = task_info.get('url') or task_info.get('download_url') or ""
-
-            # 如果任务还在进行中（calibrating 表示转录已完成、LLM 校对/总结进行中）
-            if task_info['status'] in ['queued', 'processing', 'calibrating']:
-                return {
-                    'status': 'processing',
-                    'title': task_info.get('title', '转录处理中...'),
-                    'url': display_url,
-                    'created_at': task_info['created_at']
-                }
-
-            # 如果任务失败
-            if task_info['status'] == 'failed':
-                return {
-                    'status': 'failed',
-                    'title': task_info.get('title', '转录失败'),
-                    'url': display_url,
-                    'message': task_info.get('error_message') or '转录任务失败，请重新提交'
-                }
-            
-            # 任务成功，获取缓存数据
-            if task_info['platform'] and task_info['media_id']:
-                cache_data = self.get_cache(
-                    platform=task_info['platform'],
-                    media_id=task_info['media_id'],
-                    use_speaker_recognition=task_info['use_speaker_recognition']
-                )
-                
-                if cache_data:
-                    # 缓存存在，返回完整数据
-                    # summary_state：诚实状态模型，取代过去"文件缺失=处理中"的无条件占位符
-                    # （旧 bug：cache_data.get('llm_summary', '总结处理中...') 把文件缺失、
-                    # 总结过短跳过、总结生成失败三种完全不同的情况全部误判为"处理中"）
-                    summary_state, summary = self._resolve_summary_state(task_info, cache_data)
-
-                    transcript = cache_data.get('llm_calibrated') or cache_data.get('transcript_data', '转录文本获取中...')
-                    if not isinstance(transcript, str):
-                        transcript = str(transcript) if transcript is not None else '转录文本获取中...'
-
-                    # 获取 LLM 模型配置（缓存命中任务无 llm_config，回退查同 view_token 下的历史任务）
-                    llm_config = self.get_task_llm_config(task_info['task_id'])
-                    if not llm_config:
-                        llm_config = self._get_llm_config_by_view_token(
-                            task_info['view_token']
-                        )
-
-                    return {
-                        'status': 'success',
-                        'title': cache_data.get('title', ''),
-                        'author': cache_data.get('author', ''),
-                        'description': cache_data.get('description', ''),
-                        'url': display_url,
-                        'summary': summary,
-                        'summary_state': summary_state,
-                        'transcript': transcript,
-                        'use_speaker_recognition': cache_data.get('use_speaker_recognition', False),
-                        'created_at': task_info['created_at'],
-                        'cache_dir': cache_data.get('file_path'),
-                        'llm_config': llm_config,  # 添加 LLM 模型配置
-                        'platform': cache_data.get('platform', '')
-                    }
-                else:
-                    # 底层文件已清理
-                    return {
-                        'status': 'file_cleaned',
-                        'title': task_info.get('title', '视频转录'),
-                        'url': display_url,
-                        'created_at': task_info['created_at']
-                    }
-            else:
-                # 任务信息不完整
-                return {
-                    'status': 'incomplete',
-                    'title': task_info.get('title', '任务信息不完整'),
-                    'url': display_url,
-                    'created_at': task_info['created_at']
-                }
-                
-        except Exception as e:
-            logger.error(f"获取查看页面数据失败: {e}")
-            return None
+        return ViewTokenResolver(self).get_view_data_by_token(view_token)
     
     def get_cache_by_view_token(self, view_token: str) -> Optional[Dict[str, Any]]:
-        """根据 view_token 获取完整缓存数据（含转录文件路径和元数据）
+        # Deprecated: use ViewTokenResolver
+        from ..api.services.view_token_resolver import ViewTokenResolver
 
-        从 task_status 表找到 url、platform、media_id、use_speaker_recognition，
-        再从 video_cache 表获取完整缓存数据。
-
-        Args:
-            view_token: 查看 token
-
-        Returns:
-            Dict: 完整缓存数据（与 get_cache 返回格式一致），包含额外的 task_info 字段；
-                  如果未找到则返回 None
-        """
-        try:
-            # 获取任务信息
-            task_info = self.get_task_by_view_token(view_token)
-            if not task_info:
-                logger.warning(f"未找到 view_token 对应的任务: {view_token}")
-                return None
-
-            platform = task_info.get("platform")
-            media_id = task_info.get("media_id")
-            use_speaker_recognition = task_info.get("use_speaker_recognition", False)
-
-            if not platform or not media_id:
-                logger.warning(
-                    f"任务信息不完整，缺少 platform 或 media_id: "
-                    f"view_token={view_token}, platform={platform}, media_id={media_id}"
-                )
-                return None
-
-            # 获取缓存数据
-            cache_data = self.get_cache(
-                platform=platform,
-                media_id=media_id,
-                use_speaker_recognition=use_speaker_recognition,
-            )
-
-            if cache_data:
-                # 附加任务信息，方便调用方使用
-                cache_data["task_info"] = task_info
-                logger.info(
-                    f"通过 view_token 获取缓存成功: platform={platform}, media_id={media_id}"
-                )
-
-            return cache_data
-
-        except Exception as e:
-            logger.error(f"通过 view_token 获取缓存失败: {e}")
-            return None
+        return ViewTokenResolver(self).get_cache_by_view_token(view_token)
 
     def get_existing_task_by_url(self, url: str, use_speaker_recognition: bool = False) -> Optional[Dict[str, Any]]:
         """
@@ -3395,26 +3223,7 @@ class CacheManager:
             return None
 
     def _get_llm_config_by_view_token(self, view_token: str) -> Optional[Dict[str, Any]]:
-        """回退查找：在同一 view_token 的所有任务中，找最新的 llm_config。
+        # Deprecated: use ViewTokenResolver
+        from ..api.services.view_token_resolver import ViewTokenResolver
 
-        缓存命中的任务不经过 LLM 协调器，没有 llm_config。
-        此方法用于从同一 view_token 下实际跑过 LLM 的历史任务继承配置。
-        """
-        try:
-            with self._get_cursor() as cursor:
-                cursor.execute(
-                    """SELECT llm_config FROM task_status
-                       WHERE view_token = ?
-                         AND llm_config IS NOT NULL
-                         AND llm_config != ''
-                       ORDER BY created_at DESC
-                       LIMIT 1""",
-                    (view_token,),
-                )
-                row = cursor.fetchone()
-                if row and row['llm_config']:
-                    return json.loads(row['llm_config'])
-                return None
-        except Exception as e:
-            logger.error(f"回退查找LLM配置失败: {e}")
-            return None
+        return ViewTokenResolver(self)._get_llm_config_by_view_token(view_token)
