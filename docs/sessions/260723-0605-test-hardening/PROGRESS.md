@@ -71,4 +71,24 @@
   - `uv sync --extra dev` 完成；
   - `make test`：exit 0，65.30s；执行范围 `tests/unit tests/cache`，
     `--collect-only` 确认共 2586 项，满足 180s 时限。
+- 提交：`730788d0957adf5cb45ceb24a334ed5e0117eef5`
+
+## M4：移出 pytest 收集面的并发压测脚本
+
+- 状态：完成。
+- RED：`uv run pytest tests/performance --collect-only` 收集到
+  `test_concurrent_processing` 与 `test_sequential_vs_concurrent` 两项；未执行，
+  因而没有访问脚本中的真实 URL。
+- 实现：将脚本迁移到 `scripts/perf/concurrent_load.py`，仅增加英文手动运行说明；
+  删除已无实际测试的 `tests/performance/`（包括 M2 的目录级 conftest），并从
+  `pyproject.toml` 的 `norecursedirs` 移除 `performance`。
+- GREEN：
+  - `uv run python -c "...ast.parse(...)..."` 输出 `syntax OK`；
+  - `tests/performance` 不存在，`pyproject.toml` 无 `performance` 排除项；
+  - 默认 `uv run pytest --collect-only` 不收集旧路径
+    `tests/performance/test_concurrent.py`；
+  - 原文件与移除新增头注释后的迁移文件 SHA-256 均为
+    `500964eadba390798c89582aa58db798bfa967fadc58a4001eafc5a8c598cbed`，
+    程序内容保持原样。
+- 偏离：无。
 - 提交：待本提交生成（后续里程碑补充哈希）。

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# Manual concurrent load test. Run: python scripts/perf/concurrent_load.py
 """
 并发测试脚本
 用于验证视频转录API的并发处理能力
