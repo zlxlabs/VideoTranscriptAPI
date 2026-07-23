@@ -23,6 +23,7 @@ from ..services.transcription import (
     normalize_processing_options,
     verify_token,
 )
+from ..services.view_token_resolver import ViewTokenResolver
 from ...utils.llm_status import SummaryStatus
 from ...utils.notifications import send_view_link_wechat, get_notification_router
 from ...utils.task_status import TaskStatus, http_code_for_status
@@ -539,7 +540,7 @@ async def recalibrate(
         raise HTTPException(status_code=403, detail="无重新校对权限")
 
     # 通过 view_token 获取缓存数据
-    cache_data = cache_manager.get_cache_by_view_token(view_token)
+    cache_data = ViewTokenResolver(cache_manager).get_cache_by_view_token(view_token)
     if not cache_data:
         logger.warning(f"view_token 对应的缓存不存在: {view_token}")
         raise HTTPException(status_code=404, detail="未找到对应的转录数据")
@@ -826,7 +827,7 @@ async def resummarize(
         raise HTTPException(status_code=403, detail="无重新生成总结权限")
 
     # 通过 view_token 获取缓存数据
-    cache_data = cache_manager.get_cache_by_view_token(view_token)
+    cache_data = ViewTokenResolver(cache_manager).get_cache_by_view_token(view_token)
     if not cache_data:
         logger.warning(f"view_token 对应的缓存不存在: {view_token}")
         raise HTTPException(status_code=404, detail="未找到对应的转录数据")

@@ -19,6 +19,7 @@ from ..context import (
     lazy_resource,
 )
 from ..services.transcription import TranscribeResponse, verify_token
+from ..services.view_token_resolver import ViewTokenResolver
 from ...utils.llm_status import SummaryStatus
 
 logger = lazy_resource(get_logger)
@@ -758,9 +759,11 @@ async def get_task_summary(
             data={"summary": "", "status": task_status},
         )
 
-    # 获取摘要：复用现有 get_view_data_by_token 逻辑
+    # 获取摘要：复用 ViewTokenResolver 的视图数据逻辑
     try:
-        view_data = await asyncio.to_thread(cache_manager.get_view_data_by_token, view_token)
+        view_data = await asyncio.to_thread(
+            ViewTokenResolver(cache_manager).get_view_data_by_token, view_token
+        )
         if not view_data or view_data.get("status") not in ("success",):
             return TranscribeResponse(
                 code=200,
@@ -769,7 +772,7 @@ async def get_task_summary(
             )
 
         # 诚实状态模型：不再把"总结处理中..."之类的占位字符串当真实摘要返回。
-        # summary_state 由 cache_manager.get_view_data_by_token 提供
+        # summary_state 由 ViewTokenResolver.get_view_data_by_token 提供
         # （generated/skipped_short/failed/pending）；只有 generated 才有真实文本。
         raw_summary = view_data.get("summary")
         summary_state = view_data.get("summary_state")
