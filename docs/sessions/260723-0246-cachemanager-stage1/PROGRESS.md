@@ -21,4 +21,5 @@
 ## 提交记录
 
 - T1：`4d46d31948770f8644c5b433300a13af9a5166a5` — 复核 CacheManager Stage1 调用面。
-- T2：进行中；本次仅新增 `DESIGN.md` 并同步 T1 hash，未执行业务代码或新增测试。
+- T2：`7ef6fba9f5f7bec869021ebe00bb3da7d634dd92` — 确定 CacheManager Stage1 服务落点；新增 `DESIGN.md` 并同步 T1 hash，未执行业务代码或新增测试。
+- 进度同步：进行中；本次提交仅记录 T2 hash，不为该提交自引用追加无限提交。
