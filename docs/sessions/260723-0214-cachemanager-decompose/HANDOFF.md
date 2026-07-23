@@ -2,7 +2,7 @@
 
 > Session ID：`260723-0214-cachemanager-decompose`
 > 创建：2026-07-23 02:14 (EDT)
-> **状态：未启动（交接完成，等待新 session 接手）**
+> **状态：已被取代 — 2026-07-23 第一性原理复核后，执行交接移至 `docs/sessions/260723-0246-cachemanager-stage1/HANDOFF.md`（范围锁定 Stage 1，Stage 2+ 降级为机会主义重构、不排期）。本文档保留作 graphify 原始分析与 Stage 2+ 拆分草图的备忘；下方 Prompt 已过时，不要使用。**
 > 类型：**重构规划 + 最小风险起步批**
 > 上游来源：graphify 知识图谱分析（2026-07-23）— 详见 `graphify-out/GRAPH_REPORT.md`
 > 基线分支：`main`
