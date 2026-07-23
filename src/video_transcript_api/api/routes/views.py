@@ -16,6 +16,7 @@ from ..context import (
     get_static_dir,
     get_templates,
 )
+from ..services.view_token_resolver import ViewTokenResolver
 from ...utils.rendering import (
     get_base_url,
     render_calibrated_content_smart,
@@ -739,7 +740,9 @@ async def export_content(view_token: str, export_type: str, request: Request):
     """
     try:
         # 获取查看页面数据（同步 SQLite + 文件读取，线程池执行避免阻塞事件循环）
-        view_data = await asyncio.to_thread(cache_manager.get_view_data_by_token, view_token)
+        view_data = await asyncio.to_thread(
+            ViewTokenResolver(cache_manager).get_view_data_by_token, view_token
+        )
         if not view_data:
             return Response(
                 content="❌ 页面不存在\n\nview_token 无效或已过期。",
@@ -1198,7 +1201,9 @@ async def view_transcript(
 ):
     try:
         # 同步 SQLite + 文件读取，线程池执行避免阻塞事件循环
-        view_data = await asyncio.to_thread(cache_manager.get_view_data_by_token, view_token)
+        view_data = await asyncio.to_thread(
+            ViewTokenResolver(cache_manager).get_view_data_by_token, view_token
+        )
         if not view_data:
             if raw:
                 return Response(

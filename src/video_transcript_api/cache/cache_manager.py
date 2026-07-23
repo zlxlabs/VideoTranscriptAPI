@@ -2228,14 +2228,21 @@ class CacheManager:
         if download_url is not None and not download_url.strip():
             download_url = None
 
+        from ..api.services.task_dedup import TaskDedup
+
+        task_dedup = TaskDedup(self)
         # 策略1: 精确 URL 匹配（现有行为）
-        existing_task = self.get_existing_task_by_url(url, use_speaker_recognition)
+        existing_task = task_dedup.get_existing_task_by_url(
+            url, use_speaker_recognition
+        )
         if existing_task:
             view_token = existing_task['view_token']
             logger.debug(f"通过URL精确匹配复用view_token: {view_token} (状态: {existing_task['status']}) for URL: {url}")
         else:
             # 策略2: (platform, media_id) 语义匹配（解决同源视频不同URL格式的问题）
-            media_task = self.get_existing_task_by_media(platform, media_id, use_speaker_recognition)
+            media_task = task_dedup.get_existing_task_by_media(
+                platform, media_id, use_speaker_recognition
+            )
             if media_task:
                 view_token = media_task['view_token']
                 logger.info(

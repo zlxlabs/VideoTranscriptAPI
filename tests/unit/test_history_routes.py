@@ -973,7 +973,8 @@ def summary_setup(db_pair):
 
     # Keep patches active for the lifetime of the test (yield, not return)
     with patch("video_transcript_api.api.routes.audit.audit_logger", al), \
-         patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache):
+         patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache), \
+         patch("video_transcript_api.api.routes.audit.ViewTokenResolver", side_effect=lambda manager: manager):
         yield TestClient(app), db_pair, mock_cache
 
 
@@ -1122,7 +1123,8 @@ class TestSummaryEndpoint:
         app.dependency_overrides[verify_token] = _fake_verify_token_missing_user_id
 
         with patch("video_transcript_api.api.routes.audit.audit_logger", al), \
-             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache):
+             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache), \
+             patch("video_transcript_api.api.routes.audit.ViewTokenResolver", side_effect=lambda manager: manager):
             client = TestClient(app)
             resp = client.get("/api/audit/summary?view_token=vt-someone-else")
 
@@ -1170,7 +1172,8 @@ class TestSummaryEndpoint:
         app.dependency_overrides[verify_token] = _fake_verify_token_missing_user_id
 
         with patch("video_transcript_api.api.routes.audit.audit_logger", al), \
-             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache):
+             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache), \
+             patch("video_transcript_api.api.routes.audit.ViewTokenResolver", side_effect=lambda manager: manager):
             client = TestClient(app)
             resp = client.get("/api/audit/summary?view_token=vt-no-record")
 
@@ -1226,7 +1229,8 @@ class TestSummaryEndpoint:
         app.dependency_overrides[verify_token] = _fake_verify_token_attacker
 
         with patch("video_transcript_api.api.routes.audit.audit_logger", al), \
-             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache):
+             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache), \
+             patch("video_transcript_api.api.routes.audit.ViewTokenResolver", side_effect=lambda manager: manager):
             client = TestClient(app)
             resp = client.get("/api/audit/summary?view_token=vt-h1-crossuser")
 
@@ -1272,7 +1276,8 @@ class TestSummaryEndpoint:
         app.dependency_overrides[verify_token] = _fake_verify_token
 
         with patch("video_transcript_api.api.routes.audit.audit_logger", al), \
-             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache):
+             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache), \
+             patch("video_transcript_api.api.routes.audit.ViewTokenResolver", side_effect=lambda manager: manager):
             client = TestClient(app)
             resp = client.get("/api/audit/summary?view_token=vt-h1-legacy")
 
@@ -1341,7 +1346,8 @@ class TestSummaryEndpoint:
             return TestClient(app)
 
         with patch("video_transcript_api.api.routes.audit.audit_logger", al), \
-             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache):
+             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache), \
+             patch("video_transcript_api.api.routes.audit.ViewTokenResolver", side_effect=lambda manager: manager):
             resp_a = _client_for("user-a").get("/api/audit/summary?view_token=vt-shared")
             resp_b = _client_for("user-b").get("/api/audit/summary?view_token=vt-shared")
             resp_c = _client_for("user-c").get("/api/audit/summary?view_token=vt-shared")
@@ -1415,7 +1421,8 @@ class TestSummaryEndpoint:
             return TestClient(app)
 
         with patch("video_transcript_api.api.routes.audit.audit_logger", al), \
-             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache):
+             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache), \
+             patch("video_transcript_api.api.routes.audit.ViewTokenResolver", side_effect=lambda manager: manager):
             resp_a = _client_for("user-a").get("/api/audit/summary?view_token=vt-inflight")
             resp_x = _client_for("user-x").get("/api/audit/summary?view_token=vt-inflight")
 
@@ -1831,7 +1838,8 @@ class TestObserverAuditCapabilityEscalation:
         app.dependency_overrides[verify_token] = _fake_verify_token_b
 
         with patch("video_transcript_api.api.routes.audit.audit_logger", al), \
-             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache):
+             patch("video_transcript_api.api.routes.audit.get_cache_manager", return_value=mock_cache), \
+             patch("video_transcript_api.api.routes.audit.ViewTokenResolver", side_effect=lambda manager: manager):
             client = TestClient(app)
             resp = client.get("/api/audit/summary?view_token=vt-a")
 

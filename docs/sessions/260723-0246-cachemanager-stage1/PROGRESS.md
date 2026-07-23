@@ -36,4 +36,15 @@
 - RED：`uv run pytest tests/unit/test_task_dedup.py --junit-xml=/tmp/stage1-t4-red.xml` 如预期失败；收集阶段出现 1 个 `ModuleNotFoundError`，原因是 `api.services.task_dedup` 尚未实现。
 - GREEN：`python -m py_compile src/video_transcript_api/api/services/task_dedup.py src/video_transcript_api/cache/cache_manager.py` 成功；`uv run pytest tests/unit/test_task_dedup.py --junit-xml=/tmp/stage1-t4-green.xml` 通过（10 passed）。
 - 范围回归：`uv run pytest tests/unit tests/cache --junit-xml=/tmp/stage1-t4.xml` 通过；JUnit 记录为 2586 tests、0 failures、0 errors、0 skipped。
-- T4：待本次实现提交后补充 hash；两个服务查询均通过注入实例直接复用 `_TASK_STATUS_PRIORITY_ORDER_BY`，未复制 CASE SQL 或创建连接。
+- T4：`b5555721c477c080d474cb7dc8ad24f52e81dbaa` — 抽离 TaskDedup 服务；两个服务查询均通过注入实例直接复用 `_TASK_STATUS_PRIORITY_ORDER_BY`，未复制 CASE SQL 或创建连接。
+
+## T5：调用点切换与实现阶段验证
+
+- 调用面：将 audit 1 处、tasks 2 处、views 2 处直接改为 `ViewTokenResolver(cache_manager)`；将 `CacheManager.create_task` 的 URL 和 media 去重改为单个即时构造的 `TaskDedup(self)`。未修改 `api/app.py` 注释、路由错误映射、`asyncio.to_thread` 调度或任何连接/锁/schema。
+- 调整前 targeted：`uv run pytest tests/unit/test_recalibrate.py tests/unit/test_resummarize.py tests/unit/test_history_routes.py tests/unit/test_cache_manager.py tests/unit/test_view_token_dedup.py --junit-xml=/tmp/stage1-t5-pre.xml` 通过（231 passed）。
+- RED：调用切换后，同一 targeted 集合出现 5 个 `test_history_routes.py` 摘要端点失败；旧 mock 指向 `CacheManager.get_view_data_by_token`，而路由已直接构造 Resolver。
+- GREEN：最小调整这些测试为 mock `audit.ViewTokenResolver` 构造边界并保留原有摘要、授权、状态断言；同一 targeted 集合再次通过（231 passed）。
+- 范围回归：`uv run pytest tests/unit tests/cache --junit-xml=/tmp/stage1-t5.xml` 通过；JUnit 记录为 2586 tests、0 failures、0 errors、0 skipped。
+- 静态检查：`uv run python -m compileall -q src tests/unit/test_view_token_resolver.py tests/unit/test_task_dedup.py` 成功；关键 modules import smoke 成功。项目未配置 mypy 或 pyright，未新增类型检查依赖。
+- 验收：`rg` 确认 API 路由及 `create_task` 不再调用六个 facade；6 个 CacheManager facade 都保留 Deprecated 薄委托；`_TASK_STATUS_PRIORITY_ORDER_BY` 唯一定义仍在 CacheManager。`cache_manager.py` 从基线 3420 行降至 3123 行（净减 297 行）。
+- T5：待本次调用点切换提交后补充 hash。
