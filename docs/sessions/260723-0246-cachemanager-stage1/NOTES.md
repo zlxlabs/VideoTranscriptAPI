@@ -45,3 +45,8 @@
 
 - PR #30 首次创建发现范围污染（19 files / 43,794 deletions）；通过 rebase 校正为 13 files / 363 deletions。仅推送 GitHub，未推送 Gitee。
 - 初次校正后的 CI head 为 `28efdc3`，`gate / gate` 已 success；本次文档同步会触发新的 gate。
+
+## 生产部署记录
+
+- PR #30 已 squash merge 到 `main`（`6703321d47eb03df41709b5c8cce210f4a2c8dd2`），CI gate 成功；2026-07-23 已部署到 `n305:/opt/media/VideoTranscriptAPI`。配置 preflight 通过，容器恢复为 `running/healthy`，服务器内 `/livez` OK，公开 `/livez` 连续 3 次和 `openapi.json` 均为 HTTP 200。
+- 部署时 GHCR 的旧 DNS 缓存导致镜像 pull 超时。获用户授权后以 live-restore 重启 Docker daemon，`video-history` 与本服务均恢复 healthy；这是运行环境 DNS 缓存问题，不是代码缺陷。

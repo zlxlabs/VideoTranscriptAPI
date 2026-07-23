@@ -21,6 +21,12 @@
 - T4：`217a599` — 抽离 TaskDedup 服务。
 - T5：`5c9168d` — 切换 CacheManager Stage1 调用点。
 
+## 合并与生产部署
+
+- PR #30 已 squash merge 到 `main`：`6703321d47eb03df41709b5c8cce210f4a2c8dd2`；CI gate 成功。
+- 2026-07-23 已部署到 `n305:/opt/media/VideoTranscriptAPI`。配置 preflight 通过，生产镜像为 `ghcr.io/zj1123581321/video-transcript-api:6703321d47eb`，运行 digest 为 `sha256:bd41f868836e0d60a74768aaf7bcd360d7b1fe8a02cdacfbd00b6747f0a9debf`。
+- 容器状态为 `running/healthy`；服务器内 `/livez` OK，公开 `https://sum.lexgogo.site/livez` 连续 3 次 HTTP 200，`openapi.json` HTTP 200。
+
 ## Codex gate
 
 | 轮次 | 结果 | P1 连续无发现计数 | 备注 |
@@ -57,4 +63,4 @@
 
 - 最终范围回归：2586 tests、0 failures、0 errors、0 skipped（`/tmp/stage1-t5.xml`）。
 - 静态验证：compileall 与关键模块 import smoke 通过；项目未配置 mypy/pyright，未新增依赖。
-- 最终文档提交前状态：T1-T5 均已提交；工作树仅包含本次文档同步和 `cache_manager.py` 两处空白机械修复。未 push、未部署、未合并 `main`。
+- 最终文档提交前状态：T1-T5 均已提交；工作树仅包含当时的文档同步和 `cache_manager.py` 两处空白机械修复。该历史阶段之后，PR #30 已合并到 `main` 并完成生产部署。
