@@ -2,12 +2,20 @@
 
 > Session ID：`260723-0246-cachemanager-stage1`
 > 创建：2026-07-23 02:46 (EDT)
-> **状态：未启动（裁决完成、交接就绪，等待新 session 接手执行）**
+> **状态：Stage 1 完成（职责 10/11 已外移并完成验收）**
 > 类型：**范围收敛后的重构执行**
 > 上游来源：graphify 分析与原始规划见 `docs/sessions/260723-0214-cachemanager-decompose/HANDOFF.md`（已被本文档取代，保留作 Stage 2+ 备忘）
 > 基线分支：`main`
 > **建议工作分支**：`refactor/cachemanager-decompose-stage1`（在 worktree 内）
 > 部署机制：本仓库 `.github/workflows/` 仅 `gate.yml`，**未接入 D3**；本 session 与部署无关。
+> 完成提交：`7e7fcb15`（T3）、`b5555721`（T4）、`fe977f0a`（T5）。
+> 收工约束：仅在隔离 worktree 完成；**未 push、未部署、未合并 `main`**。
+
+## 完成摘要（2026-07-23）
+
+- 新增 `ViewTokenResolver` 与 `TaskDedup`，CacheManager 保留 6 个带 Deprecated 注释的薄 facade。
+- audit/tasks/views 的 5 个实际 API 调用与 `create_task` 的 2 个 dedup 调用均已切至服务；`cache_manager.py` 从 3420 行降至 3123 行（净减 297）。
+- 最终证据：`uv run pytest tests/unit tests/cache --junit-xml=/tmp/stage1-t5.xml` 的 JUnit 为 2586 tests、0 failures、0 errors、0 skipped；compileall 和关键模块 import smoke 通过；Codex gate 两轮均无 P1。
 
 ---
 

@@ -34,3 +34,9 @@
 - 新服务若直接导入 `CacheManager`，易与 CacheManager 对服务的 facade 导入形成循环依赖；应通过构造函数接收已有 manager，采用类型检查期导入或 `Protocol`，并让运行时依赖单向。
 - 两个 API 读取路径已使用 `asyncio.to_thread`；服务迁移不能悄然改变同步 SQLite + 文件读取的调度模型。两个 tasks 写路径当前同步调用，仍需保留其现有异常映射。
 
+## Backlog / 接受不修
+
+- P2：`create_task` 直接构造 `TaskDedup(self)`，没有经由 CacheManager facade 的虚派发。接受不修：不存在受支持的子类覆盖契约，直接服务调用是本阶段已裁决的边界；改回 facade 会弱化外移结果。
+- P3：history route 测试让 `ViewTokenResolver` mock 返回 mock CacheManager，可能掩盖服务装配回归。接受不修：该组测试隔离鉴权和响应契约；Resolver 有直接单测，且最终范围回归已通过，额外装配测试机制的收益不足。
+- graphify 仅使用既有图作背景参考，因图偏旧未重跑；度数观察跳过，且它从来不是完成门槛。
+- 没有设计偏离。唯一事实偏差是 T1 复核将交接中的「8 个调用点」修正为 5 个 API 直接调用 + `create_task` 内 2 个 dedup 调用；这一统计已在本文与 PROGRESS 固化。

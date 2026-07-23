@@ -22,4 +22,3 @@ Stage 1 新增两个 API 层服务模块：
 运行时依赖方向固定为：`api/routes` → `api/services` → CacheManager **实例能力**。服务模块不在运行时导入 `cache.cache_manager.CacheManager`；类型标注使用 `typing.TYPE_CHECKING` 下的前向引用，或定义最小 `Protocol` 描述所需方法。CacheManager facade 若需创建服务，必须在方法内局部导入，或由外部装配后注入，不能在 `cache_manager.py` 模块顶层反向 import `api.services`。这避免 `CacheManager → api.services → CacheManager` 的初始化环，同时仍使 facade 保持很薄。
 
 排序常量仍由 CacheManager 唯一持有并通过注入实例读取；不在 `TaskDedup` 复制 SQL 文本。这样 `get_task_by_view_token` 与两个 dedup 查询继续共享同一状态优先级定义。
-
