@@ -40,3 +40,8 @@
 - P3：history route 测试让 `ViewTokenResolver` mock 返回 mock CacheManager，可能掩盖服务装配回归。接受不修：该组测试隔离鉴权和响应契约；Resolver 有直接单测，且最终范围回归已通过，额外装配测试机制的收益不足。
 - graphify 仅使用既有图作背景参考，因图偏旧未重跑；度数观察跳过，且它从来不是完成门槛。
 - 没有设计偏离。唯一事实偏差是 T1 复核将交接中的「8 个调用点」修正为 5 个 API 直接调用 + `create_task` 内 2 个 dedup 调用；这一统计已在本文与 PROGRESS 固化。
+
+## PR 发布记录
+
+- PR #30 首次创建发现范围污染（19 files / 43,794 deletions）；通过 rebase 校正为 13 files / 363 deletions。仅推送 GitHub，未推送 Gitee。
+- 初次校正后的 CI head 为 `28efdc3`，`gate / gate` 已 success；本次文档同步会触发新的 gate。

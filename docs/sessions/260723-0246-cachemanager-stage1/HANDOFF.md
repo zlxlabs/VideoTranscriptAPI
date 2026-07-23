@@ -8,7 +8,7 @@
 > 基线分支：`main`
 > **建议工作分支**：`refactor/cachemanager-decompose-stage1`（在 worktree 内）
 > 部署机制：本仓库 `.github/workflows/` 仅 `gate.yml`，**未接入 D3**；本 session 与部署无关。
-> 完成提交：`7e7fcb15`（T3）、`b5555721`（T4）、`fe977f0a`（T5）。
+> 完成提交：`e64f7a1`（T3）、`217a599`（T4）、`5c9168d`（T5）。
 > 收工约束：仅在隔离 worktree 完成；**未 push、未部署、未合并 `main`**。
 
 ## 完成摘要（2026-07-23）
