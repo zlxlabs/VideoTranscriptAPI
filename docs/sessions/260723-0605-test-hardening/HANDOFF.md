@@ -2,7 +2,7 @@
 
 > Session ID：`260723-0605-test-hardening`
 > 创建：2026-07-23（EDT）
-> **状态：实施完成，待独立 Codex review 门禁**
+> **状态：完成（独立 Codex review 门禁已通过）**
 > 类型：测试基建加固，小批量、低风险，不动 src/ 业务代码
 > 基线分支：`main`
 > 建议工作分支：`test/suite-hardening`（worktree 内）
@@ -73,7 +73,7 @@
 - [x] `tests/performance/` 压测脚本移出 pytest 收集面
 - [x] `tests/README.md` 与实际结构一致
 - [x] PROGRESS.md 记录全部 commit hash
-- [ ] 独立 Codex review 门禁：最多 5 轮，连续 2 轮无新增 P1（不要求零意见）；P1 必修，P2/P3 未修须记录 backlog 与理由；第 5 轮仍有 P1 时停止并汇报用户决策
+- [x] 独立 Codex review 门禁：连续 2 轮无新增 P1（第 4、5 轮；不要求零意见）；P1 已修复，P2/P3 未修均已记录 backlog 与理由
 
 ## 关键文件索引
 

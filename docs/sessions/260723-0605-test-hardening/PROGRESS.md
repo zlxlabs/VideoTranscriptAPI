@@ -2,7 +2,7 @@
 
 ## 实施状态
 
-- M1-M5 实施完成，待独立 Codex review 门禁。
+- M1-M5 实施与独立 Codex review 门禁均已完成。
 
 ## 里程碑提交
 
@@ -18,7 +18,7 @@
 
 ## 独立 Codex review
 
-- 状态：第 4/5 轮完成；clean streak=1/2。最多 5 轮，连续 2 轮无新增 P1 后解除门禁，不要求零意见。
+- 状态：第 5/5 轮完成；clean streak=2/2，门禁通过。连续 2 轮无新增 P1 后解除门禁，不要求零意见。
 - 处置规则：P1（正确性、安全、数据丢失）必须修复；P2/P3 可不修，但须记录 backlog 与理由。修复优先减法，禁止为 P2/P3 新增状态或机制；新机制仅可用于消除 P1。第 5 轮后仍有 P1 时停止并汇报用户决策。
 - 第 1 轮：
   - P1 `MANUAL-GATE-SCOPE`：`tests/manual/conftest.py` 对混合 pytest 会话的全部
@@ -52,6 +52,26 @@
   - 复核 40 个 manual 文件无收集或 import 阶段副作用，压测迁移、Makefile、
     pytest 配置与 README 一致，`git diff --check` 与语法检查通过；
   - 本轮只读环境未运行 pytest；P2/P3 backlog：仍为空。
+- 第 5 轮：
+  - 静态完整 diff 审查发现 0 P1、1 个 P2
+    `CACHE-TEST-POLLUTION-001`：Makefile 纳入 cache 后，
+    `tests/cache/test_batch_cleanup.py`、`test_cache_cleanup.py`、
+    `test_cache_manager.py` 使用固定 `./test_cache_dir`，清理与断言不足；
+  - 分诊：接受不修并记入 backlog。该问题是既有测试债务，连续多次 `make test`
+    稳定通过；修复需改 3 组测试的临时目录与资源生命周期并扩大 M3 范围，且 P2
+    不值得为清意见新增机制；
+  - 本轮未记录独立 pytest 执行结果。
+
+## Review backlog
+
+- P2 `CACHE-TEST-POLLUTION-001`：后续独立任务可使用 `tmp_path`、真实
+  `save_cache` 路径与断言治理，修复 cache 测试的固定目录和清理债务。
+
+## 五轮 review 总结
+
+- 第 1、3 轮发现并修复 P1；第 2、4、5 轮无新增 P1。
+- 第 4、5 轮连续无新增 P1，`clean streak=2/2`，独立 review 门禁通过。
+- 唯一未修问题为已接受并记录理由的 P2 `CACHE-TEST-POLLUTION-001`；无 P3 backlog。
 - 预 review 本地回归（尚不替代独立 review）：
   - `make test`：exit 0，102.88s（低于 180s）；
   - 未设置 `VTAPI_TESTS_MANUAL` 的企微手动测试：6 skipped；
