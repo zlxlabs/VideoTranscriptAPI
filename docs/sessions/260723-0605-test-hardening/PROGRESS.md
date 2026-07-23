@@ -1,5 +1,29 @@
 # 测试套件加固进度
 
+## 实施状态
+
+- M1-M5 实施完成，待独立 Codex review 门禁。
+
+## 里程碑提交
+
+| 里程碑 | 提交 |
+| --- | --- |
+| M1 | `5b45ac4c4651122d698cdb6ea50ceffe701a5e1d` |
+| M2 | `4ecbe39fcb3a56f7533ef9641d1c0ce5e24703c3` |
+| M3 | `730788d0957adf5cb45ceb24a334ed5e0117eef5` |
+| M4 | `7c1498f8d0a28c1f38bf380238c6aecc6663d0dc` |
+| M5 | `8429b888688741ddda578236f3aa7c1bf8e1be25` |
+
+## 独立 Codex review
+
+- 状态：待执行；需连续 2 轮无实质新意见后解除门禁。
+- 预 review 本地回归（尚不替代独立 review）：
+  - `make test`：exit 0，102.88s（低于 180s）；
+  - 未设置 `VTAPI_TESTS_MANUAL` 的企微手动测试：6 skipped；
+  - `tests/manual -m "not network" --collect-only`：0 selected、77 deselected；
+  - `tests/performance` 不存在，`scripts/perf/concurrent_load.py` AST 解析通过，
+    `git diff --check` 通过。
+
 ## M1：`tests/manual/` 强制 skip 门控
 
 - 状态：完成。
@@ -111,4 +135,4 @@
   - `uv run pytest tests/manual -m "not network" --collect-only` 结果为
     0 selected、77 deselected。
 - 偏离：无。
-- 提交：待本提交生成（后续里程碑补充哈希）。
+- 提交：`8429b888688741ddda578236f3aa7c1bf8e1be25`

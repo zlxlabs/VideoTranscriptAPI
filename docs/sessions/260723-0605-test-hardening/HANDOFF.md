@@ -2,7 +2,7 @@
 
 > Session ID：`260723-0605-test-hardening`
 > 创建：2026-07-23（EDT）
-> **状态：未启动（方案已定稿，交接 Codex 实施）**
+> **状态：实施完成，待独立 Codex review 门禁**
 > 类型：测试基建加固，小批量、低风险，不动 src/ 业务代码
 > 基线分支：`main`
 > 建议工作分支：`test/suite-hardening`（worktree 内）
@@ -66,13 +66,14 @@
 
 ## 完成判据
 
-- [ ] 不设 `VTAPI_TESTS_MANUAL` 时显式跑 `tests/manual/` 任意文件全部 skipped，零外发消息
-- [ ] `network`/`slow` marker 注册并自动打标，`-m "not network"` 可兜底排除
-- [ ] `make test` 至少覆盖 `tests/unit tests/cache`，本地 exit 0
-- [ ] M3 候选目录逐个有「纳入/排除 + 原因 + 耗时」记录
-- [ ] `tests/performance/` 压测脚本移出 pytest 收集面
-- [ ] `tests/README.md` 与实际结构一致
-- [ ] PROGRESS.md 记录全部 commit hash
+- [x] 不设 `VTAPI_TESTS_MANUAL` 时显式跑 `tests/manual/` 任意文件全部 skipped，零外发消息
+- [x] `network`/`slow` marker 注册并自动打标，`-m "not network"` 可兜底排除
+- [x] `make test` 至少覆盖 `tests/unit tests/cache`，本地 exit 0
+- [x] M3 候选目录逐个有「纳入/排除 + 原因 + 耗时」记录
+- [x] `tests/performance/` 压测脚本移出 pytest 收集面
+- [x] `tests/README.md` 与实际结构一致
+- [x] PROGRESS.md 记录全部 commit hash
+- [ ] 独立 Codex review 连续 2 轮无实质新意见
 
 ## 关键文件索引
 
