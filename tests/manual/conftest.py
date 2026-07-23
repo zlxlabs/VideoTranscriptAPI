@@ -6,7 +6,11 @@ import pytest
 
 
 def pytest_collection_modifyitems(items):
-    """Skip manual tests unless their explicit opt-in environment flag is set."""
+    """Mark manual tests as slow/network and require explicit opt-in to run."""
+    for item in items:
+        item.add_marker(pytest.mark.slow)
+        item.add_marker(pytest.mark.network)
+
     if os.environ.get("VTAPI_TESTS_MANUAL") == "1":
         return
 

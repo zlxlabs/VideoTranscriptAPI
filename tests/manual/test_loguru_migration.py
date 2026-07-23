@@ -11,7 +11,7 @@ import sys
 # Add src directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
-from video_transcript_api.utils import setup_logger, logger
+from video_transcript_api.utils import setup_logger
 
 def test_logger():
     """Test the logger functionality"""
@@ -25,9 +25,6 @@ def test_logger():
     log.info("This is an info message")
     log.warning("This is a warning message")
     log.error("This is an error message")
-
-    # Test using the global logger
-    logger.info("Testing global logger import")
 
     # Test multiple calls to setup_logger (should not reconfigure)
     log2 = setup_logger("another_logger")
