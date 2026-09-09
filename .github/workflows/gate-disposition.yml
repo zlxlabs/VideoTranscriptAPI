@@ -24,7 +24,7 @@ jobs:
       contents: read
       pull-requests: read
     secrets: inherit
-    uses: zlxlabs/gate/.github/workflows/gate-v2-disposition.yml@v2
+    uses: zlxlabs/gate/.github/workflows/gate-v2-disposition.yml@e0249b7d622072531097bcff82bc4ef78b39f1e6
     with:
       pr_number: ${{ inputs.pr_number }}
       primary_run_id: ${{ inputs.primary_run_id }}
