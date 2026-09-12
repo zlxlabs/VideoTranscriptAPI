@@ -24,11 +24,11 @@ jobs:
       contents: read
       pull-requests: read
     secrets: inherit
-    uses: zlxlabs/gate/.github/workflows/gate-v2-disposition.yml@e0249b7d622072531097bcff82bc4ef78b39f1e6
+    uses: zlxlabs/gate/.github/workflows/gate-v2-disposition.yml@4a4557d46cdd7583443895336416a95dfa5eeb7f
     with:
       pr_number: ${{ inputs.pr_number }}
       primary_run_id: ${{ inputs.primary_run_id }}
       primary_run_attempt: ${{ inputs.primary_run_attempt }}
       finding_id: ${{ inputs.finding_id }}
       reason: ${{ inputs.reason }}
-      gate_ref: 267eff0688c4ea5ad1253fae62e89e509b51322a
+      gate_ref: 4a4557d46cdd7583443895336416a95dfa5eeb7f
