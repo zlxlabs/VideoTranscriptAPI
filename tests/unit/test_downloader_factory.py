@@ -171,6 +171,8 @@ class TestMediaResolverRouting:
         "https://www.xiaohongshu.com/explore/abc",
         "https://xhslink.com/abc",
         "https://weixin.qq.com/sph/AOzokRxWHz",
+        "https://x.com/someuser/status/1234567890",
+        "https://twitter.com/someuser/status/1234567890?s=20",
     ])
     def test_flag_on_routes_to_resolver(self, resolver_on, url):
         downloader = create_downloader(url)
@@ -182,6 +184,8 @@ class TestMediaResolverRouting:
         ("https://www.douyin.com/video/7123", DouyinDownloader),
         ("https://www.xiaohongshu.com/explore/abc", XiaohongshuDownloader),
         ("https://weixin.qq.com/sph/AOzokRxWHz", GenericDownloader),
+        ("https://x.com/someuser/status/1234567890", GenericDownloader),
+        ("https://twitter.com/someuser/status/1234567890?s=20", GenericDownloader),
     ])
     def test_flag_off_routes_to_legacy(self, resolver_off, url, expected):
         downloader = create_downloader(url)
