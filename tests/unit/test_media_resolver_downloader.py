@@ -350,3 +350,138 @@ class TestConditionalDownloadHeaders:
         fresh_call_headers = [h for u, h in captured_headers if "fresh" in u]
         assert fresh_call_headers
         assert fresh_call_headers[0] is None or "X-API-Key" not in (fresh_call_headers[0] or {})
+
+
+# --------------------------------------------------------------------------- #
+# variants lowest bitrate selection (ASR optimization)
+# --------------------------------------------------------------------------- #
+
+TWITTER_VARIANTS = [
+    {
+        "url": "https://video.twimg.com/ext_tw_video/1234567890/pu/vid/avc1/480x270/low.mp4",
+        "bitrate": 256000,
+        "width": 480,
+        "height": 270,
+        "quality": "270p",
+    },
+    {
+        "url": "https://video.twimg.com/ext_tw_video/1234567890/pu/vid/avc1/1280x720/mid.mp4",
+        "bitrate": 832000,
+        "width": 1280,
+        "height": 720,
+        "quality": "720p",
+    },
+    {
+        "url": "https://video.twimg.com/ext_tw_video/1234567890/pu/vid/avc1/1920x1080/high.mp4",
+        "bitrate": 2176000,
+        "width": 1920,
+        "height": 1080,
+        "quality": "1080p",
+    },
+]
+
+TWITTER_DATA_WITH_VARIANTS = dict(
+    TWITTER_DATA,
+    variants=TWITTER_VARIANTS,
+)
+
+
+class TestVariantsSelection:
+    def test_select_lowest_bitrate_variant(self):
+        dl = make_downloader([TWITTER_DATA_WITH_VARIANTS])
+        url = "https://x.com/someuser/status/1234567890"
+        di = dl.get_download_info(url)
+        # 1. download_url equals variants[0].url rather than top-level video_url
+        assert di.download_url == TWITTER_VARIANTS[0]["url"]
+        assert di.download_url != TWITTER_DATA["video_url"]
+        # 2. file_ext is inferred properly
+        assert di.file_ext == "mp4"
+        assert di.filename == "twitter_1234567890.mp4"
+        # 3. extra does not add unexpected fields
+        assert di.extra == {"provider": "tikhub"}
+
+    @pytest.mark.parametrize("variants_val", [
+        None,
+        [],
+    ])
+    def test_variants_fallback_null_or_empty(self, variants_val):
+        data = dict(TWITTER_DATA, variants=variants_val)
+        dl = make_downloader([data])
+        di = dl.get_download_info("https://x.com/someuser/status/1234567890")
+        assert di.download_url == TWITTER_DATA["video_url"]
+
+    def test_variants_fallback_missing_key(self):
+        data = dict(TWITTER_DATA)
+        data.pop("variants", None)
+        dl = make_downloader([data])
+        di = dl.get_download_info("https://x.com/someuser/status/1234567890")
+        assert di.download_url == TWITTER_DATA["video_url"]
+
+    @pytest.mark.parametrize("invalid_variants", [
+        "not-a-list",
+        123,
+        {"url": "https://example.com/a.mp4"},
+        [123],
+        ["https://example.com/a.mp4"],
+        [{}],
+        [{"url": ""}],
+        [{"url": "   "}],
+        [{"url": None}],
+        [{"url": 12345}],
+    ])
+    def test_malformed_variants_raises_resolver_response_error(self, invalid_variants):
+        data = dict(TWITTER_DATA, variants=invalid_variants)
+        dl = make_downloader([data])
+        with pytest.raises(ResolverResponseError):
+            dl.get_download_info("https://x.com/someuser/status/1234567890")
+
+    def test_selected_variant_registered_in_reverse_map(self):
+        dl = make_downloader([TWITTER_DATA_WITH_VARIANTS])
+        url = "https://x.com/someuser/status/1234567890"
+        di = dl.get_download_info(url)
+        normalized_url = dl._normalize_url(url)
+        assert dl._video_url_to_page.get(di.download_url) == normalized_url
+
+    def test_unsafe_variant_url_blocked_by_ssrf(self):
+        unsafe_variants = [
+            {"url": "http://169.254.169.254/latest/meta-data", "bitrate": 100000},
+            {"url": "https://video.twimg.com/safe.mp4", "bitrate": 500000},
+        ]
+        data = dict(TWITTER_DATA, variants=unsafe_variants)
+        dl = make_downloader([data])
+        with pytest.raises(ResolverResponseError):
+            dl.get_download_info("https://x.com/someuser/status/1234567890")
+
+    def test_download_reresolve_with_variants(self, monkeypatch):
+        stale = dict(TWITTER_DATA_WITH_VARIANTS)
+        fresh_variants = [
+            {
+                "url": "https://video.twimg.com/ext_tw_video/fresh/low.mp4",
+                "bitrate": 256000,
+                "quality": "270p",
+            },
+            {
+                "url": "https://video.twimg.com/ext_tw_video/fresh/high.mp4",
+                "bitrate": 2176000,
+                "quality": "1080p",
+            },
+        ]
+        fresh = dict(TWITTER_DATA, video_url="https://video.twimg.com/fresh-default.mp4", variants=fresh_variants)
+        dl = make_downloader([stale, fresh])
+        di = dl.get_download_info("https://x.com/someuser/status/1234567890")
+        assert di.download_url == TWITTER_VARIANTS[0]["url"]
+
+        downloaded_urls = []
+
+        def fake_super(self, url, filename, max_retries=3):
+            downloaded_urls.append(url)
+            return "/tmp/ok.mp4" if "fresh" in url else None
+
+        monkeypatch.setattr(BaseDownloader, "download_file", fake_super)
+        out = dl.download_file(di.download_url, di.filename)
+        assert out == "/tmp/ok.mp4"
+        assert dl.client.calls[-1]["force_refresh"] is True
+        # Verify force_refresh selected fresh variants[0] rather than fresh video_url
+        assert fresh_variants[0]["url"] in downloaded_urls
+        assert dl._video_url_to_page.get(fresh_variants[0]["url"]) == dl._normalize_url("https://x.com/someuser/status/1234567890")
+

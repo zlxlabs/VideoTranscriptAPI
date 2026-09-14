@@ -11,7 +11,7 @@
 - 抖音改为下载**完整 mp4 再由 CapsWriter 提取音轨**（而非旧版直接抓 `music.play_url` 的 mp3）——
   对套用热门 BGM 模板的口播视频，提取的是**视频自带人声**而非背景乐，转录更准；
 - 支持微信视频号（`https://weixin.qq.com/sph/<sph_code>`）链接转录：resolver 只负责解析并下发解密文件头 + 微信 CDN 直链（`GET /api/stream/wechat_channels/{sph_code}/direct`），由本服务直连 CDN 按 Range 拼接成完整 mp4（不经 resolver 流式中转，避免跨机房 DERP 慢速）；
-- 支持 X（Twitter，`x.com` 与 `twitter.com`）音视频链接转录：resolver 解析第三方无水印直链并下发 MP4，本服务直接下载并由 CapsWriter 提取音轨转录。
+- 支持 X（Twitter，`x.com` 与 `twitter.com`）音视频链接转录：resolver 解析第三方无水印直链并下发 MP4，本服务直接下载并由 CapsWriter 提取音轨转录；本服务为 ASR 场景自动选取 resolver 返回的最低码率 variants 档（省流量、提速），无需配置。
 
 > ⚠️ **行为变更**：开启后抖音下载体积由 mp3 增大为 mp4。长视频可能撞 `storage.max_download_size_mb`
 > 上限，或 CapsWriter 一次性入内存的限制。短视频无影响。

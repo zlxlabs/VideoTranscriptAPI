@@ -7,6 +7,7 @@
 - 对 resolver 返回的直链下载前做 SSRF 校验（P0-2）。
 - 下载 resolver 流式端点时携带 X-API-Key 头，第三方 CDN 直链不携带该头。
 - 下载遇 403/失效 → force_refresh 重解析再下一次（P0-3 / FORK4-A），仍失败抛错。
+- X(Twitter) 等平台若返回 variants 档位，自动选取最低码率档（variants[0]）以下载音频/视频，省流量并提速。
 - 无字幕：`get_subtitle` 返回 None。
 
 详见 docs/designs/media-resolver-integration.md。
@@ -192,25 +193,70 @@ class MediaResolverDownloader(BaseDownloader):
             },
         )
 
+    @staticmethod
+    def _select_download_url(data: dict) -> str:
+        """从 resolver 响应中选取下载 URL。
+
+        契约：
+        - 若 data 包含 variants（非 None 且非空列表），选取最低码率档（variants[0]["url"]）；
+        - variants 为 None、缺失或空列表时，回退到 data.get("video_url")；
+        - variants 存在但形状非法（非 list、首元素非 dict、首元素缺少或非非空 str 的 url）时，
+          抛出 ResolverResponseError。
+        """
+        if not isinstance(data, dict):
+            return ""
+
+        variants = data.get("variants")
+        if variants is not None and variants != []:
+            if not isinstance(variants, list):
+                raise ResolverResponseError(
+                    f"malformed variants in resolver response: expected list, got {type(variants).__name__}"
+                )
+            first = variants[0]
+            if not isinstance(first, dict):
+                raise ResolverResponseError(
+                    f"malformed variant item in resolver response: expected dict, got {type(first).__name__}"
+                )
+            url = first.get("url")
+            if not isinstance(url, str) or not url.strip():
+                raise ResolverResponseError(
+                    "malformed variant item in resolver response: missing or empty url"
+                )
+
+            bitrate = first.get("bitrate")
+            quality = first.get("quality")
+            logger.info(
+                f"Selected lowest bitrate variant: bitrate={bitrate}, quality={quality}, total={len(variants)}"
+            )
+            return url.strip()
+
+        video_url = data.get("video_url")
+        if not video_url or not isinstance(video_url, str):
+            return ""
+        return video_url.strip()
+
     def _fetch_download_info(self, url: str, video_id: str) -> DownloadInfo:
         data = self._resolve(url)
-        video_url = data.get("video_url")
-        if not video_url:
+        download_url = self._select_download_url(data)
+        if not download_url:
             raise ResolverResponseError(f"解析结果缺少 video_url: {url}")
 
         # P0-2：resolver 返回的直链下载前做 SSRF 校验
         try:
-            validate_url_safe(video_url)
+            validate_url_safe(download_url)
         except URLValidationError as e:
-            logger.error(f"resolver 返回的 video_url 未通过 SSRF 校验，已阻止下载: {e}")
+            logger.error(f"resolver download_url failed SSRF check: {e}")
             raise ResolverResponseError(f"解析返回的直链不安全，已阻止下载: {e}")
 
-        file_ext = self._infer_file_ext(video_url)
+        key = self._normalize_url(url)
+        self._video_url_to_page[download_url] = key
+
+        file_ext = self._infer_file_ext(download_url)
         platform = data.get("platform", "media")
         vid = str(data.get("video_id") or video_id or "media")
         filename = f"{platform}_{vid}.{file_ext}"
         return DownloadInfo(
-            download_url=video_url,
+            download_url=download_url,
             file_ext=file_ext,
             filename=filename,
             extra={"provider": data.get("provider")},
@@ -270,23 +316,27 @@ class MediaResolverDownloader(BaseDownloader):
         page_key = self._video_url_to_page.get(url)
         if not page_key:
             # 非 resolver 直链（无法重解析），保持基类语义返回 None
-            logger.warning(f"download 失败且无法反查页面 url，放弃重解析: {url[:100]}")
+            logger.warning(f"download failed and cannot find page url for re-resolve: {url[:100]}")
             raise DownloadFailedError(f"resolver 直链下载失败: {url[:100]}")
 
-        logger.warning(f"直链下载失败，force_refresh 重解析后重试: {page_key}")
+        logger.warning(f"download failed, force_refresh re-resolving: {page_key}")
         try:
             data = self._resolve(page_key, force_refresh=True)
+            fresh_url = self._select_download_url(data)
+        except ResolverResponseError as e:
+            logger.error(f"force_refresh invalid response: {e}")
+            raise DownloadFailedError(f"重解析响应非法: {e}")
         except Exception as e:
-            logger.error(f"force_refresh 重解析失败: {e}")
+            logger.error(f"force_refresh resolve failed: {e}")
             raise DownloadFailedError(f"重解析失败: {e}")
 
-        fresh_url = data.get("video_url")
         if not fresh_url:
             raise DownloadFailedError("重解析未返回 video_url")
 
         # 刷新派生缓存，保证后续走新直链
         new_key = self._normalize_url(page_key)
         self._download_info_cache.pop(new_key, None)
+        self._video_url_to_page[fresh_url] = new_key
 
         try:
             validate_url_safe(fresh_url)
