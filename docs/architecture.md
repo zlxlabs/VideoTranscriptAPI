@@ -48,9 +48,13 @@ FastAPI lifespan 为每个应用实例创建并绑定独立的 `RuntimeContext`�
 | **Bilibili** | BilibiliDownloader | TikHub API、BBDown 工具支持 |
 | **抖音** | DouyinDownloader | TikHub API 获取无水印流 |
 | **小红书** | XiaohongshuDownloader | TikHub v3 接口 |
+| **微信视频号** | MediaResolverDownloader | resolver 下发解密文件头 + CDN 直链 Range 拼接 |
+| **X(Twitter)** | MediaResolverDownloader | 自动选取最低码率 variants 档（ASR 省流量提速） |
 | **小宇宙播客** | XiaoyuzhouDownloader | 网页爬虫解析 |
 | **Apple Podcast** | ApplePodcastDownloader | 网页解析获取音频直链 |
 | **通用链接** | GenericDownloader | 直接流式下载、断点续传（SSRF 校验 + 重定向逐跳校验） |
+
+注：`downloaders.use_media_resolver=true` 时抖音/小红书同样改走 `MediaResolverDownloader`（指南见 docs/guides/media_resolver.md）。
 
 **工厂模式实现**：
 
