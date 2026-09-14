@@ -360,6 +360,8 @@ async def transcribe_video(
                             title = "抖音视频转录"
                         elif "weixin.qq.com" in display_url:
                             title = "视频号视频转录"
+                        elif "twitter.com" in display_url or "x.com" in display_url:
+                            title = "X视频转录"
 
                     notification_router = get_notification_router()
                     notification_router.send_view_link(
