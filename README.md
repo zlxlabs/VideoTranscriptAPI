@@ -14,7 +14,7 @@
 
 ## 核心特性
 
-- **多平台支持**：YouTube、Bilibili、抖音、小红书、微信视频号（经 MediaResolverAPI）、小宇宙播客、Apple Podcast，工厂模式自动匹配下载器
+- **多平台支持**：YouTube、Bilibili、抖音、小红书、微信视频号与 X(Twitter)（经 MediaResolverAPI）、小宇宙播客、Apple Podcast，工厂模式自动匹配下载器
 - **双引擎转录**：CapsWriter-Offline（通用转录）+ FunASR（说话人识别）
 - **智能文本处理**：LLM 自动校对 ASR 错误、专有名词纠错、按说话人采样+置信度降级的说话人推断、内容总结
 - **处理深度可控**：`processing_options` 开关按任务控制是否校对/总结，分层缓存产物只增不减，重复请求自动复用已有层
