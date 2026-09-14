@@ -142,6 +142,51 @@ class TestURLParserBasic:
         assert not result.is_short_url
         assert result.original_url == "https://weixin.qq.com/sph/AOzokRxWHz"
 
+    @pytest.mark.parametrize("url,expected_id", [
+        ("https://x.com/someuser/status/1234567890", "1234567890"),
+        ("https://twitter.com/someuser/status/1234567890", "1234567890"),
+        ("https://mobile.twitter.com/someuser/status/1234567890", "1234567890"),
+        ("https://www.x.com/someuser/status/1234567890", "1234567890"),
+        ("https://x.com/someuser/status/1234567890?s=20&t=abcdef", "1234567890"),
+        ("https://twitter.com/someuser/status/1234567890?s=20", "1234567890"),
+        ("https://x.com/someuser/status/1234567890/video/1", "1234567890"),
+        ("https://twitter.com/someuser/statuses/1234567890", "1234567890"),
+    ])
+    def test_twitter_url_parsing(self, url, expected_id):
+        """Test X(Twitter) URL parsing for various domain/subdomain/path formats"""
+        parser = URLParser()
+        result = parser.parse(url)
+
+        assert result.platform == "twitter"
+        assert result.video_id == expected_id
+        assert not result.is_short_url
+        assert result.original_url == url
+
+    @pytest.mark.parametrize("url", [
+        "https://x.com/someuser/status/1234567890",
+        "https://twitter.com/someuser/status/1234567890",
+        "https://mobile.twitter.com/someuser/status/1234567890",
+        "https://x.com/someuser",
+        "https://twitter.com/someuser",
+    ])
+    def test_twitter_extract_platform(self, url):
+        """Test extract_platform identifies X(Twitter) correctly"""
+        assert extract_platform(url) == "twitter"
+
+    @pytest.mark.parametrize("url", [
+        "https://notx.com/u/status/1234567890",
+        "https://x.com.evil.com/u/status/1234567890",
+        "https://example.com/?q=x.com",
+        "https://example.com/notx.com/status/123",
+        "https://example.com/x.com/status/123",
+    ])
+    def test_twitter_false_positives(self, url):
+        """Test host-boundary matching prevents false positives for x.com"""
+        parser = URLParser()
+        result = parser.parse(url)
+        assert result.platform != "twitter"
+        assert extract_platform(url) != "twitter"
+
     def test_generic_url(self):
         """Test generic URL (no platform matched)"""
         parser = URLParser()

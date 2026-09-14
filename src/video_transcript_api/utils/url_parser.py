@@ -15,6 +15,12 @@ from .logging import setup_logger
 # 创建日志记录器
 logger = setup_logger("url_parser")
 
+# 主机边界匹配 x.com，避免误判 notx.com / x.com.evil.com / ?q=x.com
+_X_DOMAIN_RE = re.compile(
+    r"(?:^|://|//|@|[\s])(?:[a-zA-Z0-9-]+\.)*x\.com(?::\d+)?(?:[/?#\s]|$)",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class ParsedURL:
@@ -22,7 +28,7 @@ class ParsedURL:
     解析后的 URL 信息
 
     Attributes:
-        platform: 平台名称 (youtube/bilibili/douyin/xiaohongshu/xiaoyuzhou/apple_podcast/wechat_channels/generic)
+        platform: 平台名称 (youtube/bilibili/douyin/xiaohongshu/xiaoyuzhou/apple_podcast/wechat_channels/twitter/generic)
         video_id: 视频ID (唯一标识)
         normalized_url: 规范化的URL（长链接格式）
         is_short_url: 是否为短链接
@@ -83,6 +89,9 @@ class URLParser:
         ],
         'wechat_channels': [
             r'weixin\.qq\.com/sph/([A-Za-z0-9_-]+)',  # 微信视频号
+        ],
+        'twitter': [
+            r'(?:^|://|//|@|[\s])(?:[a-zA-Z0-9-]+\.)*(?:twitter\.com|x\.com)(?::\d+)?/[^/?#]+/status(?:es)?/(\d+)',  # X(Twitter) 推文/视频
         ],
     }
 
@@ -291,6 +300,8 @@ class URLParser:
             return 'xiaohongshu'
         elif 'weixin.qq.com' in url_lower:
             return 'wechat_channels'
+        elif 'twitter.com' in url_lower or bool(_X_DOMAIN_RE.search(url_lower)):
+            return 'twitter'
 
         return 'generic'
 
