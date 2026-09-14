@@ -1,6 +1,6 @@
-"""MediaResolverDownloader：把抖音/小红书/视频号解析外包给 MediaResolverAPI。
+"""MediaResolverDownloader：把抖音/小红书/视频号/X(Twitter)解析外包给 MediaResolverAPI。
 
-接管平台：抖音 + 小红书 + 微信视频号。本下载器：
+接管平台：抖音 + 小红书 + 微信视频号 + X(Twitter)。本下载器：
 - 用**归一化 url** 作缓存 key（绕开"先有 video_id 才能查"的鸡蛋悖论），
   一次 resolve 同时喂 `_fetch_metadata` 与 `_fetch_download_info`（FORK1-A）。
 - resolver 返回 video_url 视频直链（视频号为流式代理端点），下载仍走基类 `download_file()`。
@@ -30,13 +30,20 @@ from ..utils.url_validator import validate_url_safe, URLValidationError
 
 logger = setup_logger("media_resolver_downloader")
 
-# 接管的平台域名（抖音 + 小红书 + 微信视频号）
+# 接管的平台域名（抖音 + 小红书 + 微信视频号 + Twitter）
 _SUPPORTED_DOMAINS = (
     "douyin.com",
     "v.douyin.com",
     "xiaohongshu.com",
     "xhslink.com",
     "weixin.qq.com",
+    "twitter.com",
+)
+
+# 主机边界匹配 x.com，避免误判 notx.com / x.com.evil.com / ?q=x.com
+_X_DOMAIN_RE = re.compile(
+    r"(?:^|://|//|@|[\s])(?:[a-zA-Z0-9-]+\.)*x\.com(?::\d+)?(?:[/?#\s]|$)",
+    re.IGNORECASE,
 )
 
 # 视频号流式端点 path（不含 /direct）；命中则走 CDN 直连拼接
@@ -51,7 +58,7 @@ _MP4_FTYP_MAGIC = b"ftyp"
 
 
 class MediaResolverDownloader(BaseDownloader):
-    """通过 MediaResolverAPI 解析抖音/小红书/微信视频号的下载器。"""
+    """通过 MediaResolverAPI 解析抖音/小红书/微信视频号/X(Twitter)的下载器。"""
 
     def __init__(self):
         super().__init__()
@@ -75,10 +82,12 @@ class MediaResolverDownloader(BaseDownloader):
     # 路由
     # ------------------------------------------------------------------ #
     def can_handle(self, url: str) -> bool:
-        """接管抖音/小红书/微信视频号。"""
+        """接管抖音/小红书/微信视频号/X(Twitter)。"""
         if not url:
             return False
-        return any(domain in url for domain in _SUPPORTED_DOMAINS)
+        if any(domain in url for domain in _SUPPORTED_DOMAINS):
+            return True
+        return bool(_X_DOMAIN_RE.search(url))
 
     def extract_video_id(self, url: str) -> str:
         """best-effort 提取 video_id（仅供日志；缓存 key 用归一化 url）。
@@ -92,7 +101,7 @@ class MediaResolverDownloader(BaseDownloader):
         import re
 
         m = re.search(
-            r"(?:video|note|explore|item|sph)/([A-Za-z0-9_-]+)", url
+            r"(?:video|note|explore|item|sph|statuses?)/([A-Za-z0-9_-]+)", url
         ) or re.search(r"/(\d{6,})", url)
         return m.group(1) if m else self._normalize_url(url)
 
