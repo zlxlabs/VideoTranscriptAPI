@@ -498,6 +498,8 @@ class TaskHistoryManager {
                 return '小宇宙播客';
             } else if (hostname.includes('weixin.qq.com')) {
                 return '视频号视频';
+            } else if (hostname.includes('twitter.com') || hostname === 'x.com' || hostname.endsWith('.x.com')) {
+                return 'X视频';
             } else {
                 return '视频内容';
             }

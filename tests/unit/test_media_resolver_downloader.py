@@ -60,6 +60,17 @@ WECHAT_DATA = {
     "provider": "tikhub",
 }
 
+TWITTER_DATA = {
+    "platform": "twitter",
+    "video_id": "1234567890",
+    "title": "Elon Musk tweet",
+    "author_name": "elonmusk",
+    "description": "desc",
+    "duration": 30.0,
+    "video_url": "https://video.twimg.com/ext_tw_video/1234567890/pu/vid/720x1280/xyz.mp4",
+    "provider": "tikhub",
+}
+
 
 # --------------------------------------------------------------------------- #
 # routing
@@ -72,6 +83,10 @@ class TestCanHandle:
         "https://www.xiaohongshu.com/explore/abc",
         "https://xhslink.com/abc",
         "https://weixin.qq.com/sph/AOzokRxWHz",
+        "https://x.com/someuser/status/1234567890",
+        "https://twitter.com/someuser/status/1234567890",
+        "https://mobile.twitter.com/someuser/status/1234567890",
+        "https://www.x.com/someuser/status/1234567890",
     ])
     def test_supported(self, url):
         assert make_downloader([DOUYIN_DATA]).can_handle(url) is True
@@ -80,10 +95,24 @@ class TestCanHandle:
         "https://www.youtube.com/watch?v=x",
         "https://www.bilibili.com/video/BV1",
         "https://example.com/x",
+        "https://notx.com/u/status/1",
+        "https://x.com.evil.com/u/status/1",
+        "https://example.com/?q=x.com",
+        "https://example.com/notx.com/status/1",
+        "https://example.com/x.com/status/1",
         "",
     ])
     def test_unsupported(self, url):
         assert make_downloader([DOUYIN_DATA]).can_handle(url) is False
+
+    @pytest.mark.parametrize("url,expected_id", [
+        ("https://x.com/someuser/status/1234567890", "1234567890"),
+        ("https://twitter.com/someuser/status/1234567890?s=20", "1234567890"),
+        ("https://twitter.com/someuser/statuses/9876543210", "9876543210"),
+    ])
+    def test_extract_video_id_twitter(self, url, expected_id):
+        dl = make_downloader([TWITTER_DATA])
+        assert dl.extract_video_id(url) == expected_id
 
 
 # --------------------------------------------------------------------------- #
@@ -108,6 +137,21 @@ class TestSharedResolveCache:
         dl.get_metadata("https://www.douyin.com/video/7123/")
         dl.get_metadata("https://www.douyin.com/video/7123")  # trailing slash variant
         assert len(dl.client.calls) == 1
+
+    def test_twitter_metadata_and_download_info(self):
+        dl = make_downloader([TWITTER_DATA])
+        url = "https://x.com/elonmusk/status/1234567890"
+        md = dl.get_metadata(url)
+        di = dl.get_download_info(url)
+        assert len(dl.client.calls) == 1
+        assert md.platform == "twitter"
+        assert md.video_id == "1234567890"
+        assert md.author == "elonmusk"
+        assert md.title == "Elon Musk tweet"
+        assert md.duration == 30.0
+        assert di.download_url == TWITTER_DATA["video_url"]
+        assert di.file_ext == "mp4"
+        assert di.filename == "twitter_1234567890.mp4"
 
 
 # --------------------------------------------------------------------------- #

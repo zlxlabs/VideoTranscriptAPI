@@ -1,16 +1,17 @@
-# MediaResolverAPI 集成指南（抖音 / 小红书 / 微信视频号解析）
+# MediaResolverAPI 集成指南（抖音 / 小红书 / 微信视频号 / X(Twitter) 解析）
 
-> 适用版本：v1（接管 **抖音 + 小红书 + 微信视频号**）。其它平台（B 站 / YouTube / 小宇宙）不受影响，仍走原生下载器。
+> 适用版本：v1（接管 **抖音 + 小红书 + 微信视频号 + X(Twitter)**）。其它平台（B 站 / YouTube / 小宇宙）不受影响，仍走原生下载器。
 
 ## 这是什么
 
 [MediaResolverAPI](https://github.com/) 是一个独立的「短视频 URL → 无水印直链 + 元数据」解析服务，
-内置 TikHub 多端点降级 + Cobalt 兜底。本项目可选地把**抖音 / 小红书 / 微信视频号的解析**外包给它，从而：
+内置 TikHub 多端点降级 + Cobalt 兜底。本项目可选地把**抖音 / 小红书 / 微信视频号 / X(Twitter) 的解析**外包给它，从而：
 
 - 把易碎的 TikHub 解析逻辑集中到专用服务，本仓库退化为「下载 + 转录 + LLM」；
 - 抖音改为下载**完整 mp4 再由 CapsWriter 提取音轨**（而非旧版直接抓 `music.play_url` 的 mp3）——
   对套用热门 BGM 模板的口播视频，提取的是**视频自带人声**而非背景乐，转录更准；
-- 支持微信视频号（`https://weixin.qq.com/sph/<sph_code>`）链接转录：resolver 只负责解析并下发解密文件头 + 微信 CDN 直链（`GET /api/stream/wechat_channels/{sph_code}/direct`），由本服务直连 CDN 按 Range 拼接成完整 mp4（不经 resolver 流式中转，避免跨机房 DERP 慢速）。
+- 支持微信视频号（`https://weixin.qq.com/sph/<sph_code>`）链接转录：resolver 只负责解析并下发解密文件头 + 微信 CDN 直链（`GET /api/stream/wechat_channels/{sph_code}/direct`），由本服务直连 CDN 按 Range 拼接成完整 mp4（不经 resolver 流式中转，避免跨机房 DERP 慢速）；
+- 支持 X（Twitter，`x.com` 与 `twitter.com`）音视频链接转录：resolver 解析第三方无水印直链并下发 MP4，本服务直接下载并由 CapsWriter 提取音轨转录。
 
 > ⚠️ **行为变更**：开启后抖音下载体积由 mp3 增大为 mp4。长视频可能撞 `storage.max_download_size_mb`
 > 上限，或 CapsWriter 一次性入内存的限制。短视频无影响。
@@ -20,10 +21,10 @@
 | 你的情况 | 建议 |
 |---------|------|
 | 抖音/小红书解析经常失败、想集中维护解析逻辑 | ✅ 启用 |
-| 需要转录微信视频号链接 | ✅ 启用（视频号必须依赖 MediaResolverAPI） |
+| 需要转录微信视频号或 X(Twitter) 链接 | ✅ 启用（视频号与 X 均依赖 MediaResolverAPI） |
 | 已部署 MediaResolverAPI 服务并有 API Key | ✅ 启用 |
 | 只转录 B 站/YouTube/小宇宙 | 无需启用（默认 off，不影响） |
-| 没有 MediaResolverAPI 服务 | 保持 off，继续用内置 TikHub 直连（视频号不可用） |
+| 没有 MediaResolverAPI 服务 | 保持 off，继续用内置 TikHub 直连（视频号与 X 不可用） |
 
 默认 **关闭**。开关打开前请确认 MediaResolverAPI 服务可达。
 
@@ -65,12 +66,12 @@
 
 > **Docker 注意**：容器内访问宿主机服务用 `host.docker.internal`，不要写 `localhost` / `127.0.0.1`。
 
-配置改完无需改代码——`factory` 会在 `use_media_resolver=true` 时自动把抖音/小红书/视频号路由到
+配置改完无需改代码——`factory` 会在 `use_media_resolver=true` 时自动把抖音/小红书/视频号/X(Twitter)路由到
 `MediaResolverDownloader`，并跳过旧的 `DouyinDownloader` / `XiaohongshuDownloader`。
 
 ## 使用
 
-开关打开后，正常提交抖音/小红书/视频号链接即可，无需任何额外参数：
+开关打开后，正常提交抖音/小红书/视频号/X(Twitter)链接即可，无需任何额外参数：
 
 ```bash
 curl -X POST http://localhost:8000/api/transcribe \
@@ -79,7 +80,7 @@ curl -X POST http://localhost:8000/api/transcribe \
   -d '{"url": "https://weixin.qq.com/sph/AOzokRxWHz"}'
 ```
 
-支持的链接形态：`douyin.com` / `v.douyin.com` 短链 / `xiaohongshu.com` / `xhslink.com` 短链 / `weixin.qq.com/sph/<sph_code>` 视频号链接。
+支持的链接形态：`douyin.com` / `v.douyin.com` 短链 / `xiaohongshu.com` / `xhslink.com` 短链 / `weixin.qq.com/sph/<sph_code>` 视频号链接 / `x.com` 与 `twitter.com` 推文链接。
 
 ## 错误与提示对照
 
