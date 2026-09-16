@@ -18,7 +18,7 @@ permissions:
   pull-requests: write
 jobs:
   gate:
-    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@v2
+    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@ea7f1d8f7a4766c47220ad703ee96ff3d79451ff
     with:
       tier: personal
       runner: self
@@ -26,3 +26,6 @@ jobs:
       design_doc: ""
     secrets:
       FEISHU_CI_WEBHOOK: ${{ secrets.FEISHU_CI_WEBHOOK }}
+      # Pass through zlxlabs org-level SILO credentials for gate Silo migration.
+      SILO_ACCESS_KEY: ${{ secrets.SILO_ACCESS_KEY }}
+      SILO_SECRET_KEY: ${{ secrets.SILO_SECRET_KEY }}
