@@ -108,7 +108,7 @@ class XiaohongshuDownloader(BaseDownloader):
         Returns:
             是否可以处理
         """
-        return "xiaohongshu.com" in url or "xhslink.com" in url
+        return "xiaohongshu.com" in url or "xhslink.com" in url or "xhslink.cn" in url
 
     def extract_note_id(self, url: str) -> str:
         """从 URL 中提取笔记 ID 的公共方法。
@@ -149,7 +149,7 @@ class XiaohongshuDownloader(BaseDownloader):
             ValueError: 无法提取笔记 ID
         """
         # 解析短链接
-        if "xhslink.com" in url:
+        if "xhslink.com" in url or "xhslink.cn" in url:
             logger.info(f"Resolving xiaohongshu short link: {url}")
             url = self.resolve_short_url(url)
             logger.info(f"Resolved to full URL: {url}")
