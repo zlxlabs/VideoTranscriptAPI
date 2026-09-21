@@ -20,6 +20,7 @@ All console output must be in English only (no emoji, no Chinese).
 """
 
 import json
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -27,7 +28,10 @@ import pytest
 
 import video_transcript_api.api.services.transcription as transcription
 from video_transcript_api.api.services import llm_ops
-from video_transcript_api.cache.cache_manager import CacheManager
+from video_transcript_api.cache.cache_manager import (
+    CacheManager,
+    TERMINAL_NOTIFY_LEASE_SECONDS,
+)
 from video_transcript_api.utils.task_status import TaskStatus
 from video_transcript_api.utils.llm_status import (
     CalibrationStatus,
@@ -51,6 +55,7 @@ class DummyNotifier:
 
     def notify_task_status(self, *args, **kwargs):
         self.messages.append(("notify", args, kwargs))
+        return {"wechat": True}
 
     def send_text(self, text, **kwargs):
         self.messages.append(("send_text", text, kwargs))
@@ -97,27 +102,47 @@ class DummyCacheManager:
                 "completed_at": "dummy-completed",
                 "notified_at": None,
                 "attempts": 0,
+                "claimed_at": None,
             })
         return True
 
     def list_unattempted_terminal_notifications(self, limit=20):
         rows = [
             row for row in self._outbox.values()
-            if row["notified_at"] is None and row["attempts"] == 0
+            if (
+                row["notified_at"] is None
+                and row["attempts"] < 3
+                and (
+                    row["claimed_at"] is None
+                    or row["claimed_at"] <= time.time() - TERMINAL_NOTIFY_LEASE_SECONDS
+                )
+            )
         ]
         return rows[:limit]
 
     def claim_pending_terminal_notification(self, task_id):
         row = self._outbox.get(task_id)
-        if row is None or row["notified_at"] is not None or row["attempts"] != 0:
+        if row is None or row["notified_at"] is not None or row["attempts"] >= 3:
             return False
-        row["attempts"] = 1
+        if (
+            row["claimed_at"] is not None
+            and row["claimed_at"] > time.time() - TERMINAL_NOTIFY_LEASE_SECONDS
+        ):
+            return False
+        row["attempts"] += 1
+        row["claimed_at"] = time.time()
         return True
 
     def mark_terminal_notification_sent(self, task_id):
         row = self._outbox.get(task_id)
         if row is not None:
             row["notified_at"] = "sent"
+            row["claimed_at"] = None
+
+    def release_terminal_notification_claim(self, task_id):
+        row = self._outbox.get(task_id)
+        if row is not None and row["notified_at"] is None:
+            row["claimed_at"] = None
 
     def get_task_by_id(self, task_id):
         return self.tasks.get(task_id)
@@ -1422,6 +1447,7 @@ class TestTranscriptOnlyCacheBothSwitchesOffIsNotFullHit:
             }
 
             notification_router = MagicMock()
+            notification_router.notify_task_status.return_value = {"wechat": True}
             notification_router.send_long_text = MagicMock()
             notification_router.send_text = MagicMock()
 
@@ -1579,6 +1605,7 @@ class TestCalibrateOnlyBackfillPreservesExistingSummaryNotification:
             }
 
             notification_router = MagicMock()
+            notification_router.notify_task_status.return_value = {"wechat": True}
             notification_router.send_long_text = MagicMock()
             notification_router.send_text = MagicMock()
 
@@ -1730,6 +1757,7 @@ class TestCalibrateOnlyBackfillDoesNotMisreportSkippedShortAsSummary:
             }
 
             notification_router = MagicMock()
+            notification_router.notify_task_status.return_value = {"wechat": True}
             notification_router.send_long_text = MagicMock()
             notification_router.send_text = MagicMock()
 
@@ -1816,6 +1844,7 @@ class TestFullHitCasLossSuppressesNotification:
         monkeypatch.setattr(transcription, "cache_manager", cache_manager)
 
         notification_router = MagicMock()
+        notification_router.notify_task_status.return_value = {"wechat": True}
         monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)
 
         result = transcription.process_transcription(
@@ -1862,6 +1891,7 @@ class TestFullHitCasLossSuppressesNotification:
         monkeypatch.setattr(transcription, "cache_manager", cache_manager)
 
         notification_router = MagicMock()
+        notification_router.notify_task_status.return_value = {"wechat": True}
         monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)
 
         result = transcription.process_transcription(
@@ -1908,6 +1938,7 @@ class TestFullHitNotificationExceptionDoesNotFailTask:
         monkeypatch.setattr(transcription, "cache_manager", cache_manager)
 
         notification_router = MagicMock()
+        notification_router.notify_task_status.return_value = {"wechat": True}
         notification_router.send_long_text.side_effect = RuntimeError("webhook timeout")
         monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)
 
@@ -1955,6 +1986,7 @@ class TestFullHitNotificationExceptionDoesNotFailTask:
         monkeypatch.setattr(transcription, "cache_manager", cache_manager)
 
         notification_router = MagicMock()
+        notification_router.notify_task_status.return_value = {"wechat": True}
 
         def _raise_on_terminal_status(*args, **kwargs):
             status = kwargs.get("status")
@@ -1962,7 +1994,7 @@ class TestFullHitNotificationExceptionDoesNotFailTask:
                 status = args[1]
             if status == "【任务完成】":
                 raise RuntimeError("webhook timeout")
-            return True
+            return {"wechat": True}
 
         notification_router.notify_task_status.side_effect = _raise_on_terminal_status
         monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)

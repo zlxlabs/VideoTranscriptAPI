@@ -42,6 +42,13 @@
 - 关键决策与已否决方案：租约时长固定为模块级 `TERMINAL_NOTIFY_LEASE_SECONDS = 120`，使用 UTC `YYYY-MM-DD HH:MM:SS` 文本，与 SQLite `CURRENT_TIMESTAMP` 同口径；不引入三态 `sending` 或额外配置项。
 - 下一步唯一动作：R8.2 收紧通知返回值为真实渠道字典，并在异常/全 False 后立即释放租约。
 
+## 验收回派 R8.2
+
+- 当前阶段：repairing / R8.2 完成
+- 本段结论：`_notification_accepted` 现在只接受至少一个渠道为真的字典，非字典结果会记录类型和值并按失败处理；发送异常与渠道全 False 都立即清空租约，保留 attempts 并允许下一轮补发。所有允许范围内的通知替身已返回真实字典，并同步内存 outbox 的租约字段。
+- 关键决策与已否决方案：不为 MagicMock 或其他测试替身保留宽松默认，不新增 fallback；未知返回形态统一 fail-closed，`{"wechat": True}` / `{"wechat": False, "feishu": True}` 才能标记 sent。
+- 下一步唯一动作：R8.3 删除重复测试类并完成红验、全量测试与收尾报告。
+
 ## 验收回派 R7.1
 
 - 当前阶段：review-fix / R7.1 完成
@@ -62,7 +69,6 @@
 - 本段结论：send_status_notification=False 时立即 mark sent，HTTP 建行清理路径不会被 dispatcher 补发【任务失败】。
 - 关键决策与已否决方案：不新增列；不改 update_task_status 落库。
 - 下一步唯一动作：全量 pytest 后 push。
-
 
 
 

@@ -8,6 +8,7 @@ All console output must be in English only (no emoji, no Chinese).
 """
 
 import threading
+import time
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -15,6 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from video_transcript_api.api.services import llm_ops as llm_ops_module
+from video_transcript_api.cache.cache_manager import TERMINAL_NOTIFY_LEASE_SECONDS
 
 
 class _DummyQueue:
@@ -102,27 +104,46 @@ class _DummyCacheManager:
                 "task_id": task_id, "status": status,
                 "error_message": kwargs.get("error_message"),
                 "completed_at": "dummy-completed",
-                "notified_at": None, "attempts": 0,
+                "notified_at": None, "attempts": 0, "claimed_at": None,
             })
         return True
 
     def list_unattempted_terminal_notifications(self, limit=20):
         return [
             row for row in self._outbox.values()
-            if row["notified_at"] is None and row["attempts"] == 0
+            if (
+                row["notified_at"] is None
+                and row["attempts"] < 3
+                and (
+                    row["claimed_at"] is None
+                    or row["claimed_at"] <= time.time() - TERMINAL_NOTIFY_LEASE_SECONDS
+                )
+            )
         ][:limit]
 
     def claim_pending_terminal_notification(self, task_id):
         row = self._outbox.get(task_id)
-        if row is None or row["notified_at"] is not None or row["attempts"] != 0:
+        if row is None or row["notified_at"] is not None or row["attempts"] >= 3:
             return False
-        row["attempts"] = 1
+        if (
+            row["claimed_at"] is not None
+            and row["claimed_at"] > time.time() - TERMINAL_NOTIFY_LEASE_SECONDS
+        ):
+            return False
+        row["attempts"] += 1
+        row["claimed_at"] = time.time()
         return True
 
     def mark_terminal_notification_sent(self, task_id):
         row = self._outbox.get(task_id)
         if row is not None:
             row["notified_at"] = "sent"
+            row["claimed_at"] = None
+
+    def release_terminal_notification_claim(self, task_id):
+        row = self._outbox.get(task_id)
+        if row is not None and row["notified_at"] is None:
+            row["claimed_at"] = None
 
 
 class _DummyNotifier:

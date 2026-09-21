@@ -126,6 +126,8 @@ config.wechat/feishu.webhook     (全局配置)
 
 SQLite 的 `CURRENT_TIMESTAMP` 与 `claimed_at` 比较都使用 UTC、无时区后缀的 `YYYY-MM-DD HH:MM:SS` 文本；Python 侧用带时区的 UTC 当前时间计算并格式化后再参与比较，不依赖 sqlite3 的 datetime adapter。
 
+投递器只接受路由返回的渠道结果字典，并要求至少一个渠道值为真；`None`、布尔值、模拟对象或渠道全 False 都不会标记 sent，失败租约会立即释放。
+
 这是**有界至少一次**：崩溃或失败窗口内**可能重复一条**终态通知，但不会静默丢失。漏发比重复更糟。超过 3 次仍失败的行停止补发，避免无限打扰。
 
 outbox 不做限流/重试/分段：`wecom-notifier` 是唯一限流权威。outbox 只承载终态**状态**通知（状态行 + 错误 + 查看链接），不把总结/校对/笔记正文搬进表。

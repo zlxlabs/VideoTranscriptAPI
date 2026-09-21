@@ -43,6 +43,12 @@ def _new_task(cm, url="https://example.com/v1"):
     return cm.create_task(url=url)["task_id"]
 
 
+def _accepted_router():
+    router = MagicMock()
+    router.notify_task_status.return_value = {"wechat": True}
+    return router
+
+
 def _llm_task(task_id):
     return {
         "task_id": task_id,
@@ -67,7 +73,7 @@ class TestTerminalNotifyHelperCasGate:
     def test_cas_winner_sends_once(self, cm):
         task_id = _new_task(cm)
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
-        router = MagicMock()
+        router = _accepted_router()
 
         written = finalize_terminal_status_and_notify(
             task_id,
@@ -87,7 +93,7 @@ class TestTerminalNotifyHelperCasGate:
     def test_cas_loser_does_not_send(self, cm):
         task_id = _new_task(cm)
         cm.update_task_status(task_id, TaskStatus.FAILED, error_message="first")
-        router = MagicMock()
+        router = _accepted_router()
 
         written = finalize_terminal_status_and_notify(
             task_id,
@@ -110,7 +116,7 @@ class TestTerminalNotifyHelperCasGate:
             title="Cached Title",
             author="Cached Author",
             cache_manager=cm,
-            router=MagicMock(),
+            router=_accepted_router(),
         )
         assert written is True
         row = cm.get_task_by_id(task_id)
@@ -149,7 +155,7 @@ class TestRedCLlmOpsFinallyCasGate:
     def test_already_terminal_worker_does_not_send_second_notice(self, cm):
         task_id = _new_task(cm)
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
-        router = MagicMock()
+        router = _accepted_router()
 
         first = finalize_terminal_status_and_notify(
             task_id,
@@ -210,7 +216,7 @@ class TestRedCTranscriptionWorkerExceptCasGate:
         runtime = RuntimeContext(config)
         runtime.start()
         token = bind_runtime(runtime)
-        router = MagicMock()
+        router = _accepted_router()
         worker_started = threading.Event()
 
         def _boom(*args, **kwargs):
@@ -322,7 +328,7 @@ class TestRedARecoveryPathsNotify:
     def test_recover_orphaned_tasks_enqueues_and_dispatcher_sends(self, cm):
         task_id = _new_task(cm)
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
-        router = MagicMock()
+        router = _accepted_router()
         assert cm.recover_orphaned_tasks() == 1
         _assert_one_pending_and_one_notify(
             cm, task_id, router, reason="orphaned_on_startup",
@@ -331,7 +337,7 @@ class TestRedARecoveryPathsNotify:
     def test_drain_on_shutdown_enqueues_and_dispatcher_sends(self, cm):
         task_id = _new_task(cm)
         cm.update_task_status(task_id, TaskStatus.CALIBRATING)
-        router = MagicMock()
+        router = _accepted_router()
         assert cm.drain_non_terminal_tasks_on_shutdown() == 1
         _assert_one_pending_and_one_notify(
             cm, task_id, router, reason="shutdown_drain",
@@ -340,7 +346,7 @@ class TestRedARecoveryPathsNotify:
     def test_reconcile_runtime_enqueues_and_dispatcher_sends(self, cm):
         task_id = _new_task(cm)
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
-        router = MagicMock()
+        router = _accepted_router()
         future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
         assert cm.reconcile_runtime_orphaned_tasks(
             grace_period_seconds=0, now=future,
@@ -363,7 +369,7 @@ class TestRedBReplayIncludesCompletedAt:
         original_completed_at = pending[0]["completed_at"]
         assert original_completed_at
 
-        router = MagicMock()
+        router = _accepted_router()
         # Reconstruct a dispatcher without having started one -- this is
         # the "pending written, process killed before send" window.
         sent = deliver_pending_terminal_notifications(cm, router=router)
@@ -378,7 +384,7 @@ class TestRedDSentRowsAreNotResent:
         cm.update_task_status(
             task_id, TaskStatus.FAILED, error_message="boom",
         )
-        router = MagicMock()
+        router = _accepted_router()
         assert deliver_pending_terminal_notifications(cm, router=router) == 1
         assert router.notify_task_status.call_count == 1
         assert deliver_pending_terminal_notifications(cm, router=router) == 0
@@ -506,7 +512,8 @@ class TestBoundedAtLeastOnceReplay:
         )
         state = _outbox_state(cm, task_id)
         assert state["notified_at"] is None
-        replay = MagicMock()
+        assert state["claimed_at"] is None
+        replay = _accepted_router()
         assert deliver_pending_terminal_notifications(cm, router=replay) == 1
         replay.notify_task_status.assert_called_once()
 
@@ -524,7 +531,8 @@ class TestBoundedAtLeastOnceReplay:
         )
         state = _outbox_state(cm, task_id)
         assert state["notified_at"] is None
-        replay = MagicMock()
+        assert state["claimed_at"] is None
+        replay = _accepted_router()
         assert deliver_pending_terminal_notifications(cm, router=replay) == 1
         replay.notify_task_status.assert_called_once()
 
@@ -544,7 +552,7 @@ class TestBoundedAtLeastOnceReplay:
         state = _outbox_state(cm, task_id)
         assert state["notified_at"] is None
         assert state["attempts"] == TERMINAL_NOTIFY_MAX_ATTEMPTS
-        replay = MagicMock()
+        replay = _accepted_router()
         assert deliver_pending_terminal_notifications(cm, router=replay) == 0
         replay.notify_task_status.assert_not_called()
 
@@ -553,7 +561,7 @@ class TestSuppressedNotificationIsSettled:
     def test_http_cleanup_path_is_not_replayed(self, cm):
         task_id = _new_task(cm)
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
-        router = MagicMock()
+        router = _accepted_router()
         written = finalize_terminal_status_and_notify(
             task_id,
             TaskStatus.FAILED,
@@ -572,7 +580,7 @@ class TestSuppressedNotificationIsSettled:
     def test_http_cleanup_path_is_not_replayed(self, cm):
         task_id = _new_task(cm)
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
-        router = MagicMock()
+        router = _accepted_router()
         written = finalize_terminal_status_and_notify(
             task_id,
             TaskStatus.FAILED,

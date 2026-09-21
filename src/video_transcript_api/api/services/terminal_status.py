@@ -106,8 +106,12 @@ def finalize_terminal_status_and_notify(
         logger.exception(
             f"status notification failed (terminal already persisted): {task_id}"
         )
-    if accepted:
-        cache_manager.mark_terminal_notification_sent(task_id)
+        cache_manager.release_terminal_notification_claim(task_id)
+    else:
+        if accepted:
+            cache_manager.mark_terminal_notification_sent(task_id)
+        else:
+            cache_manager.release_terminal_notification_claim(task_id)
     return True
 
 
@@ -149,10 +153,15 @@ def _emit_status_notification(
 
 
 def _notification_accepted(result) -> bool:
-    """True if send did not refuse every channel. Dummy/MagicMock count as accepted."""
-    if isinstance(result, dict):
-        return any(bool(value) for value in result.values())
-    return result is not False
+    """True only when a real channel result explicitly reports acceptance."""
+    if not isinstance(result, dict):
+        logger.warning(
+            "terminal notification result rejected: type=%s value=%r",
+            type(result).__name__,
+            result,
+        )
+        return False
+    return any(bool(value) for value in result.values())
 
 
 DISPATCH_POLL_SECONDS = 0.5
@@ -209,9 +218,13 @@ def deliver_pending_terminal_notifications(
             logger.exception(
                 f"dispatcher status notification failed: {task_id}"
             )
-        if accepted:
-            cache_manager.mark_terminal_notification_sent(task_id)
-            sent += 1
+            cache_manager.release_terminal_notification_claim(task_id)
+        else:
+            if accepted:
+                cache_manager.mark_terminal_notification_sent(task_id)
+                sent += 1
+            else:
+                cache_manager.release_terminal_notification_claim(task_id)
     return sent
 
 

@@ -151,6 +151,7 @@ class TestLlmTaskFailedWriteReraises:
 
         wrapped_cm = self._RaisesOnFailedWrite(cm)
         router = MagicMock()
+        router.notify_task_status.return_value = {"wechat": True}
         task_queue = MagicMock()
 
         ctxs = [
@@ -307,6 +308,7 @@ class TestLlmStageNotificationExceptionDoesNotFailTask:
         # proxies to router.send_text) -- fix the same instance across the
         # call so the assertions below can inspect it afterwards.
         router_mock = MagicMock()
+        router_mock.notify_task_status.return_value = {"wechat": True}
 
         # 只监听调用次数/参数，真正的写入仍然落到真实 CacheManager——用来
         # 证明 outer except 从未被触发：SUCCESS CAS 只被真正尝试过一次，
@@ -375,6 +377,7 @@ class TestLlmStageFailureNotificationExceptionDoesNotStarveTerminalState:
         # reproduces the webhook-timeout/rate-limit failure mode this fix
         # must survive.
         router_mock = MagicMock()
+        router_mock.notify_task_status.return_value = {"wechat": True}
         router_mock.notify_task_status.side_effect = RuntimeError("webhook timeout")
 
         self._run(cm, task_id, router_mock)
@@ -394,6 +397,7 @@ class TestLlmStageFailureNotificationExceptionDoesNotStarveTerminalState:
         path."""
         task_id = _calibrating_task(cm)
         router_mock = MagicMock()
+        router_mock.notify_task_status.return_value = {"wechat": True}
 
         self._run(cm, task_id, router_mock)
 
@@ -816,6 +820,7 @@ class TestCalibrateOnlyStatusNotifyCarriesViewLink:
         task_id = _calibrating_task(cm)
         view_token = cm.get_task_by_id(task_id)["view_token"]
         router = MagicMock()
+        router.notify_task_status.return_value = {"wechat": True}
         content_notify = MagicMock()
         coordinator = MagicMock()
         coordinator.process.return_value = MagicMock()
@@ -867,4 +872,3 @@ class TestCalibrateOnlyStatusNotifyCarriesViewLink:
         )
         assert f"/view/{view_token}" in body
         assert body.count("/view/") == 1
-

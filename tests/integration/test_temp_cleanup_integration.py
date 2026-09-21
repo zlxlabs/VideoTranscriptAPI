@@ -8,12 +8,14 @@ The whole pipeline (downloader / transcriber / cache / notifier / LLM queue) is
 mocked; only the temp-file lifecycle wiring is exercised.
 """
 import os
+import time
 from pathlib import Path
 
 import pytest
 
 from src.video_transcript_api.utils.tempfile_manager import TempFileManager
 import src.video_transcript_api.api.services.transcription as tx
+from src.video_transcript_api.cache.cache_manager import TERMINAL_NOTIFY_LEASE_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +74,7 @@ class FakeTranscriber:
 
 class FakeRouter:
     def notify_task_status(self, *a, **k):
-        return None
+        return {"wechat": True}
 
     def send_text(self, *a, **k):
         return None
@@ -106,27 +108,46 @@ class FakeCache:
                 "task_id": task_id, "status": status,
                 "error_message": k.get("error_message"),
                 "completed_at": "dummy-completed",
-                "notified_at": None, "attempts": 0,
+                "notified_at": None, "attempts": 0, "claimed_at": None,
             })
         return True
 
     def list_unattempted_terminal_notifications(self, limit=20):
         return [
             row for row in self._outbox.values()
-            if row["notified_at"] is None and row["attempts"] == 0
+            if (
+                row["notified_at"] is None
+                and row["attempts"] < 3
+                and (
+                    row["claimed_at"] is None
+                    or row["claimed_at"] <= time.time() - TERMINAL_NOTIFY_LEASE_SECONDS
+                )
+            )
         ][:limit]
 
     def claim_pending_terminal_notification(self, task_id):
         row = self._outbox.get(task_id)
-        if row is None or row["notified_at"] is not None or row["attempts"] != 0:
+        if row is None or row["notified_at"] is not None or row["attempts"] >= 3:
             return False
-        row["attempts"] = 1
+        if (
+            row["claimed_at"] is not None
+            and row["claimed_at"] > time.time() - TERMINAL_NOTIFY_LEASE_SECONDS
+        ):
+            return False
+        row["attempts"] += 1
+        row["claimed_at"] = time.time()
         return True
 
     def mark_terminal_notification_sent(self, task_id):
         row = self._outbox.get(task_id)
         if row is not None:
             row["notified_at"] = "sent"
+            row["claimed_at"] = None
+
+    def release_terminal_notification_claim(self, task_id):
+        row = self._outbox.get(task_id)
+        if row is not None and row["notified_at"] is None:
+            row["claimed_at"] = None
 
     def get_task_by_id(self, *a, **k):
         return {}
