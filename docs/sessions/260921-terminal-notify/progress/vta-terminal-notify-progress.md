@@ -119,3 +119,10 @@
 - 本段结论：list 与 claim 的跨 owner 接管谓词均将 `claimed_at IS NULL` 按已过期处理，已有 owner 但缺时间戳的行可重新进入投递路径。删除迁移中的一次性回填，避免与运行时谓词维护两套语义；新增用例确认 dispatcher 恰好补发一条。
 - 关键决策与已否决方案：保留同 owner 永不重领及 release/mark owner 锁；不保留迁移回填，不新增抽象、配置或兼容分支。
 - 下一步唯一动作：跑 `uv run --extra dev pytest tests/unit tests/features tests/integration -q` 并完成收尾验收报告。
+
+## 机制收缩（路线审计落地）
+
+- 当前阶段：repairing / 收缩卡完成
+- 本段结论：按独立顾问路线审计把终态通知机制收缩到与单进程拓扑相称的规模。删除 `claimed_owner`/`claimed_at`/`TERMINAL_NOTIFY_TAKEOVER_LEASE_SECONDS`/`release_terminal_notification_claim` 与 `TERMINAL_NOTIFY_MAX_ATTEMPTS`；互斥改由单投递线程串行天然提供，`attempts` 仅作观测计数。API 从 4 个（list/claim/mark/release）降到 2 个（list/mark_sent）+ 1 个观测计数 API。同时修掉顾问新增 P1：`list_unattempted_terminal_notifications` 去掉 `attempts < 3`，未送达的行不再可能被谓词永久隐藏，超阈值只记 warning。I6 落地为写入期抑制：`update_task_status(suppress_terminal_notification=True)` 在同一事务里不插 outbox 行，helper 里「先插 pending 再 claim 再标 sent」的窗口被结构性删除。`terminal_status.py` 顶部写入 I1–I6 不变式清单作为 review 规格。
+- 关键决策与已否决方案：删字段而非补规则（治 review 不收敛的病因 B）；旧库保留的 owner/lease 列不再被代码读写，不为删列写迁移。否决：保留 owner 锁「以防将来多进程」、把租约精度提到毫秒、pending→sending→sent 三态、outbox 内做限流/重试排队（顾问已否，不重提）。`attempts` 阈值护栏只允许「永不隐藏」形态，故采用 warning 日志而非 dead-letter 过滤。
+- 下一步唯一动作：合入后另开卡做「投递点改同步发送（`async_send=False` + `SendResult.wait()`/`is_success()`）」，让 `sent` 第一次成为可断言性质；本卡明确不做。
