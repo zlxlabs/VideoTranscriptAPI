@@ -2542,8 +2542,8 @@ class CacheManager:
         with self._get_cursor() as cursor:
             cursor.execute(
                 '''UPDATE task_terminal_notifications
-                   SET attempts = attempts + 1, claimed_owner = ?,
-                       claimed_at = CURRENT_TIMESTAMP
+                   SET claimed_at = CURRENT_TIMESTAMP,
+                       attempts = attempts + 1, claimed_owner = ?
                    WHERE task_id = ? AND notified_at IS NULL AND attempts < ?
                      AND (claimed_owner IS NULL OR (claimed_owner != ? AND (claimed_at IS NULL OR claimed_at <= ?)))''',
                 (
