@@ -28,5 +28,13 @@
 - 关键决策与已否决方案：否决「claim 缺失时同步直发」——那是静默降级通道。
 - 下一步唯一动作：R2 给终态状态通知加 view 链接，calibrate_only 路径先写红验再实现。
 
+## 验收回派 R2
+
+- 当前阶段：review-fix / R2 完成
+- 本段结论：`build_task_status_content` 增加可选 `view_url`，helper 与 dispatcher 都填 `{base}/view/{view_token}`。dispatcher 不再往 error 里拼 `view=`，避免双链接。calibrate_only 成功路径红验先转红后转绿。
+- 关键决策与已否决方案：不新增第二条消息。链接加在既有状态通知正文。
+- 下一步唯一动作：全量 pytest 后 push。
+
+
 
 

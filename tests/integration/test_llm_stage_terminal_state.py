@@ -403,6 +403,8 @@ class TestLlmStageFailureNotificationExceptionDoesNotStarveTerminalState:
         notify_kwargs = router_mock.notify_task_status.call_args.kwargs
         assert notify_kwargs.get("status") == "【任务失败】"
         assert "【LLM API调用异常】" in (notify_kwargs.get("error") or "")
+        view_token = row["view_token"]
+        assert f"/view/{view_token}" in (notify_kwargs.get("view_url") or "")
 
 
 class _ScriptedQueue:
@@ -803,3 +805,66 @@ class TestLlmQueuePumpCapacityGate:
                 thread.join(timeout=2)
             for c in ctxs:
                 c.stop()
+
+
+class TestCalibrateOnlyStatusNotifyCarriesViewLink:
+    """R2: recalibrate (calibrate_only) skips the content notification, so
+    the terminal status message must itself carry /view/<view_token>.
+    """
+
+    def test_calibrate_only_success_status_body_includes_view_token(self, cm):
+        task_id = _calibrating_task(cm)
+        view_token = cm.get_task_by_id(task_id)["view_token"]
+        router = MagicMock()
+        content_notify = MagicMock()
+        coordinator = MagicMock()
+        coordinator.process.return_value = MagicMock()
+        task = _llm_task(task_id)
+        task["calibrate_only"] = True
+
+        ctxs = [
+            patch.object(llm_ops, "cache_manager", cm),
+            patch.object(llm_ops, "llm_coordinator", coordinator),
+            patch.object(llm_ops, "llm_task_queue", MagicMock()),
+            patch.object(llm_ops, "_build_result_dict", lambda r: {}),
+            patch.object(llm_ops, "_save_llm_results", MagicMock(return_value=None)),
+            patch.object(llm_ops, "_send_notification", content_notify),
+            patch.object(llm_ops, "get_notification_router", lambda: router),
+            patch.object(llm_ops, "_generate_title_if_needed", lambda t, title, tr: title),
+            patch.object(llm_ops, "_prepare_llm_content", lambda t, tr, spk: "content"),
+        ]
+        for ctx in ctxs:
+            ctx.start()
+        try:
+            llm_ops._handle_llm_task(task)
+        finally:
+            for ctx in ctxs:
+                ctx.stop()
+
+        assert cm.get_task_by_id(task_id)["status"] == "success"
+        content_notify.assert_not_called()
+        router.notify_task_status.assert_called_once()
+        kwargs = router.notify_task_status.call_args.kwargs
+        blob = " ".join(
+            [
+                str(kwargs.get("status") or ""),
+                str(kwargs.get("error") or ""),
+                str(kwargs.get("view_url") or ""),
+                str(kwargs.get("url") or ""),
+            ]
+        )
+        assert f"/view/{view_token}" in blob
+        from src.video_transcript_api.utils.notifications.channel import (
+            build_task_status_content,
+        )
+        body = build_task_status_content(
+            url=kwargs.get("url") or "",
+            status=kwargs.get("status") or "",
+            error=kwargs.get("error"),
+            title=kwargs.get("title"),
+            author=kwargs.get("author"),
+            view_url=kwargs.get("view_url"),
+        )
+        assert f"/view/{view_token}" in body
+        assert body.count("/view/") == 1
+

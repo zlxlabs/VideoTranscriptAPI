@@ -180,6 +180,7 @@ def build_task_status_content(
     title: str = None,
     author: str = None,
     transcript: str = None,
+    view_url: str = None,
 ) -> str:
     """Build task status notification content (shared across channels)."""
     from ..timeutil.timezone_helper import get_configured_timezone
@@ -204,6 +205,8 @@ def build_task_status_content(
     if transcript and "转录完成" in status:
         preview = transcript[:100] + ("..." if len(transcript) > 100 else "")
         content += f"\n\n**转录预览：**\n```\n{preview}\n```"
+    if view_url:
+        content += f"\n\n🔗 查看：{view_url}"
     return content
 
 
@@ -281,9 +284,12 @@ class FeishuChannel:
         author: str = None,
         transcript: str = None,
         webhook: str = None,
+        view_url: str = None,
     ) -> bool:
         """Send task status notification via Feishu card."""
-        content = build_task_status_content(url, status, error, title, author, transcript)
+        content = build_task_status_content(
+            url, status, error, title, author, transcript, view_url=view_url,
+        )
         return self.send_rich(content, webhook=webhook, title="视频转录任务状态更新")
 
 
@@ -327,10 +333,15 @@ class WeComChannel:
         author: str = None,
         transcript: str = None,
         webhook: str = None,
+        view_url: str = None,
     ) -> bool:
         """Send task status notification via WeCom."""
         if webhook and webhook != self._notifier.webhook:
             from .wechat import WechatNotifier
             notifier = WechatNotifier(webhook)
-            return notifier.notify_task_status(url, status, error, title, author, transcript)
-        return self._notifier.notify_task_status(url, status, error, title, author, transcript)
+            return notifier.notify_task_status(
+                url, status, error, title, author, transcript, view_url=view_url,
+            )
+        return self._notifier.notify_task_status(
+            url, status, error, title, author, transcript, view_url=view_url,
+        )

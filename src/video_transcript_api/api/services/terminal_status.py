@@ -70,6 +70,7 @@ def finalize_terminal_status_and_notify(
     error_for_notify = notify_error if notify_error is not None else error_message
 
     display_url = url
+    task = None
     if not display_url or title is None or author is None:
         task = cache_manager.get_task_by_id(task_id) or {}
         if not display_url:
@@ -78,6 +79,7 @@ def finalize_terminal_status_and_notify(
             title = task.get("title")
         if author is None:
             author = task.get("author")
+    view_url = _resolve_view_url(cache_manager, task_id, task)
 
     try:
         _emit_status_notification(
@@ -90,6 +92,7 @@ def finalize_terminal_status_and_notify(
             webhooks=webhooks,
             router=router,
             notify_via=notify_via,
+            view_url=view_url,
         )
     except Exception:
         logger.exception(
@@ -110,6 +113,7 @@ def _emit_status_notification(
     webhooks: Optional[Dict[str, str]],
     router=None,
     notify_via=None,
+    view_url: Optional[str] = None,
 ) -> None:
     """Dispatch the status line through a bound notifier or the router."""
     if notify_via is not None:
@@ -119,6 +123,7 @@ def _emit_status_notification(
             error_for_notify,
             title,
             author,
+            view_url=view_url,
         )
         return
 
@@ -131,6 +136,7 @@ def _emit_status_notification(
         author=author,
         channel_name=channel_name,
         webhooks=webhooks,
+        view_url=view_url,
     )
 
 
@@ -171,6 +177,7 @@ def deliver_pending_terminal_notifications(
         )
         error_for_notify = _compose_dispatcher_error(row, task)
         webhooks = _resolve_delivery_webhooks(task)
+        view_url = _resolve_view_url(cache_manager, task_id, task)
         try:
             router.notify_task_status(
                 url=task.get("url") or "",
@@ -179,6 +186,7 @@ def deliver_pending_terminal_notifications(
                 title=task.get("title"),
                 author=task.get("author"),
                 webhooks=webhooks,
+                view_url=view_url,
             )
         except Exception:
             logger.exception(
@@ -223,14 +231,18 @@ def _compose_dispatcher_error(row: dict, task: dict) -> str:
     snapshot = task.get("terminal_snapshot") or {}
     if isinstance(snapshot, dict) and snapshot.get("reason") in _RECOVERY_REASONS:
         parts.append("由服务重启恢复判定")
-    view_token = task.get("view_token")
-    if view_token:
-        try:
-            from ...utils.rendering import get_base_url
-            parts.append(f"view={get_base_url()}/view/{view_token}")
-        except Exception:
-            logger.exception("failed to build view url for terminal notify")
     return "\n".join(parts) if parts else None
+
+
+def _resolve_view_url(cache_manager, task_id: str, task: Optional[dict] = None) -> Optional[str]:
+    """Build `{base_url}/view/{view_token}` from the task row."""
+    if task is None:
+        task = cache_manager.get_task_by_id(task_id) or {}
+    token = task.get("view_token")
+    if not token:
+        return None
+    from ...utils.rendering import get_base_url
+    return f"{get_base_url()}/view/{token}"
 
 
 def _resolve_delivery_webhooks(task: dict) -> Optional[Dict[str, str]]:

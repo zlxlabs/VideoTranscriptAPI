@@ -846,10 +846,10 @@ def process_transcription(
 
         class _TaskNotifier:
             """Bound notifier for this task — wraps router with channel/webhook context."""
-            def notify_task_status(self, url, status, error=None, title=None, author=None, transcript=None):
+            def notify_task_status(self, url, status, error=None, title=None, author=None, transcript=None, view_url=None):
                 return _router.notify_task_status(
                     url=url, status=status, error=error, title=title,
-                    author=author, transcript=transcript,
+                    author=author, transcript=transcript, view_url=view_url,
                     channel_name=notification_channel, webhooks=notification_webhooks,
                 )
             def send_text(self, content, skip_risk_control=False):
