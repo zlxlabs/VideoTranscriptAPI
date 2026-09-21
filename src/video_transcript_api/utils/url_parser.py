@@ -91,7 +91,6 @@ class URLParser:
             r'youtube\.com/shorts/([a-zA-Z0-9_-]+)',  # Shorts
             r'youtube\.com/live/([a-zA-Z0-9_-]+)',  # Live
             r'youtube\.com/embed/([a-zA-Z0-9_-]+)',  # Embed
-            r'[?&]v=([a-zA-Z0-9_-]+)',  # 查询参数
         ],
         'bilibili': [
             r'bilibili\.com/video/(BV[a-zA-Z0-9]+)',  # BV号

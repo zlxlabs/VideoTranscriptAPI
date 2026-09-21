@@ -187,6 +187,45 @@ class TestURLParserBasic:
         assert result.platform != "twitter"
         assert extract_platform(url) != "twitter"
 
+    @pytest.mark.parametrize("url,expected_id", [
+        ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("https://m.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("https://www.youtube.com/watch?list=PLtest&v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("https://youtu.be/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("https://www.youtube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("https://www.youtube.com/live/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("https://www.youtube.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+    ])
+    def test_youtube_legal_forms(self, url, expected_id):
+        """YouTube legal forms must stay youtube (issue #75)."""
+        parser = URLParser()
+        with patch('requests.head') as mock_head:
+            mock_response = Mock()
+            mock_response.url = url
+            mock_head.return_value = mock_response
+            result = parser.parse(url)
+        assert result.platform == "youtube"
+        assert result.video_id == expected_id
+
+    @pytest.mark.parametrize("url", [
+        "https://example.com/watch?v=d84",
+        "https://video.twimg.com/amplify_video/2098781203050405894/pl/U6mq-9ejWo_YqRl5.m3u8?tag=29&v=d84&variant_version=1",
+    ])
+    def test_non_youtube_v_param_not_youtube(self, url):
+        """Non-YouTube URLs with v= must not parse as youtube (issue #75)."""
+        parser = URLParser()
+        result = parser.parse(url)
+        assert result.platform != "youtube"
+        assert result.video_id != "d84"
+
+    @pytest.mark.parametrize("url", [
+        "https://example.com/watch?v=d84",
+        "https://video.twimg.com/amplify_video/2098781203050405894/pl/U6mq-9ejWo_YqRl5.m3u8?tag=29&v=d84&variant_version=1",
+    ])
+    def test_non_youtube_v_param_extract_platform(self, url):
+        """extract_platform must agree: no youtube for v= on other hosts."""
+        assert extract_platform(url) != "youtube"
+
     def test_generic_url(self):
         """Test generic URL (no platform matched)"""
         parser = URLParser()
