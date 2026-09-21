@@ -49,6 +49,13 @@
 - 关键决策与已否决方案：不为 MagicMock 或其他测试替身保留宽松默认，不新增 fallback；未知返回形态统一 fail-closed，`{"wechat": True}` / `{"wechat": False, "feishu": True}` 才能标记 sent。
 - 下一步唯一动作：R8.3 删除重复测试类并完成红验、全量测试与收尾报告。
 
+## 验收回派 R8.3
+
+- 当前阶段：repairing / R8.3 完成
+- 本段结论：删除 `tests/unit/test_terminal_notification_outbox.py` 中第二份完全重复的 `TestSuppressedNotificationIsSettled`，测试声明恢复为单一来源。三条 finding 的代码与测试修复均已落盘。
+- 关键决策与已否决方案：只删除重复声明，不重写保留的抑制通知测试，也不扩展到其他测试命名或结构整理。
+- 下一步唯一动作：执行红验、全量验证、检查允许范围与提交产物，并写完整 delegate 报告。
+
 ## 验收回派 R7.1
 
 - 当前阶段：review-fix / R7.1 完成
@@ -69,7 +76,6 @@
 - 本段结论：send_status_notification=False 时立即 mark sent，HTTP 建行清理路径不会被 dispatcher 补发【任务失败】。
 - 关键决策与已否决方案：不新增列；不改 update_task_status 落库。
 - 下一步唯一动作：全量 pytest 后 push。
-
 
 
 

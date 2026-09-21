@@ -156,9 +156,8 @@ def _notification_accepted(result) -> bool:
     """True only when a real channel result explicitly reports acceptance."""
     if not isinstance(result, dict):
         logger.warning(
-            "terminal notification result rejected: type=%s value=%r",
-            type(result).__name__,
-            result,
+            f"terminal notification result rejected: "
+            f"type={type(result).__name__} value={result!r}"
         )
         return False
     return any(bool(value) for value in result.values())

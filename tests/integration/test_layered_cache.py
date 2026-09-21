@@ -20,7 +20,6 @@ All console output must be in English only (no emoji, no Chinese).
 """
 
 import json
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -30,7 +29,6 @@ import video_transcript_api.api.services.transcription as transcription
 from video_transcript_api.api.services import llm_ops
 from video_transcript_api.cache.cache_manager import (
     CacheManager,
-    TERMINAL_NOTIFY_LEASE_SECONDS,
 )
 from video_transcript_api.utils.task_status import TaskStatus
 from video_transcript_api.utils.llm_status import (
@@ -109,28 +107,23 @@ class DummyCacheManager:
     def list_unattempted_terminal_notifications(self, limit=20):
         rows = [
             row for row in self._outbox.values()
-            if (
-                row["notified_at"] is None
-                and row["attempts"] < 3
-                and (
-                    row["claimed_at"] is None
-                    or row["claimed_at"] <= time.time() - TERMINAL_NOTIFY_LEASE_SECONDS
-                )
-            )
+            if row["notified_at"] is None
+            and row["attempts"] < 3
+            and row["claimed_at"] is None
         ]
         return rows[:limit]
 
     def claim_pending_terminal_notification(self, task_id):
         row = self._outbox.get(task_id)
-        if row is None or row["notified_at"] is not None or row["attempts"] >= 3:
-            return False
         if (
-            row["claimed_at"] is not None
-            and row["claimed_at"] > time.time() - TERMINAL_NOTIFY_LEASE_SECONDS
+            row is None
+            or row["notified_at"] is not None
+            or row["attempts"] >= 3
+            or row["claimed_at"] is not None
         ):
             return False
         row["attempts"] += 1
-        row["claimed_at"] = time.time()
+        row["claimed_at"] = "claimed"
         return True
 
     def mark_terminal_notification_sent(self, task_id):

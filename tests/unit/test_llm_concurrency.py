@@ -8,7 +8,6 @@ All console output must be in English only (no emoji, no Chinese).
 """
 
 import threading
-import time
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -16,7 +15,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from video_transcript_api.api.services import llm_ops as llm_ops_module
-from video_transcript_api.cache.cache_manager import TERMINAL_NOTIFY_LEASE_SECONDS
 
 
 class _DummyQueue:
@@ -111,27 +109,22 @@ class _DummyCacheManager:
     def list_unattempted_terminal_notifications(self, limit=20):
         return [
             row for row in self._outbox.values()
-            if (
-                row["notified_at"] is None
-                and row["attempts"] < 3
-                and (
-                    row["claimed_at"] is None
-                    or row["claimed_at"] <= time.time() - TERMINAL_NOTIFY_LEASE_SECONDS
-                )
-            )
+            if row["notified_at"] is None
+            and row["attempts"] < 3
+            and row["claimed_at"] is None
         ][:limit]
 
     def claim_pending_terminal_notification(self, task_id):
         row = self._outbox.get(task_id)
-        if row is None or row["notified_at"] is not None or row["attempts"] >= 3:
-            return False
         if (
-            row["claimed_at"] is not None
-            and row["claimed_at"] > time.time() - TERMINAL_NOTIFY_LEASE_SECONDS
+            row is None
+            or row["notified_at"] is not None
+            or row["attempts"] >= 3
+            or row["claimed_at"] is not None
         ):
             return False
         row["attempts"] += 1
-        row["claimed_at"] = time.time()
+        row["claimed_at"] = "claimed"
         return True
 
     def mark_terminal_notification_sent(self, task_id):

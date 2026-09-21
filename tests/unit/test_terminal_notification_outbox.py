@@ -574,22 +574,3 @@ class TestSuppressedNotificationIsSettled:
         router.notify_task_status.assert_not_called()
         assert deliver_pending_terminal_notifications(cm, router=router) == 0
         router.notify_task_status.assert_not_called()
-
-
-class TestSuppressedNotificationIsSettled:
-    def test_http_cleanup_path_is_not_replayed(self, cm):
-        task_id = _new_task(cm)
-        cm.update_task_status(task_id, TaskStatus.PROCESSING)
-        router = _accepted_router()
-        written = finalize_terminal_status_and_notify(
-            task_id,
-            TaskStatus.FAILED,
-            error_message="queue full",
-            cache_manager=cm,
-            router=router,
-            send_status_notification=False,
-        )
-        assert written is True
-        router.notify_task_status.assert_not_called()
-        assert deliver_pending_terminal_notifications(cm, router=router) == 0
-        router.notify_task_status.assert_not_called()
