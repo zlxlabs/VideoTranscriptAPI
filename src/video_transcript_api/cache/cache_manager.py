@@ -2531,6 +2531,20 @@ class CacheManager:
                 (task_id,),
             )
 
+    def is_terminal_notification_pending(self, task_id: str) -> bool:
+        """True when this row has not been marked sent yet.
+
+        In-process mutual exclusion: two deliverers (the inline helper and the
+        dispatcher) both re-check this under the process lock before sending.
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                '''SELECT 1 FROM task_terminal_notifications
+                   WHERE task_id = ? AND notified_at IS NULL''',
+                (task_id,),
+            )
+            return cursor.fetchone() is not None
+
     def mark_terminal_notification_sent(self, task_id: str) -> None:
         """Set notified_at after the notifier accepted the send (I5)."""
         with self._get_cursor() as cursor:

@@ -405,9 +405,9 @@ def _outbox_state(cm, task_id):
 class TestSerialDeliveryIsExclusive:
     """History lock for the deleted claim mutex (rounds 3/4/5 findings).
 
-    Mutual exclusion now comes from single-threaded serial delivery: the same
-    row cannot be sent twice in one pass, and a second pass after mark-sent
-    finds nothing. No owner/lease predicate is involved.
+    Mutual exclusion now comes from `_DELIVERY_LOCK`, not from a DB field:
+    the inline helper path and the dispatcher both re-check `notified_at IS
+    NULL` under it, so the same row cannot be sent twice within one process.
     """
 
     def test_row_is_delivered_once_per_pass_and_never_again(self, cm):
@@ -419,6 +419,68 @@ class TestSerialDeliveryIsExclusive:
         assert cm.list_unattempted_terminal_notifications() == []
         assert deliver_pending_terminal_notifications(cm, router=router) == 0
         router.notify_task_status.assert_called_once()
+
+    def test_r12_helper_and_dispatcher_never_double_send(self, cm):
+        """R12.1: the inline helper and the dispatcher are two in-process
+        deliverers of the same row. Before `_DELIVERY_LOCK` the dispatcher
+        could send a row the helper was already sending (no crash required).
+        """
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.PROCESSING)
+
+        helper_in_router = threading.Event()
+        release_helper = threading.Event()
+        dispatcher_done = threading.Event()
+        router = MagicMock()
+
+        def _gated_notify(*args, **kwargs):
+            helper_in_router.set()
+            assert release_helper.wait(5), "helper gate never released"
+            return {"wechat": True}
+
+        router.notify_task_status.side_effect = _gated_notify
+        helper_error = []
+
+        def _run_helper():
+            try:
+                finalize_terminal_status_and_notify(
+                    task_id,
+                    TaskStatus.FAILED,
+                    error_message="boom",
+                    cache_manager=cm,
+                    router=router,
+                )
+            except BaseException as exc:  # surfaced below
+                helper_error.append(exc)
+
+        helper_thread = threading.Thread(target=_run_helper)
+        helper_thread.start()
+        assert helper_in_router.wait(5), "helper never entered the notifier"
+
+        dispatcher_sent = []
+
+        def _run_dispatcher():
+            dispatcher_sent.append(
+                deliver_pending_terminal_notifications(cm, router=router)
+            )
+            dispatcher_done.set()
+
+        dispatcher_thread = threading.Thread(target=_run_dispatcher)
+        dispatcher_thread.start()
+        dispatcher_thread.join(timeout=0.3)
+        assert not dispatcher_done.is_set(), (
+            "dispatcher finished while the helper held the delivery lock; "
+            "the lock is not covering the send"
+        )
+
+        release_helper.set()
+        helper_thread.join(timeout=5)
+        dispatcher_thread.join(timeout=5)
+
+        assert not helper_error, helper_error
+        router.notify_task_status.assert_called_once()
+        assert dispatcher_sent == [0], dispatcher_sent
+        assert cm.is_terminal_notification_pending(task_id) is False
 
 
 class TestNotificationAcceptance:
