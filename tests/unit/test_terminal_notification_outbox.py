@@ -491,6 +491,16 @@ class TestNotificationAcceptance:
             ({"wechat": False}, False),
             ({"wechat": True}, True),
             ({"wechat": False, "feishu": True}, True),
+            ({"wechat": object()}, False),
+            ({"wechat": "ok"}, False),
+            ({"wechat": 1}, False),
+            ({"wechat": []}, False),
+            ({"wechat": {}}, False),
+            ({}, False),
+            ("True", False),
+            ({"wechat": True}, True),
+            ({"wechat": False, "feishu": True}, True),
+            ({"wechat": False, "feishu": False}, False),
         ],
     )
     def test_only_dict_with_accepted_channel_is_accepted(self, result, accepted):

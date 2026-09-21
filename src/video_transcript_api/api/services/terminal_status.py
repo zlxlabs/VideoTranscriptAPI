@@ -190,14 +190,19 @@ def _emit_status_notification(
 
 
 def _notification_accepted(result) -> bool:
-    """True only when a real channel result explicitly reports acceptance."""
+    """Accept only an explicit channel ``True`` for the outbox sent flag.
+
+    The flag means that a channel explicitly reported acceptance. Truthy
+    objects or strings can represent queued or other intermediate states;
+    treating them as success would prevent the outbox from retrying the row.
+    """
     if not isinstance(result, dict):
         logger.warning(
             f"terminal notification result rejected: "
             f"type={type(result).__name__} value={result!r}"
         )
         return False
-    return any(bool(value) for value in result.values())
+    return any(value is True for value in result.values())
 
 
 DISPATCH_POLL_SECONDS = 0.5
