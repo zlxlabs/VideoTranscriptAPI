@@ -34,6 +34,7 @@ logger = setup_logger("cache_manager")
 # 5400s（90 分钟）留出余量，宽限期取其 2 倍。
 MAX_EXPECTED_TASK_DURATION_SECONDS = 5400
 RUNTIME_RECONCILE_GRACE_SECONDS = 2 * MAX_EXPECTED_TASK_DURATION_SECONDS
+TERMINAL_NOTIFY_MAX_ATTEMPTS = 3
 
 # 清算路径 SQLite 连接的默认 busy_timeout（毫秒，本地 codex review 第
 # 12 轮 P2 发现 e）：匹配 CacheManager._get_connection() 里 sqlite3.
@@ -347,6 +348,22 @@ class CacheManager:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_view_token ON task_status(view_token)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_task_status ON task_status(status)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_task_platform_media ON task_status(platform, media_id)')
+
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS task_terminal_notifications (
+                    task_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    error_message TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    notified_at TIMESTAMP,
+                    attempts INTEGER NOT NULL DEFAULT 0
+                )
+            ''')
+            cursor.execute(
+                'CREATE INDEX IF NOT EXISTS idx_terminal_notifications_pending '
+                'ON task_terminal_notifications(notified_at, attempts)'
+            )
             
         # 执行数据库迁移
         self._migrate_database()
@@ -2438,6 +2455,14 @@ class CacheManager:
                     )
                 else:
                     logger.info(f"任务状态更新: {task_id} -> {status}")
+                    if status in (TaskStatus.SUCCESS, TaskStatus.FAILED):
+                        cursor.execute(
+                            '''INSERT INTO task_terminal_notifications
+                               (task_id, status, error_message, completed_at)
+                               SELECT task_id, status, error_message, completed_at
+                               FROM task_status WHERE task_id = ?''',
+                            (task_id,),
+                        )
 
             # Cross-database writes cannot be atomic. Persist the task terminal
             # state first, then best-effort its audit-owned snapshot. A failed
@@ -2463,6 +2488,41 @@ class CacheManager:
         except Exception as e:
             logger.error(f"更新任务状态失败: {e}")
             raise
+
+    def list_unattempted_terminal_notifications(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Pending outbox rows not marked sent, with attempts < MAX_ATTEMPTS."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                '''SELECT task_id, status, error_message, created_at, completed_at,
+                          notified_at, attempts
+                   FROM task_terminal_notifications
+                   WHERE notified_at IS NULL AND attempts < ?
+                   ORDER BY created_at ASC
+                   LIMIT ?''',
+                (TERMINAL_NOTIFY_MAX_ATTEMPTS, int(limit)),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def claim_pending_terminal_notification(self, task_id: str) -> bool:
+        """Claim a pending row (attempts += 1 if under MAX_ATTEMPTS)."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                '''UPDATE task_terminal_notifications
+                   SET attempts = attempts + 1
+                   WHERE task_id = ? AND notified_at IS NULL AND attempts < ?''',
+                (task_id, TERMINAL_NOTIFY_MAX_ATTEMPTS),
+            )
+            return cursor.rowcount == 1
+
+    def mark_terminal_notification_sent(self, task_id: str) -> None:
+        """Set notified_at after the notifier accepted the send."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                '''UPDATE task_terminal_notifications
+                   SET notified_at = CURRENT_TIMESTAMP
+                   WHERE task_id = ?''',
+                (task_id,),
+            )
 
     def update_task_progress(self, task_id: str, progress: dict) -> bool:
         """更新任务进度；进度是从属元数据，绝不参与状态机。

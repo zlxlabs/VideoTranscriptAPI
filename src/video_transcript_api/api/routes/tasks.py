@@ -30,6 +30,7 @@ from ..services.view_token_resolver import ViewTokenResolver
 from ...utils.llm_status import ChaptersStatus, NotesStatus, SummaryStatus
 from ...utils.notifications import send_view_link_wechat, get_notification_router
 from ...utils.task_status import TaskStatus, http_code_for_status
+from ..services.terminal_status import finalize_terminal_status_and_notify
 
 logger = lazy_resource(get_logger)
 config = lazy_resource(get_config)
@@ -151,8 +152,12 @@ def _fail_task_after_creation(task_id: str, error_message: str, *, log_context: 
         先一步写成终态）；False 表示写入本身抛出异常，终态未被确认写入。
     """
     try:
-        failed_status_written = cache_manager.update_task_status(
-            task_id, TaskStatus.FAILED, error_message=error_message,
+        failed_status_written = finalize_terminal_status_and_notify(
+            task_id,
+            TaskStatus.FAILED,
+            error_message=error_message,
+            cache_manager=cache_manager,
+            send_status_notification=False,
         )
         if not failed_status_written:
             logger.warning(

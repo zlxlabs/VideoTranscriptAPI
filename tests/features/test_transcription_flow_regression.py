@@ -38,6 +38,7 @@ class DummyCacheManager:
         self.saved = []
         self.status_updates = []
         self.tasks = {}
+        self._outbox = {}
 
     def get_cache(self, platform, media_id, use_speaker_recognition):
         return self.cache_data
@@ -45,6 +46,23 @@ class DummyCacheManager:
     def save_cache(self, **kwargs):
         self.saved.append(kwargs)
         return True
+
+    def _seed_outbox(self, task_id, status, kwargs):
+        if status not in (
+            transcription.TaskStatus.SUCCESS,
+            transcription.TaskStatus.FAILED,
+            "success",
+            "failed",
+        ):
+            return
+        self._outbox.setdefault(task_id, {
+            "task_id": task_id,
+            "status": status,
+            "error_message": kwargs.get("error_message"),
+            "completed_at": "dummy-completed",
+            "notified_at": None,
+            "attempts": 0,
+        })
 
     def update_task_status(self, task_id, status, **kwargs):
         self.status_updates.append((task_id, status, kwargs))
@@ -55,7 +73,27 @@ class DummyCacheManager:
         # no terminal-stickiness model of its own -- callers that need to
         # simulate a CAS loss should stub this method directly rather than
         # relying on the default.
+        self._seed_outbox(task_id, status, kwargs)
         return True
+
+    def list_unattempted_terminal_notifications(self, limit=20):
+        rows = [
+            row for row in self._outbox.values()
+            if row["notified_at"] is None and row["attempts"] == 0
+        ]
+        return rows[:limit]
+
+    def claim_pending_terminal_notification(self, task_id):
+        row = self._outbox.get(task_id)
+        if row is None or row["notified_at"] is not None or row["attempts"] != 0:
+            return False
+        row["attempts"] = 1
+        return True
+
+    def mark_terminal_notification_sent(self, task_id):
+        row = self._outbox.get(task_id)
+        if row is not None:
+            row["notified_at"] = "sent"
 
     def get_task_by_id(self, task_id):
         return self.tasks.get(task_id)
@@ -713,7 +751,10 @@ def test_flow_final_exception_persists_failed_before_notifying(monkeypatch, patc
         """
 
         def notify_task_status(self, *args, **kwargs):
-            if kwargs.get("status") == "转录异常":
+            status = kwargs.get("status")
+            if status is None and len(args) > 1:
+                status = args[1]
+            if status == "【任务失败】":
                 order.append("notify")
 
     cache_manager = OrderTrackingCacheManager(cache_data=None)
@@ -1185,7 +1226,7 @@ class TestHandoffToLlmStageFailureModes:
         }
         assert bound_runtime.inflight_registry.size("llm") == 0
         assert "task_c" not in bound_runtime.inflight_registry.all_task_ids()
-        assert any(msg[0] == "send_text" for msg in notifier.messages)
+        assert any(msg[0] == "notify" for msg in notifier.messages)
         failed_writes = [
             u for u in cache_manager.status_updates
             if u[1] == transcription.TaskStatus.FAILED
@@ -1228,8 +1269,8 @@ class TestHandoffToLlmStageFailureModes:
                 raise RuntimeError("boom-put")
 
         class RaisingNotifier(DummyNotifier):
-            def send_text(self, text, **kwargs):
-                super().send_text(text, **kwargs)
+            def notify_task_status(self, *args, **kwargs):
+                super().notify_task_status(*args, **kwargs)
                 raise RuntimeError("webhook timeout")
 
         monkeypatch.setattr(transcription, "llm_task_queue", RaisingQueue())
@@ -1248,7 +1289,7 @@ class TestHandoffToLlmStageFailureModes:
         }
         assert bound_runtime.inflight_registry.size("llm") == 0
         assert "task_d" not in bound_runtime.inflight_registry.all_task_ids()
-        assert any(msg[0] == "send_text" for msg in notifier.messages)
+        assert any(msg[0] == "notify" for msg in notifier.messages)
         failed_writes = [
             u for u in cache_manager.status_updates
             if u[1] == transcription.TaskStatus.FAILED
@@ -1614,12 +1655,12 @@ class TestFailTaskAndNotifyCasConsistency:
                 self._failed_write_count = 0
 
             def update_task_status(self, task_id, status, **kwargs):
-                self.status_updates.append((task_id, status, kwargs))
                 if status == transcription.TaskStatus.FAILED:
                     self._failed_write_count += 1
                     if self._failed_write_count == 1:
+                        self.status_updates.append((task_id, status, kwargs))
                         raise RuntimeError("boom-failed-write-1")
-                return True
+                return super().update_task_status(task_id, status, **kwargs)
 
         cache_manager = RaiseOnceThenSucceedCacheManager()
         router = RecordingRouter()
@@ -1631,7 +1672,7 @@ class TestFailTaskAndNotifyCasConsistency:
             "_fail_task_and_notify's own CAS write raised -- it must not "
             "send its own failure notification before re-raising"
         )
-        assert router.statuses.count("转录异常") == 1, (
+        assert router.statuses.count("【任务失败】") == 1, (
             "the exception must propagate to process_transcription's outer "
             "handler, which retries the FAILED write and notifies once "
             "on its own successful (second) attempt"
@@ -1728,7 +1769,7 @@ class TestFailTaskAndNotifyCasConsistency:
         result = self._run(monkeypatch, patch_runtime, cache_manager, router)
 
         assert result["status"] == "failed"
-        assert router.statuses.count("下载失败") == 1
+        assert router.statuses.count("【任务失败】") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1892,4 +1933,4 @@ class TestOuterExceptHandlerCasConsistency:
         result = self._run(monkeypatch, patch_runtime, cache_manager, router)
 
         assert result["status"] == "failed"
-        assert router.statuses.count("转录异常") == 1
+        assert router.statuses.count("【任务失败】") == 1

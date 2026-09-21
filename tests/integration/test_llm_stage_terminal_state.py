@@ -176,9 +176,11 @@ class TestLlmTaskFailedWriteReraises:
         # task_done() must still fire from the outer `finally:` even though
         # the terminal write raised and the exception propagated past it.
         task_queue.task_done.assert_called_once()
-        # The best-effort failure notification must still be attempted
-        # (moved into a `finally` alongside the re-raise, see the fix).
-        router.send_text.assert_called_once()
+        # Terminal write never landed, so the status-notify helper must not
+        # send a failure message (CAS did not win). The previous finally
+        # block sent 【LLM API调用异常】 even on a failed write.
+        router.send_text.assert_not_called()
+        router.notify_task_status.assert_not_called()
         # The task row itself must still show calibrating (not failed) --
         # proof the terminal write genuinely never landed, which is exactly
         # why observability (the re-raise) matters here.
@@ -369,11 +371,11 @@ class TestLlmStageFailureNotificationExceptionDoesNotStarveTerminalState:
 
     def test_failure_notification_exception_does_not_prevent_failed_cas(self, cm):
         task_id = _calibrating_task(cm)
-        # task_notifier.send_text proxies to router_mock.send_text -- raising
-        # here reproduces the webhook-timeout/rate-limit failure mode this
-        # fix must survive.
+        # Status notify now goes through notify_task_status. Raising here
+        # reproduces the webhook-timeout/rate-limit failure mode this fix
+        # must survive.
         router_mock = MagicMock()
-        router_mock.send_text.side_effect = RuntimeError("webhook timeout")
+        router_mock.notify_task_status.side_effect = RuntimeError("webhook timeout")
 
         self._run(cm, task_id, router_mock)
 
@@ -384,7 +386,7 @@ class TestLlmStageFailureNotificationExceptionDoesNotStarveTerminalState:
         assert "boom" in (row["error_message"] or "")
         # The notification was attempted (and its exception swallowed) --
         # not skipped entirely.
-        router_mock.send_text.assert_called_once()
+        router_mock.notify_task_status.assert_called_once()
 
     def test_failure_notification_still_sent_on_normal_failure(self, cm):
         """Sanity/regression companion: the reorder must not accidentally
@@ -397,8 +399,12 @@ class TestLlmStageFailureNotificationExceptionDoesNotStarveTerminalState:
 
         row = cm.get_task_by_id(task_id)
         assert row["status"] == "failed"
-        router_mock.send_text.assert_called_once()
-        assert "【LLM API调用异常】" in router_mock.send_text.call_args.args[0]
+        router_mock.notify_task_status.assert_called_once()
+        notify_kwargs = router_mock.notify_task_status.call_args.kwargs
+        assert notify_kwargs.get("status") == "【任务失败】"
+        assert "【LLM API调用异常】" in (notify_kwargs.get("error") or "")
+        view_token = row["view_token"]
+        assert f"/view/{view_token}" in (notify_kwargs.get("view_url") or "")
 
 
 class _ScriptedQueue:
@@ -799,3 +805,66 @@ class TestLlmQueuePumpCapacityGate:
                 thread.join(timeout=2)
             for c in ctxs:
                 c.stop()
+
+
+class TestCalibrateOnlyStatusNotifyCarriesViewLink:
+    """R2: recalibrate (calibrate_only) skips the content notification, so
+    the terminal status message must itself carry /view/<view_token>.
+    """
+
+    def test_calibrate_only_success_status_body_includes_view_token(self, cm):
+        task_id = _calibrating_task(cm)
+        view_token = cm.get_task_by_id(task_id)["view_token"]
+        router = MagicMock()
+        content_notify = MagicMock()
+        coordinator = MagicMock()
+        coordinator.process.return_value = MagicMock()
+        task = _llm_task(task_id)
+        task["calibrate_only"] = True
+
+        ctxs = [
+            patch.object(llm_ops, "cache_manager", cm),
+            patch.object(llm_ops, "llm_coordinator", coordinator),
+            patch.object(llm_ops, "llm_task_queue", MagicMock()),
+            patch.object(llm_ops, "_build_result_dict", lambda r: {}),
+            patch.object(llm_ops, "_save_llm_results", MagicMock(return_value=None)),
+            patch.object(llm_ops, "_send_notification", content_notify),
+            patch.object(llm_ops, "get_notification_router", lambda: router),
+            patch.object(llm_ops, "_generate_title_if_needed", lambda t, title, tr: title),
+            patch.object(llm_ops, "_prepare_llm_content", lambda t, tr, spk: "content"),
+        ]
+        for ctx in ctxs:
+            ctx.start()
+        try:
+            llm_ops._handle_llm_task(task)
+        finally:
+            for ctx in ctxs:
+                ctx.stop()
+
+        assert cm.get_task_by_id(task_id)["status"] == "success"
+        content_notify.assert_not_called()
+        router.notify_task_status.assert_called_once()
+        kwargs = router.notify_task_status.call_args.kwargs
+        blob = " ".join(
+            [
+                str(kwargs.get("status") or ""),
+                str(kwargs.get("error") or ""),
+                str(kwargs.get("view_url") or ""),
+                str(kwargs.get("url") or ""),
+            ]
+        )
+        assert f"/view/{view_token}" in blob
+        from src.video_transcript_api.utils.notifications.channel import (
+            build_task_status_content,
+        )
+        body = build_task_status_content(
+            url=kwargs.get("url") or "",
+            status=kwargs.get("status") or "",
+            error=kwargs.get("error"),
+            title=kwargs.get("title"),
+            author=kwargs.get("author"),
+            view_url=kwargs.get("view_url"),
+        )
+        assert f"/view/{view_token}" in body
+        assert body.count("/view/") == 1
+

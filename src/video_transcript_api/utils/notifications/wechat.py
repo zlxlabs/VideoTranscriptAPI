@@ -336,7 +336,7 @@ class WechatNotifier:
             # 默认处理中状态
             return "🔄"
 
-    def notify_task_status(self, url, status, error=None, title=None, author=None, transcript=None):
+    def notify_task_status(self, url, status, error=None, title=None, author=None, transcript=None, view_url=None):
         """
         通知任务状态
 
@@ -382,10 +382,13 @@ class WechatNotifier:
             content += f"\n\n**错误：** {error}"
 
         # 添加转录文本预览（如果有）
-        if transcript and status == "转录完成":
+        if transcript and "转录完成" in status:
             # 最多显示前100个字符
             preview = transcript[:100] + ("..." if len(transcript) > 100 else "")
             content += f"\n\n**转录预览：**\n```\n{preview}\n```"
+
+        if view_url:
+            content += f"\n\n🔗 查看：{view_url}"
 
         return self.send_text(content, skip_risk_control=True)
 

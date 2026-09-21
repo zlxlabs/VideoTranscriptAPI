@@ -40,10 +40,10 @@ from ...utils.notifications import (
     format_llm_config_markdown,
     get_notification_router,
 )
-from ...utils.notifications.channel import _clean_url, _apply_risk_control_safe
 from ...utils.rendering import get_base_url
 from ...utils.perf_tracker import PerfTracker
 from ...utils.task_status import TaskStatus
+from .terminal_status import finalize_terminal_status_and_notify
 from ...utils.llm_status import (
     CalibrationStatus,
     ChaptersStatus,
@@ -263,9 +263,16 @@ def process_llm_queue():
                 # 回收。
                 runtime.llm_submit_semaphore.release()
                 try:
-                    fail_status_written = cache_manager.update_task_status(
-                        submit_fail_task_id, TaskStatus.FAILED,
+                    fail_status_written = finalize_terminal_status_and_notify(
+                        submit_fail_task_id,
+                        TaskStatus.FAILED,
                         error_message=f"提交LLM任务失败: {exc}",
+                        url=llm_task.get("display_url") or llm_task.get("url"),
+                        title=llm_task.get("video_title"),
+                        channel_name=llm_task.get("notification_channel"),
+                        webhooks=llm_task.get("notification_webhooks"),
+                        cache_manager=cache_manager,
+                        router=get_notification_router(),
                     )
                     if fail_status_written:
                         logger.info(
@@ -465,13 +472,14 @@ def _handle_notes_generation(
                 use_speaker_recognition=use_speaker_recognition,
                 notes_status=NotesStatus.GENERATED,
             )
-        status_written = cache_manager.update_task_status(
+        status_written = finalize_terminal_status_and_notify(
             task_id,
             TaskStatus.SUCCESS,
-            platform=platform,
-            media_id=media_id,
+            url=llm_task.get("display_url") or llm_task.get("url"),
             title=llm_task.get("video_title", ""),
             author=llm_task.get("author", ""),
+            platform=platform,
+            media_id=media_id,
             terminal_snapshot={
                 "result": {
                     "notes_status": NotesStatus.GENERATED,
@@ -480,6 +488,10 @@ def _handle_notes_generation(
                 },
                 "processing_options": processing_options,
             },
+            cache_manager=cache_manager,
+            router=get_notification_router(),
+            channel_name=llm_task.get("notification_channel"),
+            webhooks=llm_task.get("notification_webhooks"),
         )
         if status_written:
             logger.info(f"详细笔记任务状态已更新为 success: {task_id}")
@@ -815,13 +827,14 @@ def _handle_llm_task(llm_task: dict):
                 # 完成通知；落败时记录 warning（附带当前的真实终态）且不再通知。
                 done_message = "重新校对完成" if calibrate_only else "校对完成"
                 final_stats = result_dict.get("stats", {})
-                status_written = cache_manager.update_task_status(
+                status_written = finalize_terminal_status_and_notify(
                     task_id,
                     TaskStatus.SUCCESS,
-                    platform=platform,
-                    media_id=media_id,
+                    url=display_url,
                     title=video_title,
                     author=llm_task.get("author", ""),
+                    platform=platform,
+                    media_id=media_id,
                     calibration_status=final_stats.get("calibration_status"),
                     summary_status=final_stats.get("summary_status"),
                     chapters_status=final_stats.get("chapters_status"),
@@ -829,6 +842,10 @@ def _handle_llm_task(llm_task: dict):
                         "result": result_dict,
                         "processing_options": processing_options,
                     },
+                    cache_manager=cache_manager,
+                    router=get_notification_router(),
+                    channel_name=notification_channel,
+                    webhooks=notification_webhooks,
                 )
                 if status_written:
                     logger.info(f"任务状态已更新为 success: {task_id} ({done_message})")
@@ -889,44 +906,29 @@ def _handle_llm_task(llm_task: dict):
                     else f"LLM处理失败: {exc}"
                 )
                 try:
-                    # K3 修复：FAILED CAS 也是 compare-and-set，终态黏性同样
-                    # 可能拒绝这次写入（例如上面的 try 块其实已经成功写过
-                    # success，只是 _send_notification 抛了异常——但那条路径
-                    # 现在已经被上面的独立 try/except 兜住，不会再走到这里；
-                    # 这里检查返回值是为了其它真正在 success CAS 之前就失败
-                    # 的路径，不能无条件声称"已更新为 failed"）。
-                    fail_status_written = cache_manager.update_task_status(
-                        task_id, TaskStatus.FAILED, error_message=fail_message,
+                    # CAS-gated status notify lives in
+                    # finalize_terminal_status_and_notify. The previous
+                    # `finally: send_text(...)` fired even when the FAILED
+                    # write lost the CAS or raised, producing a second
+                    # "task failed" message after another path already
+                    # finalized the task.
+                    fail_status_written = finalize_terminal_status_and_notify(
+                        task_id,
+                        TaskStatus.FAILED,
+                        error_message=fail_message,
+                        url=display_url,
+                        title=video_title,
+                        notify_error=f"【LLM API调用异常】{exc}",
+                        channel_name=notification_channel,
+                        webhooks=notification_webhooks,
+                        cache_manager=cache_manager,
+                        router=get_notification_router(),
                     )
                 except Exception:
-                    # G1 修复（CI review 第 2 轮 major）：此前这里是
-                    # `except Exception: pass`——终态写库异常被完全静默吞掉，
-                    # 连日志都没有，函数正常走到 finally 的 task_done() 后
-                    # 返回，调用方（run_with_runtime 包装后提交给
-                    # llm_executor 的 future）看不到任何异常，任务永久停在
-                    # calibrating（非终态），只能靠运行期对账（最长 ~27h）
-                    # 才会被发现，是本文件里最彻底的一处"终态写库失败不可
-                    # 观察"。改为记日志后重新抛出：本函数是
-                    # process_llm_queue 消费泵 submit 给 llm_executor 的
-                    # worker 入口（见该函数），异常会传出这个 except 块，
-                    # 逐层往外传播（跳过下面 finally 之外的所有代码，但
-                    # finally 本身仍会执行 task_done()），最终从
-                    # run_with_runtime 传出，被 RuntimeContext.track_future
-                    # （kind="llm"）的完成回调观察到——future 完成即释放
-                    # inflight_registry 的 "llm" 名额与 llm_submit_semaphore，
-                    # 不依赖终态写入是否成功。finally 块保证无论这里是否
-                    # 重新抛出，入队失败的通知都会被尝试一次。
                     logger.exception(
                         f"收敛 failed 终态写入异常: {task_id} ({fail_message})"
                     )
                     raise
-                finally:
-                    try:
-                        task_notifier.send_text(f"【LLM API调用异常】{exc}")
-                    except Exception:
-                        logger.exception(
-                            f"失败通知发送失败（任务终态已落库，不影响任务结果）: {task_id}"
-                        )
 
                 if fail_status_written:
                     logger.info(f"任务状态已更新为 failed: {task_id} ({fail_message})")
@@ -2521,32 +2523,7 @@ def _send_notification(
         webhooks=notification_webhooks,
         skip_content_type_header=True,
     )
-
-    time.sleep(0.1)
-
-    task_info = cache_manager.get_task_by_id(task_id)
-    if task_info and task_info.get("view_token"):
-        base_url = get_base_url()
-        view_url = f"{base_url}/view/{task_info['view_token']}"
-        clean = _clean_url(display_url)
-        sanitized_title = _sanitize_title(video_title)
-
-        if notes_generated:
-            completion_message = (
-                f"# {sanitized_title}\n\n{clean}\n\n"
-                f"🔗 详细笔记已生成：\n{view_url}\n\n✅ **【任务完成】**"
-            )
-        else:
-            completion_message = (
-                f"# {sanitized_title}\n\n{clean}\n\n"
-                f"🔗 总结和校对：\n{view_url}\n\n✅ **【任务完成】**"
-            )
-        router.send_text(
-            completion_message,
-            channel_name=notification_channel,
-            webhooks=notification_webhooks,
-        )
-        logger.info(f"任务完成通知已加入限流队列: {task_id}")
+    logger.info(f"content notification queued: {task_id}")
 
 
 def _build_calibration_warning(stats: dict) -> str:

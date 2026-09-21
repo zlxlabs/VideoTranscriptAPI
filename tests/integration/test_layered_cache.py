@@ -68,6 +68,7 @@ class DummyCacheManager:
         self.saved = []
         self.status_updates = []
         self.tasks = {}
+        self._outbox = {}
 
     def get_cache(self, platform, media_id, use_speaker_recognition):
         return self.cache_data
@@ -88,7 +89,35 @@ class DummyCacheManager:
         # no terminal-stickiness model of its own -- callers that need to
         # simulate a CAS loss should stub this method directly rather than
         # relying on the default.
+        if status in ("success", "failed"):
+            self._outbox.setdefault(task_id, {
+                "task_id": task_id,
+                "status": status,
+                "error_message": kwargs.get("error_message"),
+                "completed_at": "dummy-completed",
+                "notified_at": None,
+                "attempts": 0,
+            })
         return True
+
+    def list_unattempted_terminal_notifications(self, limit=20):
+        rows = [
+            row for row in self._outbox.values()
+            if row["notified_at"] is None and row["attempts"] == 0
+        ]
+        return rows[:limit]
+
+    def claim_pending_terminal_notification(self, task_id):
+        row = self._outbox.get(task_id)
+        if row is None or row["notified_at"] is not None or row["attempts"] != 0:
+            return False
+        row["attempts"] = 1
+        return True
+
+    def mark_terminal_notification_sent(self, task_id):
+        row = self._outbox.get(task_id)
+        if row is not None:
+            row["notified_at"] = "sent"
 
     def get_task_by_id(self, task_id):
         return self.tasks.get(task_id)
@@ -1847,7 +1876,12 @@ class TestFullHitCasLossSuppressesNotification:
 
         assert result["status"] == "success"
         notification_router.send_long_text.assert_called_once()
-        notification_router.send_text.assert_called_once()
+        terminal_status_calls = [
+            call for call in notification_router.notify_task_status.call_args_list
+            if call.kwargs.get("status") == "【任务完成】"
+            or (len(call.args) > 1 and call.args[1] == "【任务完成】")
+        ]
+        assert len(terminal_status_calls) == 1
 
 
 class TestFullHitNotificationExceptionDoesNotFailTask:
@@ -1921,7 +1955,16 @@ class TestFullHitNotificationExceptionDoesNotFailTask:
         monkeypatch.setattr(transcription, "cache_manager", cache_manager)
 
         notification_router = MagicMock()
-        notification_router.send_text.side_effect = RuntimeError("webhook timeout")
+
+        def _raise_on_terminal_status(*args, **kwargs):
+            status = kwargs.get("status")
+            if status is None and len(args) > 1:
+                status = args[1]
+            if status == "【任务完成】":
+                raise RuntimeError("webhook timeout")
+            return True
+
+        notification_router.notify_task_status.side_effect = _raise_on_terminal_status
         monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)
 
         result = transcription.process_transcription(

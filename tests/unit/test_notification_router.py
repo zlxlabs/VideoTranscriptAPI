@@ -374,3 +374,31 @@ class TestRouterIsEnabled:
 
     def test_disabled_without_channels(self, router_no_config):
         assert router_no_config.is_enabled is False
+
+
+class TestStatusEmojiMatchesLayeredCopy:
+    """New intermediate copy must not fall through to the default emoji."""
+
+    def test_in_progress_transcription_copy_is_not_default_emoji(self):
+        from src.video_transcript_api.utils.notifications.channel import (
+            _get_status_emoji,
+        )
+        from src.video_transcript_api.utils.notifications.wechat import WechatNotifier
+
+        intermediate = "转录完成（进行中）- 普通转录(CapsWriter)，后面还有校对/摘要"
+        default = _get_status_emoji("unknown state")
+        assert _get_status_emoji(intermediate) == "✅"
+        assert _get_status_emoji(intermediate) != default
+        wechat_emoji = WechatNotifier._get_status_emoji(None, intermediate)
+        assert wechat_emoji == "✅"
+        assert wechat_emoji != default
+
+    def test_terminal_copy_stays_distinct(self):
+        from src.video_transcript_api.utils.notifications.channel import (
+            _get_status_emoji,
+        )
+
+        assert _get_status_emoji("【任务完成】") == "✅"
+        assert _get_status_emoji("【任务失败】") == "❌"
+        assert "进行中" in "转录完成（进行中）- 普通转录(CapsWriter)，后面还有校对/摘要"
+        assert "【任务完成】" != "转录完成（进行中）- 普通转录(CapsWriter)，后面还有校对/摘要"
