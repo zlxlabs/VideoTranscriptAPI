@@ -93,6 +93,11 @@
     margin-top: 8px;
     color: var(--text-secondary, #666);
 }
+.status-interrupted .interrupted-at {
+    margin-top: 8px;
+    color: var(--text-secondary, #666);
+    font-size: 0.85rem;
+}
 
 /* Recalibrate button */
 .recalibrate-btn {
@@ -372,6 +377,9 @@
             <p>以下是中断前已生成的部分，不是一次正常完成。</p>
             {% if interrupted_reason %}
             <p class="interrupted-reason">中断原因：{{ interrupted_reason }}</p>
+            {% endif %}
+            {% if interrupted_at %}
+            <p class="interrupted-at">中断时间：{{ interrupted_at }}</p>
             {% endif %}
         </div>
     </div>

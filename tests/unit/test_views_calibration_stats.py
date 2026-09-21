@@ -162,6 +162,7 @@ def test_interrupted_view_route_prepares_success_view(tmp_path):
         "notes": None,
         "cache_dir": str(tmp_path),
         "interrupted_reason": "orphan recovered after deploy restart",
+        "interrupted_at": "2026-09-21 13:04:00",
         "created_at": None,
         "platform": "bilibili",
         "use_speaker_recognition": False,
@@ -188,6 +189,7 @@ def test_interrupted_view_route_prepares_success_view(tmp_path):
     assert "任务被中断判定" in body
     assert "以下是中断前已生成的部分" in body
     assert "orphan recovered after deploy restart" in body
+    assert "2026-09-21 13:04:00" in body
 
 
 def test_transcript_template_banner_only_for_interrupted():
@@ -224,9 +226,12 @@ def test_transcript_template_banner_only_for_interrupted():
             **ctx,
             "status": "interrupted",
             "interrupted_reason": "orphan recovered after deploy restart",
+            "interrupted_at": "2026-09-21 13:04:00",
         }
     )
     assert 'id="interrupted-banner"' in interrupted_html
     assert "任务被中断判定" in interrupted_html
     assert "orphan recovered after deploy restart" in interrupted_html
+    assert "interrupted-at" in interrupted_html
+    assert "2026-09-21 13:04:00" in interrupted_html
     assert "Body" in interrupted_html
