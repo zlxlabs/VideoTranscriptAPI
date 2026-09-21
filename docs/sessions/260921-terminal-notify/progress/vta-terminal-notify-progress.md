@@ -112,3 +112,10 @@
 - 本段结论：通知文档改为记录 120 秒接管租约、UTC naive 时间口径和超过租约的共享数据库重复风险；四个内存 outbox 替身已同步 claimed_at、跨 owner 过期判断及 mark/release 清理。
 - 关键决策与已否决方案：替身直接复用生产租约常量，不另设配置或兼容分支；不引入 fencing token、sending 状态、TTL 或额外重试机制。
 - 下一步唯一动作：跑允许范围内的窄测与收尾全量测试，检查谓词残留、文件范围和最终提交状态。
+
+## 验收回派 R10.4
+
+- 当前阶段：repairing / R10.4 完成
+- 本段结论：list 与 claim 的跨 owner 接管谓词均将 `claimed_at IS NULL` 按已过期处理，已有 owner 但缺时间戳的行可重新进入投递路径。删除迁移中的一次性回填，避免与运行时谓词维护两套语义；新增用例确认 dispatcher 恰好补发一条。
+- 关键决策与已否决方案：保留同 owner 永不重领及 release/mark owner 锁；不保留迁移回填，不新增抽象、配置或兼容分支。
+- 下一步唯一动作：跑 `uv run --extra dev pytest tests/unit tests/features tests/integration -q` 并完成收尾验收报告。
