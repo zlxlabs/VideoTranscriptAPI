@@ -35,6 +35,13 @@
 - 关键决策与已否决方案：不新增第二条消息。链接加在既有状态通知正文。
 - 下一步唯一动作：全量 pytest 后 push。
 
+## 验收回派 R8.1
+
+- 当前阶段：repairing / R8.1 完成
+- 本段结论：终态通知 outbox 增加 `claimed_at` 租约列，新库建表与既有 `_migrate_database()` 均覆盖；claim/list 只允许无租约或已过期租约的行，claim 后立即重复领取被拒。新增过期租约恢复与慢发送跨轮询周期不重复投递测试。
+- 关键决策与已否决方案：租约时长固定为模块级 `TERMINAL_NOTIFY_LEASE_SECONDS = 120`，使用 UTC `YYYY-MM-DD HH:MM:SS` 文本，与 SQLite `CURRENT_TIMESTAMP` 同口径；不引入三态 `sending` 或额外配置项。
+- 下一步唯一动作：R8.2 收紧通知返回值为真实渠道字典，并在异常/全 False 后立即释放租约。
+
 ## 验收回派 R7.1
 
 - 当前阶段：review-fix / R7.1 完成
@@ -55,7 +62,6 @@
 - 本段结论：send_status_notification=False 时立即 mark sent，HTTP 建行清理路径不会被 dispatcher 补发【任务失败】。
 - 关键决策与已否决方案：不新增列；不改 update_task_status 落库。
 - 下一步唯一动作：全量 pytest 后 push。
-
 
 
 

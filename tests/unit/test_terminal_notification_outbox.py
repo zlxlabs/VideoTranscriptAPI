@@ -8,20 +8,27 @@ All console output must be in English only (no emoji, no Chinese).
 """
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import datetime
 import sqlite3
 import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.video_transcript_api.api.services import llm_ops, transcription
 from src.video_transcript_api.api.services.terminal_status import (
+    DISPATCH_POLL_SECONDS,
     TERMINAL_FAILED_STATUS,
+    _notification_accepted,
     deliver_pending_terminal_notifications,
     finalize_terminal_status_and_notify,
 )
-from src.video_transcript_api.cache.cache_manager import CacheManager
+from src.video_transcript_api.cache.cache_manager import (
+    CacheManager,
+    TERMINAL_NOTIFY_LEASE_SECONDS,
+)
 from src.video_transcript_api.utils.task_status import TaskStatus
 
 
@@ -279,6 +286,22 @@ class TestOutboxSchema:
                     (task_id, "failed"),
                 )
 
+    def test_legacy_outbox_schema_migrates_claimed_at(self, tmp_path):
+        cache_dir = tmp_path / "cache"
+        manager = CacheManager(cache_dir=str(cache_dir))
+        with manager._get_cursor() as cursor:
+            cursor.execute("ALTER TABLE task_terminal_notifications DROP COLUMN claimed_at")
+        manager.close()
+
+        migrated = CacheManager(cache_dir=str(cache_dir))
+        try:
+            with migrated._get_cursor() as cursor:
+                cursor.execute("PRAGMA table_info(task_terminal_notifications)")
+                columns = [row[1] for row in cursor.fetchall()]
+            assert "claimed_at" in columns
+        finally:
+            migrated.close()
+
 
 def _assert_one_pending_and_one_notify(cm, task_id, router, *, reason):
     pending = cm.list_unattempted_terminal_notifications()
@@ -365,12 +388,107 @@ class TestRedDSentRowsAreNotResent:
 def _outbox_state(cm, task_id):
     with cm._get_cursor() as cursor:
         cursor.execute(
-            "SELECT notified_at, attempts FROM task_terminal_notifications "
+            "SELECT notified_at, attempts, claimed_at FROM task_terminal_notifications "
             "WHERE task_id = ?",
             (task_id,),
         )
         row = cursor.fetchone()
-    return {"notified_at": row["notified_at"], "attempts": row["attempts"]}
+    return {
+        "notified_at": row["notified_at"],
+        "attempts": row["attempts"],
+        "claimed_at": row["claimed_at"],
+    }
+
+
+class TestTerminalNotificationLease:
+    def test_claim_is_exclusive_while_lease_is_live(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
+
+        assert cm.claim_pending_terminal_notification(task_id) is True
+        assert cm.claim_pending_terminal_notification(task_id) is False
+        assert cm.list_unattempted_terminal_notifications() == []
+
+        state = _outbox_state(cm, task_id)
+        assert state["attempts"] == 1
+        assert state["claimed_at"] is not None
+
+    def test_expired_claim_is_reclaimed_and_dispatched_once(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
+        claimed_at = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(seconds=TERMINAL_NOTIFY_LEASE_SECONDS + 1)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        with cm._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE task_terminal_notifications SET attempts = 1, claimed_at = ? "
+                "WHERE task_id = ?",
+                (claimed_at, task_id),
+            )
+
+        router = MagicMock()
+        router.notify_task_status.return_value = {"wechat": True}
+        assert [row["task_id"] for row in cm.list_unattempted_terminal_notifications()] == [
+            task_id
+        ]
+        assert deliver_pending_terminal_notifications(cm, router=router) == 1
+        router.notify_task_status.assert_called_once()
+
+    def test_slow_send_is_not_claimed_by_second_dispatcher(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
+        started = threading.Event()
+        release = threading.Event()
+        router = MagicMock()
+
+        def slow_send(*args, **kwargs):
+            started.set()
+            assert release.wait(timeout=5)
+            return {"wechat": True}
+
+        router.notify_task_status.side_effect = slow_send
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(deliver_pending_terminal_notifications, cm, router=router)
+            assert started.wait(timeout=5)
+            time.sleep(DISPATCH_POLL_SECONDS + 0.05)
+            second = executor.submit(deliver_pending_terminal_notifications, cm, router=router)
+            assert second.result(timeout=5) == 0
+            release.set()
+            assert first.result(timeout=5) == 1
+
+        router.notify_task_status.assert_called_once()
+        assert _outbox_state(cm, task_id)["notified_at"] is not None
+
+
+class TestNotificationAcceptance:
+    @pytest.mark.parametrize(
+        ("result", "accepted"),
+        [
+            (None, False),
+            ({"wechat": False}, False),
+            ({"wechat": True}, True),
+            ({"wechat": False, "feishu": True}, True),
+        ],
+    )
+    def test_only_dict_with_accepted_channel_is_accepted(self, result, accepted):
+        assert _notification_accepted(result) is accepted
+
+    def test_mixed_channel_acceptance_marks_row_sent(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.PROCESSING)
+        router = MagicMock()
+        router.notify_task_status.return_value = {"wechat": False, "feishu": True}
+
+        assert finalize_terminal_status_and_notify(
+            task_id,
+            TaskStatus.FAILED,
+            error_message="boom",
+            cache_manager=cm,
+            router=router,
+        ) is True
+        assert _outbox_state(cm, task_id)["notified_at"] is not None
+
 
 
 class TestBoundedAtLeastOnceReplay:
@@ -467,4 +585,3 @@ class TestSuppressedNotificationIsSettled:
         router.notify_task_status.assert_not_called()
         assert deliver_pending_terminal_notifications(cm, router=router) == 0
         router.notify_task_status.assert_not_called()
-
