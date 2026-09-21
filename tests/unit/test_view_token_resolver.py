@@ -318,6 +318,79 @@ class TestViewTokenResolver:
         assert view_data["message"] == reason
         assert "transcript" not in view_data
 
+    @pytest.mark.parametrize(
+        "transcript_data",
+        [
+            {
+                "task_id": "t1",
+                "segments": [
+                    {"start_time": 0.0, "end_time": 1.2, "text": "hello from funasr"},
+                    {"start_time": 1.2, "end_time": 2.0, "text": "second paragraph"},
+                ],
+            },
+            [
+                {"start_time": 0.0, "end_time": 1.2, "text": "hello from funasr"},
+                {"start_time": 1.2, "end_time": 2.0, "text": "second paragraph"},
+            ],
+        ],
+    )
+    def test_failed_funasr_segments_return_interrupted(
+        self, cm, resolver, monkeypatch, transcript_data
+    ):
+        reason = "orphan recovered after deploy restart"
+        task = _make_failed_task(cm, "vid-funasr-ok", reason)
+
+        def fake_get_cache(**kwargs):
+            return {
+                "title": "FunASR Video",
+                "author": "",
+                "description": "",
+                "file_path": str(cm.cache_dir),
+                "platform": "youtube",
+                "use_speaker_recognition": True,
+                "transcript_data": transcript_data,
+            }
+
+        monkeypatch.setattr(cm, "get_cache", fake_get_cache)
+        view_data = resolver.get_view_data_by_token(task["view_token"])
+
+        assert view_data["status"] == "interrupted"
+        assert "hello from funasr" in view_data["transcript"]
+        assert "second paragraph" in view_data["transcript"]
+        assert "{'" not in view_data["transcript"]
+        assert "segments" not in view_data["transcript"]
+
+    @pytest.mark.parametrize(
+        "transcript_data",
+        [
+            {"task_id": "t1", "segments": []},
+            {"task_id": "t1", "segments": [{"start_time": 0.0, "end_time": 1.0}]},
+            {"task_id": "t1", "segments": [{"text": "   "}]},
+        ],
+    )
+    def test_failed_funasr_dict_without_text_stays_failed(
+        self, cm, resolver, monkeypatch, transcript_data
+    ):
+        reason = "orphan recovered after deploy restart"
+        task = _make_failed_task(cm, "vid-funasr-empty", reason)
+
+        def fake_get_cache(**kwargs):
+            return {
+                "title": "FunASR Video",
+                "author": "",
+                "description": "",
+                "file_path": str(cm.cache_dir),
+                "platform": "youtube",
+                "use_speaker_recognition": True,
+                "transcript_data": transcript_data,
+            }
+
+        monkeypatch.setattr(cm, "get_cache", fake_get_cache)
+        view_data = resolver.get_view_data_by_token(task["view_token"])
+
+        assert view_data["status"] == "failed"
+        assert view_data["message"] == reason
+
     def test_failed_task_with_key_info_only_stays_failed(self, cm, resolver):
         """Accident shell: directory exists with only key_info.json."""
         reason = "orphan recovered after deploy restart"

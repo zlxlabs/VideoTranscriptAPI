@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+from ...transcriber.segments import normalize_segments
 from ...utils.llm_status import NotesStatus, SummaryStatus
 from ...utils.logging import setup_logger
 
@@ -68,15 +69,19 @@ class ViewTokenResolver:
 
     @staticmethod
     def _cache_has_usable_payload(cache_data: Dict[str, Any]) -> bool:
-        """True when cache holds non-empty transcript text.
+        """True when cache holds non-empty transcript text or FunASR segments.
 
         File existence is not enough: a directory may contain only
-        key_info.json. Only llm_calibrated / transcript_data strings count.
+        key_info.json. Strings count when non-empty; list/dict payloads
+        count when normalize_segments finds at least one non-empty text.
         """
         for key in ("llm_calibrated", "transcript_data"):
             value = cache_data.get(key)
             if isinstance(value, str) and value.strip():
                 return True
+        transcript_data = cache_data.get("transcript_data")
+        if isinstance(transcript_data, (list, dict)):
+            return bool(normalize_segments(transcript_data))
         return False
 
     def _assemble_content_view(
@@ -98,9 +103,17 @@ class ViewTokenResolver:
             "transcript_data", "转录文本获取中..."
         )
         if not isinstance(transcript, str):
-            transcript = (
-                str(transcript) if transcript is not None else "转录文本获取中..."
-            )
+            if status == "interrupted":
+                segments = normalize_segments(transcript)
+                transcript = (
+                    "\n".join(seg["text"] for seg in segments)
+                    if segments
+                    else "转录文本获取中..."
+                )
+            else:
+                transcript = (
+                    str(transcript) if transcript is not None else "转录文本获取中..."
+                )
 
         llm_config = self._cache_manager.get_task_llm_config(task_info["task_id"])
         if not llm_config:
