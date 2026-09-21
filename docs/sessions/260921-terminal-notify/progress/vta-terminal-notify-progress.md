@@ -35,6 +35,14 @@
 - 关键决策与已否决方案：不新增第二条消息。链接加在既有状态通知正文。
 - 下一步唯一动作：全量 pytest 后 push。
 
+## 验收回派 R7.1
+
+- 当前阶段：review-fix / R7.1 完成
+- 本段结论：helper 把 title/author 转发给 update_task_status，终态行与 terminal_snapshot 不再丢标题作者。
+- 关键决策与已否决方案：不新增字段，只转发改造前各站点本来就传的 title/author。
+- 下一步唯一动作：R7.2 有界至少一次补发。
+
+
 
 
 

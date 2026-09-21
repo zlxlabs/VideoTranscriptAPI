@@ -42,6 +42,8 @@ def finalize_terminal_status_and_notify(
         task_id,
         status,
         error_message=error_message,
+        title=title,
+        author=author,
         **update_kwargs,
     )
     if not written:

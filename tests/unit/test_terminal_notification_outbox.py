@@ -94,6 +94,22 @@ class TestTerminalNotifyHelperCasGate:
         router.notify_task_status.assert_not_called()
         assert cm.get_task_by_id(task_id)["error_message"] == "first"
 
+    def test_success_write_persists_title_and_author(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.PROCESSING)
+        written = finalize_terminal_status_and_notify(
+            task_id,
+            TaskStatus.SUCCESS,
+            title="Cached Title",
+            author="Cached Author",
+            cache_manager=cm,
+            router=MagicMock(),
+        )
+        assert written is True
+        row = cm.get_task_by_id(task_id)
+        assert row["title"] == "Cached Title"
+        assert row["author"] == "Cached Author"
+
 
 class TestRedCLlmOpsFinallyCasGate:
     """llm_ops._handle_llm_task except used to send in a finally block
