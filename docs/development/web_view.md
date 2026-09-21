@@ -96,6 +96,17 @@ https://your-domain.com/view/view_xxxxxxxxxxxxxxxxx
 - 支持Markdown渲染
 - 响应式设计
 
+### 2.1 中断回落页面（`view_data.status = interrupted`）
+
+任务行终态仍是 `failed`（状态机不变），但缓存里已经有可用正文（`llm_calibrated` 或 `transcript_data` 非空字符串）时，`/view/{view_token}` 不走失败页。
+
+- 模板仍是 `transcript.html`，走与 success 相同的 `_prepare_success_view`
+- 页面顶部渲染中断横幅：说明「任务被中断判定、以下是中断前已生成的部分」
+- 导出（`?raw=` / `?page=`）与审计摘要端点把 `interrupted` 视为可提供已有产物
+- 空壳缓存（目录在、但没有正文）仍显示现有失败页 `error.html`，文案不变
+
+`interrupted` 不复用 `success`：下游不能把「被中断判定」静默当成完全成功。
+
 ### 3. 文件清理页面 (`cleaned.html`)
 - 提示底层文件已被清理
 - 提供原始视频链接

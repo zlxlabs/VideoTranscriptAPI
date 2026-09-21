@@ -20,3 +20,10 @@
 - 本段结论：横幅插在 `block content` 最顶部、统计信息之前，不在任何布局条件块内；success 渲染不含横幅。路由级 TestClient 与 Jinja 直渲染都看到横幅 + 正文。
 - 关键决策与已否决方案：样式写在 transcript.html 的 extra_css（base.html 不在允许修改范围）；复用 `.section` 与 CSS 变量，不用 status-error 以免看起来像整页失败。
 - 下一步唯一动作：更新 web_view.md 并做红验 + 全量测试。
+
+## 段落 4 — 文档、红验与全量收尾
+
+- 当前阶段：implementing，文档与收尾完成
+- 本段结论：`web_view.md` 记录了 interrupted 呈现语义。反向红验把产物判据放宽成 `file_path` 后，空壳用例以 AssertionError 转红（interrupted vs failed），已还原判据行。全量 `uv run --extra dev pytest tests/unit tests/features tests/integration -q` 退出码 0。顺手把 interrupted 日志从失效的 `%s` 改成 f-string（loguru）。
+- 关键决策与已否决方案：audit `/summary` 在提取成功后仍返回 envelope `status=success`（表示预览可用），不把 hover 客户端的成功信封改成 interrupted。
+- 下一步唯一动作：push 并写 report.md。

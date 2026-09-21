@@ -129,9 +129,9 @@ class ViewTokenResolver:
             payload["interrupted_reason"] = task_info.get("error_message")
             payload["interrupted_at"] = task_info.get("completed_at")
             logger.info(
-                "view token resolved as interrupted: task_id=%s reason=%s",
-                task_info.get("task_id"),
-                task_info.get("error_message"),
+                "view token resolved as interrupted: "
+                f"task_id={task_info.get('task_id')} "
+                f"reason={task_info.get('error_message')}"
             )
         return payload
 
