@@ -795,9 +795,10 @@ async def get_task_summary(
         if not owned:
             raise HTTPException(status_code=403, detail="无权访问该任务")
 
-    # 任务未完成（cache.db 中完成的状态值为 'success'）
+    # 任务未完成。cache.db 终态仍是 success/failed；failed 但缓存有正文时
+    # ViewTokenResolver 会给出 interrupted，摘要端点按产物存在性放行。
     task_status = task_info.get("status", "")
-    if task_status not in ("success",):
+    if task_status not in ("success", "failed"):
         return TranscribeResponse(
             code=202,
             message="任务处理中",
@@ -809,7 +810,13 @@ async def get_task_summary(
         view_data = await asyncio.to_thread(
             ViewTokenResolver(cache_manager).get_view_data_by_token, view_token
         )
-        if not view_data or view_data.get("status") not in ("success",):
+        if not view_data or view_data.get("status") not in ("success", "interrupted"):
+            if task_status == "failed":
+                return TranscribeResponse(
+                    code=202,
+                    message="任务处理中",
+                    data={"summary": "", "status": task_status},
+                )
             return TranscribeResponse(
                 code=200,
                 message="摘要不可用",
@@ -832,13 +839,23 @@ async def get_task_summary(
             return TranscribeResponse(
                 code=200,
                 message="获取摘要成功",
-                data={"summary": preview, "status": "success", "summary_status": summary_state},
+                data={
+                    "summary": preview,
+                    "status": view_data.get("status"),
+                    "summary_status": summary_state,
+                    "task_status": task_status,
+                },
             )
 
         return TranscribeResponse(
             code=200,
             message="摘要不可用",
-            data={"summary": None, "status": "success", "summary_status": summary_state},
+            data={
+                "summary": None,
+                "status": view_data.get("status"),
+                "summary_status": summary_state,
+                "task_status": task_status,
+            },
         )
     except Exception as exc:
         logger.exception("get summary failed for view_token=%s: %s", view_token, exc)

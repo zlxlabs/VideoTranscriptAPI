@@ -80,6 +80,27 @@
     .notes-generation-placeholder::after { animation: none; }
 }
 
+.status-interrupted {
+    background: #fff8e1;
+    border-left: 4px solid #f9a825;
+    padding: 16px;
+    margin: 0;
+    border-radius: 4px;
+}
+.status-interrupted h2 { margin-top: 0; }
+.status-interrupted p { margin-bottom: 0; }
+.status-interrupted .interrupted-reason {
+    margin-top: 8px;
+    color: var(--text-secondary, #666);
+    overflow-wrap: anywhere;
+}
+.status-interrupted .interrupted-at {
+    margin-top: 8px;
+    color: var(--text-secondary, #666);
+    font-size: 0.85rem;
+    overflow-wrap: anywhere;
+}
+
 /* Recalibrate button */
 .recalibrate-btn {
     background: var(--bg-secondary, #f5f5f5);
@@ -351,6 +372,21 @@
 {% endblock %}
 
 {% block content %}
+    {% if status == 'interrupted' %}
+    <div class="section" id="interrupted-banner">
+        <div class="status-interrupted" role="status">
+            <h2>任务被中断判定</h2>
+            <p>以下是中断前已生成的部分，不是一次正常完成。</p>
+            {% if interrupted_reason %}
+            <p class="interrupted-reason">中断原因：{{ interrupted_reason }}</p>
+            {% endif %}
+            {% if interrupted_at %}
+            <p class="interrupted-at">中断时间：{{ interrupted_at }}</p>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+
     <!-- 统计信息（单行显示） -->
     {% set original_length = stats.get('original_length', 0) if stats else 0 %}
     {% set calibrated_length = stats.get('calibrated_length', 0) if stats else 0 %}

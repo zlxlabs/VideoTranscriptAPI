@@ -9,11 +9,18 @@ All console output must be in English only (no emoji, no Chinese).
 """
 
 import json
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import jinja2
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from video_transcript_api.api.routes.views import (
     _prepare_success_view,
     _derive_legacy_calibration_status,
 )
+from video_transcript_api.api.routes import views as views_mod
 from video_transcript_api.utils.llm_status import CalibrationStatus
 
 
@@ -135,3 +142,96 @@ class TestDeriveLegacyCalibrationStatus:
         assert _derive_legacy_calibration_status(
             {"total_chunks": 5, "failed_count": 1, "fallback_count": 0}
         ) == CalibrationStatus.PARTIAL
+
+
+def test_interrupted_view_route_prepares_success_view(tmp_path):
+    """interrupted must not early-return on failed/file_cleaned; stats are computed."""
+    (tmp_path / "transcript_capswriter.txt").write_text(
+        "original transcript body", encoding="utf-8"
+    )
+    (tmp_path / "llm_calibrated.txt").write_text(
+        "calibrated transcript body", encoding="utf-8"
+    )
+    view_data = {
+        "status": "interrupted",
+        "title": "Interrupted Video",
+        "author": "Author",
+        "url": "https://example.com/interrupted",
+        "transcript": "calibrated transcript body",
+        "summary": None,
+        "notes": None,
+        "cache_dir": str(tmp_path),
+        "interrupted_reason": "orphan recovered after deploy restart",
+        "interrupted_at": "2026-09-21 13:04:00",
+        "created_at": None,
+        "platform": "bilibili",
+        "use_speaker_recognition": False,
+        "llm_config": {"calibrate_model": "test-model"},
+    }
+    resolver = MagicMock()
+    resolver.get_view_data_by_token.return_value = view_data
+
+    app = FastAPI()
+    app.include_router(views_mod.router)
+    with patch.object(views_mod, "ViewTokenResolver", return_value=resolver), patch(
+        "video_transcript_api.api.routes.views.get_config",
+        return_value={"web": {}, "llm": {}},
+    ):
+        resp = TestClient(app).get("/view/view_interrupted_token")
+
+    assert resp.status_code == 200
+    body = resp.text
+    assert "calibrated transcript body" in body
+    assert "转录任务失败，请重新提交" not in body
+    assert "该文件已被清理" not in body
+    assert "Interrupted Video" in body
+    assert 'id="interrupted-banner"' in body
+    assert "任务被中断判定" in body
+    assert "以下是中断前已生成的部分" in body
+    assert "orphan recovered after deploy restart" in body
+    assert "2026-09-21 13:04:00" in body
+
+
+def test_transcript_template_banner_only_for_interrupted():
+    templates_dir = Path(__file__).resolve().parents[2] / "src" / "web" / "templates"
+    env = jinja2.Environment(
+        loader=jinja2.FileSystemLoader(str(templates_dir)),
+        autoescape=True,
+    )
+    ctx = {
+        "title": "Sample",
+        "author": "Author",
+        "url": "https://example.com",
+        "created_at_display": "2026-09-21",
+        "platform": "youtube",
+        "summary_html": None,
+        "summary_state": "skipped_short",
+        "calibrated_html": "<p>Body</p>",
+        "use_speaker_recognition": False,
+        "view_token": "token",
+        "stats": {
+            "original_length": 600,
+            "calibrated_length": 500,
+            "summary_length": 0,
+        },
+        "llm_config": None,
+        "status": "success",
+    }
+    success_html = env.get_template("transcript.html").render(**ctx)
+    assert "interrupted-banner" not in success_html
+    assert "任务被中断判定" not in success_html
+
+    interrupted_html = env.get_template("transcript.html").render(
+        **{
+            **ctx,
+            "status": "interrupted",
+            "interrupted_reason": "orphan recovered after deploy restart",
+            "interrupted_at": "2026-09-21 13:04:00",
+        }
+    )
+    assert 'id="interrupted-banner"' in interrupted_html
+    assert "任务被中断判定" in interrupted_html
+    assert "orphan recovered after deploy restart" in interrupted_html
+    assert "interrupted-at" in interrupted_html
+    assert "2026-09-21 13:04:00" in interrupted_html
+    assert "Body" in interrupted_html

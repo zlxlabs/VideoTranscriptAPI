@@ -37,6 +37,11 @@ static_dir = get_static_dir()
 
 router = APIRouter()
 
+# View-page payloads that already have usable cache text. interrupted is not
+# success (the task row stayed failed) but export/render treat the files the
+# same way because they are on disk.
+_CONTENT_VIEW_STATUSES = ("success", "interrupted")
+
 # robots.txt：允许首页和分享页面被收录，禁止 API 和静态资源
 _ROBOTS_TXT_TEMPLATE = """\
 User-agent: *
@@ -477,7 +482,7 @@ def handle_page_export(view_data: Dict[str, Any], export_type: str) -> Response:
             content="<html><body><p>任务处理失败</p></body></html>",
             status_code=500,
         )
-    if status != "success":
+    if status not in _CONTENT_VIEW_STATUSES:
         return HTMLResponse(
             content=f"<html><body><p>任务状态异常: {status}</p></body></html>",
             status_code=400,
@@ -659,7 +664,7 @@ def handle_raw_export(view_data: Dict[str, Any], export_type: str) -> Response:
             status_code=500,
         )
 
-    if status != "success":
+    if status not in _CONTENT_VIEW_STATUSES:
         return Response(
             content=f"❌ 任务状态异常: {status}",
             media_type="text/plain; charset=utf-8",
@@ -1468,7 +1473,7 @@ async def view_transcript(
                 {"request": request, **view_data},
             )
         stats: Dict[str, Any] = {"original_length": 0, "calibrated_length": 0, "summary_length": 0}
-        if view_data["status"] == "success":
+        if view_data["status"] in _CONTENT_VIEW_STATUSES:
             stats = await asyncio.to_thread(_prepare_success_view, view_data)
 
         return templates.TemplateResponse(

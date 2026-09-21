@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+from ...transcriber.segments import normalize_segments
 from ...utils.llm_status import NotesStatus, SummaryStatus
 from ...utils.logging import setup_logger
 
@@ -66,6 +67,100 @@ class ViewTokenResolver:
             return notes_status, None
         return None, None
 
+    @staticmethod
+    def _first_usable_text(*candidates: Any) -> Optional[str]:
+        """Return the first string that is non-empty after strip."""
+        for value in candidates:
+            if isinstance(value, str) and value.strip():
+                return value
+        return None
+
+    @staticmethod
+    def _cache_has_usable_payload(cache_data: Dict[str, Any]) -> bool:
+        """True when cache holds non-empty transcript text or FunASR segments.
+
+        File existence is not enough: a directory may contain only
+        key_info.json. Strings count when non-empty after strip; list/dict
+        payloads count when normalize_segments finds at least one non-empty
+        text.
+        """
+        if ViewTokenResolver._first_usable_text(
+            cache_data.get("llm_calibrated"),
+            cache_data.get("transcript_data"),
+        ):
+            return True
+        transcript_data = cache_data.get("transcript_data")
+        if isinstance(transcript_data, (list, dict)):
+            return bool(normalize_segments(transcript_data))
+        return False
+
+    def _assemble_content_view(
+        self,
+        task_info: Dict[str, Any],
+        cache_data: Dict[str, Any],
+        display_url: str,
+        *,
+        status: str,
+    ) -> Dict[str, Any]:
+        """Assemble the transcript-page payload shared by success and interrupted.
+
+        Interrupted is a presentation status: the task row stays failed, but
+        usable cache text is shown instead of the failure page.
+        """
+        summary_state, summary = self._resolve_summary_state(task_info, cache_data)
+        notes_state, notes = self._resolve_notes_state(cache_data)
+        transcript = self._first_usable_text(
+            cache_data.get("llm_calibrated"),
+            cache_data.get("transcript_data"),
+        )
+        if transcript is None:
+            raw = cache_data.get("transcript_data")
+            if not isinstance(raw, str) and raw is not None:
+                if status == "interrupted":
+                    segments = normalize_segments(raw)
+                    transcript = (
+                        "\n".join(seg["text"] for seg in segments)
+                        if segments
+                        else "转录文本获取中..."
+                    )
+                else:
+                    transcript = str(raw)
+            else:
+                transcript = "转录文本获取中..."
+
+        llm_config = self._cache_manager.get_task_llm_config(task_info["task_id"])
+        if not llm_config:
+            llm_config = self._get_llm_config_by_view_token(task_info["view_token"])
+
+        payload: Dict[str, Any] = {
+            "status": status,
+            "title": cache_data.get("title", ""),
+            "author": cache_data.get("author", ""),
+            "description": cache_data.get("description", ""),
+            "url": display_url,
+            "summary": summary,
+            "summary_state": summary_state,
+            "notes": notes,
+            "notes_state": notes_state,
+            "transcript": transcript,
+            "use_speaker_recognition": cache_data.get(
+                "use_speaker_recognition", False
+            ),
+            "created_at": task_info["created_at"],
+            "cache_dir": cache_data.get("file_path"),
+            "llm_config": llm_config,
+            "platform": cache_data.get("platform", ""),
+        }
+        if status == "interrupted":
+            payload["interrupted_reason"] = task_info.get("error_message")
+            payload["interrupted_at"] = task_info.get("completed_at")
+            logger.info(
+                "view token resolved as interrupted: "
+                f"task_id={task_info.get('task_id')} "
+                f"reason={task_info.get('error_message')}"
+            )
+        return payload
+
     def get_view_data_by_token(self, view_token: str) -> Optional[Dict[str, Any]]:
         """Return the view-page data associated with a view token."""
         try:
@@ -84,6 +179,21 @@ class ViewTokenResolver:
                 }
 
             if task_info["status"] == "failed":
+                platform = task_info.get("platform")
+                media_id = task_info.get("media_id")
+                if platform and media_id:
+                    cache_data = self._cache_manager.get_cache(
+                        platform=platform,
+                        media_id=media_id,
+                        use_speaker_recognition=task_info["use_speaker_recognition"],
+                    )
+                    if cache_data and self._cache_has_usable_payload(cache_data):
+                        return self._assemble_content_view(
+                            task_info,
+                            cache_data,
+                            display_url,
+                            status="interrupted",
+                        )
                 return {
                     "status": "failed",
                     "title": task_info.get("title", "转录失败"),
@@ -100,47 +210,9 @@ class ViewTokenResolver:
                 )
 
                 if cache_data:
-                    summary_state, summary = self._resolve_summary_state(
-                        task_info, cache_data
+                    return self._assemble_content_view(
+                        task_info, cache_data, display_url, status="success"
                     )
-                    notes_state, notes = self._resolve_notes_state(cache_data)
-                    transcript = cache_data.get("llm_calibrated") or cache_data.get(
-                        "transcript_data", "转录文本获取中..."
-                    )
-                    if not isinstance(transcript, str):
-                        transcript = (
-                            str(transcript)
-                            if transcript is not None
-                            else "转录文本获取中..."
-                        )
-
-                    llm_config = self._cache_manager.get_task_llm_config(
-                        task_info["task_id"]
-                    )
-                    if not llm_config:
-                        llm_config = self._get_llm_config_by_view_token(
-                            task_info["view_token"]
-                        )
-
-                    return {
-                        "status": "success",
-                        "title": cache_data.get("title", ""),
-                        "author": cache_data.get("author", ""),
-                        "description": cache_data.get("description", ""),
-                        "url": display_url,
-                        "summary": summary,
-                        "summary_state": summary_state,
-                        "notes": notes,
-                        "notes_state": notes_state,
-                        "transcript": transcript,
-                        "use_speaker_recognition": cache_data.get(
-                            "use_speaker_recognition", False
-                        ),
-                        "created_at": task_info["created_at"],
-                        "cache_dir": cache_data.get("file_path"),
-                        "llm_config": llm_config,
-                        "platform": cache_data.get("platform", ""),
-                    }
 
                 return {
                     "status": "file_cleaned",
