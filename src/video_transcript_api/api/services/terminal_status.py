@@ -58,10 +58,7 @@ def finalize_terminal_status_and_notify(
     if not send_status_notification:
         return True
 
-    claim = getattr(cache_manager, "claim_pending_terminal_notification", None)
-    if callable(claim) and not claim(task_id):
-        # Dispatcher already owns this row, or Dummy-less claim lost.
-        # Dummy cache managers have no claim method and fall through.
+    if not cache_manager.claim_pending_terminal_notification(task_id):
         return True
 
     if notify_status is None:
@@ -98,9 +95,7 @@ def finalize_terminal_status_and_notify(
         logger.exception(
             f"status notification failed (terminal already persisted): {task_id}"
         )
-    mark = getattr(cache_manager, "mark_terminal_notification_sent", None)
-    if callable(mark):
-        mark(task_id)
+    cache_manager.mark_terminal_notification_sent(task_id)
     return True
 
 

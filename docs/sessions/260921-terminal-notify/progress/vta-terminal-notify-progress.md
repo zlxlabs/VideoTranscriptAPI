@@ -21,4 +21,12 @@
 - 关键决策与已否决方案：中间态文案不用「处理中」，避免 `_get_status_emoji` 里「处理」分支先于「转录完成」把 emoji 打成 🔄。
 - 下一步唯一动作：跑全量 `uv run --extra dev pytest tests/unit tests/features tests/integration -q`，写报告并 push。
 
+## 验收回派 R1
+
+- 当前阶段：review-fix / R1 完成
+- 本段结论：helper 直接调用 `claim_pending_terminal_notification` / `mark_terminal_notification_sent`，删掉 getattr 鸭子类型。DummyCacheManager 用内存 dict 实现这三个方法。
+- 关键决策与已否决方案：否决「claim 缺失时同步直发」——那是静默降级通道。
+- 下一步唯一动作：R2 给终态状态通知加 view 链接，calibrate_only 路径先写红验再实现。
+
+
 
