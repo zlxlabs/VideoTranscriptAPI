@@ -49,6 +49,14 @@
 - 关键决策与已否决方案：主脑拍板有界至少一次，不重新论证至多一次。
 - 下一步唯一动作：R7.3 抑制通知的路径标 sent，避免 dispatcher 补发。
 
+## 验收回派 R7.3
+
+- 当前阶段：review-fix / R7.3 完成
+- 本段结论：send_status_notification=False 时立即 mark sent，HTTP 建行清理路径不会被 dispatcher 补发【任务失败】。
+- 关键决策与已否决方案：不新增列；不改 update_task_status 落库。
+- 下一步唯一动作：全量 pytest 后 push。
+
+
 
 
 
