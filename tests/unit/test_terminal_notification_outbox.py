@@ -501,11 +501,11 @@ class TestBoundedAtLeastOnceReplay:
             deliver_pending_terminal_notifications(cm, router=failing)
         state = _outbox_state(cm, task_id)
         assert state["notified_at"] is None
-        assert state["attempts"] == 5
-        assert cm.count_attempted_terminal_notifications(3) == 1
         assert [r["task_id"] for r in cm.list_unattempted_terminal_notifications()] == [
             task_id
         ]
+        assert state["attempts"] == 5
+        assert cm.count_attempted_terminal_notifications(3) == 1
         replay = _accepted_router()
         assert deliver_pending_terminal_notifications(cm, router=replay) == 1
         replay.notify_task_status.assert_called_once()
