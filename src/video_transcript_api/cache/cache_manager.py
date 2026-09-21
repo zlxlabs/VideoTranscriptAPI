@@ -34,6 +34,7 @@ logger = setup_logger("cache_manager")
 # 5400s（90 分钟）留出余量，宽限期取其 2 倍。
 MAX_EXPECTED_TASK_DURATION_SECONDS = 5400
 RUNTIME_RECONCILE_GRACE_SECONDS = 2 * MAX_EXPECTED_TASK_DURATION_SECONDS
+TERMINAL_NOTIFY_MAX_ATTEMPTS = 3
 
 # 清算路径 SQLite 连接的默认 busy_timeout（毫秒，本地 codex review 第
 # 12 轮 P2 发现 e）：匹配 CacheManager._get_connection() 里 sqlite3.
@@ -2489,27 +2490,27 @@ class CacheManager:
             raise
 
     def list_unattempted_terminal_notifications(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """Pending outbox rows that have never been claimed (attempts=0)."""
+        """Pending outbox rows not marked sent, with attempts < MAX_ATTEMPTS."""
         with self._get_cursor() as cursor:
             cursor.execute(
                 '''SELECT task_id, status, error_message, created_at, completed_at,
                           notified_at, attempts
                    FROM task_terminal_notifications
-                   WHERE notified_at IS NULL AND attempts = 0
+                   WHERE notified_at IS NULL AND attempts < ?
                    ORDER BY created_at ASC
                    LIMIT ?''',
-                (int(limit),),
+                (TERMINAL_NOTIFY_MAX_ATTEMPTS, int(limit)),
             )
             return [dict(row) for row in cursor.fetchall()]
 
     def claim_pending_terminal_notification(self, task_id: str) -> bool:
-        """Claim a pending row (attempts 0->1). True if this caller won."""
+        """Claim a pending row (attempts += 1 if under MAX_ATTEMPTS)."""
         with self._get_cursor() as cursor:
             cursor.execute(
                 '''UPDATE task_terminal_notifications
                    SET attempts = attempts + 1
-                   WHERE task_id = ? AND notified_at IS NULL AND attempts = 0''',
-                (task_id,),
+                   WHERE task_id = ? AND notified_at IS NULL AND attempts < ?''',
+                (task_id, TERMINAL_NOTIFY_MAX_ATTEMPTS),
             )
             return cursor.rowcount == 1
 

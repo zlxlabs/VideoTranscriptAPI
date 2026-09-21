@@ -120,9 +120,11 @@ config.wechat/feishu.webhook     (全局配置)
 
 ## 终态状态通知 outbox
 
-任务写入 `success` / `failed` 且 CAS 获胜时，在同一 SQLite 事务里向 `task_terminal_notifications` 插入一行 pending（`task_id` UNIQUE）。投递线程启动时先扫 `notified_at IS NULL AND attempts = 0` 补发，文案带原始 `completed_at`，避免和刚提交的任务混在一起。
+任务写入 `success` / `failed` 且 CAS 获胜时，在同一 SQLite 事务里向 `task_terminal_notifications` 插入一行 pending（`task_id` UNIQUE）。投递线程启动时先扫 `notified_at IS NULL AND attempts < MAX_ATTEMPTS`（`MAX_ATTEMPTS = 3`）补发，文案带原始 `completed_at`，避免和刚提交的任务混在一起。
 
-两态 `pending → sent`，不做 `sending`。`wecom-notifier` 的 send 是 fire-and-forget 立即返回；claim 时 `attempts` 0→1，若发送已提交但未标 sent 时进程崩溃，**不重发**（至多一次，避免重复「任务完成」）。从未尝试过的 pending 必须补发。
+两态 `pending → sent`，不做 `sending`。`notified_at` **只在发送未抛异常、且路由至少一个渠道返回 True** 时写入。发送抛异常或渠道全 False 不标 sent，留给后续补发。claim 条件与扫描相同（`attempts < 3`）。
+
+这是**有界至少一次**：崩溃或失败窗口内**可能重复一条**终态通知，但不会静默丢失。漏发比重复更糟。超过 3 次仍失败的行停止补发，避免无限打扰。
 
 outbox 不做限流/重试/分段：`wecom-notifier` 是唯一限流权威。outbox 只承载终态**状态**通知（状态行 + 错误 + 查看链接），不把总结/校对/笔记正文搬进表。
 
@@ -136,7 +138,7 @@ outbox 不做限流/重试/分段：`wecom-notifier` 是唯一限流权威。out
 
 ### 投递侧残留风险（本卡不修）
 
-`utils/notifications/wechat.py` 里 `async_send=True` 立即返回，表示已提交到 wecom-notifier 内部队列，不代表已送达。`shutdown_global_notifier()` 不 flush。关闭预算耗尽时 `shutdown_all_notifiers()` 可能被跳过。真实 SIGKILL 窗口靠 outbox 补发覆盖「从未尝试」的 pending，覆盖不了「已提交给 wecom-notifier 但进程被杀」的毫秒级窗口。
+`utils/notifications/wechat.py` 里 `async_send=True` 立即返回，表示已提交到 wecom-notifier 内部队列，不代表已送达。`shutdown_global_notifier()` 不 flush。关闭预算耗尽时 `shutdown_all_notifiers()` 可能被跳过。真实 SIGKILL 窗口：若进程在 wecom-notifier 已接收但 `notified_at` 尚未写入时被杀，重启会按 attempts 再补发（可能重复一条）。覆盖不了 wecom-notifier 内部队列未 flush 的毫秒级窗口。
 
 ## 消息格式
 

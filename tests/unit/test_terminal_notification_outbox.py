@@ -361,3 +361,72 @@ class TestRedDSentRowsAreNotResent:
         assert deliver_pending_terminal_notifications(cm, router=router) == 0
         assert router.notify_task_status.call_count == 1
 
+
+def _outbox_state(cm, task_id):
+    with cm._get_cursor() as cursor:
+        cursor.execute(
+            "SELECT notified_at, attempts FROM task_terminal_notifications "
+            "WHERE task_id = ?",
+            (task_id,),
+        )
+        row = cursor.fetchone()
+    return {"notified_at": row["notified_at"], "attempts": row["attempts"]}
+
+
+class TestBoundedAtLeastOnceReplay:
+    def test_send_exception_leaves_row_replayable(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.PROCESSING)
+        router = MagicMock()
+        router.notify_task_status.side_effect = RuntimeError("webhook down")
+        finalize_terminal_status_and_notify(
+            task_id,
+            TaskStatus.FAILED,
+            error_message="boom",
+            cache_manager=cm,
+            router=router,
+        )
+        state = _outbox_state(cm, task_id)
+        assert state["notified_at"] is None
+        replay = MagicMock()
+        assert deliver_pending_terminal_notifications(cm, router=replay) == 1
+        replay.notify_task_status.assert_called_once()
+
+    def test_all_channels_false_leaves_row_replayable(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.PROCESSING)
+        router = MagicMock()
+        router.notify_task_status.return_value = {"wechat": False, "feishu": False}
+        finalize_terminal_status_and_notify(
+            task_id,
+            TaskStatus.FAILED,
+            error_message="boom",
+            cache_manager=cm,
+            router=router,
+        )
+        state = _outbox_state(cm, task_id)
+        assert state["notified_at"] is None
+        replay = MagicMock()
+        assert deliver_pending_terminal_notifications(cm, router=replay) == 1
+        replay.notify_task_status.assert_called_once()
+
+    def test_exhausted_attempts_are_not_replayed(self, cm):
+        from src.video_transcript_api.cache.cache_manager import (
+            TERMINAL_NOTIFY_MAX_ATTEMPTS,
+        )
+
+        task_id = _new_task(cm)
+        cm.update_task_status(
+            task_id, TaskStatus.FAILED, error_message="boom",
+        )
+        failing = MagicMock()
+        failing.notify_task_status.side_effect = RuntimeError("down")
+        for _ in range(TERMINAL_NOTIFY_MAX_ATTEMPTS):
+            deliver_pending_terminal_notifications(cm, router=failing)
+        state = _outbox_state(cm, task_id)
+        assert state["notified_at"] is None
+        assert state["attempts"] == TERMINAL_NOTIFY_MAX_ATTEMPTS
+        replay = MagicMock()
+        assert deliver_pending_terminal_notifications(cm, router=replay) == 0
+        replay.notify_task_status.assert_not_called()
+

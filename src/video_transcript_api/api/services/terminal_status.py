@@ -83,8 +83,9 @@ def finalize_terminal_status_and_notify(
             author = task.get("author")
     view_url = _resolve_view_url(cache_manager, task_id, task)
 
+    accepted = False
     try:
-        _emit_status_notification(
+        result = _emit_status_notification(
             display_url=display_url or "",
             notify_status=notify_status,
             error_for_notify=error_for_notify,
@@ -96,11 +97,13 @@ def finalize_terminal_status_and_notify(
             notify_via=notify_via,
             view_url=view_url,
         )
+        accepted = _notification_accepted(result)
     except Exception:
         logger.exception(
             f"status notification failed (terminal already persisted): {task_id}"
         )
-    cache_manager.mark_terminal_notification_sent(task_id)
+    if accepted:
+        cache_manager.mark_terminal_notification_sent(task_id)
     return True
 
 
@@ -119,7 +122,7 @@ def _emit_status_notification(
 ) -> None:
     """Dispatch the status line through a bound notifier or the router."""
     if notify_via is not None:
-        notify_via.notify_task_status(
+        return notify_via.notify_task_status(
             display_url,
             notify_status,
             error_for_notify,
@@ -127,10 +130,9 @@ def _emit_status_notification(
             author,
             view_url=view_url,
         )
-        return
 
     sender = router if router is not None else get_notification_router()
-    sender.notify_task_status(
+    return sender.notify_task_status(
         url=display_url,
         status=notify_status,
         error=error_for_notify,
@@ -140,6 +142,13 @@ def _emit_status_notification(
         webhooks=webhooks,
         view_url=view_url,
     )
+
+
+def _notification_accepted(result) -> bool:
+    """True if send did not refuse every channel. Dummy/MagicMock count as accepted."""
+    if isinstance(result, dict):
+        return any(bool(value) for value in result.values())
+    return result is not False
 
 
 DISPATCH_POLL_SECONDS = 0.5
@@ -180,8 +189,9 @@ def deliver_pending_terminal_notifications(
         error_for_notify = _compose_dispatcher_error(row, task)
         webhooks = _resolve_delivery_webhooks(task)
         view_url = _resolve_view_url(cache_manager, task_id, task)
+        accepted = False
         try:
-            router.notify_task_status(
+            result = router.notify_task_status(
                 url=task.get("url") or "",
                 status=notify_status,
                 error=error_for_notify,
@@ -190,12 +200,14 @@ def deliver_pending_terminal_notifications(
                 webhooks=webhooks,
                 view_url=view_url,
             )
+            accepted = _notification_accepted(result)
         except Exception:
             logger.exception(
                 f"dispatcher status notification failed: {task_id}"
             )
-        cache_manager.mark_terminal_notification_sent(task_id)
-        sent += 1
+        if accepted:
+            cache_manager.mark_terminal_notification_sent(task_id)
+            sent += 1
     return sent
 
 
