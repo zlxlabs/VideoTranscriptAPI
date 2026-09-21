@@ -227,8 +227,9 @@ def test_notes_task_only_adds_notes_layer(notes_cache):
     long_text_call = notification_router.send_long_text.call_args.kwargs
     assert long_text_call["title"] == "Notes demo"
     assert "详细笔记已生成" in long_text_call["text"]
-    notification_router.send_text.assert_called_once()
-    assert "详细笔记已生成" in notification_router.send_text.call_args.args[0]
+    notification_router.notify_task_status.assert_called()
+    terminal_kwargs = notification_router.notify_task_status.call_args.kwargs
+    assert terminal_kwargs.get("status") == "【任务完成】"
 
     for name, path in protected_files.items():
         with open(path, "rb") as artifact_file:
@@ -273,7 +274,10 @@ def test_notes_task_failure_writes_failed_status_without_artifact(notes_cache):
         == TaskStatus.FAILED
     )
     notification_router.send_long_text.assert_not_called()
-    notification_router.send_text.assert_called_once()
+    notification_router.notify_task_status.assert_called()
+    fail_kwargs = notification_router.notify_task_status.call_args.kwargs
+    assert fail_kwargs.get("status") == "【任务失败】"
+    assert "【LLM API调用异常】" in (fail_kwargs.get("error") or "")
 
 
 def test_notes_task_discards_result_when_chapters_change_before_persist(

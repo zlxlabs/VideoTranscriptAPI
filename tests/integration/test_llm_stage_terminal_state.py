@@ -176,9 +176,11 @@ class TestLlmTaskFailedWriteReraises:
         # task_done() must still fire from the outer `finally:` even though
         # the terminal write raised and the exception propagated past it.
         task_queue.task_done.assert_called_once()
-        # The best-effort failure notification must still be attempted
-        # (moved into a `finally` alongside the re-raise, see the fix).
-        router.send_text.assert_called_once()
+        # Terminal write never landed, so the status-notify helper must not
+        # send a failure message (CAS did not win). The previous finally
+        # block sent 【LLM API调用异常】 even on a failed write.
+        router.send_text.assert_not_called()
+        router.notify_task_status.assert_not_called()
         # The task row itself must still show calibrating (not failed) --
         # proof the terminal write genuinely never landed, which is exactly
         # why observability (the re-raise) matters here.
@@ -369,11 +371,11 @@ class TestLlmStageFailureNotificationExceptionDoesNotStarveTerminalState:
 
     def test_failure_notification_exception_does_not_prevent_failed_cas(self, cm):
         task_id = _calibrating_task(cm)
-        # task_notifier.send_text proxies to router_mock.send_text -- raising
-        # here reproduces the webhook-timeout/rate-limit failure mode this
-        # fix must survive.
+        # Status notify now goes through notify_task_status. Raising here
+        # reproduces the webhook-timeout/rate-limit failure mode this fix
+        # must survive.
         router_mock = MagicMock()
-        router_mock.send_text.side_effect = RuntimeError("webhook timeout")
+        router_mock.notify_task_status.side_effect = RuntimeError("webhook timeout")
 
         self._run(cm, task_id, router_mock)
 
@@ -384,7 +386,7 @@ class TestLlmStageFailureNotificationExceptionDoesNotStarveTerminalState:
         assert "boom" in (row["error_message"] or "")
         # The notification was attempted (and its exception swallowed) --
         # not skipped entirely.
-        router_mock.send_text.assert_called_once()
+        router_mock.notify_task_status.assert_called_once()
 
     def test_failure_notification_still_sent_on_normal_failure(self, cm):
         """Sanity/regression companion: the reorder must not accidentally
@@ -397,8 +399,10 @@ class TestLlmStageFailureNotificationExceptionDoesNotStarveTerminalState:
 
         row = cm.get_task_by_id(task_id)
         assert row["status"] == "failed"
-        router_mock.send_text.assert_called_once()
-        assert "【LLM API调用异常】" in router_mock.send_text.call_args.args[0]
+        router_mock.notify_task_status.assert_called_once()
+        notify_kwargs = router_mock.notify_task_status.call_args.kwargs
+        assert notify_kwargs.get("status") == "【任务失败】"
+        assert "【LLM API调用异常】" in (notify_kwargs.get("error") or "")
 
 
 class _ScriptedQueue:

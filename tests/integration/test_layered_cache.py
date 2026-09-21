@@ -1847,7 +1847,12 @@ class TestFullHitCasLossSuppressesNotification:
 
         assert result["status"] == "success"
         notification_router.send_long_text.assert_called_once()
-        notification_router.send_text.assert_called_once()
+        terminal_status_calls = [
+            call for call in notification_router.notify_task_status.call_args_list
+            if call.kwargs.get("status") == "【任务完成】"
+            or (len(call.args) > 1 and call.args[1] == "【任务完成】")
+        ]
+        assert len(terminal_status_calls) == 1
 
 
 class TestFullHitNotificationExceptionDoesNotFailTask:
@@ -1921,7 +1926,16 @@ class TestFullHitNotificationExceptionDoesNotFailTask:
         monkeypatch.setattr(transcription, "cache_manager", cache_manager)
 
         notification_router = MagicMock()
-        notification_router.send_text.side_effect = RuntimeError("webhook timeout")
+
+        def _raise_on_terminal_status(*args, **kwargs):
+            status = kwargs.get("status")
+            if status is None and len(args) > 1:
+                status = args[1]
+            if status == "【任务完成】":
+                raise RuntimeError("webhook timeout")
+            return True
+
+        notification_router.notify_task_status.side_effect = _raise_on_terminal_status
         monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)
 
         result = transcription.process_transcription(

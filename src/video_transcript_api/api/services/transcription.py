@@ -93,6 +93,7 @@ from ...utils.rendering import get_base_url
 from ...utils.perf_tracker import PerfTracker
 from ...utils.task_status import TaskStatus
 from ...utils.llm_status import CalibrationStatus, SummaryStatus
+from .terminal_status import finalize_terminal_status_and_notify
 
 logger = lazy_resource(get_logger)
 config = lazy_resource(get_config)
@@ -473,14 +474,16 @@ async def process_task_queue():
                         logger.exception(
                             f"任务处理失败: {task_id}, URL: {url}, 错误: {exc}"
                         )
-                        cache_manager.update_task_status(
-                            task_id, TaskStatus.FAILED,
+                        finalize_terminal_status_and_notify(
+                            task_id,
+                            TaskStatus.FAILED,
                             error_message=f"转录任务失败: {exc}",
-                        )
-                        get_notification_router().notify_task_status(
-                            url=url, status="转录失败", error=str(exc),
+                            url=url,
+                            notify_error=str(exc),
                             channel_name=notification_channel,
                             webhooks=notification_webhooks,
+                            cache_manager=cache_manager,
+                            router=get_notification_router(),
                         )
 
                 future = executor.submit(
@@ -534,9 +537,15 @@ async def process_task_queue():
                 # finally 保护，重新抛出不会破坏队列记账，可以采用与其它
                 # 站点一致的"清理后重抛"。
                 try:
-                    cache_manager.update_task_status(
-                        task_id, TaskStatus.FAILED,
+                    finalize_terminal_status_and_notify(
+                        task_id,
+                        TaskStatus.FAILED,
                         error_message=f"提交任务失败: {exc}",
+                        url=url,
+                        channel_name=notification_channel,
+                        webhooks=notification_webhooks,
+                        cache_manager=cache_manager,
+                        router=get_notification_router(),
                     )
                 except Exception:
                     logger.exception(f"提交失败后写入 failed 终态异常: {task_id}")
@@ -644,9 +653,12 @@ def _handoff_to_llm_stage(
             f"{task_id}, 错误: {status_exc}"
         )
         try:
-            cache_manager.update_task_status(
-                task_id, TaskStatus.FAILED,
+            finalize_terminal_status_and_notify(
+                task_id,
+                TaskStatus.FAILED,
                 error_message=f"任务状态写入异常: {status_exc}",
+                cache_manager=cache_manager,
+                notify_via=task_notifier,
             )
         except Exception:
             # G1 修复（CI review 第 2 轮 major）：此前这里只记日志、不重新
@@ -711,9 +723,13 @@ def _handoff_to_llm_stage(
         # 还反过来锁死了"通知异常会传播"这个错误行为，本次一并修正（见
         # tests/features/test_transcription_flow_regression.py）。
         try:
-            fail_status_written = cache_manager.update_task_status(
-                task_id, TaskStatus.FAILED,
+            fail_status_written = finalize_terminal_status_and_notify(
+                task_id,
+                TaskStatus.FAILED,
                 error_message=f"LLM任务加入队列失败: {exc}",
+                notify_error=f"【LLM任务加入队列失败】{exc}",
+                cache_manager=cache_manager,
+                notify_via=task_notifier,
             )
         except Exception:
             # G1 修复（CI review 第 2 轮 major）：此前这里只记日志、不重新
@@ -735,17 +751,7 @@ def _handoff_to_llm_stage(
             raise
 
         if fail_status_written:
-            # M1 修复（PR3 review hardening 收尾轮）：CAS==True 才是本次调用的
-            # 真正胜者——只有这个分支能确定"是本次把任务写成 failed 的"，失败
-            # 通知严格只挂在这里。
             logger.info(f"任务状态已更新为 failed（{log_context}）: {task_id}")
-            try:
-                task_notifier.send_text(f"【LLM任务加入队列失败】{exc}")
-            except Exception:
-                logger.exception(
-                    f"入队失败通知发送失败（任务终态已落库，不影响任务结果，"
-                    f"{log_context}）: {task_id}"
-                )
             return {"status": "failed", "message": f"LLM任务加入队列失败: {exc}"}
 
         # M1 修复（PR3 review hardening 收尾轮）：CAS 返回 False 只代表"这次
@@ -898,27 +904,23 @@ def process_transcription(
                 False 且既有终态已是 success 时为 {"status": "success",
                 ...}；CAS 写入抛异常则不返回，异常向上传播。"""
             try:
-                fail_status_written = cache_manager.update_task_status(
-                    task_id, TaskStatus.FAILED,
-                    download_url=download_url, error_message=error_msg,
+                fail_status_written = finalize_terminal_status_and_notify(
+                    task_id,
+                    TaskStatus.FAILED,
+                    download_url=download_url,
+                    error_message=error_msg,
+                    url=display_url,
+                    title=title,
+                    author=author_name,
+                    cache_manager=cache_manager,
+                    notify_via=task_notifier,
                 )
             except Exception:
                 logger.exception(f"收敛 failed 终态写入异常: {task_id} ({error_msg})")
                 raise
 
             if fail_status_written:
-                # M1 修复（PR3 review hardening 收尾轮）：CAS==True 才是本次调用
-                # 的真正胜者，失败通知严格只挂在这里。
                 logger.info(f"任务状态已更新为 failed: {task_id} ({error_msg})")
-                try:
-                    task_notifier.notify_task_status(
-                        display_url, notify_status, error_msg,
-                        title=title, author=author_name,
-                    )
-                except Exception:
-                    logger.exception(
-                        f"失败通知发送失败（任务终态已落库，不影响任务结果）: {task_id}"
-                    )
                 return {"status": "failed", "message": error_msg}
 
             # M1 修复（PR3 review hardening 收尾轮）：CAS 返回 False 无法区分
@@ -1367,13 +1369,14 @@ def process_transcription(
                 # 通知、再写 CAS 且忽略返回值——CAS 落败时用户已经收到了通知，
                 # 日志却从不提示矛盾。改为先写、检查结果，只有真正赢得
                 # 终态写入时才发送。
-                status_written = cache_manager.update_task_status(
+                status_written = finalize_terminal_status_and_notify(
                     task_id,
                     TaskStatus.SUCCESS,
-                    platform=cache_data.get("platform"),
-                    media_id=cache_data.get("media_id"),
+                    url=display_url,
                     title=video_title,
                     author=author,
+                    platform=cache_data.get("platform"),
+                    media_id=cache_data.get("media_id"),
                     cache_id=cache_data.get("cache_id"),
                     download_url=download_url,
                     calibration_status=mirrored_calibration_status,
@@ -1387,6 +1390,8 @@ def process_transcription(
                         "summary_status": mirrored_summary_status,
                         "processing_options": processing_options,
                     },
+                    cache_manager=cache_manager,
+                    notify_via=task_notifier,
                 )
 
                 if not status_written:
@@ -1408,7 +1413,8 @@ def process_transcription(
                     # 本身的异常：通知失败只记日志，不影响已经写定的
                     # success 任务结果，也不会误触发失败通知。
                     try:
-                        # 发送（跳过自动添加的内容类型标题）
+                        # Content body only. Terminal status notify is emitted
+                        # by finalize_terminal_status_and_notify on CAS win.
                         _router.send_long_text(
                             title=video_title,
                             url=display_url,
@@ -1419,26 +1425,6 @@ def process_transcription(
                             webhooks=notification_webhooks,
                             skip_content_type_header=True,
                         )
-
-                        # 确保总结文本完全加入队列后再发送完成通知
-                        logger.info("[缓存模式] 总结文本发送完成，延迟100ms后发送完成通知")
-                        time.sleep(0.1)
-
-                        # 发送任务完成通知，包含查看链接
-                        task_info = cache_manager.get_task_by_id(task_id)
-                        if task_info and task_info.get("view_token"):
-                            base_url = get_base_url()
-                            view_url = f"{base_url}/view/{task_info['view_token']}"
-
-                            from ...utils.notifications.channel import _apply_risk_control_safe
-                            clean = _clean_url(display_url)
-                            sanitized_title = _apply_risk_control_safe(video_title, text_type="title")
-
-                            completion_message = f"# {sanitized_title}\n\n{clean}\n\n🔗 总结和校对：\n{view_url}\n\n✅ **【任务完成】**"
-                            logger.info(f"[缓存模式] 准备发送任务完成通知: {sanitized_title}")
-                            task_notifier.send_text(completion_message, skip_risk_control=True)
-                            logger.info(f"[缓存模式] 任务完成通知已加入限流队列: {task_id}")
-
                         logger.info(f"已发送缓存的 LLM 结果: {video_title}")
                     except Exception:
                         logger.exception(
@@ -2480,21 +2466,23 @@ def process_transcription(
         # 行为不变、可观测性补齐，且与 _handoff_to_llm_stage /
         # _fail_task_and_notify 两处站点统一。
         try:
-            failed_status_written = cache_manager.update_task_status(
-                task_id, TaskStatus.FAILED, download_url=download_url,
+            failed_status_written = finalize_terminal_status_and_notify(
+                task_id,
+                TaskStatus.FAILED,
+                download_url=download_url,
                 error_message=f"转录任务异常: {exc}",
+                url=display_url,
+                notify_error=str(exc),
+                channel_name=notification_channel,
+                webhooks=notification_webhooks,
+                cache_manager=cache_manager,
+                router=get_notification_router(),
             )
         except Exception:
             logger.exception(f"收敛 failed 终态写入异常: {task_id}")
             raise
 
         if failed_status_written:
-            # M1 修复（PR3 review hardening 收尾轮）：CAS==True 才是本次调用的
-            # 真正胜者，失败通知严格只挂在这里。
-            get_notification_router().notify_task_status(
-                url=display_url, status="转录异常", error=str(exc),
-                channel_name=notification_channel, webhooks=notification_webhooks,
-            )
             return {
                 "status": "failed",
                 "message": f"转录任务异常: {exc}",

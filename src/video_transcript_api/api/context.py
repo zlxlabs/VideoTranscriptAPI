@@ -1673,9 +1673,13 @@ def _retry_terminal_write_pending(cache_manager, task_ids: set[str], logger) -> 
     still_pending = set()
     for task_id in task_ids:
         try:
-            cache_manager.update_task_status(
-                task_id, TaskStatus.FAILED,
+            from .services.terminal_status import finalize_terminal_status_and_notify
+
+            finalize_terminal_status_and_notify(
+                task_id,
+                TaskStatus.FAILED,
                 error_message="LLM 任务提交失败，终态写入曾经失败，已由运行期维护补偿写入",
+                cache_manager=cache_manager,
             )
         except Exception:
             logger.exception(
