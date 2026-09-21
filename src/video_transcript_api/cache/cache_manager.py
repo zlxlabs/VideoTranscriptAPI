@@ -34,8 +34,6 @@ logger = setup_logger("cache_manager")
 # 5400s（90 分钟）留出余量，宽限期取其 2 倍。
 MAX_EXPECTED_TASK_DURATION_SECONDS = 5400
 RUNTIME_RECONCILE_GRACE_SECONDS = 2 * MAX_EXPECTED_TASK_DURATION_SECONDS
-TERMINAL_NOTIFY_MAX_ATTEMPTS = 3
-TERMINAL_NOTIFY_TAKEOVER_LEASE_SECONDS = 120
 
 # 清算路径 SQLite 连接的默认 busy_timeout（毫秒，本地 codex review 第
 # 12 轮 P2 发现 e）：匹配 CacheManager._get_connection() 里 sqlite3.
@@ -127,7 +125,6 @@ class CacheManager:
         # 使用线程本地存储来管理数据库连接
         self._local = threading.local()
         self.audit_logger = None
-        self.terminal_notification_owner = uuid.uuid4().hex
 
         # 按 (platform, media_id) 粒度的进程内锁池，保护缓存产物（llm_status.json
         # 的读-改-写，以及分层缓存"层是否已存在"的判定 + 写入，见 media_lock()
@@ -359,9 +356,7 @@ class CacheManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     completed_at TIMESTAMP,
                     notified_at TIMESTAMP,
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    claimed_owner TEXT,
-                    claimed_at TIMESTAMP
+                    attempts INTEGER NOT NULL DEFAULT 0
                 )
             ''')
             cursor.execute(
@@ -454,22 +449,6 @@ class CacheManager:
                 for column in ("processing_options", "submitted_by", "terminal_snapshot"):
                     if column not in columns:
                         cursor.execute(f"ALTER TABLE task_status ADD COLUMN {column} TEXT")
-
-                cursor.execute("PRAGMA table_info(task_terminal_notifications)")
-                terminal_notification_columns = [
-                    col[1] for col in cursor.fetchall()
-                ]
-                if 'claimed_owner' not in terminal_notification_columns:
-                    cursor.execute(
-                        "ALTER TABLE task_terminal_notifications "
-                        "ADD COLUMN claimed_owner TEXT"
-                    )
-                    terminal_notification_columns.append('claimed_owner')
-                if 'claimed_at' not in terminal_notification_columns:
-                    cursor.execute(
-                        "ALTER TABLE task_terminal_notifications "
-                        "ADD COLUMN claimed_at TIMESTAMP"
-                    )
 
                 # 迁移7: 章节梗概诚实状态（ChaptersStatus）镜像列，供 history 透出。
                 cursor.execute("PRAGMA table_info(task_status)")
@@ -2345,6 +2324,7 @@ class CacheManager:
                           chapters_status: str = None,
                           terminal_snapshot: Optional[dict] = None,
                           skip_archive: bool = False,
+                          suppress_terminal_notification: bool = False,
                           progress: Optional[dict] = None) -> bool:
         """
         更新任务状态
@@ -2376,6 +2356,11 @@ class CacheManager:
                 None 表示不更新该列。
             chapters_status: ChaptersStatus 取值，None 表示不更新该列。
             progress: 详细笔记生成进度对象，按 JSON 文本写入；None 表示不更新该列。
+            suppress_terminal_notification: 为 True 时，本次终态写入**不产生**
+                task_terminal_notifications 行（I6：抑制在写入期决定）。调用方
+                （HTTP 建行后清理路径）据此表达「这个终态不该通知用户」；
+                写完之后 DB 里没有任何可投递的行，不存在「先插 pending 再标
+                sent」那个自找的崩溃窗口。
             skip_archive: 为 True 时跳过终态写入附带的同步审计快照归档
                 （archive_task_snapshot）。默认 False 与原有行为一致：正常终态写入
                 仍同步归档，保证 /api/audit/history 等查询可以立即看到
@@ -2475,7 +2460,7 @@ class CacheManager:
                     )
                 else:
                     logger.info(f"任务状态更新: {task_id} -> {status}")
-                    if status in (TaskStatus.SUCCESS, TaskStatus.FAILED):
+                    if status in (TaskStatus.SUCCESS, TaskStatus.FAILED) and not suppress_terminal_notification:
                         cursor.execute(
                             '''INSERT INTO task_terminal_notifications
                                (task_id, status, error_message, completed_at)
@@ -2510,73 +2495,50 @@ class CacheManager:
             raise
 
     def list_unattempted_terminal_notifications(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """List pending rows available to this process."""
-        takeover_cutoff = (
-            datetime.datetime.utcnow()
-            - datetime.timedelta(seconds=TERMINAL_NOTIFY_TAKEOVER_LEASE_SECONDS)
-        ).strftime("%Y-%m-%d %H:%M:%S")
+        """List every not-yet-sent row (I4: no row may be hidden by a predicate)."""
         with self._get_cursor() as cursor:
             cursor.execute(
                 '''SELECT task_id, status, error_message, created_at, completed_at,
-                          notified_at, attempts, claimed_owner, claimed_at
+                          notified_at, attempts
                    FROM task_terminal_notifications
-                   WHERE notified_at IS NULL AND attempts < ?
-                     AND (claimed_owner IS NULL OR (claimed_owner != ? AND (claimed_at IS NULL OR claimed_at <= ?)))
+                   WHERE notified_at IS NULL
                    ORDER BY created_at ASC
                    LIMIT ?''',
-                (
-                    TERMINAL_NOTIFY_MAX_ATTEMPTS,
-                    self.terminal_notification_owner,
-                    takeover_cutoff,
-                    int(limit),
-                ),
+                (int(limit),),
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def claim_pending_terminal_notification(self, task_id: str) -> bool:
-        """Claim a pending row not owned by this process within its lease."""
-        takeover_cutoff = (
-            datetime.datetime.utcnow()
-            - datetime.timedelta(seconds=TERMINAL_NOTIFY_TAKEOVER_LEASE_SECONDS)
-        ).strftime("%Y-%m-%d %H:%M:%S")
+    def count_attempted_terminal_notifications(self, threshold: int) -> int:
+        """Count still-unsent rows whose attempts already reached threshold.
+
+        Observation only: used to log a warning (I4 forbids hiding them).
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                '''SELECT COUNT(*) FROM task_terminal_notifications
+                   WHERE notified_at IS NULL AND attempts >= ?''',
+                (int(threshold),),
+            )
+            return int(cursor.fetchone()[0])
+
+    def mark_terminal_notification_attempted(self, task_id: str) -> None:
+        """Increment attempts before a delivery attempt (observation counter)."""
         with self._get_cursor() as cursor:
             cursor.execute(
                 '''UPDATE task_terminal_notifications
-                   SET claimed_at = CURRENT_TIMESTAMP,
-                       attempts = attempts + 1, claimed_owner = ?
-                   WHERE task_id = ? AND notified_at IS NULL AND attempts < ?
-                     AND (claimed_owner IS NULL OR (claimed_owner != ? AND (claimed_at IS NULL OR claimed_at <= ?)))''',
-                (
-                    self.terminal_notification_owner,
-                    task_id,
-                    TERMINAL_NOTIFY_MAX_ATTEMPTS,
-                    self.terminal_notification_owner,
-                    takeover_cutoff,
-                ),
+                   SET attempts = attempts + 1
+                   WHERE task_id = ? AND notified_at IS NULL''',
+                (task_id,),
             )
-            return cursor.rowcount == 1
 
     def mark_terminal_notification_sent(self, task_id: str) -> None:
-        """Set notified_at after the notifier accepted the send."""
+        """Set notified_at after the notifier accepted the send (I5)."""
         with self._get_cursor() as cursor:
             cursor.execute(
                 '''UPDATE task_terminal_notifications
-                   SET notified_at = CURRENT_TIMESTAMP, claimed_owner = NULL,
-                       claimed_at = NULL
-                   WHERE task_id = ? AND notified_at IS NULL
-                     AND claimed_owner = ?''',
-                (task_id, self.terminal_notification_owner),
-            )
-
-    def release_terminal_notification_claim(self, task_id: str) -> None:
-        """Release a failed send claim without changing its attempt count."""
-        with self._get_cursor() as cursor:
-            cursor.execute(
-                '''UPDATE task_terminal_notifications
-                   SET claimed_owner = NULL, claimed_at = NULL
-                   WHERE task_id = ? AND notified_at IS NULL
-                     AND claimed_owner = ?''',
-                (task_id, self.terminal_notification_owner),
+                   SET notified_at = CURRENT_TIMESTAMP
+                   WHERE task_id = ? AND notified_at IS NULL''',
+                (task_id,),
             )
 
     def update_task_progress(self, task_id: str, progress: dict) -> bool:

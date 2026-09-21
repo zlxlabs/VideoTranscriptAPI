@@ -24,7 +24,6 @@ from src.video_transcript_api.api.services.terminal_status import (
 )
 from src.video_transcript_api.cache.cache_manager import (
     CacheManager,
-    TERMINAL_NOTIFY_TAKEOVER_LEASE_SECONDS,
 )
 from src.video_transcript_api.utils.task_status import TaskStatus
 
@@ -289,22 +288,21 @@ class TestOutboxSchema:
                     (task_id, "failed"),
                 )
 
-    def test_outbox_schema_migrates_claimed_owner(self, tmp_path):
-        cache_dir = tmp_path / "cache"
-        manager = CacheManager(cache_dir=str(cache_dir))
-        with manager._get_cursor() as cursor:
-            cursor.execute("ALTER TABLE task_terminal_notifications DROP COLUMN claimed_owner")
-        manager.close()
-
-        migrated = CacheManager(cache_dir=str(cache_dir))
+    def test_outbox_schema_has_no_owner_columns(self, tmp_path):
+        # I2/history lock: the owner+lease fields were deleted with the claim
+        # mutex. A fresh database must not carry them, and a legacy database
+        # keeping the old columns is harmless (code no longer reads them).
+        manager = CacheManager(cache_dir=str(tmp_path / "cache"))
         try:
-            with migrated._get_cursor() as cursor:
+            with manager._get_cursor() as cursor:
                 cursor.execute("PRAGMA table_info(task_terminal_notifications)")
                 columns = [row[1] for row in cursor.fetchall()]
-            assert "claimed_owner" in columns
-            assert "claimed_at" in columns
         finally:
-            migrated.close()
+            manager.close()
+        assert columns == [
+            "task_id", "status", "error_message", "created_at",
+            "completed_at", "notified_at", "attempts",
+        ]
 
 
 def _assert_one_pending_and_one_notify(cm, task_id, router, *, reason):
@@ -392,7 +390,7 @@ class TestRedDSentRowsAreNotResent:
 def _outbox_state(cm, task_id):
     with cm._get_cursor() as cursor:
         cursor.execute(
-            "SELECT notified_at, attempts, claimed_owner, claimed_at "
+            "SELECT notified_at, attempts "
             "FROM task_terminal_notifications "
             "WHERE task_id = ?",
             (task_id,),
@@ -401,128 +399,26 @@ def _outbox_state(cm, task_id):
     return {
         "notified_at": row["notified_at"],
         "attempts": row["attempts"],
-        "claimed_owner": row["claimed_owner"],
-        "claimed_at": row["claimed_at"],
     }
 
 
-class TestTerminalNotificationOwnership:
-    def test_claim_is_exclusive_for_same_owner(self, cm):
+class TestSerialDeliveryIsExclusive:
+    """History lock for the deleted claim mutex (rounds 3/4/5 findings).
+
+    Mutual exclusion now comes from single-threaded serial delivery: the same
+    row cannot be sent twice in one pass, and a second pass after mark-sent
+    finds nothing. No owner/lease predicate is involved.
+    """
+
+    def test_row_is_delivered_once_per_pass_and_never_again(self, cm):
         task_id = _new_task(cm)
         cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
-
-        assert cm.claim_pending_terminal_notification(task_id) is True
-        assert cm.claim_pending_terminal_notification(task_id) is False
-        assert cm.list_unattempted_terminal_notifications() == []
-
-        state = _outbox_state(cm, task_id)
-        assert state["attempts"] == 1
-        assert state["claimed_owner"] == cm.terminal_notification_owner
-
-    def test_old_owner_cannot_release_new_owner(self, cm):
-        task_id = _new_task(cm)
-        cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
-        cm.terminal_notification_owner = "owner-a"
-        assert cm.claim_pending_terminal_notification(task_id) is True
-        with cm._get_cursor() as cursor:
-            cursor.execute(
-                "UPDATE task_terminal_notifications SET claimed_owner = ? "
-                "WHERE task_id = ?",
-                ("owner-b", task_id),
-            )
-        cm.release_terminal_notification_claim(task_id)
-        state = _outbox_state(cm, task_id)
-        assert state["claimed_owner"] == "owner-b"
-        assert state["attempts"] == 1
-
-    def test_active_other_owner_claim_cannot_be_reclaimed(self, cm):
-        task_id = _new_task(cm)
-        cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
-        active_claimed_at = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-        with cm._get_cursor() as cursor:
-            cursor.execute(
-                "UPDATE task_terminal_notifications "
-                "SET claimed_owner = ?, claimed_at = ? WHERE task_id = ?",
-                ("previous-process", active_claimed_at, task_id),
-            )
-
-        assert cm.claim_pending_terminal_notification(task_id) is False
-        assert cm.list_unattempted_terminal_notifications() == []
-
-    def test_expired_other_owner_can_be_reclaimed_and_dispatched_once(self, cm):
-        task_id = _new_task(cm)
-        cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
-        expired_claimed_at = (
-            datetime.datetime.utcnow()
-            - datetime.timedelta(
-                seconds=TERMINAL_NOTIFY_TAKEOVER_LEASE_SECONDS + 1
-            )
-        ).strftime("%Y-%m-%d %H:%M:%S")
-        with cm._get_cursor() as cursor:
-            cursor.execute(
-                "UPDATE task_terminal_notifications "
-                "SET claimed_owner = ?, claimed_at = ? WHERE task_id = ?",
-                ("previous-process", expired_claimed_at, task_id),
-            )
-        router = MagicMock()
-        router.notify_task_status.return_value = {"wechat": True}
-        assert [row["task_id"] for row in cm.list_unattempted_terminal_notifications()] == [
-            task_id
-        ]
-        assert deliver_pending_terminal_notifications(cm, router=router) == 1
-        router.notify_task_status.assert_called_once()
-
-    def test_missing_claim_timestamp_is_listed_and_reclaimable(self, cm):
-        task_id = _new_task(cm)
-        cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
-        with cm._get_cursor() as cursor:
-            cursor.execute(
-                "UPDATE task_terminal_notifications "
-                "SET claimed_owner = ?, claimed_at = NULL, attempts = 0, "
-                "notified_at = NULL WHERE task_id = ?",
-                ("previous-process", task_id),
-            )
-
-        pending = cm.list_unattempted_terminal_notifications()
-        assert [row["task_id"] for row in pending] == [task_id]
-        assert pending[0]["claimed_at"] is None
-        assert cm.claim_pending_terminal_notification(task_id) is True
-
-    def test_missing_claim_timestamp_is_dispatched_once(self, cm):
-        task_id = _new_task(cm)
-        cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
-        with cm._get_cursor() as cursor:
-            cursor.execute(
-                "UPDATE task_terminal_notifications "
-                "SET claimed_owner = ?, claimed_at = NULL, attempts = 0, "
-                "notified_at = NULL WHERE task_id = ?",
-                ("previous-process", task_id),
-            )
-
         router = _accepted_router()
+
         assert deliver_pending_terminal_notifications(cm, router=router) == 1
+        assert cm.list_unattempted_terminal_notifications() == []
         assert deliver_pending_terminal_notifications(cm, router=router) == 0
         router.notify_task_status.assert_called_once()
-
-    def test_same_owner_cannot_reclaim_even_after_lease_expires(self, cm):
-        task_id = _new_task(cm)
-        cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
-        assert cm.claim_pending_terminal_notification(task_id) is True
-        expired_claimed_at = (
-            datetime.datetime.utcnow()
-            - datetime.timedelta(
-                seconds=TERMINAL_NOTIFY_TAKEOVER_LEASE_SECONDS + 1
-            )
-        ).strftime("%Y-%m-%d %H:%M:%S")
-        with cm._get_cursor() as cursor:
-            cursor.execute(
-                "UPDATE task_terminal_notifications SET claimed_at = ? "
-                "WHERE task_id = ?",
-                (expired_claimed_at, task_id),
-            )
-
-        assert cm.claim_pending_terminal_notification(task_id) is False
-        assert cm.list_unattempted_terminal_notifications() == []
 
 
 class TestNotificationAcceptance:
@@ -556,7 +452,7 @@ class TestNotificationAcceptance:
 
 
 class TestBoundedAtLeastOnceReplay:
-    def test_send_exception_leaves_row_replayable(self, cm):
+    def test_i5_send_exception_leaves_row_replayable(self, cm):
         task_id = _new_task(cm)
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
         router = MagicMock()
@@ -570,14 +466,12 @@ class TestBoundedAtLeastOnceReplay:
         )
         state = _outbox_state(cm, task_id)
         assert state["notified_at"] is None
-        assert state["claimed_owner"] is None
-        assert state["claimed_at"] is None
         assert state["attempts"] == 1
         replay = _accepted_router()
         assert deliver_pending_terminal_notifications(cm, router=replay) == 1
         replay.notify_task_status.assert_called_once()
 
-    def test_all_channels_false_leaves_row_replayable(self, cm):
+    def test_i5_all_channels_false_leaves_row_replayable(self, cm):
         task_id = _new_task(cm)
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
         router = MagicMock()
@@ -591,36 +485,35 @@ class TestBoundedAtLeastOnceReplay:
         )
         state = _outbox_state(cm, task_id)
         assert state["notified_at"] is None
-        assert state["claimed_owner"] is None
-        assert state["claimed_at"] is None
         assert state["attempts"] == 1
         replay = _accepted_router()
         assert deliver_pending_terminal_notifications(cm, router=replay) == 1
         replay.notify_task_status.assert_called_once()
 
-    def test_exhausted_attempts_are_not_replayed(self, cm):
-        from src.video_transcript_api.cache.cache_manager import (
-            TERMINAL_NOTIFY_MAX_ATTEMPTS,
-        )
-
+    def test_i4_row_past_any_attempt_threshold_is_still_replayed(self, cm):
+        # Consultant P1: `attempts < 3` used to filter permanently-False rows
+        # out of the listing -> terminal written, zero notices, no trace.
         task_id = _new_task(cm)
-        cm.update_task_status(
-            task_id, TaskStatus.FAILED, error_message="boom",
-        )
+        cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
         failing = MagicMock()
         failing.notify_task_status.side_effect = RuntimeError("down")
-        for _ in range(TERMINAL_NOTIFY_MAX_ATTEMPTS):
+        for _ in range(5):
             deliver_pending_terminal_notifications(cm, router=failing)
         state = _outbox_state(cm, task_id)
         assert state["notified_at"] is None
-        assert state["attempts"] == TERMINAL_NOTIFY_MAX_ATTEMPTS
+        assert state["attempts"] == 5
+        assert cm.count_attempted_terminal_notifications(3) == 1
+        assert [r["task_id"] for r in cm.list_unattempted_terminal_notifications()] == [
+            task_id
+        ]
         replay = _accepted_router()
-        assert deliver_pending_terminal_notifications(cm, router=replay) == 0
-        replay.notify_task_status.assert_not_called()
+        assert deliver_pending_terminal_notifications(cm, router=replay) == 1
+        replay.notify_task_status.assert_called_once()
+        assert _outbox_state(cm, task_id)["notified_at"] is not None
 
 
-class TestSuppressedNotificationIsSettled:
-    def test_http_cleanup_path_is_not_replayed(self, cm):
+class TestI6SuppressedNotificationNeverExists:
+    def test_i6_suppressed_terminal_write_creates_no_outbox_row(self, cm):
         task_id = _new_task(cm)
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
         router = _accepted_router()
@@ -630,9 +523,17 @@ class TestSuppressedNotificationIsSettled:
             error_message="queue full",
             cache_manager=cm,
             router=router,
-            send_status_notification=False,
+            suppress_terminal_notification=True,
         )
         assert written is True
+        assert cm.get_task_by_id(task_id)["status"] == "failed"
+        with cm._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM task_terminal_notifications "
+                "WHERE task_id = ?",
+                (task_id,),
+            )
+            assert cursor.fetchone()[0] == 0
         router.notify_task_status.assert_not_called()
         assert deliver_pending_terminal_notifications(cm, router=router) == 0
         router.notify_task_status.assert_not_called()
