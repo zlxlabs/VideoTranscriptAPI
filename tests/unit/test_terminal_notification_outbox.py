@@ -472,6 +472,38 @@ class TestTerminalNotificationOwnership:
         assert deliver_pending_terminal_notifications(cm, router=router) == 1
         router.notify_task_status.assert_called_once()
 
+    def test_missing_claim_timestamp_is_listed_and_reclaimable(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
+        with cm._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE task_terminal_notifications "
+                "SET claimed_owner = ?, claimed_at = NULL, attempts = 0, "
+                "notified_at = NULL WHERE task_id = ?",
+                ("previous-process", task_id),
+            )
+
+        pending = cm.list_unattempted_terminal_notifications()
+        assert [row["task_id"] for row in pending] == [task_id]
+        assert pending[0]["claimed_at"] is None
+        assert cm.claim_pending_terminal_notification(task_id) is True
+
+    def test_missing_claim_timestamp_is_dispatched_once(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
+        with cm._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE task_terminal_notifications "
+                "SET claimed_owner = ?, claimed_at = NULL, attempts = 0, "
+                "notified_at = NULL WHERE task_id = ?",
+                ("previous-process", task_id),
+            )
+
+        router = _accepted_router()
+        assert deliver_pending_terminal_notifications(cm, router=router) == 1
+        assert deliver_pending_terminal_notifications(cm, router=router) == 0
+        router.notify_task_status.assert_called_once()
+
     def test_same_owner_cannot_reclaim_even_after_lease_expires(self, cm):
         task_id = _new_task(cm)
         cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
