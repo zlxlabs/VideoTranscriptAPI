@@ -60,6 +60,7 @@ def finalize_terminal_status_and_notify(
     channel_name: Optional[str] = None,
     webhooks: Optional[Dict[str, str]] = None,
     suppress_terminal_notification: bool = False,
+    defer_delivery: bool = False,
     cache_manager=None,
     router=None,
     notify_via=None,
@@ -70,6 +71,8 @@ def finalize_terminal_status_and_notify(
     Returns True iff the row was updated. Notify errors are logged, not raised.
     Pass suppress_terminal_notification=True to persist without producing an
     outbox row at all (I6, HTTP cleanup path).
+    Pass defer_delivery=True to persist the outbox row without inline delivery;
+    the caller must deliver it after any content notification.
     """
     if cache_manager is None:
         cache_manager = get_cache_manager()
@@ -100,6 +103,45 @@ def finalize_terminal_status_and_notify(
         )
         return True
 
+    if not defer_delivery:
+        deliver_terminal_notification(
+            task_id,
+            status,
+            error_message=error_message,
+            url=url,
+            title=title,
+            author=author,
+            notify_status=notify_status,
+            notify_error=notify_error,
+            channel_name=channel_name,
+            webhooks=webhooks,
+            cache_manager=cache_manager,
+            router=router,
+            notify_via=notify_via,
+        )
+    return True
+
+
+def deliver_terminal_notification(
+    task_id: str,
+    status: str,
+    *,
+    error_message: Optional[str] = None,
+    url: Optional[str] = None,
+    title: Optional[str] = None,
+    author: Optional[str] = None,
+    notify_status: Optional[str] = None,
+    notify_error: Optional[str] = None,
+    channel_name: Optional[str] = None,
+    webhooks: Optional[Dict[str, str]] = None,
+    cache_manager=None,
+    router=None,
+    notify_via=None,
+) -> None:
+    """Deliver an already-persisted terminal notification inline."""
+    if cache_manager is None:
+        cache_manager = get_cache_manager()
+
     if notify_status is None:
         if status == TaskStatus.SUCCESS:
             notify_status = TERMINAL_SUCCESS_STATUS
@@ -126,7 +168,7 @@ def finalize_terminal_status_and_notify(
             logger.debug(
                 f"terminal notification already sent by another deliverer: {task_id}"
             )
-            return True
+            return
         cache_manager.mark_terminal_notification_attempted(task_id)
         try:
             result = _emit_status_notification(
@@ -149,7 +191,6 @@ def finalize_terminal_status_and_notify(
         else:
             if accepted:
                 cache_manager.mark_terminal_notification_sent(task_id)
-    return True
 
 
 def _emit_status_notification(

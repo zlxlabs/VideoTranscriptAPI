@@ -119,6 +119,40 @@ class TestTerminalNotifyHelperCasGate:
         assert row["title"] == "Cached Title"
         assert row["author"] == "Cached Author"
 
+    def test_deferred_delivery_stays_pending_until_dispatcher(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.PROCESSING)
+        router = _accepted_router()
+
+        assert finalize_terminal_status_and_notify(
+            task_id,
+            TaskStatus.SUCCESS,
+            cache_manager=cm,
+            router=router,
+            defer_delivery=True,
+        ) is True
+        router.notify_task_status.assert_not_called()
+        assert cm.is_terminal_notification_pending(task_id) is True
+
+        assert deliver_pending_terminal_notifications(cm, router=router) == 1
+        assert cm.is_terminal_notification_pending(task_id) is False
+        router.notify_task_status.assert_called_once()
+
+    def test_deferred_cas_loser_does_not_create_or_deliver(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.SUCCESS)
+        router = _accepted_router()
+
+        assert finalize_terminal_status_and_notify(
+            task_id,
+            TaskStatus.SUCCESS,
+            cache_manager=cm,
+            router=router,
+            defer_delivery=True,
+        ) is False
+        assert router.notify_task_status.call_count == 0
+        assert len(cm.list_unattempted_terminal_notifications()) == 1
+
 
 class TestRedCLlmOpsFinallyCasGate:
     """llm_ops._handle_llm_task except used to send in a finally block
@@ -174,6 +208,71 @@ class TestRedCLlmOpsFinallyCasGate:
         assert "【LLM API调用异常】" in (
             router.notify_task_status.call_args.kwargs.get("error") or ""
         )
+
+
+class TestSuccessNotificationOrder:
+    def _run_success_task(self, cm, monkeypatch, router, *, calibrate_only=False):
+        tracker = MagicMock()
+        tracker.track.return_value.__enter__.return_value = None
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.PROCESSING)
+        llm_task = _llm_task(task_id)
+        llm_task.update({
+            "processing_options": {
+                "calibrate": True,
+                "summarize": True,
+                "chapters": False,
+            },
+            "calibrate_only": calibrate_only,
+            "notification_channel": "feishu",
+            "notification_webhooks": {"feishu": "hook"},
+            "perf_tracker": tracker,
+        })
+        result_dict = {"skip_summary": False, "stats": {}, "models_used": {}}
+        monkeypatch.setattr(llm_ops, "cache_manager", cm)
+        monkeypatch.setattr(llm_ops, "llm_task_queue", MagicMock())
+        monkeypatch.setattr(llm_ops, "get_notification_router", lambda: router)
+        monkeypatch.setattr(llm_ops, "_requires_llm_title", lambda *args, **kwargs: False)
+        monkeypatch.setattr(llm_ops, "_prepare_llm_content", lambda *args: "content")
+        monkeypatch.setattr(llm_ops, "_build_result_dict", lambda result: result_dict)
+        monkeypatch.setattr(
+            llm_ops,
+            "_save_llm_results",
+            lambda **kwargs: {
+                "calibration_status": "full",
+                "summary_status": "generated",
+                "chapters_status": "disabled",
+            },
+        )
+        monkeypatch.setattr(llm_ops.llm_coordinator, "process", lambda **kwargs: {})
+        llm_ops._handle_llm_task(llm_task)
+        return task_id
+
+    def test_content_notification_is_queued_before_terminal_status(self, cm, monkeypatch):
+        router = MagicMock()
+        events = []
+        router.send_long_text.side_effect = lambda *args, **kwargs: events.append("content")
+        router.notify_task_status.side_effect = lambda *args, **kwargs: (
+            events.append("terminal") or {"wechat": True}
+        )
+
+        self._run_success_task(cm, monkeypatch, router)
+
+        assert events == ["content", "terminal"]
+        assert router.send_long_text.call_args.kwargs["channel_name"] == "feishu"
+        assert router.notify_task_status.call_args.kwargs["channel_name"] == "feishu"
+        assert router.send_long_text.call_args.kwargs["webhooks"] == {"feishu": "hook"}
+        assert router.notify_task_status.call_args.kwargs["webhooks"] == {"feishu": "hook"}
+
+    def test_calibrate_only_sends_terminal_status_without_content(self, cm, monkeypatch):
+        router = _accepted_router()
+        send_content = MagicMock()
+        monkeypatch.setattr(llm_ops, "_send_notification", send_content)
+
+        self._run_success_task(cm, monkeypatch, router, calibrate_only=True)
+
+        send_content.assert_not_called()
+        router.notify_task_status.assert_called_once()
 
 
 class TestRedCTranscriptionWorkerExceptCasGate:
