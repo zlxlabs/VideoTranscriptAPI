@@ -470,11 +470,6 @@ class CacheManager:
                         "ALTER TABLE task_terminal_notifications "
                         "ADD COLUMN claimed_at TIMESTAMP"
                     )
-                    cursor.execute(
-                        "UPDATE task_terminal_notifications "
-                        "SET claimed_at = CURRENT_TIMESTAMP "
-                        "WHERE claimed_owner IS NOT NULL AND claimed_at IS NULL"
-                    )
 
                 # 迁移7: 章节梗概诚实状态（ChaptersStatus）镜像列，供 history 透出。
                 cursor.execute("PRAGMA table_info(task_status)")
@@ -2526,7 +2521,7 @@ class CacheManager:
                           notified_at, attempts, claimed_owner, claimed_at
                    FROM task_terminal_notifications
                    WHERE notified_at IS NULL AND attempts < ?
-                     AND (claimed_owner IS NULL OR (claimed_owner != ? AND claimed_at <= ?))
+                     AND (claimed_owner IS NULL OR (claimed_owner != ? AND (claimed_at IS NULL OR claimed_at <= ?)))
                    ORDER BY created_at ASC
                    LIMIT ?''',
                 (
@@ -2550,7 +2545,7 @@ class CacheManager:
                    SET attempts = attempts + 1, claimed_owner = ?,
                        claimed_at = CURRENT_TIMESTAMP
                    WHERE task_id = ? AND notified_at IS NULL AND attempts < ?
-                     AND (claimed_owner IS NULL OR (claimed_owner != ? AND claimed_at <= ?))''',
+                     AND (claimed_owner IS NULL OR (claimed_owner != ? AND (claimed_at IS NULL OR claimed_at <= ?)))''',
                 (
                     self.terminal_notification_owner,
                     task_id,
