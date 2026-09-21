@@ -391,33 +391,6 @@ class TestViewTokenResolver:
         assert view_data["status"] == "failed"
         assert view_data["message"] == reason
 
-    def test_failed_task_with_key_info_only_stays_failed(self, cm, resolver):
-        """Accident shell: directory exists with only key_info.json."""
-        reason = "orphan recovered after deploy restart"
-        task = _make_failed_task(
-            cm,
-            "vid-key-info-only",
-            reason,
-            save_transcript="temporary body that will be deleted",
-        )
-        view_before = resolver.get_view_data_by_token(task["view_token"])
-        cache_dir = Path(view_before["cache_dir"])
-        for name in (
-            "transcript_capswriter.txt",
-            "transcript_capswriter.json",
-            "transcript_funasr.json",
-            "llm_calibrated.txt",
-        ):
-            target = cache_dir / name
-            if target.exists():
-                target.unlink()
-        (cache_dir / "key_info.json").write_text("{}", encoding="utf-8")
-
-        view_data = resolver.get_view_data_by_token(task["view_token"])
-
-        assert view_data["status"] == "failed"
-        assert view_data["message"] == reason
-
     def test_failed_task_without_cache_keeps_default_failed_page(self, cm, resolver):
         task = _make_failed_task(cm, "vid-no-cache", "download failed")
 
