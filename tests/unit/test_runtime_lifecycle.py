@@ -306,12 +306,12 @@ def test_runtime_close_is_bounded_when_llm_consumer_does_not_stop(tmp_path):
 
     assert runtime.llm_stop_event.is_set()
     # N1（本地 codex review 第 11 轮）：join timeout 不再是硬编码的字面量
-    # 5，而是 close() 入口计算的单一 deadline 减去到这一步已经流逝的
-    # 墙钟时间算出的剩余预算——不能再要求精确等于 5，允许极小的流逝误差
+    # 20，而是 close() 入口计算的单一 deadline 减去到这一步已经流逝的
+    # 墙钟时间算出的剩余预算——不能再要求精确等于 20，允许极小的流逝误差
     # （其余阶段的 wait_for 在空 worker_futures 上都会立即返回，实测流逝
     # 远小于 0.1s，留了充足裕量）。
-    assert runtime.llm_thread.join_timeout == pytest.approx(5, abs=0.5)
-    assert runtime.llm_thread.join_timeout <= 5
+    assert runtime.llm_thread.join_timeout == pytest.approx(20, abs=0.5)
+    assert runtime.llm_thread.join_timeout <= 20
 
 
 def test_runtime_close_does_not_wait_forever_for_executor_jobs(tmp_path):
@@ -576,7 +576,7 @@ def test_runtime_workers_close_before_notification_clients(monkeypatch):
 
     class Runtime:
         def new_shutdown_deadline(self):
-            return time.monotonic() + 5.0
+            return time.monotonic() + 20.0
 
         async def aclose(self, deadline=None):
             events.append("workers-closed")
@@ -612,7 +612,7 @@ def test_notification_clients_remain_open_when_workers_time_out(monkeypatch):
 
     class Runtime:
         def new_shutdown_deadline(self):
-            return time.monotonic() + 5.0
+            return time.monotonic() + 20.0
 
         async def aclose(self, deadline=None):
             events.append("workers-timed-out")

@@ -623,7 +623,11 @@ def load_and_validate_config(config_path: str | os.PathLike | None = None) -> di
 # 退化为"这一次调用现算一个新 deadline"，等价于把整份预算单独给这一次
 # 调用——真正的跨阶段累加只发生在 aclose()/close() 显式传入同一个
 # deadline、贯穿多阶段调用的生产路径上。
-WORKER_STOP_TIMEOUT_SECONDS = 5.0
+# 2026-09-21 生产事故日志记录：13:04:22 API服务已关闭；13:04:27 ERROR
+# 关闭预算已耗尽，跳过关闭清算，留给下次启动的孤儿恢复兜底。前段
+# stop_background_owners + _stop_workers 的有界等待吃光了原 5s，导致正在
+# LLM 摘要阶段的任务没有清算机会；因此将内部预算提高到 20s。
+WORKER_STOP_TIMEOUT_SECONDS = 20.0
 
 
 # LLM 队列容量上限（受理位，不是执行位——见 _InflightTaskRegistry 类文档

@@ -18,6 +18,8 @@ services:
       # 宿主端口 8200（n305 上 portainer 已占 8000）；外部入口
       # https://sum.lexgogo.site 经 Cloudflare Tunnel 落到 :8200。
       - "8200:8000"
+    # 必须大于内部关闭预算 20s，否则 SIGKILL 可能打断优雅关闭流程。
+    stop_grace_period: 30s
     volumes:
       # Configuration files (user must prepare before starting)
       - ../config:/app/config
