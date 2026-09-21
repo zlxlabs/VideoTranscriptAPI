@@ -191,21 +191,28 @@ class TestURLParserBasic:
         ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
         ("https://m.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
         ("https://www.youtube.com/watch?list=PLtest&v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
-        ("https://youtu.be/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
         ("https://www.youtube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
         ("https://www.youtube.com/live/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
         ("https://www.youtube.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
     ])
     def test_youtube_legal_forms(self, url, expected_id):
         """YouTube legal forms must stay youtube (issue #75)."""
+        # Non-short URLs never touch the network: parse without any mock.
+        parser = URLParser()
+        result = parser.parse(url)
+        assert result.platform == "youtube"
+        assert result.video_id == expected_id
+
+    def test_youtube_short_link_form(self):
+        """youtu.be short link resolves without real network (issue #75)."""
         parser = URLParser()
         with patch('requests.head') as mock_head:
             mock_response = Mock()
-            mock_response.url = url
+            mock_response.url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
             mock_head.return_value = mock_response
-            result = parser.parse(url)
+            result = parser.parse("https://youtu.be/dQw4w9WgXcQ")
         assert result.platform == "youtube"
-        assert result.video_id == expected_id
+        assert result.video_id == "dQw4w9WgXcQ"
 
     @pytest.mark.parametrize("url", [
         "https://example.com/watch?v=d84",
