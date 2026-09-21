@@ -105,3 +105,10 @@
 - 本段结论：终态通知表保留 `claimed_owner` 并补回 `claimed_at`；生产 claim/list 统一为同 owner 永不重领、跨 owner 仅在 120 秒租约过期后接管。mark/release 同步清理 claim 时刻并保留 owner 锁。
 - 关键决策与已否决方案：迁移不再把旧 `claimed_at` 改名为 owner，保留旧时间列并缺列补齐另一列；不引入 fencing token、sending 状态或额外重试机制。
 - 下一步唯一动作：R10.2 在已提交真修复上注入活动跨 owner 立即接管的单点坏改动，确认新增红验转红后立即还原。
+
+## 验收回派 R10.3
+
+- 当前阶段：repairing / R10.3 完成
+- 本段结论：通知文档改为记录 120 秒接管租约、UTC naive 时间口径和超过租约的共享数据库重复风险；四个内存 outbox 替身已同步 claimed_at、跨 owner 过期判断及 mark/release 清理。
+- 关键决策与已否决方案：替身直接复用生产租约常量，不另设配置或兼容分支；不引入 fencing token、sending 状态、TTL 或额外重试机制。
+- 下一步唯一动作：跑允许范围内的窄测与收尾全量测试，检查谓词残留、文件范围和最终提交状态。

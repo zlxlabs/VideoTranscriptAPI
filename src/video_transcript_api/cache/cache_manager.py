@@ -2516,7 +2516,7 @@ class CacheManager:
 
     def list_unattempted_terminal_notifications(self, limit: int = 20) -> List[Dict[str, Any]]:
         """List pending rows available to this process."""
-        lease_cutoff = (
+        takeover_cutoff = (
             datetime.datetime.utcnow()
             - datetime.timedelta(seconds=TERMINAL_NOTIFY_TAKEOVER_LEASE_SECONDS)
         ).strftime("%Y-%m-%d %H:%M:%S")
@@ -2532,7 +2532,7 @@ class CacheManager:
                 (
                     TERMINAL_NOTIFY_MAX_ATTEMPTS,
                     self.terminal_notification_owner,
-                    lease_cutoff,
+                    takeover_cutoff,
                     int(limit),
                 ),
             )
@@ -2540,7 +2540,7 @@ class CacheManager:
 
     def claim_pending_terminal_notification(self, task_id: str) -> bool:
         """Claim a pending row not owned by this process within its lease."""
-        lease_cutoff = (
+        takeover_cutoff = (
             datetime.datetime.utcnow()
             - datetime.timedelta(seconds=TERMINAL_NOTIFY_TAKEOVER_LEASE_SECONDS)
         ).strftime("%Y-%m-%d %H:%M:%S")
@@ -2556,7 +2556,7 @@ class CacheManager:
                     task_id,
                     TERMINAL_NOTIFY_MAX_ATTEMPTS,
                     self.terminal_notification_owner,
-                    lease_cutoff,
+                    takeover_cutoff,
                 ),
             )
             return cursor.rowcount == 1

@@ -1,9 +1,13 @@
+import datetime
 import types
 from unittest.mock import MagicMock
 
 import pytest
 
 import video_transcript_api.api.services.transcription as transcription
+from video_transcript_api.cache.cache_manager import (
+    TERMINAL_NOTIFY_TAKEOVER_LEASE_SECONDS,
+)
 from video_transcript_api.downloaders.models import VideoMetadata, DownloadInfo
 from video_transcript_api.downloaders.subtitle_types import SubtitleResult
 from video_transcript_api.utils.llm_status import CalibrationStatus, ChaptersStatus
@@ -65,6 +69,7 @@ class DummyCacheManager:
             "notified_at": None,
             "attempts": 0,
             "claimed_owner": None,
+            "claimed_at": None,
         })
 
     def update_task_status(self, task_id, status, **kwargs):
@@ -80,25 +85,48 @@ class DummyCacheManager:
         return True
 
     def list_unattempted_terminal_notifications(self, limit=20):
+        lease_cutoff = (
+            datetime.datetime.utcnow()
+            - datetime.timedelta(seconds=TERMINAL_NOTIFY_TAKEOVER_LEASE_SECONDS)
+        )
         rows = [
             row for row in self._outbox.values()
             if row["notified_at"] is None
             and row["attempts"] < 3
-            and row["claimed_owner"] != self.notification_owner
+            and (
+                row["claimed_owner"] is None
+                or (
+                    row["claimed_owner"] != self.notification_owner
+                    and row["claimed_at"] is not None
+                    and row["claimed_at"] <= lease_cutoff
+                )
+            )
         ]
         return rows[:limit]
 
     def claim_pending_terminal_notification(self, task_id):
         row = self._outbox.get(task_id)
+        lease_cutoff = (
+            datetime.datetime.utcnow()
+            - datetime.timedelta(seconds=TERMINAL_NOTIFY_TAKEOVER_LEASE_SECONDS)
+        )
         if (
             row is None
             or row["notified_at"] is not None
             or row["attempts"] >= 3
             or row["claimed_owner"] == self.notification_owner
+            or (
+                row["claimed_owner"] is not None
+                and (
+                    row["claimed_at"] is None
+                    or row["claimed_at"] > lease_cutoff
+                )
+            )
         ):
             return False
         row["attempts"] += 1
         row["claimed_owner"] = self.notification_owner
+        row["claimed_at"] = datetime.datetime.utcnow()
         return True
 
     def mark_terminal_notification_sent(self, task_id):
@@ -106,11 +134,13 @@ class DummyCacheManager:
         if row is not None and row["claimed_owner"] == self.notification_owner:
             row["notified_at"] = "sent"
             row["claimed_owner"] = None
+            row["claimed_at"] = None
 
     def release_terminal_notification_claim(self, task_id):
         row = self._outbox.get(task_id)
         if row and row["notified_at"] is None and row["claimed_owner"] == self.notification_owner:
             row["claimed_owner"] = None
+            row["claimed_at"] = None
 
     def get_task_by_id(self, task_id):
         return self.tasks.get(task_id)
