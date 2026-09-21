@@ -9,10 +9,13 @@ I2 (unique)   `task_terminal_notifications.task_id` is UNIQUE: at most one row
 I3 (coherent) The row carries the status written by that CAS; the delivered
               text is rendered from that row, never by re-reading the task to
               decide "should this send".
-I4 (no loss)  At process start and on every delivery cycle, every row with
-              `notified_at IS NULL` must be attempted. NO condition may make a
-              row permanently unlisted, and no ordering/limit may starve it:
-              "no condition under which a row is never attempted" is the test.
+I4 (no loss)  At process start and on every delivery cycle, every eligible
+              row with `notified_at IS NULL` must be attempted. A steady-state
+              age gate may temporarily omit a fresh row, but row age grows
+              monotonically, so every row becomes eligible within the gate.
+              NO condition may make a row permanently unlisted, and no
+              ordering/limit may starve it: "no condition under which a row is
+              never attempted" is the test.
               `attempts` is an observation counter and never filters anything;
               the listing is ordered by `attempts ASC` so a stuck head cannot
               starve fresh rows.
@@ -247,6 +250,7 @@ def _notification_accepted(result) -> bool:
 
 
 DISPATCH_POLL_SECONDS = 0.5
+DISPATCH_MIN_AGE_SECONDS = 5.0
 DISPATCH_BATCH_SIZE = 20
 # Observation only (I4): rows past this many attempts get a warning, never a filter.
 STUCK_ATTEMPT_WARN_THRESHOLD = 3
@@ -262,8 +266,15 @@ def deliver_pending_terminal_notifications(
     *,
     router=None,
     limit: int = DISPATCH_BATCH_SIZE,
+    min_age_seconds: float = 0.0,
 ) -> int:
-    """Send every unsent row, one at a time. Used by the dispatcher and tests.
+    """Send every eligible unsent row, one at a time.
+
+    ``min_age_seconds=0`` keeps direct callers and startup replay immediate.
+    The steady-state dispatcher supplies the age gate so a row written by an
+    in-flight inline success path cannot be sent before its content message.
+    Fresh rows are only temporarily omitted; their age grows monotonically and
+    they become eligible after the gate, preserving I4's no-loss guarantee.
 
     In-process mutual exclusion comes from `_DELIVERY_LOCK`, shared with the
     inline helper path: both re-check `notified_at IS NULL` while holding it, so
@@ -277,7 +288,10 @@ def deliver_pending_terminal_notifications(
     if router is None:
         router = get_notification_router()
 
-    rows = cache_manager.list_unattempted_terminal_notifications(limit=limit)
+    rows = cache_manager.list_unattempted_terminal_notifications(
+        limit=limit,
+        min_age_seconds=min_age_seconds,
+    )
     sent = 0
     for row in rows:
         task_id = row["task_id"]
@@ -318,6 +332,21 @@ def deliver_pending_terminal_notifications(
     return sent
 
 
+def deliver_terminal_notification_dispatcher_round(
+    cache_manager=None,
+    *,
+    router=None,
+    limit: int = DISPATCH_BATCH_SIZE,
+) -> int:
+    """Run one steady-state dispatcher round with the minimum age gate."""
+    return deliver_pending_terminal_notifications(
+        cache_manager,
+        router=router,
+        limit=limit,
+        min_age_seconds=DISPATCH_MIN_AGE_SECONDS,
+    )
+
+
 def _warn_repeatedly_failing_rows(cache_manager) -> None:
     """I4 guardrail: keep retrying, but make a stuck row visible in the log."""
     stuck = cache_manager.count_attempted_terminal_notifications(
@@ -344,7 +373,7 @@ def run_terminal_notification_dispatcher() -> None:
         if delivered:
             logger.info(f"terminal notification replay sent {delivered} pending row(s)")
         while stop_event is None or not stop_event.is_set():
-            deliver_pending_terminal_notifications(cache_manager)
+            deliver_terminal_notification_dispatcher_round(cache_manager)
             if stop_event is None:
                 break
             stop_event.wait(DISPATCH_POLL_SECONDS)

@@ -20,6 +20,7 @@ from src.video_transcript_api.api.services.terminal_status import (
     TERMINAL_FAILED_STATUS,
     _notification_accepted,
     deliver_pending_terminal_notifications,
+    deliver_terminal_notification_dispatcher_round,
     finalize_terminal_status_and_notify,
 )
 from src.video_transcript_api.cache.cache_manager import (
@@ -152,6 +153,52 @@ class TestTerminalNotifyHelperCasGate:
         ) is False
         assert router.notify_task_status.call_count == 0
         assert len(cm.list_unattempted_terminal_notifications()) == 1
+
+
+class TestSteadyStateDispatcherAgeGate:
+    def test_fresh_deferred_row_is_not_sent_by_steady_state_round(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.PROCESSING)
+        router = _accepted_router()
+
+        assert finalize_terminal_status_and_notify(
+            task_id,
+            TaskStatus.SUCCESS,
+            cache_manager=cm,
+            router=router,
+            defer_delivery=True,
+        ) is True
+
+        assert deliver_terminal_notification_dispatcher_round(
+            cm, router=router,
+        ) == 0
+        assert cm.is_terminal_notification_pending(task_id) is True
+        router.notify_task_status.assert_not_called()
+
+    def test_aged_deferred_row_is_sent_by_steady_state_round(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.PROCESSING)
+        router = _accepted_router()
+        assert finalize_terminal_status_and_notify(
+            task_id,
+            TaskStatus.SUCCESS,
+            cache_manager=cm,
+            router=router,
+            defer_delivery=True,
+        ) is True
+        with cm._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE task_terminal_notifications "
+                "SET created_at = datetime('now', '-10 seconds') "
+                "WHERE task_id = ?",
+                (task_id,),
+            )
+
+        assert deliver_terminal_notification_dispatcher_round(
+            cm, router=router,
+        ) == 1
+        assert cm.is_terminal_notification_pending(task_id) is False
+        router.notify_task_status.assert_called_once()
 
 
 class TestRedCLlmOpsFinallyCasGate:
