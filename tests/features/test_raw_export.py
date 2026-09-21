@@ -116,6 +116,29 @@ def test_url_encoding():
     return True
 
 
+def test_interrupted_raw_export_returns_body(tmp_path):
+    """Pytest entry: interrupted view_data exports like success."""
+    from src.video_transcript_api.api.routes.views import handle_raw_export
+
+    (tmp_path / "transcript_capswriter.txt").write_text(
+        "raw transcript body", encoding="utf-8"
+    )
+    response = handle_raw_export(
+        {
+            "status": "interrupted",
+            "cache_dir": str(tmp_path),
+            "title": "Interrupted Demo",
+            "platform": "bilibili",
+            "url": "https://example.com/interrupted",
+            "view_token": "view-interrupted-raw",
+        },
+        "transcript",
+    )
+    body = response.body.decode("utf-8")
+    assert response.status_code == 200
+    assert "raw transcript body" in body
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Raw Export Functionality Tests")

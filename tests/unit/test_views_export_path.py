@@ -4,6 +4,10 @@ All console output must be in English only (no emoji, no Chinese).
 """
 
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from video_transcript_api.api.routes.views import (
     generate_download_filename,
@@ -11,6 +15,22 @@ from video_transcript_api.api.routes.views import (
     handle_raw_export,
     resolve_export_file_path,
 )
+from video_transcript_api.utils.llm_status import SummaryStatus
+
+
+def _content_view_data(tmp_path, status):
+    (tmp_path / "llm_calibrated.txt").write_text(
+        "calibrated transcript body",
+        encoding="utf-8",
+    )
+    return {
+        "status": status,
+        "cache_dir": str(tmp_path),
+        "title": "Demo",
+        "platform": "youtube",
+        "url": "https://example.com/demo",
+        "view_token": "view-interrupted",
+    }
 
 
 class TestResolveExportFilePath:
@@ -116,3 +136,97 @@ def test_notes_export_hides_artifact_without_generated_status(tmp_path):
 
     assert response.status_code == 404
     assert "orphan notes artifact" not in response.body.decode("utf-8")
+
+
+def test_raw_export_treats_interrupted_like_success(tmp_path):
+    response = handle_raw_export(_content_view_data(tmp_path, "interrupted"), "calibrated")
+
+    body = response.body.decode("utf-8")
+    assert response.status_code == 200
+    assert "calibrated transcript body" in body
+
+
+def test_page_export_treats_interrupted_like_success(tmp_path):
+    response = handle_page_export(_content_view_data(tmp_path, "interrupted"), "calibrated")
+
+    body = response.body.decode("utf-8")
+    assert response.status_code == 200
+    assert "calibrated transcript body" in body
+
+
+def test_raw_export_failed_without_payload_still_errors(tmp_path):
+    response = handle_raw_export(
+        {"status": "failed", "cache_dir": str(tmp_path), "title": "Demo"},
+        "calibrated",
+    )
+    assert response.status_code == 500
+    assert "calibrated transcript body" not in response.body.decode("utf-8")
+
+
+def test_audit_summary_serves_interrupted_payload():
+    """task_status stays failed; view_data interrupted is still summary-capable."""
+    mock_cache = MagicMock()
+    mock_cache.get_task_by_view_token.return_value = {
+        "task_id": "task-interrupted",
+        "status": "failed",
+        "error_message": "orphan recovered after deploy restart",
+    }
+    mock_cache.get_view_data_by_token.return_value = {
+        "status": "interrupted",
+        "summary": "partial summary from before the restart",
+        "summary_state": SummaryStatus.GENERATED,
+    }
+
+    async def _fake_verify_token():
+        return {"user_id": "test-user", "api_key": "sk-test", "wechat_webhook": None}
+
+    from video_transcript_api.api.services.transcription import verify_token
+    from video_transcript_api.api.routes import audit
+
+    app = FastAPI()
+    app.include_router(audit.router)
+    app.dependency_overrides[verify_token] = _fake_verify_token
+
+    with patch.object(audit, "check_view_token_ownership", return_value=True), \
+         patch.object(audit, "get_cache_manager", return_value=mock_cache), \
+         patch.object(audit, "ViewTokenResolver", side_effect=lambda manager: manager):
+        resp = TestClient(app).get("/api/audit/summary?view_token=vt-interrupted")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["code"] == 200
+    assert payload["data"]["summary"] == "partial summary from before the restart"
+
+
+def test_audit_summary_failed_without_payload_keeps_202():
+    mock_cache = MagicMock()
+    mock_cache.get_task_by_view_token.return_value = {
+        "task_id": "task-failed",
+        "status": "failed",
+        "error_message": "download failed",
+    }
+    mock_cache.get_view_data_by_token.return_value = {
+        "status": "failed",
+        "message": "download failed",
+    }
+
+    async def _fake_verify_token():
+        return {"user_id": "test-user", "api_key": "sk-test", "wechat_webhook": None}
+
+    from video_transcript_api.api.services.transcription import verify_token
+    from video_transcript_api.api.routes import audit
+
+    app = FastAPI()
+    app.include_router(audit.router)
+    app.dependency_overrides[verify_token] = _fake_verify_token
+
+    with patch.object(audit, "check_view_token_ownership", return_value=True), \
+         patch.object(audit, "get_cache_manager", return_value=mock_cache), \
+         patch.object(audit, "ViewTokenResolver", side_effect=lambda manager: manager):
+        resp = TestClient(app).get("/api/audit/summary?view_token=vt-failed")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["code"] == 202
+    assert payload["data"]["summary"] == ""
+    assert payload["data"]["status"] == "failed"
