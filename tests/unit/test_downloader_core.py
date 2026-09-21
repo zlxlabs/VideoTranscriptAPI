@@ -133,6 +133,78 @@ class TestShortURLResolution:
         result = mock_downloader.resolve_short_url("https://t.co/abc123")
         assert result == "https://t.co/abc123"
 
+    @patch("video_transcript_api.downloaders.base.requests.head")
+    def test_resolve_short_url_non_xhslink_sends_no_user_agent(
+        self, mock_head, mock_downloader
+    ):
+        """Non-xhslink domains must expand without UA (base-identical headers)."""
+        mock_response = MagicMock()
+        mock_response.url = "https://test.com/full-video-url"
+        mock_response.status_code = 200
+        mock_head.return_value = mock_response
+
+        result = mock_downloader.resolve_short_url("https://t.co/abc123")
+        assert result == "https://test.com/full-video-url"
+        assert mock_head.call_args.kwargs.get("headers") is None
+
+    @patch("video_transcript_api.downloaders.base.requests.head")
+    def test_resolve_short_url_xhslink_sends_user_agent(
+        self, mock_head, mock_downloader
+    ):
+        """xhslink.cn expansion must carry the shared mobile User-Agent."""
+        from video_transcript_api.utils.url_parser import SHORT_URL_USER_AGENT
+
+        mock_response = MagicMock()
+        mock_response.url = "https://www.xiaohongshu.com/discovery/item/abc"
+        mock_response.status_code = 200
+        mock_head.return_value = mock_response
+
+        result = mock_downloader.resolve_short_url("https://xhslink.cn/o/abc123")
+        assert result == "https://www.xiaohongshu.com/discovery/item/abc"
+        headers = mock_head.call_args.kwargs.get("headers") or {}
+        assert headers.get("User-Agent") == SHORT_URL_USER_AGENT
+
+    @patch("video_transcript_api.downloaders.base.requests.head")
+    @patch("video_transcript_api.downloaders.base.requests.get")
+    def test_resolve_short_url_get_fallback_xhslink_sends_user_agent(
+        self, mock_get, mock_head, mock_downloader
+    ):
+        """GET fallback (HEAD 404) on xhslink must carry the same User-Agent."""
+        from video_transcript_api.utils.url_parser import SHORT_URL_USER_AGENT
+
+        head_resp = MagicMock()
+        head_resp.url = "https://xhslink.cn/o/abc123"
+        head_resp.status_code = 404
+        mock_head.return_value = head_resp
+        get_resp = MagicMock()
+        get_resp.url = "https://www.xiaohongshu.com/discovery/item/abc"
+        mock_get.return_value = get_resp
+
+        result = mock_downloader.resolve_short_url("https://xhslink.cn/o/abc123")
+        assert result == "https://www.xiaohongshu.com/discovery/item/abc"
+        for mock_call in (mock_head, mock_get):
+            headers = mock_call.call_args.kwargs.get("headers") or {}
+            assert headers.get("User-Agent") == SHORT_URL_USER_AGENT
+
+    @patch("video_transcript_api.downloaders.base.requests.head")
+    @patch("video_transcript_api.downloaders.base.requests.get")
+    def test_resolve_short_url_get_fallback_douyin_sends_no_user_agent(
+        self, mock_get, mock_head, mock_downloader
+    ):
+        """GET fallback on v.douyin.com must not carry the UA (iesdouyin split)."""
+        head_resp = MagicMock()
+        head_resp.url = "https://v.douyin.com/iRNBho6u/"
+        head_resp.status_code = 404
+        mock_head.return_value = head_resp
+        get_resp = MagicMock()
+        get_resp.url = "https://www.douyin.com/video/7298145681699622182"
+        mock_get.return_value = get_resp
+
+        result = mock_downloader.resolve_short_url("https://v.douyin.com/iRNBho6u/")
+        assert result == "https://www.douyin.com/video/7298145681699622182"
+        for mock_call in (mock_head, mock_get):
+            assert mock_call.call_args.kwargs.get("headers") is None
+
 
 # ============================================================
 # Media File Validation Tests

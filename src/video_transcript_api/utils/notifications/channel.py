@@ -66,7 +66,7 @@ class NotificationChannel(Protocol):
 
 def _clean_url(url: str) -> str:
     """Clean tracking parameters from URL (shared across channels)."""
-    if "xiaohongshu.com" in url or "xhslink.com" in url:
+    if "xiaohongshu.com" in url or "xhslink.com" in url or "xhslink.cn" in url:
         if "?" in url:
             base, query = url.split("?", 1)
             kept = [p for p in query.split("&") if p.startswith("xsec_token=")]

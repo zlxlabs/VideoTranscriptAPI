@@ -37,6 +37,7 @@ _SUPPORTED_DOMAINS = (
     "v.douyin.com",
     "xiaohongshu.com",
     "xhslink.com",
+    "xhslink.cn",
     "weixin.qq.com",
     "twitter.com",
 )

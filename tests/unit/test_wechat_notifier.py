@@ -76,6 +76,11 @@ class TestCleanURL:
         url = "https://xhslink.com/a/abc?xsec_token=tok456&ref=share"
         assert notifier._clean_url(url) == "https://xhslink.com/a/abc?xsec_token=tok456"
 
+    def test_xhslink_cn_preserves_xsec_token(self, notifier):
+        """xhslink.cn URLs should also preserve xsec_token."""
+        url = "https://xhslink.cn/o/abc?xsec_token=tok456&ref=share"
+        assert notifier._clean_url(url) == "https://xhslink.cn/o/abc?xsec_token=tok456"
+
     def test_xiaohongshu_without_query(self, notifier):
         """Xiaohongshu URL without query should be returned as-is."""
         url = "https://www.xiaohongshu.com/explore/abc"

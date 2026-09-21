@@ -58,7 +58,7 @@ class TestPlatformRecognition:
                 platform = 'xiaoyuzhou'
 
         # Xiaohongshu
-        elif 'xiaohongshu.com' in url or 'xhslink.com' in url:
+        elif 'xiaohongshu.com' in url or 'xhslink.com' in url or 'xhslink.cn' in url:
             match = re.search(r'(?:explore/|discovery/item/|items/)(\w+)', url)
             if not match:
                 match = re.search(r'/(\w{24})', url)

@@ -187,14 +187,16 @@ class BaseDownloader(ABC):
             str: 原始长链接
         """
         try:
-            response = requests.head(url, allow_redirects=True, timeout=10)
+            from ..utils.url_parser import short_url_headers
+            headers = short_url_headers(url)
+            response = requests.head(url, allow_redirects=True, timeout=10, headers=headers)
             resolved_url = response.url
 
             # 某些短链接服务（如 xhslink.com）不支持 HEAD，返回 404
             # 回退到 GET + stream 模式，只读取 headers 不下载 body
             if response.status_code == 404 or (resolved_url == url and response.status_code != 200):
                 logger.debug(f"HEAD failed (status={response.status_code}), falling back to GET: {url}")
-                response = requests.get(url, allow_redirects=True, timeout=10, stream=True)
+                response = requests.get(url, allow_redirects=True, timeout=10, stream=True, headers=headers)
                 resolved_url = response.url
                 response.close()
 

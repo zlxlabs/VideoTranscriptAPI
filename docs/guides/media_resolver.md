@@ -80,7 +80,7 @@ curl -X POST http://localhost:8000/api/transcribe \
   -d '{"url": "https://weixin.qq.com/sph/AOzokRxWHz"}'
 ```
 
-支持的链接形态：`douyin.com` / `v.douyin.com` 短链 / `xiaohongshu.com` / `xhslink.com` 短链 / `weixin.qq.com/sph/<sph_code>` 视频号链接 / `x.com` 与 `twitter.com` 推文链接。
+支持的链接形态：`douyin.com` / `v.douyin.com` 短链 / `xiaohongshu.com` / `xhslink.com` 短链 / `xhslink.cn` 短链 / `weixin.qq.com/sph/<sph_code>` 视频号链接 / `x.com` 与 `twitter.com` 推文链接。
 
 ## 错误与提示对照
 

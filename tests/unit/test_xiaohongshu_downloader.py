@@ -111,6 +111,16 @@ class TestExtractNoteId:
             result = downloader._extract_note_id("https://xhslink.com/abc123")
             assert result == "6501a1234b5c6d7e8f901234"
 
+    def test_short_link_cn_resolved(self, downloader):
+        """xhslink.cn short link should be resolved then parsed."""
+        with patch.object(
+            downloader,
+            "resolve_short_url",
+            return_value="https://www.xiaohongshu.com/explore/6501a1234b5c6d7e8f901234",
+        ):
+            result = downloader._extract_note_id("https://xhslink.cn/o/abc123")
+            assert result == "6501a1234b5c6d7e8f901234"
+
     def test_invalid_url_raises(self, downloader):
         with pytest.raises(ValueError, match="Failed to extract note ID"):
             downloader._extract_note_id("https://example.com/nothing")
@@ -451,6 +461,9 @@ class TestCanHandle:
 
     def test_xhslink_com(self, downloader):
         assert downloader.can_handle("https://xhslink.com/abc")
+
+    def test_xhslink_cn(self, downloader):
+        assert downloader.can_handle("https://xhslink.cn/o/abc")
 
     def test_unrelated_url(self, downloader):
         assert not downloader.can_handle("https://www.youtube.com/watch?v=abc")
