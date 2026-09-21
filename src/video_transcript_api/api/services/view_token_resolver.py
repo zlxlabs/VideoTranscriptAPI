@@ -68,17 +68,27 @@ class ViewTokenResolver:
         return None, None
 
     @staticmethod
+    def _first_usable_text(*candidates: Any) -> Optional[str]:
+        """Return the first string that is non-empty after strip."""
+        for value in candidates:
+            if isinstance(value, str) and value.strip():
+                return value
+        return None
+
+    @staticmethod
     def _cache_has_usable_payload(cache_data: Dict[str, Any]) -> bool:
         """True when cache holds non-empty transcript text or FunASR segments.
 
         File existence is not enough: a directory may contain only
-        key_info.json. Strings count when non-empty; list/dict payloads
-        count when normalize_segments finds at least one non-empty text.
+        key_info.json. Strings count when non-empty after strip; list/dict
+        payloads count when normalize_segments finds at least one non-empty
+        text.
         """
-        for key in ("llm_calibrated", "transcript_data"):
-            value = cache_data.get(key)
-            if isinstance(value, str) and value.strip():
-                return True
+        if ViewTokenResolver._first_usable_text(
+            cache_data.get("llm_calibrated"),
+            cache_data.get("transcript_data"),
+        ):
+            return True
         transcript_data = cache_data.get("transcript_data")
         if isinstance(transcript_data, (list, dict)):
             return bool(normalize_segments(transcript_data))
@@ -99,21 +109,24 @@ class ViewTokenResolver:
         """
         summary_state, summary = self._resolve_summary_state(task_info, cache_data)
         notes_state, notes = self._resolve_notes_state(cache_data)
-        transcript = cache_data.get("llm_calibrated") or cache_data.get(
-            "transcript_data", "转录文本获取中..."
+        transcript = self._first_usable_text(
+            cache_data.get("llm_calibrated"),
+            cache_data.get("transcript_data"),
         )
-        if not isinstance(transcript, str):
-            if status == "interrupted":
-                segments = normalize_segments(transcript)
-                transcript = (
-                    "\n".join(seg["text"] for seg in segments)
-                    if segments
-                    else "转录文本获取中..."
-                )
+        if transcript is None:
+            raw = cache_data.get("transcript_data")
+            if not isinstance(raw, str) and raw is not None:
+                if status == "interrupted":
+                    segments = normalize_segments(raw)
+                    transcript = (
+                        "\n".join(seg["text"] for seg in segments)
+                        if segments
+                        else "转录文本获取中..."
+                    )
+                else:
+                    transcript = str(raw)
             else:
-                transcript = (
-                    str(transcript) if transcript is not None else "转录文本获取中..."
-                )
+                transcript = "转录文本获取中..."
 
         llm_config = self._cache_manager.get_task_llm_config(task_info["task_id"])
         if not llm_config:

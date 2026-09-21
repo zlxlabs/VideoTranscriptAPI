@@ -318,6 +318,62 @@ class TestViewTokenResolver:
         assert view_data["message"] == reason
         assert "transcript" not in view_data
 
+    @pytest.mark.parametrize("blank_calibrated", ["\n", "   "])
+    def test_failed_whitespace_calibrated_falls_back_to_transcript(
+        self, cm, resolver, monkeypatch, blank_calibrated
+    ):
+        reason = "orphan recovered after deploy restart"
+        body = "actual transcript body from capswriter"
+        task = _make_failed_task(cm, "vid-blank-calibrated", reason)
+
+        def fake_get_cache(**kwargs):
+            return {
+                "title": "Video",
+                "author": "",
+                "description": "",
+                "file_path": str(cm.cache_dir),
+                "platform": "youtube",
+                "use_speaker_recognition": False,
+                "llm_calibrated": blank_calibrated,
+                "transcript_data": body,
+            }
+
+        monkeypatch.setattr(cm, "get_cache", fake_get_cache)
+        view_data = resolver.get_view_data_by_token(task["view_token"])
+
+        assert view_data["status"] == "interrupted"
+        assert body in view_data["transcript"]
+        assert view_data["transcript"].strip() == body
+        assert "转录文本获取中" not in view_data["transcript"]
+
+    @pytest.mark.parametrize(
+        ("llm_calibrated", "transcript_data"),
+        [("", ""), ("\n", "   "), ("   ", "")],
+    )
+    def test_failed_whitespace_only_payload_stays_failed(
+        self, cm, resolver, monkeypatch, llm_calibrated, transcript_data
+    ):
+        reason = "orphan recovered after deploy restart"
+        task = _make_failed_task(cm, "vid-whitespace-only", reason)
+
+        def fake_get_cache(**kwargs):
+            return {
+                "title": "Shell",
+                "author": "",
+                "description": "",
+                "file_path": str(cm.cache_dir),
+                "platform": "youtube",
+                "use_speaker_recognition": False,
+                "llm_calibrated": llm_calibrated,
+                "transcript_data": transcript_data,
+            }
+
+        monkeypatch.setattr(cm, "get_cache", fake_get_cache)
+        view_data = resolver.get_view_data_by_token(task["view_token"])
+
+        assert view_data["status"] == "failed"
+        assert view_data["message"] == reason
+
     @pytest.mark.parametrize(
         "transcript_data",
         [
