@@ -82,6 +82,9 @@ class FakeRouter:
 
 
 class FakeCache:
+    def __init__(self):
+        self._outbox = {}
+
     def get_cache(self, *a, **k):
         return None
 
@@ -96,7 +99,34 @@ class FakeCache:
         # 外部终态化"提前退出并报告失败）。这个 fake 此前无条件返回 None，
         # 在没人检查返回值时无害；加了返回值检查后必须如实返回 True，
         # 否则本测试预期的成功路径会被误判为竞态失败。
+        task_id = a[0] if a else k.get("task_id")
+        status = a[1] if len(a) > 1 else k.get("status")
+        if task_id and status in ("success", "failed"):
+            self._outbox.setdefault(task_id, {
+                "task_id": task_id, "status": status,
+                "error_message": k.get("error_message"),
+                "completed_at": "dummy-completed",
+                "notified_at": None, "attempts": 0,
+            })
         return True
+
+    def list_unattempted_terminal_notifications(self, limit=20):
+        return [
+            row for row in self._outbox.values()
+            if row["notified_at"] is None and row["attempts"] == 0
+        ][:limit]
+
+    def claim_pending_terminal_notification(self, task_id):
+        row = self._outbox.get(task_id)
+        if row is None or row["notified_at"] is not None or row["attempts"] != 0:
+            return False
+        row["attempts"] = 1
+        return True
+
+    def mark_terminal_notification_sent(self, task_id):
+        row = self._outbox.get(task_id)
+        if row is not None:
+            row["notified_at"] = "sent"
 
     def get_task_by_id(self, *a, **k):
         return {}

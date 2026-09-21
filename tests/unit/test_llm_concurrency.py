@@ -28,6 +28,7 @@ class _DummyQueue:
 class _DummyCacheManager:
     def __init__(self):
         self.saved = []
+        self._outbox = {}
 
     @contextmanager
     def media_lock(self, platform, media_id):
@@ -96,7 +97,32 @@ class _DummyCacheManager:
         # round 7: _handle_llm_task now gates its completion notification
         # on this return value). This double has no terminal-stickiness
         # model of its own, so it always reports a win.
+        if status in ("success", "failed"):
+            self._outbox.setdefault(task_id, {
+                "task_id": task_id, "status": status,
+                "error_message": kwargs.get("error_message"),
+                "completed_at": "dummy-completed",
+                "notified_at": None, "attempts": 0,
+            })
         return True
+
+    def list_unattempted_terminal_notifications(self, limit=20):
+        return [
+            row for row in self._outbox.values()
+            if row["notified_at"] is None and row["attempts"] == 0
+        ][:limit]
+
+    def claim_pending_terminal_notification(self, task_id):
+        row = self._outbox.get(task_id)
+        if row is None or row["notified_at"] is not None or row["attempts"] != 0:
+            return False
+        row["attempts"] = 1
+        return True
+
+    def mark_terminal_notification_sent(self, task_id):
+        row = self._outbox.get(task_id)
+        if row is not None:
+            row["notified_at"] = "sent"
 
 
 class _DummyNotifier:
