@@ -8,18 +8,15 @@ All console output must be in English only (no emoji, no Chinese).
 """
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import datetime
 import sqlite3
 import threading
-import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.video_transcript_api.api.services import llm_ops, transcription
 from src.video_transcript_api.api.services.terminal_status import (
-    DISPATCH_POLL_SECONDS,
     TERMINAL_FAILED_STATUS,
     _notification_accepted,
     deliver_pending_terminal_notifications,
@@ -27,7 +24,6 @@ from src.video_transcript_api.api.services.terminal_status import (
 )
 from src.video_transcript_api.cache.cache_manager import (
     CacheManager,
-    TERMINAL_NOTIFY_LEASE_SECONDS,
 )
 from src.video_transcript_api.utils.task_status import TaskStatus
 
@@ -292,11 +288,11 @@ class TestOutboxSchema:
                     (task_id, "failed"),
                 )
 
-    def test_legacy_outbox_schema_migrates_claimed_at(self, tmp_path):
+    def test_outbox_schema_migrates_claimed_owner(self, tmp_path):
         cache_dir = tmp_path / "cache"
         manager = CacheManager(cache_dir=str(cache_dir))
         with manager._get_cursor() as cursor:
-            cursor.execute("ALTER TABLE task_terminal_notifications DROP COLUMN claimed_at")
+            cursor.execute("ALTER TABLE task_terminal_notifications DROP COLUMN claimed_owner")
         manager.close()
 
         migrated = CacheManager(cache_dir=str(cache_dir))
@@ -304,7 +300,7 @@ class TestOutboxSchema:
             with migrated._get_cursor() as cursor:
                 cursor.execute("PRAGMA table_info(task_terminal_notifications)")
                 columns = [row[1] for row in cursor.fetchall()]
-            assert "claimed_at" in columns
+            assert "claimed_owner" in columns
         finally:
             migrated.close()
 
@@ -394,7 +390,7 @@ class TestRedDSentRowsAreNotResent:
 def _outbox_state(cm, task_id):
     with cm._get_cursor() as cursor:
         cursor.execute(
-            "SELECT notified_at, attempts, claimed_at FROM task_terminal_notifications "
+            "SELECT notified_at, attempts, claimed_owner FROM task_terminal_notifications "
             "WHERE task_id = ?",
             (task_id,),
         )
@@ -402,12 +398,12 @@ def _outbox_state(cm, task_id):
     return {
         "notified_at": row["notified_at"],
         "attempts": row["attempts"],
-        "claimed_at": row["claimed_at"],
+        "claimed_owner": row["claimed_owner"],
     }
 
 
-class TestTerminalNotificationLease:
-    def test_claim_is_exclusive_while_lease_is_live(self, cm):
+class TestTerminalNotificationOwnership:
+    def test_claim_is_exclusive_for_same_owner(self, cm):
         task_id = _new_task(cm)
         cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
 
@@ -417,22 +413,33 @@ class TestTerminalNotificationLease:
 
         state = _outbox_state(cm, task_id)
         assert state["attempts"] == 1
-        assert state["claimed_at"] is not None
+        assert state["claimed_owner"] == cm.terminal_notification_owner
 
-    def test_expired_claim_is_reclaimed_and_dispatched_once(self, cm):
+    def test_old_owner_cannot_release_new_owner(self, cm):
         task_id = _new_task(cm)
         cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
-        claimed_at = (
-            datetime.datetime.now(datetime.timezone.utc)
-            - datetime.timedelta(seconds=TERMINAL_NOTIFY_LEASE_SECONDS + 1)
-        ).strftime("%Y-%m-%d %H:%M:%S")
+        cm.terminal_notification_owner = "owner-a"
+        assert cm.claim_pending_terminal_notification(task_id) is True
         with cm._get_cursor() as cursor:
             cursor.execute(
-                "UPDATE task_terminal_notifications SET attempts = 1, claimed_at = ? "
+                "UPDATE task_terminal_notifications SET claimed_owner = ? "
                 "WHERE task_id = ?",
-                (claimed_at, task_id),
+                ("owner-b", task_id),
             )
+        cm.release_terminal_notification_claim(task_id)
+        state = _outbox_state(cm, task_id)
+        assert state["claimed_owner"] == "owner-b"
+        assert state["attempts"] == 1
 
+    def test_other_owner_can_be_reclaimed_and_dispatched_once(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
+        with cm._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE task_terminal_notifications SET claimed_owner = ? "
+                "WHERE task_id = ?",
+                ("previous-process", task_id),
+            )
         router = MagicMock()
         router.notify_task_status.return_value = {"wechat": True}
         assert [row["task_id"] for row in cm.list_unattempted_terminal_notifications()] == [
@@ -440,31 +447,6 @@ class TestTerminalNotificationLease:
         ]
         assert deliver_pending_terminal_notifications(cm, router=router) == 1
         router.notify_task_status.assert_called_once()
-
-    def test_slow_send_is_not_claimed_by_second_dispatcher(self, cm):
-        task_id = _new_task(cm)
-        cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
-        started = threading.Event()
-        release = threading.Event()
-        router = MagicMock()
-
-        def slow_send(*args, **kwargs):
-            started.set()
-            assert release.wait(timeout=5)
-            return {"wechat": True}
-
-        router.notify_task_status.side_effect = slow_send
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            first = executor.submit(deliver_pending_terminal_notifications, cm, router=router)
-            assert started.wait(timeout=5)
-            time.sleep(DISPATCH_POLL_SECONDS + 0.05)
-            second = executor.submit(deliver_pending_terminal_notifications, cm, router=router)
-            assert second.result(timeout=5) == 0
-            release.set()
-            assert first.result(timeout=5) == 1
-
-        router.notify_task_status.assert_called_once()
-        assert _outbox_state(cm, task_id)["notified_at"] is not None
 
 
 class TestNotificationAcceptance:
@@ -512,7 +494,8 @@ class TestBoundedAtLeastOnceReplay:
         )
         state = _outbox_state(cm, task_id)
         assert state["notified_at"] is None
-        assert state["claimed_at"] is None
+        assert state["claimed_owner"] is None
+        assert state["attempts"] == 1
         replay = _accepted_router()
         assert deliver_pending_terminal_notifications(cm, router=replay) == 1
         replay.notify_task_status.assert_called_once()
@@ -531,7 +514,8 @@ class TestBoundedAtLeastOnceReplay:
         )
         state = _outbox_state(cm, task_id)
         assert state["notified_at"] is None
-        assert state["claimed_at"] is None
+        assert state["claimed_owner"] is None
+        assert state["attempts"] == 1
         replay = _accepted_router()
         assert deliver_pending_terminal_notifications(cm, router=replay) == 1
         replay.notify_task_status.assert_called_once()
