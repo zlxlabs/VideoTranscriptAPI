@@ -839,13 +839,23 @@ async def get_task_summary(
             return TranscribeResponse(
                 code=200,
                 message="获取摘要成功",
-                data={"summary": preview, "status": "success", "summary_status": summary_state},
+                data={
+                    "summary": preview,
+                    "status": view_data.get("status"),
+                    "summary_status": summary_state,
+                    "task_status": task_status,
+                },
             )
 
         return TranscribeResponse(
             code=200,
             message="摘要不可用",
-            data={"summary": None, "status": "success", "summary_status": summary_state},
+            data={
+                "summary": None,
+                "status": view_data.get("status"),
+                "summary_status": summary_state,
+                "task_status": task_status,
+            },
         )
     except Exception as exc:
         logger.exception("get summary failed for view_token=%s: %s", view_token, exc)

@@ -196,6 +196,8 @@ def test_audit_summary_serves_interrupted_payload():
     payload = resp.json()
     assert payload["code"] == 200
     assert payload["data"]["summary"] == "partial summary from before the restart"
+    assert payload["data"]["status"] == "interrupted"
+    assert payload["data"]["task_status"] == "failed"
 
 
 def test_audit_summary_failed_without_payload_keeps_202():
