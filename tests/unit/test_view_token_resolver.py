@@ -1,5 +1,7 @@
 """Unit tests for ViewTokenResolver extracted from CacheManager contracts."""
 
+from pathlib import Path
+
 import pytest
 
 from src.video_transcript_api.api.services.view_token_resolver import (
@@ -47,6 +49,35 @@ def _make_success_task(cm, media_id="vid1"):
     )
     cm.update_task_status(
         task["task_id"], "success", platform="youtube", media_id=media_id
+    )
+    return task
+
+
+def _make_failed_task(cm, media_id, error_message, *, save_transcript=None):
+    """Create a failed task, optionally with a CapsWriter cache body."""
+    if save_transcript is not None:
+        cm.save_cache(
+            platform="youtube",
+            url=f"https://example.com/{media_id}",
+            media_id=media_id,
+            use_speaker_recognition=False,
+            transcript_data=save_transcript,
+            transcript_type="capswriter",
+            title="Failed Video",
+            author="Author",
+            description="A failed video",
+        )
+    task = cm.create_task(
+        url=f"https://example.com/{media_id}",
+        platform="youtube",
+        media_id=media_id,
+    )
+    cm.update_task_status(
+        task["task_id"],
+        "failed",
+        platform="youtube",
+        media_id=media_id,
+        error_message=error_message,
     )
     return task
 
@@ -195,3 +226,210 @@ class TestViewTokenResolver:
         view_data = resolver.get_view_data_by_token(cache_hit["view_token"])
 
         assert view_data["llm_config"] == config
+
+    def test_failed_task_with_transcript_returns_interrupted(self, cm, resolver):
+        """Red E: failed task row + non-empty cache body -> interrupted."""
+        reason = "orphan recovered after deploy restart"
+        task = _make_failed_task(
+            cm,
+            "vid-interrupted-body",
+            reason,
+            save_transcript="Hello world. This is a test transcript.",
+        )
+
+        view_data = resolver.get_view_data_by_token(task["view_token"])
+
+        assert view_data["status"] == "interrupted"
+        assert view_data["transcript"]
+        assert "Hello world" in view_data["transcript"]
+        assert view_data["interrupted_reason"] == reason
+        assert view_data["interrupted_at"]
+        assert view_data["llm_config"] is None or isinstance(view_data["llm_config"], dict)
+        assert view_data["cache_dir"]
+
+    def test_failed_task_with_calibrated_text_returns_interrupted(
+        self, cm, resolver
+    ):
+        """Red E variant: llm_calibrated.txt is also a usable payload."""
+        reason = "killed during summary stage"
+        task = _make_failed_task(
+            cm,
+            "vid-interrupted-calibrated",
+            reason,
+            save_transcript="raw transcript body",
+        )
+        cm.save_llm_result(
+            platform="youtube",
+            media_id="vid-interrupted-calibrated",
+            use_speaker_recognition=False,
+            llm_type="calibrated",
+            content="calibrated transcript body",
+        )
+
+        view_data = resolver.get_view_data_by_token(task["view_token"])
+
+        assert view_data["status"] == "interrupted"
+        assert view_data["transcript"] == "calibrated transcript body"
+        assert view_data["interrupted_reason"] == reason
+
+    def test_failed_task_with_empty_transcript_stays_failed(self, cm, resolver):
+        """Reverse red: cache hit without body text must stay failed."""
+        reason = "orphan recovered after deploy restart"
+        task = _make_failed_task(
+            cm,
+            "vid-empty-shell",
+            reason,
+            save_transcript="",
+        )
+
+        view_data = resolver.get_view_data_by_token(task["view_token"])
+
+        assert view_data["status"] == "failed"
+        assert view_data["message"] == reason
+        assert "transcript" not in view_data
+
+    def test_failed_cache_dir_without_text_fields_stays_failed(
+        self, cm, resolver, monkeypatch
+    ):
+        """Reverse red: directory existence must not count as usable payload."""
+        reason = "orphan recovered after deploy restart"
+        task = _make_failed_task(cm, "vid-dir-only", reason)
+        cache_dir = Path(cm.cache_dir) / "shell-only"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "key_info.json").write_text("{}", encoding="utf-8")
+
+        def fake_get_cache(**kwargs):
+            return {
+                "title": "Shell",
+                "author": "",
+                "description": "",
+                "file_path": str(cache_dir),
+                "platform": "youtube",
+                "use_speaker_recognition": False,
+                "llm_calibrated": "",
+                "transcript_data": "",
+            }
+
+        monkeypatch.setattr(cm, "get_cache", fake_get_cache)
+
+        view_data = resolver.get_view_data_by_token(task["view_token"])
+
+        assert view_data["status"] == "failed"
+        assert view_data["message"] == reason
+        assert "transcript" not in view_data
+
+    def test_failed_task_with_key_info_only_stays_failed(self, cm, resolver):
+        """Accident shell: directory exists with only key_info.json."""
+        reason = "orphan recovered after deploy restart"
+        task = _make_failed_task(
+            cm,
+            "vid-key-info-only",
+            reason,
+            save_transcript="temporary body that will be deleted",
+        )
+        view_before = resolver.get_view_data_by_token(task["view_token"])
+        cache_dir = Path(view_before["cache_dir"])
+        for name in (
+            "transcript_capswriter.txt",
+            "transcript_capswriter.json",
+            "transcript_funasr.json",
+            "llm_calibrated.txt",
+        ):
+            target = cache_dir / name
+            if target.exists():
+                target.unlink()
+        (cache_dir / "key_info.json").write_text("{}", encoding="utf-8")
+
+        view_data = resolver.get_view_data_by_token(task["view_token"])
+
+        assert view_data["status"] == "failed"
+        assert view_data["message"] == reason
+
+    def test_failed_task_without_cache_keeps_default_failed_page(self, cm, resolver):
+        task = _make_failed_task(cm, "vid-no-cache", "download failed")
+
+        view_data = resolver.get_view_data_by_token(task["view_token"])
+
+        assert view_data["status"] == "failed"
+        assert view_data["message"] == "download failed"
+        assert "transcript" not in view_data
+
+    def test_failed_task_without_error_message_uses_default_copy(self, cm, resolver):
+        task = cm.create_task(
+            url="https://example.com/vid-default-msg",
+            platform="youtube",
+            media_id="vid-default-msg",
+        )
+        cm.update_task_status(
+            task["task_id"],
+            "failed",
+            platform="youtube",
+            media_id="vid-default-msg",
+        )
+
+        view_data = resolver.get_view_data_by_token(task["view_token"])
+
+        assert view_data["status"] == "failed"
+        assert view_data["message"] == "转录任务失败，请重新提交"
+
+    def test_success_task_still_returns_success(self, cm, resolver):
+        task = _make_success_task(cm, "vid-still-success")
+
+        view_data = resolver.get_view_data_by_token(task["view_token"])
+
+        assert view_data["status"] == "success"
+        assert "interrupted_reason" not in view_data
+
+    @pytest.mark.parametrize(
+        ("task_status", "expected_view_status"),
+        [
+            ("queued", "processing"),
+            ("processing", "processing"),
+            ("calibrating", "processing"),
+        ],
+    )
+    def test_in_flight_statuses_stay_processing(
+        self, cm, resolver, task_status, expected_view_status
+    ):
+        _save_sample_capswriter(cm, f"vid-{task_status}")
+        task = cm.create_task(
+            url=f"https://example.com/vid-{task_status}",
+            platform="youtube",
+            media_id=f"vid-{task_status}",
+        )
+        cm.update_task_status(
+            task["task_id"],
+            task_status,
+            platform="youtube",
+            media_id=f"vid-{task_status}",
+        )
+
+        view_data = resolver.get_view_data_by_token(task["view_token"])
+
+        assert view_data["status"] == expected_view_status
+        assert "transcript" not in view_data
+
+    def test_success_without_cache_returns_file_cleaned(self, cm, resolver):
+        task = cm.create_task(
+            url="https://example.com/vid-cleaned",
+            platform="youtube",
+            media_id="vid-cleaned",
+        )
+        cm.update_task_status(
+            task["task_id"],
+            "success",
+            platform="youtube",
+            media_id="vid-cleaned",
+        )
+
+        view_data = resolver.get_view_data_by_token(task["view_token"])
+
+        assert view_data["status"] == "file_cleaned"
+
+    def test_success_without_platform_returns_incomplete(self, cm, resolver):
+        task = cm.create_task(url="https://example.com/vid-incomplete")
+        cm.update_task_status(task["task_id"], "success")
+
+        view_data = resolver.get_view_data_by_token(task["view_token"])
+
+        assert view_data["status"] == "incomplete"
