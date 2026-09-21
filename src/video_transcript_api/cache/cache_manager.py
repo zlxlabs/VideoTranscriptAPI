@@ -35,6 +35,7 @@ logger = setup_logger("cache_manager")
 MAX_EXPECTED_TASK_DURATION_SECONDS = 5400
 RUNTIME_RECONCILE_GRACE_SECONDS = 2 * MAX_EXPECTED_TASK_DURATION_SECONDS
 TERMINAL_NOTIFY_MAX_ATTEMPTS = 3
+TERMINAL_NOTIFY_TAKEOVER_LEASE_SECONDS = 120
 
 # 清算路径 SQLite 连接的默认 busy_timeout（毫秒，本地 codex review 第
 # 12 轮 P2 发现 e）：匹配 CacheManager._get_connection() 里 sqlite3.
@@ -359,7 +360,8 @@ class CacheManager:
                     completed_at TIMESTAMP,
                     notified_at TIMESTAMP,
                     attempts INTEGER NOT NULL DEFAULT 0,
-                    claimed_owner TEXT
+                    claimed_owner TEXT,
+                    claimed_at TIMESTAMP
                 )
             ''')
             cursor.execute(
@@ -458,12 +460,21 @@ class CacheManager:
                     col[1] for col in cursor.fetchall()
                 ]
                 if 'claimed_owner' not in terminal_notification_columns:
-                    action = (
-                        "RENAME COLUMN claimed_at TO claimed_owner"
-                        if 'claimed_at' in terminal_notification_columns
-                        else "ADD COLUMN claimed_owner TEXT"
+                    cursor.execute(
+                        "ALTER TABLE task_terminal_notifications "
+                        "ADD COLUMN claimed_owner TEXT"
                     )
-                    cursor.execute("ALTER TABLE task_terminal_notifications " + action)
+                    terminal_notification_columns.append('claimed_owner')
+                if 'claimed_at' not in terminal_notification_columns:
+                    cursor.execute(
+                        "ALTER TABLE task_terminal_notifications "
+                        "ADD COLUMN claimed_at TIMESTAMP"
+                    )
+                    cursor.execute(
+                        "UPDATE task_terminal_notifications "
+                        "SET claimed_at = CURRENT_TIMESTAMP "
+                        "WHERE claimed_owner IS NOT NULL AND claimed_at IS NULL"
+                    )
 
                 # 迁移7: 章节梗概诚实状态（ChaptersStatus）镜像列，供 history 透出。
                 cursor.execute("PRAGMA table_info(task_status)")
@@ -2504,33 +2515,48 @@ class CacheManager:
             raise
 
     def list_unattempted_terminal_notifications(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """List pending rows not owned by this process."""
+        """List pending rows available to this process."""
+        lease_cutoff = (
+            datetime.datetime.utcnow()
+            - datetime.timedelta(seconds=TERMINAL_NOTIFY_TAKEOVER_LEASE_SECONDS)
+        ).strftime("%Y-%m-%d %H:%M:%S")
         with self._get_cursor() as cursor:
             cursor.execute(
                 '''SELECT task_id, status, error_message, created_at, completed_at,
-                          notified_at, attempts, claimed_owner
+                          notified_at, attempts, claimed_owner, claimed_at
                    FROM task_terminal_notifications
                    WHERE notified_at IS NULL AND attempts < ?
-                     AND (claimed_owner IS NULL OR claimed_owner != ?)
+                     AND (claimed_owner IS NULL OR (claimed_owner != ? AND claimed_at <= ?))
                    ORDER BY created_at ASC
                    LIMIT ?''',
-                (TERMINAL_NOTIFY_MAX_ATTEMPTS, self.terminal_notification_owner, int(limit)),
+                (
+                    TERMINAL_NOTIFY_MAX_ATTEMPTS,
+                    self.terminal_notification_owner,
+                    lease_cutoff,
+                    int(limit),
+                ),
             )
             return [dict(row) for row in cursor.fetchall()]
 
     def claim_pending_terminal_notification(self, task_id: str) -> bool:
-        """Claim a pending row not already owned by this process."""
+        """Claim a pending row not owned by this process within its lease."""
+        lease_cutoff = (
+            datetime.datetime.utcnow()
+            - datetime.timedelta(seconds=TERMINAL_NOTIFY_TAKEOVER_LEASE_SECONDS)
+        ).strftime("%Y-%m-%d %H:%M:%S")
         with self._get_cursor() as cursor:
             cursor.execute(
                 '''UPDATE task_terminal_notifications
-                   SET attempts = attempts + 1, claimed_owner = ?
+                   SET attempts = attempts + 1, claimed_owner = ?,
+                       claimed_at = CURRENT_TIMESTAMP
                    WHERE task_id = ? AND notified_at IS NULL AND attempts < ?
-                     AND (claimed_owner IS NULL OR claimed_owner != ?)''',
+                     AND (claimed_owner IS NULL OR (claimed_owner != ? AND claimed_at <= ?))''',
                 (
                     self.terminal_notification_owner,
                     task_id,
                     TERMINAL_NOTIFY_MAX_ATTEMPTS,
                     self.terminal_notification_owner,
+                    lease_cutoff,
                 ),
             )
             return cursor.rowcount == 1
@@ -2540,7 +2566,8 @@ class CacheManager:
         with self._get_cursor() as cursor:
             cursor.execute(
                 '''UPDATE task_terminal_notifications
-                   SET notified_at = CURRENT_TIMESTAMP, claimed_owner = NULL
+                   SET notified_at = CURRENT_TIMESTAMP, claimed_owner = NULL,
+                       claimed_at = NULL
                    WHERE task_id = ? AND notified_at IS NULL
                      AND claimed_owner = ?''',
                 (task_id, self.terminal_notification_owner),
@@ -2551,7 +2578,7 @@ class CacheManager:
         with self._get_cursor() as cursor:
             cursor.execute(
                 '''UPDATE task_terminal_notifications
-                   SET claimed_owner = NULL
+                   SET claimed_owner = NULL, claimed_at = NULL
                    WHERE task_id = ? AND notified_at IS NULL
                      AND claimed_owner = ?''',
                 (task_id, self.terminal_notification_owner),

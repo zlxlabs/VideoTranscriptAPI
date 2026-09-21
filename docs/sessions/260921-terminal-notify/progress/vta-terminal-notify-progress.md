@@ -98,3 +98,10 @@
 - 本段结论：`test_transcription_flow_regression.py`、`test_layered_cache.py`、`test_temp_cleanup_integration.py`、`test_llm_concurrency.py` 的替身均记录 `notification_owner`，并同步 claim/list/mark/release 的 owner 条件。相关四文件测试通过。
 - 关键决策与已否决方案：不让替身继续使用 "claimed" 哨兵或无条件释放；固定测试 owner 只用于复现生产的进程内互斥规则。
 - 下一步唯一动作：跑收尾全量测试、检查范围与报告证据后提交并推送同一分支。
+
+## 验收回派 R10.1
+
+- 当前阶段：repairing / R10.1 完成
+- 本段结论：终态通知表保留 `claimed_owner` 并补回 `claimed_at`；生产 claim/list 统一为同 owner 永不重领、跨 owner 仅在 120 秒租约过期后接管。mark/release 同步清理 claim 时刻并保留 owner 锁。
+- 关键决策与已否决方案：迁移不再把旧 `claimed_at` 改名为 owner，保留旧时间列并缺列补齐另一列；不引入 fencing token、sending 状态或额外重试机制。
+- 下一步唯一动作：R10.2 在已提交真修复上注入活动跨 owner 立即接管的单点坏改动，确认新增红验转红后立即还原。
