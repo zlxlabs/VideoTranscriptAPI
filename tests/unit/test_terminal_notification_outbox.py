@@ -8,6 +8,8 @@ All console output must be in English only (no emoji, no Chinese).
 """
 
 import asyncio
+import datetime
+import sqlite3
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +18,7 @@ import pytest
 from src.video_transcript_api.api.services import llm_ops, transcription
 from src.video_transcript_api.api.services.terminal_status import (
     TERMINAL_FAILED_STATUS,
+    deliver_pending_terminal_notifications,
     finalize_terminal_status_and_notify,
 )
 from src.video_transcript_api.cache.cache_manager import CacheManager
@@ -239,3 +242,106 @@ class TestRedCTranscriptionWorkerExceptCasGate:
         finally:
             unbind_runtime(token)
             runtime.close()
+
+
+class TestOutboxSchema:
+    def test_task_id_unique_constraint(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
+        with cm._get_cursor() as cursor:
+            cursor.execute("PRAGMA table_info(task_terminal_notifications)")
+            pk_cols = [row[1] for row in cursor.fetchall() if row[5]]
+            cursor.execute("PRAGMA index_list(task_terminal_notifications)")
+            indexes = list(cursor.fetchall())
+        assert pk_cols == ["task_id"]
+        assert indexes, "expected a unique index on task_id"
+        with pytest.raises(sqlite3.IntegrityError):
+            with cm._get_cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO task_terminal_notifications (task_id, status) "
+                    "VALUES (?, ?)",
+                    (task_id, "failed"),
+                )
+
+
+def _assert_one_pending_and_one_notify(cm, task_id, router, *, reason):
+    pending = cm.list_unattempted_terminal_notifications()
+    assert [row["task_id"] for row in pending] == [task_id]
+    sent = deliver_pending_terminal_notifications(cm, router=router)
+    assert sent == 1
+    router.notify_task_status.assert_called_once()
+    kwargs = router.notify_task_status.call_args.kwargs
+    assert kwargs["status"] == TERMINAL_FAILED_STATUS
+    error = kwargs.get("error") or ""
+    assert f"completed_at=" in error
+    assert "由服务重启恢复判定" in error
+    snapshot = cm.get_task_by_id(task_id)["terminal_snapshot"]
+    assert snapshot.get("reason") == reason
+
+
+class TestRedARecoveryPathsNotify:
+    def test_recover_orphaned_tasks_enqueues_and_dispatcher_sends(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.PROCESSING)
+        router = MagicMock()
+        assert cm.recover_orphaned_tasks() == 1
+        _assert_one_pending_and_one_notify(
+            cm, task_id, router, reason="orphaned_on_startup",
+        )
+
+    def test_drain_on_shutdown_enqueues_and_dispatcher_sends(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.CALIBRATING)
+        router = MagicMock()
+        assert cm.drain_non_terminal_tasks_on_shutdown() == 1
+        _assert_one_pending_and_one_notify(
+            cm, task_id, router, reason="shutdown_drain",
+        )
+
+    def test_reconcile_runtime_enqueues_and_dispatcher_sends(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.PROCESSING)
+        router = MagicMock()
+        future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
+        assert cm.reconcile_runtime_orphaned_tasks(
+            grace_period_seconds=0, now=future,
+        ) == 1
+        _assert_one_pending_and_one_notify(
+            cm, task_id, router, reason="runtime_reconcile",
+        )
+
+
+class TestRedBReplayIncludesCompletedAt:
+    def test_replay_after_process_death_sends_original_completed_at(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.PROCESSING)
+        assert cm.update_task_status(
+            task_id, TaskStatus.FAILED,
+            error_message="Task interrupted by service restart",
+        ) is True
+        pending = cm.list_unattempted_terminal_notifications()
+        assert len(pending) == 1
+        original_completed_at = pending[0]["completed_at"]
+        assert original_completed_at
+
+        router = MagicMock()
+        # Reconstruct a dispatcher without having started one -- this is
+        # the "pending written, process killed before send" window.
+        sent = deliver_pending_terminal_notifications(cm, router=router)
+        assert sent == 1
+        error = router.notify_task_status.call_args.kwargs.get("error") or ""
+        assert f"completed_at={original_completed_at}" in error
+
+
+class TestRedDSentRowsAreNotResent:
+    def test_replay_after_mark_sent_does_not_resend(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(
+            task_id, TaskStatus.FAILED, error_message="boom",
+        )
+        router = MagicMock()
+        assert deliver_pending_terminal_notifications(cm, router=router) == 1
+        assert router.notify_task_status.call_count == 1
+        assert deliver_pending_terminal_notifications(cm, router=router) == 0
+        assert router.notify_task_status.call_count == 1
+

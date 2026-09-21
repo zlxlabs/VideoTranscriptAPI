@@ -31,6 +31,7 @@ from .context import (
 )
 from .routes import audit, health, tasks, users, views
 from .services.transcription import process_llm_queue, process_task_queue
+from .services.terminal_status import run_terminal_notification_dispatcher
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -392,6 +393,20 @@ def create_app(
             # （见 RuntimeContext.recovery_pending / CacheManager.
             # recover_orphaned_tasks 的 cutoff 参数说明）。
             app.state.runtime.recovery_pending = True
+
+        # Dispatcher starts after recover so startup replay covers rows
+        # just written by orphan recovery (the n305 incident: failed
+        # landed, no notify). Replay also covers pending from a previous
+        # crash that never marked sent.
+        logger.info("starting terminal notification dispatcher")
+        notify_thread = threading.Thread(
+            target=run_with_runtime,
+            args=(app.state.runtime, run_terminal_notification_dispatcher),
+            daemon=True,
+            name="terminal-notify-dispatcher",
+        )
+        notify_thread.start()
+        app.state.runtime.terminal_notify_thread = notify_thread
 
         try:
             repaired = _repair_all_task_snapshots(

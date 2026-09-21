@@ -868,6 +868,8 @@ class RuntimeContext:
         self.background_tasks: list[asyncio.Task] = []
         self.llm_thread: threading.Thread | None = None
         self.llm_stop_event = threading.Event()
+        self.terminal_notify_thread: threading.Thread | None = None
+        self.terminal_notify_stop_event = threading.Event()
         self.worker_futures: set[tuple[str, concurrent.futures.Future]] = set()
         self._worker_futures_condition = threading.Condition()
         # 进程内在途任务登记表（本地 codex review 第 12 轮 P1）：容量取自
@@ -1358,6 +1360,12 @@ class RuntimeContext:
         """
         if deadline is None:
             deadline = self._new_shutdown_deadline()
+        try:
+            return self._stop_workers_body(deadline)
+        finally:
+            self._shutdown_terminal_notify_owner(deadline)
+
+    def _stop_workers_body(self, deadline: float) -> bool:
         transcription_executor = getattr(self, "executor", None)
         if transcription_executor is not None:
             transcription_executor.shutdown(wait=False, cancel_futures=True)
@@ -1456,6 +1464,19 @@ class RuntimeContext:
         if llm_executor is not None:
             llm_executor.shutdown(wait=False, cancel_futures=True)
         return not (llm_thread and llm_thread.is_alive())
+
+    def _shutdown_terminal_notify_owner(self, deadline: float | None = None) -> None:
+        """Bounded stop for the terminal-notification dispatcher thread."""
+        if deadline is None:
+            deadline = self._new_shutdown_deadline()
+        self.terminal_notify_stop_event.set()
+        thread = self.terminal_notify_thread
+        if thread and thread.is_alive():
+            thread.join(timeout=self._remaining_shutdown_budget(deadline))
+        if thread and thread.is_alive():
+            self.logger.warning(
+                "terminal notification dispatcher still alive after bounded join"
+            )
 
     def _finish_close(self, resources_safe: bool, deadline: float | None = None) -> None:
         """Drain unconditionally, then close owner-thread resources only

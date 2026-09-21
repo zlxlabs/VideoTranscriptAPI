@@ -1,13 +1,4 @@
-"""Single exit for terminal task status writes and status notifications.
-
-Milestone 1: callers write success/failed through
-``finalize_terminal_status_and_notify``. Status notification is sent only
-when the CAS write wins. Content bodies (summary / notes / calibrated
-text) stay on the worker side.
-
-Milestone 2 replaces the in-process notify with an outbox row inserted
-inside ``CacheManager.update_task_status`` plus a dispatcher thread.
-"""
+"""Single exit for terminal (success/failed) status writes and status notifies."""
 
 from typing import Any, Dict, Optional
 
@@ -39,38 +30,10 @@ def finalize_terminal_status_and_notify(
     notify_via=None,
     **update_kwargs: Any,
 ) -> bool:
-    """Write a terminal status and notify only if this call won the CAS.
+    """Write terminal status via CAS; notify only if this call won.
 
-    Args:
-        task_id: Task id to finalize.
-        status: ``success`` or ``failed``.
-        error_message: Persisted on the task row when status is failed.
-        url: Video URL used in the status notification.
-        title: Optional title shown in the status notification.
-        author: Optional author shown in the status notification.
-        notify_status: Override the user-visible status string. Defaults to
-            ``【任务完成】`` / ``【任务失败】``.
-        notify_error: Override the error string sent with the notification.
-            Defaults to ``error_message``.
-        channel_name: Per-request channel pin, forwarded to the router.
-        webhooks: Per-request webhook map, forwarded to the router.
-        send_status_notification: When False, only the CAS write happens
-            (used by the HTTP create-then-cleanup path that already has a
-            response body).
-        cache_manager: Cache manager instance; defaults to the runtime one.
-        router: Notification router; defaults to the global router.
-        notify_via: Optional bound notifier (``notify_task_status``). When
-            set, channel/webhook context is already bound on that object.
-        **update_kwargs: Passed through to ``update_task_status``.
-
-    Returns:
-        True if this call won the CAS (row updated). False if the task was
-        already terminal or the row does not exist.
-
-    Raises:
-        Whatever ``update_task_status`` raises. Notification errors are
-        logged and swallowed so they cannot roll back a landed terminal
-        write.
+    Returns True iff the row was updated. Notify errors are logged, not raised.
+    Pass send_status_notification=False to persist without sending (HTTP cleanup).
     """
     if cache_manager is None:
         cache_manager = get_cache_manager()
@@ -93,6 +56,12 @@ def finalize_terminal_status_and_notify(
     logger.info(f"terminal CAS won: {task_id} -> {status}")
 
     if not send_status_notification:
+        return True
+
+    claim = getattr(cache_manager, "claim_pending_terminal_notification", None)
+    if callable(claim) and not claim(task_id):
+        # Dispatcher already owns this row, or Dummy-less claim lost.
+        # Dummy cache managers have no claim method and fall through.
         return True
 
     if notify_status is None:
@@ -129,6 +98,9 @@ def finalize_terminal_status_and_notify(
         logger.exception(
             f"status notification failed (terminal already persisted): {task_id}"
         )
+    mark = getattr(cache_manager, "mark_terminal_notification_sent", None)
+    if callable(mark):
+        mark(task_id)
     return True
 
 
@@ -165,3 +137,159 @@ def _emit_status_notification(
         channel_name=channel_name,
         webhooks=webhooks,
     )
+
+
+DISPATCH_POLL_SECONDS = 0.5
+DISPATCH_BATCH_SIZE = 20
+_RECOVERY_REASONS = frozenset({
+    "orphaned_on_startup",
+    "shutdown_drain",
+    "runtime_reconcile",
+})
+
+
+def deliver_pending_terminal_notifications(
+    cache_manager=None,
+    *,
+    router=None,
+    limit: int = DISPATCH_BATCH_SIZE,
+) -> int:
+    """Claim and send never-attempted pending rows. Used by the dispatcher and tests."""
+    from ..context import get_cache_manager as _get_cm
+
+    if cache_manager is None:
+        cache_manager = _get_cm()
+    if router is None:
+        router = get_notification_router()
+
+    rows = cache_manager.list_unattempted_terminal_notifications(limit=limit)
+    sent = 0
+    for row in rows:
+        task_id = row["task_id"]
+        if not cache_manager.claim_pending_terminal_notification(task_id):
+            continue
+        task = cache_manager.get_task_by_id(task_id) or {}
+        notify_status = (
+            TERMINAL_SUCCESS_STATUS
+            if row["status"] == TaskStatus.SUCCESS
+            else TERMINAL_FAILED_STATUS
+        )
+        error_for_notify = _compose_dispatcher_error(row, task)
+        webhooks = _resolve_delivery_webhooks(task)
+        try:
+            router.notify_task_status(
+                url=task.get("url") or "",
+                status=notify_status,
+                error=error_for_notify,
+                title=task.get("title"),
+                author=task.get("author"),
+                webhooks=webhooks,
+            )
+        except Exception:
+            logger.exception(
+                f"dispatcher status notification failed: {task_id}"
+            )
+        cache_manager.mark_terminal_notification_sent(task_id)
+        sent += 1
+    return sent
+
+
+def run_terminal_notification_dispatcher() -> None:
+    """Replay pending rows, then poll. Closes this thread's sqlite connection on exit."""
+    from ..context import get_cache_manager, get_runtime
+
+    logger.info("terminal notification dispatcher starting")
+    cache_manager = get_cache_manager()
+    runtime = get_runtime()
+    stop_event = getattr(runtime, "terminal_notify_stop_event", None)
+    try:
+        delivered = deliver_pending_terminal_notifications(cache_manager)
+        if delivered:
+            logger.info(f"terminal notification replay sent {delivered} pending row(s)")
+        while stop_event is None or not stop_event.is_set():
+            deliver_pending_terminal_notifications(cache_manager)
+            if stop_event is None:
+                break
+            stop_event.wait(DISPATCH_POLL_SECONDS)
+    finally:
+        cache_manager.close()
+        logger.info("terminal notification dispatcher stopped")
+
+
+def _compose_dispatcher_error(row: dict, task: dict) -> str:
+    """Build the dispatcher error/body: original error, completed_at, recovery note."""
+    parts = []
+    error_message = row.get("error_message") or task.get("error_message")
+    if error_message:
+        parts.append(str(error_message))
+    completed_at = row.get("completed_at")
+    if completed_at:
+        parts.append(f"completed_at={completed_at}")
+    snapshot = task.get("terminal_snapshot") or {}
+    if isinstance(snapshot, dict) and snapshot.get("reason") in _RECOVERY_REASONS:
+        parts.append("由服务重启恢复判定")
+    view_token = task.get("view_token")
+    if view_token:
+        try:
+            from ...utils.rendering import get_base_url
+            parts.append(f"view={get_base_url()}/view/{view_token}")
+        except Exception:
+            logger.exception("failed to build view url for terminal notify")
+    return "\n".join(parts) if parts else None
+
+
+def _resolve_delivery_webhooks(task: dict) -> Optional[Dict[str, str]]:
+    """Resolve notify targets without request context: audit log, user, then global."""
+    task_id = task.get("task_id")
+    audit_webhook = _lookup_audit_wechat_webhook(task_id)
+    if audit_webhook:
+        return {"wechat": audit_webhook}
+
+    submitted_by = task.get("submitted_by")
+    if submitted_by:
+        try:
+            from ..context import get_runtime
+            user = get_runtime().user_manager.get_user_by_id(submitted_by)
+        except RuntimeError:
+            user = None
+        except Exception:
+            logger.exception("failed to resolve user webhook for terminal notify")
+            user = None
+        if user:
+            webhooks = {}
+            if user.get("wechat_webhook"):
+                webhooks["wechat"] = user["wechat_webhook"]
+            if user.get("feishu_webhook"):
+                webhooks["feishu"] = user["feishu_webhook"]
+            if webhooks:
+                return webhooks
+    return None
+
+
+def _lookup_audit_wechat_webhook(task_id: Optional[str]) -> Optional[str]:
+    """Read api_audit_logs.wechat_webhook by task_id. Audit schema is not ours to extend."""
+    if not task_id:
+        return None
+    try:
+        from ..context import get_runtime
+        audit = get_runtime().audit_logger
+    except RuntimeError:
+        return None
+    except Exception:
+        logger.exception("failed to open audit logger for terminal notify webhook")
+        return None
+    try:
+        with audit._get_cursor() as cursor:
+            cursor.execute(
+                '''SELECT wechat_webhook FROM api_audit_logs
+                   WHERE task_id = ? AND wechat_webhook IS NOT NULL
+                         AND wechat_webhook != ''
+                   ORDER BY request_time DESC LIMIT 1''',
+                (task_id,),
+            )
+            row = cursor.fetchone()
+        if row:
+            return row[0]
+    except Exception:
+        logger.exception("failed to lookup audit wechat_webhook for terminal notify")
+    return None
