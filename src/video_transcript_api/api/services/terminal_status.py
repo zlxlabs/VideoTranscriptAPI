@@ -11,8 +11,11 @@ I3 (coherent) The row carries the status written by that CAS; the delivered
               decide "should this send".
 I4 (no loss)  At process start and on every delivery cycle, every row with
               `notified_at IS NULL` must be attempted. NO condition may make a
-              row permanently unlisted. `attempts` is an observation counter and
-              never filters anything.
+              row permanently unlisted, and no ordering/limit may starve it:
+              "no condition under which a row is never attempted" is the test.
+              `attempts` is an observation counter and never filters anything;
+              the listing is ordered by `attempts ASC` so a stuck head cannot
+              starve fresh rows.
 I5 (at-least-once) `notified_at` is written only after a send that returned a
               real success signal. A crash between send and mark => one
               duplicate is allowed (explicitly accepted window).

@@ -2495,14 +2495,19 @@ class CacheManager:
             raise
 
     def list_unattempted_terminal_notifications(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """List every not-yet-sent row (I4: no row may be hidden by a predicate)."""
+        """List every not-yet-sent row, least-attempted first (I4).
+
+        Ordering by `attempts` first means a permanently failing head cannot
+        starve fresh rows: rows are never removed from this list, but a stuck
+        row sinks to the tail instead of blocking everyone behind it.
+        """
         with self._get_cursor() as cursor:
             cursor.execute(
                 '''SELECT task_id, status, error_message, created_at, completed_at,
                           notified_at, attempts
                    FROM task_terminal_notifications
                    WHERE notified_at IS NULL
-                   ORDER BY created_at ASC
+                   ORDER BY attempts ASC, created_at ASC
                    LIMIT ?''',
                 (int(limit),),
             )

@@ -115,6 +115,10 @@ class FakeCache:
         # I4: unsent rows are always listed; attempts never filters.
         return [r for r in self._outbox.values() if r["notified_at"] is None][:limit]
 
+    def is_terminal_notification_pending(self, task_id):
+        row = self._outbox.get(task_id)
+        return row is not None and row["notified_at"] is None
+
     def mark_terminal_notification_attempted(self, task_id):
         row = self._outbox.get(task_id)
         if row is not None and row["notified_at"] is None:

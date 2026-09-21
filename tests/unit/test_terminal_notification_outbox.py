@@ -573,6 +573,50 @@ class TestBoundedAtLeastOnceReplay:
         replay.notify_task_status.assert_called_once()
         assert _outbox_state(cm, task_id)["notified_at"] is not None
 
+    def test_r12_limit_does_not_starve_fresh_rows_behind_stuck_head(self, cm):
+        """R12.2: 21 stuck rows (attempts=5) sit at the head of created_at ASC.
+        With `LIMIT 20` the newest row was never attempted at all -- listed but
+        starved, which is the same silent loss I4 forbids.
+        """
+        stuck_ids = []
+        for i in range(21):
+            tid = _new_task(cm, url=f"https://example.com/stuck{i}")
+            cm.update_task_status(tid, TaskStatus.FAILED, error_message="boom")
+            with cm._get_cursor() as cursor:
+                cursor.execute(
+                    "UPDATE task_terminal_notifications SET attempts = 5, "
+                    "created_at = '2020-01-01 00:00:00' WHERE task_id = ?",
+                    (tid,),
+                )
+            stuck_ids.append(tid)
+
+        fresh_id = _new_task(cm, url="https://example.com/fresh")
+        cm.update_task_status(fresh_id, TaskStatus.FAILED, error_message="boom")
+        with cm._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE task_terminal_notifications "
+                "SET created_at = '2026-01-01 00:00:00' WHERE task_id = ?",
+                (fresh_id,),
+            )
+
+        listed = cm.list_unattempted_terminal_notifications(limit=20)
+        assert [r["task_id"] for r in listed][0] == fresh_id, (
+            "a fresh row must outrank stuck rows within the limit"
+        )
+        assert len(listed) == 20
+        assert fresh_id not in stuck_ids
+
+        router = _accepted_router()
+        sent = deliver_pending_terminal_notifications(cm, router=router, limit=20)
+        assert sent >= 1
+        assert _outbox_state(cm, fresh_id)["notified_at"] is not None, (
+            "the fresh row was starved by the stuck head"
+        )
+        delivered_ids = {
+            call.kwargs["url"] for call in router.notify_task_status.call_args_list
+        }
+        assert "https://example.com/fresh" in delivered_ids
+
 
 class TestI6SuppressedNotificationNeverExists:
     def test_i6_suppressed_terminal_write_creates_no_outbox_row(self, cm):
