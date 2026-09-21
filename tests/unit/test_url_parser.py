@@ -341,5 +341,60 @@ class TestURLParserEdgeCases:
         assert len(result1.video_id) == 16
 
 
+# Production fixture: real 302 Location for https://xhslink.cn/o/2SDXgXldd0a
+# (2026-09-21, GET with mobile UA). Producer contract — do not simplify.
+XHSLINK_CN_SHORT = "https://xhslink.cn/o/2SDXgXldd0a"
+XHSLINK_CN_LONG = (
+    "https://www.xiaohongshu.com/discovery/item/6aafeb9a000000002b0275ff"
+    "?app_platform=android&ignoreEngage=true&app_version=9.46.1"
+    "&share_from_user_hidden=true&xsec_source=app_share&type=video"
+    "&xsec_token=CB24bGFHn-ES913xIejqR5V6aQGE_jGKZXujm3veWoz8c%3D"
+    "&author_share=1&xhsshare=CopyLink&shareRedId=NztDNjg2PU48PkdFPz0zRzozQEk1NzpB"
+    "&apptime=1789951860&share_id=2006952a55e441e5a7cbf6d20be50cc7"
+    "&share_channel=copy_link&track_code=2SDXgXldd0a"
+)
+
+
+class TestXhslinkCn:
+    """xhslink.cn short links resolve to xiaohongshu notes."""
+
+    def test_is_short_url(self):
+        assert URLParser()._is_short_url(XHSLINK_CN_SHORT) is True
+
+    def test_parse_production_fixture(self):
+        parser = URLParser()
+        head_resp = Mock()
+        head_resp.status_code = 404
+        head_resp.url = XHSLINK_CN_SHORT
+        get_resp = Mock()
+        get_resp.url = XHSLINK_CN_LONG
+        with patch("requests.head", return_value=head_resp) as mock_head, \
+             patch("requests.get", return_value=get_resp) as mock_get:
+            result = parser.parse(XHSLINK_CN_SHORT)
+            assert mock_head.called
+            assert mock_get.called
+        assert result.platform == "xiaohongshu"
+        assert result.video_id == "6aafeb9a000000002b0275ff"
+        assert result.is_short_url is True
+
+    def test_expansion_sends_user_agent(self):
+        from src.video_transcript_api.utils.url_parser import SHORT_URL_USER_AGENT
+        parser = URLParser()
+        head_resp = Mock()
+        head_resp.status_code = 404
+        head_resp.url = XHSLINK_CN_SHORT
+        get_resp = Mock()
+        get_resp.url = XHSLINK_CN_LONG
+        with patch("requests.head", return_value=head_resp) as mock_head, \
+             patch("requests.get", return_value=get_resp) as mock_get:
+            parser.parse(XHSLINK_CN_SHORT)
+        for mock_call in (mock_head, mock_get):
+            headers = mock_call.call_args.kwargs.get("headers") or {}
+            assert headers.get("User-Agent") == SHORT_URL_USER_AGENT
+
+    def test_extract_platform(self):
+        assert extract_platform(XHSLINK_CN_SHORT) == "xiaohongshu"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

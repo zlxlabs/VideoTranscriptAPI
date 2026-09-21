@@ -58,7 +58,7 @@ class TestPlatformRecognition:
                 platform = 'xiaoyuzhou'
 
         # Xiaohongshu
-        elif 'xiaohongshu.com' in url or 'xhslink.com' in url:
+        elif 'xiaohongshu.com' in url or 'xhslink.com' in url or 'xhslink.cn' in url:
             match = re.search(r'(?:explore/|discovery/item/|items/)(\w+)', url)
             if not match:
                 match = re.search(r'/(\w{24})', url)
@@ -170,6 +170,12 @@ class TestPlatformRecognition:
         platform, video_id = self.extract_platform_and_id(url)
         assert platform == 'xiaohongshu'
         # Short link needs resolver, so video_id may be None
+
+    def test_xiaohongshu_cn_short_link(self):
+        """Test Xiaohongshu new short link (xhslink.cn) - platform recognized"""
+        url = "https://xhslink.cn/o/2SDXgXldd0a"
+        platform, video_id = self.extract_platform_and_id(url)
+        assert platform == 'xiaohongshu'
 
     # ========== Edge Cases ==========
 

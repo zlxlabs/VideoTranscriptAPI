@@ -82,6 +82,7 @@ class TestCanHandle:
         "https://v.douyin.com/abc/",
         "https://www.xiaohongshu.com/explore/abc",
         "https://xhslink.com/abc",
+        "https://xhslink.cn/o/abc",
         "https://weixin.qq.com/sph/AOzokRxWHz",
         "https://x.com/someuser/status/1234567890",
         "https://twitter.com/someuser/status/1234567890",

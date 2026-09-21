@@ -103,6 +103,7 @@ class TestXiaohongshuRouting:
         "https://xiaohongshu.com/explore/abc123",
         "https://xhslink.com/abc123",
         "http://xhslink.com/abc123",
+        "https://xhslink.cn/o/abc123",
     ])
     def test_xiaohongshu_urls(self, url):
         downloader = create_downloader(url)
@@ -170,6 +171,7 @@ class TestMediaResolverRouting:
         "https://v.douyin.com/abc/",
         "https://www.xiaohongshu.com/explore/abc",
         "https://xhslink.com/abc",
+        "https://xhslink.cn/o/abc",
         "https://weixin.qq.com/sph/AOzokRxWHz",
         "https://x.com/someuser/status/1234567890",
         "https://twitter.com/someuser/status/1234567890?s=20",

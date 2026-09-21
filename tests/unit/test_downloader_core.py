@@ -133,6 +133,43 @@ class TestShortURLResolution:
         result = mock_downloader.resolve_short_url("https://t.co/abc123")
         assert result == "https://t.co/abc123"
 
+    @patch("video_transcript_api.downloaders.base.requests.head")
+    def test_resolve_short_url_sends_user_agent(self, mock_head, mock_downloader):
+        """HEAD expansion must carry the shared mobile User-Agent."""
+        from video_transcript_api.utils.url_parser import SHORT_URL_USER_AGENT
+
+        mock_response = MagicMock()
+        mock_response.url = "https://test.com/full-video-url"
+        mock_response.status_code = 200
+        mock_head.return_value = mock_response
+
+        result = mock_downloader.resolve_short_url("https://t.co/abc123")
+        assert result == "https://test.com/full-video-url"
+        headers = mock_head.call_args.kwargs.get("headers") or {}
+        assert headers.get("User-Agent") == SHORT_URL_USER_AGENT
+
+    @patch("video_transcript_api.downloaders.base.requests.head")
+    @patch("video_transcript_api.downloaders.base.requests.get")
+    def test_resolve_short_url_get_fallback_sends_user_agent(
+        self, mock_get, mock_head, mock_downloader
+    ):
+        """GET fallback (HEAD 404) must carry the same User-Agent."""
+        from video_transcript_api.utils.url_parser import SHORT_URL_USER_AGENT
+
+        head_resp = MagicMock()
+        head_resp.url = "https://t.co/abc123"
+        head_resp.status_code = 404
+        mock_head.return_value = head_resp
+        get_resp = MagicMock()
+        get_resp.url = "https://test.com/full-video-url"
+        mock_get.return_value = get_resp
+
+        result = mock_downloader.resolve_short_url("https://t.co/abc123")
+        assert result == "https://test.com/full-video-url"
+        for mock_call in (mock_head, mock_get):
+            headers = mock_call.call_args.kwargs.get("headers") or {}
+            assert headers.get("User-Agent") == SHORT_URL_USER_AGENT
+
 
 # ============================================================
 # Media File Validation Tests
