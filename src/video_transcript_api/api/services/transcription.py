@@ -947,7 +947,9 @@ def process_transcription(
         engine_info = (
             "说话人识别(FunASR)" if use_speaker_recognition else "普通转录(CapsWriter)"
         )
-        task_notifier.notify_task_status(display_url, f"开始处理 - {engine_info}")
+        task_notifier.notify_task_status(
+            display_url, f"开始处理（进行中）- {engine_info}"
+        )
 
         # ==================== 阶段1: URL 解析（提取 platform 和 video_id）====================
         from ...utils.url_parser import URLParser
@@ -1976,7 +1978,7 @@ def process_transcription(
 
                         task_notifier.notify_task_status(
                             display_url,
-                            f"转录完成 - {engine_info}",
+                            f"转录完成（进行中）- {engine_info}，后面还有校对/摘要",
                             title=video_title,
                             author=author,
                             transcript=transcript,
@@ -2382,7 +2384,7 @@ def process_transcription(
                     # 通知转录完成，包含转录文本预览和服务器类型信息
                     task_notifier.notify_task_status(
                         display_url,
-                        f"转录完成 - {engine_info}",
+                        f"转录完成（进行中）- {engine_info}，后面还有校对/摘要",
                         title=video_title,
                         author=author,
                         transcript=transcript,

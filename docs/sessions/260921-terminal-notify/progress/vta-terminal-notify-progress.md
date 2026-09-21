@@ -14,3 +14,11 @@
 - 关键决策与已否决方案：outbox INSERT 失败随事务回滚状态写，不扩展 `terminal_write_pending`（该通道是内存 set，进程死即丢，正是本卡要消除的）。两态 pending→sent，claim 时 attempts 0→1，崩溃不重发。DummyCacheManager 无 claim 方法时 helper 仍即时发送，保住既有 feature 测试。
 - 下一步唯一动作：里程碑 3——中间态文案加「进行中」语义，emoji 匹配同步，文档记录 outbox / 至多一次 / fire-and-forget / 飞书缺口。
 
+## 里程碑 3
+
+- 当前阶段：implementing / 里程碑 3 完成
+- 本段结论：中间态改为「转录完成（进行中）…后面还有校对/摘要」与「开始处理（进行中）」。`channel.py` / `wechat.py` 的「转录完成」匹配改为 substring，并加用例锁死新文案 emoji 不是默认值。文档记录 outbox、至多一次、fire-and-forget 残留和飞书缺口。
+- 关键决策与已否决方案：中间态文案不用「处理中」，避免 `_get_status_emoji` 里「处理」分支先于「转录完成」把 emoji 打成 🔄。
+- 下一步唯一动作：跑全量 `uv run --extra dev pytest tests/unit tests/features tests/integration -q`，写报告并 push。
+
+

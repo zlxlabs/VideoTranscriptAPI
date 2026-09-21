@@ -109,12 +109,34 @@ config.wechat/feishu.webhook     (全局配置)
 | 阶段 | 通知内容 |
 |------|---------|
 | 任务创建 | 查看链接（view URL） |
-| 开始处理 | 转录引擎信息 |
+| 开始处理（进行中） | 转录引擎信息；文案带「进行中」，不是终态 |
 | 缓存命中 | 标题、作者、转录预览 |
-| 转录完成 | 状态更新 |
-| LLM 完成 | 总结/校对文本 + 查看链接 |
-| 任务失败 | 错误信息 |
+| 转录完成（进行中） | 中间态。文案含「后面还有校对/摘要」，避免被当成任务已结束 |
+| LLM 完成 / 终态 success | 内容正文（总结/校对/笔记）+ 状态通知 `【任务完成】` |
+| 终态 failed | 状态通知 `【任务失败】`（含错误与查看链接） |
 | ASR 告警 | 服务宕机/恢复通知 |
+
+中间态与终态必须能区分：用户把「转录完成」当成终态来等，是 2026-09-21 n305 事故的一部分。终态状态通知只由 `finalize_terminal_status_and_notify` / outbox 出口产生，worker 只发内容正文。
+
+## 终态状态通知 outbox
+
+任务写入 `success` / `failed` 且 CAS 获胜时，在同一 SQLite 事务里向 `task_terminal_notifications` 插入一行 pending（`task_id` UNIQUE）。投递线程启动时先扫 `notified_at IS NULL AND attempts = 0` 补发，文案带原始 `completed_at`，避免和刚提交的任务混在一起。
+
+两态 `pending → sent`，不做 `sending`。`wecom-notifier` 的 send 是 fire-and-forget 立即返回；claim 时 `attempts` 0→1，若发送已提交但未标 sent 时进程崩溃，**不重发**（至多一次，避免重复「任务完成」）。从未尝试过的 pending 必须补发。
+
+outbox 不做限流/重试/分段：`wecom-notifier` 是唯一限流权威。outbox 只承载终态**状态**通知（状态行 + 错误 + 查看链接），不把总结/校对/笔记正文搬进表。
+
+恢复路径没有请求上下文，目标解析顺序：
+
+1. `api_audit_logs.wechat_webhook` by task_id
+2. `user_manager.get_user_by_id(submitted_by)` 的用户级 webhook
+3. 全局配置默认渠道
+
+飞书自定义 webhook 未落库，恢复路径取不回，是已知缺口。
+
+### 投递侧残留风险（本卡不修）
+
+`utils/notifications/wechat.py` 里 `async_send=True` 立即返回，表示已提交到 wecom-notifier 内部队列，不代表已送达。`shutdown_global_notifier()` 不 flush。关闭预算耗尽时 `shutdown_all_notifiers()` 可能被跳过。真实 SIGKILL 窗口靠 outbox 补发覆盖「从未尝试」的 pending，覆盖不了「已提交给 wecom-notifier 但进程被杀」的毫秒级窗口。
 
 ## 消息格式
 

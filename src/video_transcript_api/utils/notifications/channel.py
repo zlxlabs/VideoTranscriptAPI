@@ -201,7 +201,7 @@ def build_task_status_content(
         content += f"\n\n**作者：** {author}"
     if error:
         content += f"\n\n**错误：** {error}"
-    if transcript and status == "转录完成":
+    if transcript and "转录完成" in status:
         preview = transcript[:100] + ("..." if len(transcript) > 100 else "")
         content += f"\n\n**转录预览：**\n```\n{preview}\n```"
     return content
