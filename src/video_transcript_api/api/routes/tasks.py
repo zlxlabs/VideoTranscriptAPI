@@ -157,7 +157,7 @@ def _fail_task_after_creation(task_id: str, error_message: str, *, log_context: 
             TaskStatus.FAILED,
             error_message=error_message,
             cache_manager=cache_manager,
-            send_status_notification=False,
+            suppress_terminal_notification=True,
         )
         if not failed_status_written:
             logger.warning(
