@@ -120,11 +120,26 @@ config.wechat/feishu.webhook     (全局配置)
 
 ## 终态状态通知 outbox
 
-任务写入 `success` / `failed` 且 CAS 获胜时，在同一 SQLite 事务里向 `task_terminal_notifications` 插入一行 pending（`task_id` UNIQUE）。投递线程启动时先扫 `notified_at IS NULL AND attempts < MAX_ATTEMPTS`（`MAX_ATTEMPTS = 3`）补发，文案带原始 `completed_at`，避免和刚提交的任务混在一起。
+任务写入 `success` / `failed` 且 CAS 获胜时，在同一 SQLite 事务里向 `task_terminal_notifications` 插入一行 pending（`task_id` UNIQUE）。投递线程启动时先扫全部 `notified_at IS NULL` 的行补发，文案带原始 `completed_at`，避免和刚提交的任务混在一起。
 
-两态 `pending → sent`，不做 `sending`。`notified_at` **只在发送未抛异常、且路由至少一个渠道返回 True** 时写入。发送抛异常或渠道全 False 不标 sent，留给后续补发。claim 条件与扫描相同（`attempts < 3`）。
+两态 `pending → sent`，不做 `sending`。投递由**单线程串行**完成：服务是单进程（uvicorn 无 `workers`、单容器单副本），投递线程是该表唯一的写者，互斥由「同一线程逐行处理」天然提供。**没有 owner 锁、没有接管租约、没有 claim/release**：这些机制仲裁的并发在本部署拓扑下不存在，且多进程场景下任务状态机本身早已崩坏（启动时无条件把所有非终态行写 failed），给通知表加锁救不了任何东西。`attempts` 仅作观测计数（每次投递尝试递增），**不参与任何过滤**。
 
-这是**有界至少一次**：崩溃或失败窗口内**可能重复一条**终态通知，但不会静默丢失。漏发比重复更糟。超过 3 次仍失败的行停止补发，避免无限打扰。
+`sent`（= `notified_at`）**只表示「已提交给投递器」**，不表示送达：当前实现下投递器 = 进程内 daemon 队列（`async_send=True` 立即返回）。`notified_at` 只在发送未抛异常、且路由至少一个渠道返回 True 时写入；发送抛异常或渠道全 False 不标 sent，该行**保持列出**并在下一轮重试。
+
+这是**有界至少一次**：崩溃或失败窗口内**可能重复一条**终态通知，但不会静默丢失。漏发比重复更糟。
+
+### 不变式（review 的规格，逐条可证伪）
+
+- **I1 原子**：任一次终态 CAS 获胜 ⇔ 同事务内 `task_terminal_notifications` 出现该 task_id 一行；CAS 落败 ⇒ 不出现行。
+- **I2 唯一**：`task_id` UNIQUE，同一任务至多一行（由 schema 保证）。
+- **I3 一致**：该行携带的状态 = 当次 CAS 写入的终态；文案由该行渲染，不重新查任务状态决定「是否该发」。
+- **I4 不丢**：进程启动时与每个投递周期，所有 `notified_at IS NULL` 的行必须被尝试投递；**不存在任何条件使某一行永久不被列出**。
+- **I5 至少一次**：`notified_at` 只在一次**返回真实成功信号**的发送之后写入；崩溃于此之间 ⇒ 允许重复一条（显式接受的窗口）。
+- **I6 抑制在写入期决定**：需要抑制通知的终态写入路径，**在同一事务里就不产生可投递的行**（`update_task_status(suppress_terminal_notification=True)`，HTTP 建行后清理走这条）。
+
+投递器只接受路由返回的渠道结果字典，并要求至少一个渠道值为真；`None`、布尔值、模拟对象或渠道全 False 都不会标记 sent。
+
+超过 3 次仍失败的行**不停止补发**，只多记一条 warning 日志（`STUCK_ATTEMPT_WARN_THRESHOLD`）：任何让一行同时满足「未送达」且「不再被任何视图列出」的机制，都是本卡要消灭的那类静默事故。
 
 outbox 不做限流/重试/分段：`wecom-notifier` 是唯一限流权威。outbox 只承载终态**状态**通知（状态行 + 错误 + 查看链接），不把总结/校对/笔记正文搬进表。
 

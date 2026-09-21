@@ -7,6 +7,7 @@ not serialized by the queue processor.
 All console output must be in English only (no emoji, no Chinese).
 """
 
+import datetime
 import threading
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -107,17 +108,17 @@ class _DummyCacheManager:
         return True
 
     def list_unattempted_terminal_notifications(self, limit=20):
-        return [
-            row for row in self._outbox.values()
-            if row["notified_at"] is None and row["attempts"] == 0
-        ][:limit]
+        # I4: unsent rows are always listed; attempts never filters.
+        return [r for r in self._outbox.values() if r["notified_at"] is None][:limit]
 
-    def claim_pending_terminal_notification(self, task_id):
+    def is_terminal_notification_pending(self, task_id):
         row = self._outbox.get(task_id)
-        if row is None or row["notified_at"] is not None or row["attempts"] != 0:
-            return False
-        row["attempts"] = 1
-        return True
+        return row is not None and row["notified_at"] is None
+
+    def mark_terminal_notification_attempted(self, task_id):
+        row = self._outbox.get(task_id)
+        if row is not None and row["notified_at"] is None:
+            row["attempts"] += 1
 
     def mark_terminal_notification_sent(self, task_id):
         row = self._outbox.get(task_id)

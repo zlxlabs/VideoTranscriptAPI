@@ -1,5 +1,33 @@
-"""Single exit for terminal (success/failed) status writes and status notifies."""
+"""Single exit for terminal (success/failed) status writes and status notifies.
 
+Invariants (the spec this module is reviewed against; each is falsifiable):
+
+I1 (atomic)   Any terminal CAS win <=> a `task_terminal_notifications` row for
+              that task_id appears in the same transaction; a CAS loss => no row.
+I2 (unique)   `task_terminal_notifications.task_id` is UNIQUE: at most one row
+              per task, enforced by schema, not by code.
+I3 (coherent) The row carries the status written by that CAS; the delivered
+              text is rendered from that row, never by re-reading the task to
+              decide "should this send".
+I4 (no loss)  At process start and on every delivery cycle, every row with
+              `notified_at IS NULL` must be attempted. NO condition may make a
+              row permanently unlisted, and no ordering/limit may starve it:
+              "no condition under which a row is never attempted" is the test.
+              `attempts` is an observation counter and never filters anything;
+              the listing is ordered by `attempts ASC` so a stuck head cannot
+              starve fresh rows.
+I5 (at-least-once) `notified_at` is written only after a send that returned a
+              real success signal. A crash between send and mark => one
+              duplicate is allowed (explicitly accepted window).
+I6 (suppress at write) A terminal write that must not notify produces no
+              deliverable row in that same transaction (see
+              `suppress_terminal_notification` in CacheManager.update_task_status).
+
+`sent` (= `notified_at`) means "handed to the notifier", NOT "delivered":
+the current implementation enqueues into an in-process daemon queue.
+"""
+
+import threading
 from typing import Any, Dict, Optional
 
 from ..context import get_cache_manager, get_logger, lazy_resource
@@ -10,6 +38,13 @@ logger = lazy_resource(get_logger)
 
 TERMINAL_SUCCESS_STATUS = "【任务完成】"
 TERMINAL_FAILED_STATUS = "【任务失败】"
+
+# In-process mutual exclusion between the two deliverers of the same row: the
+# inline helper path (called by the terminal writer) and the dispatcher thread.
+# Both send immediately (fire-and-forget), so this lock is never held for a
+# blocking wait. Cross-process exclusion is deliberately NOT attempted: the
+# service is single-process (uvicorn without workers, one container).
+_DELIVERY_LOCK = threading.Lock()
 
 
 def finalize_terminal_status_and_notify(
@@ -24,7 +59,7 @@ def finalize_terminal_status_and_notify(
     notify_error: Optional[str] = None,
     channel_name: Optional[str] = None,
     webhooks: Optional[Dict[str, str]] = None,
-    send_status_notification: bool = True,
+    suppress_terminal_notification: bool = False,
     cache_manager=None,
     router=None,
     notify_via=None,
@@ -33,7 +68,8 @@ def finalize_terminal_status_and_notify(
     """Write terminal status via CAS; notify only if this call won.
 
     Returns True iff the row was updated. Notify errors are logged, not raised.
-    Pass send_status_notification=False to persist without sending (HTTP cleanup).
+    Pass suppress_terminal_notification=True to persist without producing an
+    outbox row at all (I6, HTTP cleanup path).
     """
     if cache_manager is None:
         cache_manager = get_cache_manager()
@@ -44,6 +80,7 @@ def finalize_terminal_status_and_notify(
         error_message=error_message,
         title=title,
         author=author,
+        suppress_terminal_notification=suppress_terminal_notification,
         **update_kwargs,
     )
     if not written:
@@ -57,14 +94,10 @@ def finalize_terminal_status_and_notify(
 
     logger.info(f"terminal CAS won: {task_id} -> {status}")
 
-    if not send_status_notification:
-        cache_manager.mark_terminal_notification_sent(task_id)
+    if suppress_terminal_notification:
         logger.debug(
-            f"caller suppressed terminal status notification: {task_id}"
+            f"caller suppressed terminal status notification at write time: {task_id}"
         )
-        return True
-
-    if not cache_manager.claim_pending_terminal_notification(task_id):
         return True
 
     if notify_status is None:
@@ -88,26 +121,34 @@ def finalize_terminal_status_and_notify(
     view_url = _resolve_view_url(cache_manager, task_id, task)
 
     accepted = False
-    try:
-        result = _emit_status_notification(
-            display_url=display_url or "",
-            notify_status=notify_status,
-            error_for_notify=error_for_notify,
-            title=title,
-            author=author,
-            channel_name=channel_name,
-            webhooks=webhooks,
-            router=router,
-            notify_via=notify_via,
-            view_url=view_url,
-        )
-        accepted = _notification_accepted(result)
-    except Exception:
-        logger.exception(
-            f"status notification failed (terminal already persisted): {task_id}"
-        )
-    if accepted:
-        cache_manager.mark_terminal_notification_sent(task_id)
+    with _DELIVERY_LOCK:
+        if not cache_manager.is_terminal_notification_pending(task_id):
+            logger.debug(
+                f"terminal notification already sent by another deliverer: {task_id}"
+            )
+            return True
+        cache_manager.mark_terminal_notification_attempted(task_id)
+        try:
+            result = _emit_status_notification(
+                display_url=display_url or "",
+                notify_status=notify_status,
+                error_for_notify=error_for_notify,
+                title=title,
+                author=author,
+                channel_name=channel_name,
+                webhooks=webhooks,
+                router=router,
+                notify_via=notify_via,
+                view_url=view_url,
+            )
+            accepted = _notification_accepted(result)
+        except Exception:
+            logger.exception(
+                f"status notification failed (terminal already persisted): {task_id}"
+            )
+        else:
+            if accepted:
+                cache_manager.mark_terminal_notification_sent(task_id)
     return True
 
 
@@ -149,14 +190,20 @@ def _emit_status_notification(
 
 
 def _notification_accepted(result) -> bool:
-    """True if send did not refuse every channel. Dummy/MagicMock count as accepted."""
-    if isinstance(result, dict):
-        return any(bool(value) for value in result.values())
-    return result is not False
+    """True only when a real channel result explicitly reports acceptance."""
+    if not isinstance(result, dict):
+        logger.warning(
+            f"terminal notification result rejected: "
+            f"type={type(result).__name__} value={result!r}"
+        )
+        return False
+    return any(bool(value) for value in result.values())
 
 
 DISPATCH_POLL_SECONDS = 0.5
 DISPATCH_BATCH_SIZE = 20
+# Observation only (I4): rows past this many attempts get a warning, never a filter.
+STUCK_ATTEMPT_WARN_THRESHOLD = 3
 _RECOVERY_REASONS = frozenset({
     "orphaned_on_startup",
     "shutdown_drain",
@@ -170,7 +217,13 @@ def deliver_pending_terminal_notifications(
     router=None,
     limit: int = DISPATCH_BATCH_SIZE,
 ) -> int:
-    """Claim and send never-attempted pending rows. Used by the dispatcher and tests."""
+    """Send every unsent row, one at a time. Used by the dispatcher and tests.
+
+    In-process mutual exclusion comes from `_DELIVERY_LOCK`, shared with the
+    inline helper path: both re-check `notified_at IS NULL` while holding it, so
+    the same row is sent once. Cross-process exclusion is NOT assumed (the
+    service is single-process: uvicorn without workers, one container).
+    """
     from ..context import get_cache_manager as _get_cm
 
     if cache_manager is None:
@@ -182,8 +235,6 @@ def deliver_pending_terminal_notifications(
     sent = 0
     for row in rows:
         task_id = row["task_id"]
-        if not cache_manager.claim_pending_terminal_notification(task_id):
-            continue
         task = cache_manager.get_task_by_id(task_id) or {}
         notify_status = (
             TERMINAL_SUCCESS_STATUS
@@ -194,25 +245,44 @@ def deliver_pending_terminal_notifications(
         webhooks = _resolve_delivery_webhooks(task)
         view_url = _resolve_view_url(cache_manager, task_id, task)
         accepted = False
-        try:
-            result = router.notify_task_status(
-                url=task.get("url") or "",
-                status=notify_status,
-                error=error_for_notify,
-                title=task.get("title"),
-                author=task.get("author"),
-                webhooks=webhooks,
-                view_url=view_url,
-            )
-            accepted = _notification_accepted(result)
-        except Exception:
-            logger.exception(
-                f"dispatcher status notification failed: {task_id}"
-            )
-        if accepted:
-            cache_manager.mark_terminal_notification_sent(task_id)
-            sent += 1
+        with _DELIVERY_LOCK:
+            if not cache_manager.is_terminal_notification_pending(task_id):
+                continue
+            cache_manager.mark_terminal_notification_attempted(task_id)
+            try:
+                result = router.notify_task_status(
+                    url=task.get("url") or "",
+                    status=notify_status,
+                    error=error_for_notify,
+                    title=task.get("title"),
+                    author=task.get("author"),
+                    webhooks=webhooks,
+                    view_url=view_url,
+                )
+                accepted = _notification_accepted(result)
+            except Exception:
+                logger.exception(
+                    f"dispatcher status notification failed: {task_id}"
+                )
+            else:
+                if accepted:
+                    cache_manager.mark_terminal_notification_sent(task_id)
+                    sent += 1
+    _warn_repeatedly_failing_rows(cache_manager)
     return sent
+
+
+def _warn_repeatedly_failing_rows(cache_manager) -> None:
+    """I4 guardrail: keep retrying, but make a stuck row visible in the log."""
+    stuck = cache_manager.count_attempted_terminal_notifications(
+        STUCK_ATTEMPT_WARN_THRESHOLD
+    )
+    if stuck:
+        logger.warning(
+            f"{stuck} terminal notification row(s) still unsent after "
+            f"{STUCK_ATTEMPT_WARN_THRESHOLD}+ attempts; they stay listed and "
+            "keep being retried"
+        )
 
 
 def run_terminal_notification_dispatcher() -> None:

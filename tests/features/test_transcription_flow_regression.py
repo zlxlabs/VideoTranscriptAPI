@@ -1,3 +1,4 @@
+import datetime
 import types
 from unittest.mock import MagicMock
 
@@ -24,6 +25,7 @@ class DummyNotifier:
 
     def notify_task_status(self, *args, **kwargs):
         self.messages.append(("notify", args, kwargs))
+        return {"wechat": True}
 
     def send_text(self, text, **kwargs):
         self.messages.append(("send_text", text, kwargs))
@@ -77,18 +79,17 @@ class DummyCacheManager:
         return True
 
     def list_unattempted_terminal_notifications(self, limit=20):
-        rows = [
-            row for row in self._outbox.values()
-            if row["notified_at"] is None and row["attempts"] == 0
-        ]
-        return rows[:limit]
+        # I4: unsent rows are always listed; attempts never filters.
+        return [r for r in self._outbox.values() if r["notified_at"] is None][:limit]
 
-    def claim_pending_terminal_notification(self, task_id):
+    def is_terminal_notification_pending(self, task_id):
         row = self._outbox.get(task_id)
-        if row is None or row["notified_at"] is not None or row["attempts"] != 0:
-            return False
-        row["attempts"] = 1
-        return True
+        return row is not None and row["notified_at"] is None
+
+    def mark_terminal_notification_attempted(self, task_id):
+        row = self._outbox.get(task_id)
+        if row is not None and row["notified_at"] is None:
+            row["attempts"] += 1
 
     def mark_terminal_notification_sent(self, task_id):
         row = self._outbox.get(task_id)
@@ -196,6 +197,7 @@ class OrderedNotificationRouter:
         status = kwargs.get("status", "")
         if status.startswith("正在下载视频"):
             self.events.append("notify_download")
+        return {"wechat": True}
 
     def send_text(self, *args, **kwargs):
         pass
@@ -321,6 +323,7 @@ def test_flow_cache_hit_with_disabled_calibration_notifies_disclaimer(monkeypatc
     monkeypatch.setattr(transcription, "create_downloader", fail_create_downloader)
 
     notification_router = MagicMock()
+    notification_router.notify_task_status.return_value = {"wechat": True}
     notification_router.send_long_text = MagicMock()
     notification_router.send_text = MagicMock()
     monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)
@@ -380,6 +383,7 @@ def test_flow_cache_hit_with_summary_disabled_shows_not_enabled_label(monkeypatc
     monkeypatch.setattr(transcription, "create_downloader", fail_create_downloader)
 
     notification_router = MagicMock()
+    notification_router.notify_task_status.return_value = {"wechat": True}
     notification_router.send_long_text = MagicMock()
     notification_router.send_text = MagicMock()
     monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)
@@ -431,6 +435,7 @@ def test_flow_cache_hit_with_full_calibration_has_no_disclaimer(monkeypatch, pat
     )
 
     notification_router = MagicMock()
+    notification_router.notify_task_status.return_value = {"wechat": True}
     notification_router.send_long_text = MagicMock()
     notification_router.send_text = MagicMock()
     monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)
@@ -756,6 +761,7 @@ def test_flow_final_exception_persists_failed_before_notifying(monkeypatch, patc
                 status = args[1]
             if status == "【任务失败】":
                 order.append("notify")
+            return {"wechat": True}
 
     cache_manager = OrderTrackingCacheManager(cache_data=None)
     monkeypatch.setattr(transcription, "cache_manager", cache_manager)
@@ -1603,6 +1609,7 @@ class RecordingRouter:
 
     def notify_task_status(self, *args, **kwargs):
         self.statuses.append(kwargs.get("status"))
+        return {"wechat": True}
 
     def send_text(self, *args, **kwargs):
         pass

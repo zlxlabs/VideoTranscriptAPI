@@ -35,6 +35,27 @@
 - 关键决策与已否决方案：不新增第二条消息。链接加在既有状态通知正文。
 - 下一步唯一动作：全量 pytest 后 push。
 
+## 验收回派 R8.1
+
+- 当前阶段：repairing / R8.1 完成
+- 本段结论：终态通知 outbox 增加 `claimed_at` 租约列，新库建表与既有 `_migrate_database()` 均覆盖；claim/list 只允许无租约或已过期租约的行，claim 后立即重复领取被拒。新增过期租约恢复与慢发送跨轮询周期不重复投递测试。
+- 关键决策与已否决方案：租约时长固定为模块级 `TERMINAL_NOTIFY_LEASE_SECONDS = 120`，使用 UTC `YYYY-MM-DD HH:MM:SS` 文本，与 SQLite `CURRENT_TIMESTAMP` 同口径；不引入三态 `sending` 或额外配置项。
+- 下一步唯一动作：R8.2 收紧通知返回值为真实渠道字典，并在异常/全 False 后立即释放租约。
+
+## 验收回派 R8.2
+
+- 当前阶段：repairing / R8.2 完成
+- 本段结论：`_notification_accepted` 现在只接受至少一个渠道为真的字典，非字典结果会记录类型和值并按失败处理；发送异常与渠道全 False 都立即清空租约，保留 attempts 并允许下一轮补发。所有允许范围内的通知替身已返回真实字典，并同步内存 outbox 的租约字段。
+- 关键决策与已否决方案：不为 MagicMock 或其他测试替身保留宽松默认，不新增 fallback；未知返回形态统一 fail-closed，`{"wechat": True}` / `{"wechat": False, "feishu": True}` 才能标记 sent。
+- 下一步唯一动作：R8.3 删除重复测试类并完成红验、全量测试与收尾报告。
+
+## 验收回派 R8.3
+
+- 当前阶段：repairing / R8.3 完成
+- 本段结论：删除 `tests/unit/test_terminal_notification_outbox.py` 中第二份完全重复的 `TestSuppressedNotificationIsSettled`，测试声明恢复为单一来源。三条 finding 的代码与测试修复均已落盘。
+- 关键决策与已否决方案：只删除重复声明，不重写保留的抑制通知测试，也不扩展到其他测试命名或结构整理。
+- 下一步唯一动作：执行红验、全量验证、检查允许范围与提交产物，并写完整 delegate 报告。
+
 ## 验收回派 R7.1
 
 - 当前阶段：review-fix / R7.1 完成
@@ -57,8 +78,51 @@
 - 下一步唯一动作：全量 pytest 后 push。
 
 
+## 验收回派 R9.1
 
+- 当前阶段：repairing / R9.1 完成
+- 本段结论：用 `claimed_owner TEXT` 和每次 `CacheManager` 启动生成的 UUID 替换时间租约；claim/list/mark/release 均按 owner 互斥。旧分支数据库的 `claimed_at` 在迁移时重命名，失败释放不再误清新持有者。
+- 关键决策与已否决方案：不加 fencing token 或 TTL；同进程严格互斥，跨启动按 owner 不同立即接管，接受单进程服务之外共享数据库可能重复一条通知。
+- 下一步唯一动作：补齐 owner 接管、旧 owner 释放保护、失败释放与有界重试红验。
 
+## 验收回派 R9.2
 
+- 当前阶段：repairing / R9.2 完成
+- 本段结论：新增 owner fencing 红验、同进程不重领、跨启动接管、失败释放和 attempts 上限断言；删除时间过期与慢发送轮询测试。坏释放条件和坏 claim 条件均已各自转红并恢复。
+- 关键决策与已否决方案：不模拟时间，也不保留 `claimed_at` 断言；失败释放只清当前实例 owner，接管后旧实例只能让新实例继续发送。
+- 下一步唯一动作：让四个内存 outbox 替身与生产 owner 规则一致并跑相关测试。
 
+## 验收回派 R9.3
 
+- 当前阶段：repairing / R9.3 完成
+- 本段结论：`test_transcription_flow_regression.py`、`test_layered_cache.py`、`test_temp_cleanup_integration.py`、`test_llm_concurrency.py` 的替身均记录 `notification_owner`，并同步 claim/list/mark/release 的 owner 条件。相关四文件测试通过。
+- 关键决策与已否决方案：不让替身继续使用 "claimed" 哨兵或无条件释放；固定测试 owner 只用于复现生产的进程内互斥规则。
+- 下一步唯一动作：跑收尾全量测试、检查范围与报告证据后提交并推送同一分支。
+
+## 验收回派 R10.1
+
+- 当前阶段：repairing / R10.1 完成
+- 本段结论：终态通知表保留 `claimed_owner` 并补回 `claimed_at`；生产 claim/list 统一为同 owner 永不重领、跨 owner 仅在 120 秒租约过期后接管。mark/release 同步清理 claim 时刻并保留 owner 锁。
+- 关键决策与已否决方案：迁移不再把旧 `claimed_at` 改名为 owner，保留旧时间列并缺列补齐另一列；不引入 fencing token、sending 状态或额外重试机制。
+- 下一步唯一动作：R10.2 在已提交真修复上注入活动跨 owner 立即接管的单点坏改动，确认新增红验转红后立即还原。
+
+## 验收回派 R10.3
+
+- 当前阶段：repairing / R10.3 完成
+- 本段结论：通知文档改为记录 120 秒接管租约、UTC naive 时间口径和超过租约的共享数据库重复风险；四个内存 outbox 替身已同步 claimed_at、跨 owner 过期判断及 mark/release 清理。
+- 关键决策与已否决方案：替身直接复用生产租约常量，不另设配置或兼容分支；不引入 fencing token、sending 状态、TTL 或额外重试机制。
+- 下一步唯一动作：跑允许范围内的窄测与收尾全量测试，检查谓词残留、文件范围和最终提交状态。
+
+## 验收回派 R10.4
+
+- 当前阶段：repairing / R10.4 完成
+- 本段结论：list 与 claim 的跨 owner 接管谓词均将 `claimed_at IS NULL` 按已过期处理，已有 owner 但缺时间戳的行可重新进入投递路径。删除迁移中的一次性回填，避免与运行时谓词维护两套语义；新增用例确认 dispatcher 恰好补发一条。
+- 关键决策与已否决方案：保留同 owner 永不重领及 release/mark owner 锁；不保留迁移回填，不新增抽象、配置或兼容分支。
+- 下一步唯一动作：跑 `uv run --extra dev pytest tests/unit tests/features tests/integration -q` 并完成收尾验收报告。
+
+## 机制收缩（路线审计落地）
+
+- 当前阶段：repairing / 收缩卡完成
+- 本段结论：按独立顾问路线审计把终态通知机制收缩到与单进程拓扑相称的规模。删除 `claimed_owner`/`claimed_at`/`TERMINAL_NOTIFY_TAKEOVER_LEASE_SECONDS`/`release_terminal_notification_claim` 与 `TERMINAL_NOTIFY_MAX_ATTEMPTS`；互斥改由单投递线程串行天然提供，`attempts` 仅作观测计数。API 从 4 个（list/claim/mark/release）降到 2 个（list/mark_sent）+ 1 个观测计数 API。同时修掉顾问新增 P1：`list_unattempted_terminal_notifications` 去掉 `attempts < 3`，未送达的行不再可能被谓词永久隐藏，超阈值只记 warning。I6 落地为写入期抑制：`update_task_status(suppress_terminal_notification=True)` 在同一事务里不插 outbox 行，helper 里「先插 pending 再 claim 再标 sent」的窗口被结构性删除。`terminal_status.py` 顶部写入 I1–I6 不变式清单作为 review 规格。
+- 关键决策与已否决方案：删字段而非补规则（治 review 不收敛的病因 B）；旧库保留的 owner/lease 列不再被代码读写，不为删列写迁移。否决：保留 owner 锁「以防将来多进程」、把租约精度提到毫秒、pending→sending→sent 三态、outbox 内做限流/重试排队（顾问已否，不重提）。`attempts` 阈值护栏只允许「永不隐藏」形态，故采用 warning 日志而非 dead-letter 过滤。
+- 下一步唯一动作：合入后另开卡做「投递点改同步发送（`async_send=False` + `SendResult.wait()`/`is_success()`）」，让 `sent` 第一次成为可断言性质；本卡明确不做。
