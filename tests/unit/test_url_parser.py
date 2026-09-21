@@ -392,6 +392,39 @@ class TestXhslinkCn:
             headers = mock_call.call_args.kwargs.get("headers") or {}
             assert headers.get("User-Agent") == SHORT_URL_USER_AGENT
 
+    def test_xhslink_com_expansion_sends_user_agent(self):
+        from src.video_transcript_api.utils.url_parser import SHORT_URL_USER_AGENT
+        parser = URLParser()
+        head_resp = Mock()
+        head_resp.status_code = 404
+        head_resp.url = "https://xhslink.com/o/2SDXgXldd0a"
+        get_resp = Mock()
+        get_resp.url = XHSLINK_CN_LONG
+        with patch("requests.head", return_value=head_resp) as mock_head, \
+             patch("requests.get", return_value=get_resp) as mock_get:
+            parser.parse("https://xhslink.com/o/2SDXgXldd0a")
+        for mock_call in (mock_head, mock_get):
+            headers = mock_call.call_args.kwargs.get("headers") or {}
+            assert headers.get("User-Agent") == SHORT_URL_USER_AGENT
+
+    def test_douyin_expansion_sends_no_user_agent(self):
+        """v.douyin.com must expand without UA (mobile UA resolves to iesdouyin)."""
+        parser = URLParser()
+        short = "https://v.douyin.com/iRNBho6u/"
+        long = "https://www.douyin.com/video/7298145681699622182"
+        head_resp = Mock()
+        head_resp.status_code = 404
+        head_resp.url = short
+        get_resp = Mock()
+        get_resp.url = long
+        with patch("requests.head", return_value=head_resp) as mock_head, \
+             patch("requests.get", return_value=get_resp) as mock_get:
+            result = parser.parse(short)
+        for mock_call in (mock_head, mock_get):
+            assert mock_call.call_args.kwargs.get("headers") is None
+        assert result.platform == "douyin"
+        assert result.video_id == "7298145681699622182"
+
     def test_extract_platform(self):
         assert extract_platform(XHSLINK_CN_SHORT) == "xiaohongshu"
 

@@ -187,8 +187,8 @@ class BaseDownloader(ABC):
             str: 原始长链接
         """
         try:
-            from ..utils.url_parser import SHORT_URL_USER_AGENT
-            headers = {"User-Agent": SHORT_URL_USER_AGENT}
+            from ..utils.url_parser import short_url_headers
+            headers = short_url_headers(url)
             response = requests.head(url, allow_redirects=True, timeout=10, headers=headers)
             resolved_url = response.url
 

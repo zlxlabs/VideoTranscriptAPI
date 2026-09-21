@@ -24,6 +24,23 @@ SHORT_URL_USER_AGENT = (
     "Mobile/15E148 Safari/604.1"
 )
 
+# Short domains that need the mobile UA for expansion. Only xhslink hosts:
+# without a UA Xiaohongshu answers short-link expansion with a login wall,
+# while other short domains split traffic by UA (e.g. v.douyin.com under a
+# mobile UA resolves to www.iesdouyin.com, which the resolver rejects).
+_SHORT_URL_UA_DOMAINS = ("xhslink.com", "xhslink.cn")
+
+
+def short_url_headers(url: str) -> Optional[dict]:
+    """Return expansion request headers for a short URL.
+
+    xhslink hosts get the shared mobile User-Agent; every other domain gets
+    None so the request stays byte-identical to the pre-UA behaviour.
+    """
+    if any(domain in url for domain in _SHORT_URL_UA_DOMAINS):
+        return {"User-Agent": SHORT_URL_USER_AGENT}
+    return None
+
 # 主机边界匹配 x.com，避免误判 notx.com / x.com.evil.com / ?q=x.com
 _X_DOMAIN_RE = re.compile(
     r"(?:^|://|//|@|[\s])(?:[a-zA-Z0-9-]+\.)*x\.com(?::\d+)?(?:[/?#\s]|$)",
@@ -199,14 +216,14 @@ class URLParser:
         """
         try:
             logger.debug(f"发送 HTTP HEAD 请求解析短链接: {url}")
-            response = requests.head(url, allow_redirects=True, timeout=timeout, headers={"User-Agent": SHORT_URL_USER_AGENT})
+            response = requests.head(url, allow_redirects=True, timeout=timeout, headers=short_url_headers(url))
             resolved_url = response.url
 
             # 某些短链接服务（如 xhslink.com）不支持 HEAD，返回 404
             # 回退到 GET + stream 模式，只读取 headers 不下载 body
             if response.status_code == 404 or (resolved_url == url and response.status_code != 200):
                 logger.debug(f"HEAD 请求未跳转 (status={response.status_code})，回退到 GET: {url}")
-                response = requests.get(url, allow_redirects=True, timeout=timeout, stream=True, headers={"User-Agent": SHORT_URL_USER_AGENT})
+                response = requests.get(url, allow_redirects=True, timeout=timeout, stream=True, headers=short_url_headers(url))
                 resolved_url = response.url
                 response.close()
 

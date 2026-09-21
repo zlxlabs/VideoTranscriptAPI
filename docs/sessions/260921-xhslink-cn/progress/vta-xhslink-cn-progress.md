@@ -20,3 +20,10 @@
 - 本段结论：两次最小注入红验均按预期以 AssertionError 转红（media_resolver 域名行、url_parser HEAD UA 行），还原后 worktree 与对应提交逐字节一致；`uv run --extra dev pytest tests/unit -q` 全量 2875 passed。
 - 关键决策与已否决方案：红验中发现 python 文本重写会把 `url_parser.py` 的 CRLF 行尾转为 LF，已用二进制方式转回并经 `grep -c $'\r'` 逐文件核对行尾无损。教训：CRLF 文件一律二进制改写。
 - 下一步唯一动作：提交本文件并写报告。
+
+## 段落 4 — 轮 1 R1：UA 收窄到小红书短链域名
+
+- 当前阶段：implementing，R1 修复完成
+- 本段结论：新增 `short_url_headers()`（`url_parser.py` 唯一值源，`base.py` 复用），仅 `xhslink.com` / `xhslink.cn` 带移动 UA，其余域名传 `headers=None` 与加 UA 前逐字一致；回归锁覆盖 xhslink 双域名带 UA 与 `v.douyin.com` 不带 UA。窄范围绿。
+- 关键决策与已否决方案：无差别加 UA 会触发抖音按 UA 分流到 `iesdouyin.com`（resolver 400），故按锁定修法做域名白名单而非全局 UA。
+- 下一步唯一动作：R1 红验后做 R2+R3。
