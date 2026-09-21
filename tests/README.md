@@ -82,5 +82,5 @@ URL。它是手工压测工具，不会被 pytest 收集，也不应在 CI 或�
 运行。仅在本地服务、授权和外部访问均已确认后，才可手动运行：
 
 ```bash
-uv run python scripts/perf/concurrent_load.py
+uv run --extra perf python scripts/perf/concurrent_load.py
 ```
