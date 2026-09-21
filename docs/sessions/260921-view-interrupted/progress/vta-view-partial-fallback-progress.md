@@ -13,3 +13,10 @@
 - 本段结论：`interrupted` 与 `success` 共用 `_CONTENT_VIEW_STATUSES`，走 `transcript.html` 并调用 `_prepare_success_view`；raw/page 导出按成功同款读磁盘文件。audit `/summary` 发现 task_status 仍是 failed 的前置门，failed 无正文仍返回原来的 202，failed+interrupted 才提供 summary。
 - 关键决策与已否决方案：不把 failed 一律放进摘要成功门（会改变无产物失败任务的 202 形状）；不把 interrupted 复用成 success。
 - 下一步唯一动作：在 transcript.html 顶部加中断横幅并做渲染取证。
+
+## 段落 3 — transcript.html 中断横幅
+
+- 当前阶段：implementing，模板横幅完成
+- 本段结论：横幅插在 `block content` 最顶部、统计信息之前，不在任何布局条件块内；success 渲染不含横幅。路由级 TestClient 与 Jinja 直渲染都看到横幅 + 正文。
+- 关键决策与已否决方案：样式写在 transcript.html 的 extra_css（base.html 不在允许修改范围）；复用 `.section` 与 CSS 变量，不用 status-error 以免看起来像整页失败。
+- 下一步唯一动作：更新 web_view.md 并做红验 + 全量测试。

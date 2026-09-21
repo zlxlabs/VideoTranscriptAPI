@@ -9,8 +9,10 @@ All console output must be in English only (no emoji, no Chinese).
 """
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import jinja2
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -182,3 +184,49 @@ def test_interrupted_view_route_prepares_success_view(tmp_path):
     assert "转录任务失败，请重新提交" not in body
     assert "该文件已被清理" not in body
     assert "Interrupted Video" in body
+    assert 'id="interrupted-banner"' in body
+    assert "任务被中断判定" in body
+    assert "以下是中断前已生成的部分" in body
+    assert "orphan recovered after deploy restart" in body
+
+
+def test_transcript_template_banner_only_for_interrupted():
+    templates_dir = Path(__file__).resolve().parents[2] / "src" / "web" / "templates"
+    env = jinja2.Environment(
+        loader=jinja2.FileSystemLoader(str(templates_dir)),
+        autoescape=True,
+    )
+    ctx = {
+        "title": "Sample",
+        "author": "Author",
+        "url": "https://example.com",
+        "created_at_display": "2026-09-21",
+        "platform": "youtube",
+        "summary_html": None,
+        "summary_state": "skipped_short",
+        "calibrated_html": "<p>Body</p>",
+        "use_speaker_recognition": False,
+        "view_token": "token",
+        "stats": {
+            "original_length": 600,
+            "calibrated_length": 500,
+            "summary_length": 0,
+        },
+        "llm_config": None,
+        "status": "success",
+    }
+    success_html = env.get_template("transcript.html").render(**ctx)
+    assert "interrupted-banner" not in success_html
+    assert "任务被中断判定" not in success_html
+
+    interrupted_html = env.get_template("transcript.html").render(
+        **{
+            **ctx,
+            "status": "interrupted",
+            "interrupted_reason": "orphan recovered after deploy restart",
+        }
+    )
+    assert 'id="interrupted-banner"' in interrupted_html
+    assert "任务被中断判定" in interrupted_html
+    assert "orphan recovered after deploy restart" in interrupted_html
+    assert "Body" in interrupted_html
