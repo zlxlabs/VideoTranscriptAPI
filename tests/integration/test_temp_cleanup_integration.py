@@ -84,6 +84,7 @@ class FakeRouter:
 class FakeCache:
     def __init__(self):
         self._outbox = {}
+        self.notification_owner = "test-owner"
 
     def get_cache(self, *a, **k):
         return None
@@ -106,7 +107,7 @@ class FakeCache:
                 "task_id": task_id, "status": status,
                 "error_message": k.get("error_message"),
                 "completed_at": "dummy-completed",
-                "notified_at": None, "attempts": 0, "claimed_at": None,
+                "notified_at": None, "attempts": 0, "claimed_owner": None,
             })
         return True
 
@@ -115,7 +116,7 @@ class FakeCache:
             row for row in self._outbox.values()
             if row["notified_at"] is None
             and row["attempts"] < 3
-            and row["claimed_at"] is None
+            and row["claimed_owner"] != self.notification_owner
         ][:limit]
 
     def claim_pending_terminal_notification(self, task_id):
@@ -124,23 +125,23 @@ class FakeCache:
             row is None
             or row["notified_at"] is not None
             or row["attempts"] >= 3
-            or row["claimed_at"] is not None
+            or row["claimed_owner"] == self.notification_owner
         ):
             return False
         row["attempts"] += 1
-        row["claimed_at"] = "claimed"
+        row["claimed_owner"] = self.notification_owner
         return True
 
     def mark_terminal_notification_sent(self, task_id):
         row = self._outbox.get(task_id)
-        if row is not None:
+        if row is not None and row["claimed_owner"] == self.notification_owner:
             row["notified_at"] = "sent"
-            row["claimed_at"] = None
+            row["claimed_owner"] = None
 
     def release_terminal_notification_claim(self, task_id):
         row = self._outbox.get(task_id)
-        if row is not None and row["notified_at"] is None:
-            row["claimed_at"] = None
+        if row and row["notified_at"] is None and row["claimed_owner"] == self.notification_owner:
+            row["claimed_owner"] = None
 
     def get_task_by_id(self, *a, **k):
         return {}

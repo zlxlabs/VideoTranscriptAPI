@@ -458,10 +458,12 @@ class CacheManager:
                     col[1] for col in cursor.fetchall()
                 ]
                 if 'claimed_owner' not in terminal_notification_columns:
-                    cursor.execute(
-                        "ALTER TABLE task_terminal_notifications "
-                        "ADD COLUMN claimed_owner TEXT"
+                    action = (
+                        "RENAME COLUMN claimed_at TO claimed_owner"
+                        if 'claimed_at' in terminal_notification_columns
+                        else "ADD COLUMN claimed_owner TEXT"
                     )
+                    cursor.execute("ALTER TABLE task_terminal_notifications " + action)
 
                 # 迁移7: 章节梗概诚实状态（ChaptersStatus）镜像列，供 history 透出。
                 cursor.execute("PRAGMA table_info(task_status)")

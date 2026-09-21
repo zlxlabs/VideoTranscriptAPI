@@ -72,6 +72,7 @@ class DummyCacheManager:
         self.status_updates = []
         self.tasks = {}
         self._outbox = {}
+        self.notification_owner = "test-owner"
 
     def get_cache(self, platform, media_id, use_speaker_recognition):
         return self.cache_data
@@ -100,7 +101,7 @@ class DummyCacheManager:
                 "completed_at": "dummy-completed",
                 "notified_at": None,
                 "attempts": 0,
-                "claimed_at": None,
+                "claimed_owner": None,
             })
         return True
 
@@ -109,7 +110,7 @@ class DummyCacheManager:
             row for row in self._outbox.values()
             if row["notified_at"] is None
             and row["attempts"] < 3
-            and row["claimed_at"] is None
+            and row["claimed_owner"] != self.notification_owner
         ]
         return rows[:limit]
 
@@ -119,23 +120,23 @@ class DummyCacheManager:
             row is None
             or row["notified_at"] is not None
             or row["attempts"] >= 3
-            or row["claimed_at"] is not None
+            or row["claimed_owner"] == self.notification_owner
         ):
             return False
         row["attempts"] += 1
-        row["claimed_at"] = "claimed"
+        row["claimed_owner"] = self.notification_owner
         return True
 
     def mark_terminal_notification_sent(self, task_id):
         row = self._outbox.get(task_id)
-        if row is not None:
+        if row is not None and row["claimed_owner"] == self.notification_owner:
             row["notified_at"] = "sent"
-            row["claimed_at"] = None
+            row["claimed_owner"] = None
 
     def release_terminal_notification_claim(self, task_id):
         row = self._outbox.get(task_id)
-        if row is not None and row["notified_at"] is None:
-            row["claimed_at"] = None
+        if row and row["notified_at"] is None and row["claimed_owner"] == self.notification_owner:
+            row["claimed_owner"] = None
 
     def get_task_by_id(self, task_id):
         return self.tasks.get(task_id)

@@ -91,3 +91,10 @@
 - 本段结论：新增 owner fencing 红验、同进程不重领、跨启动接管、失败释放和 attempts 上限断言；删除时间过期与慢发送轮询测试。坏释放条件和坏 claim 条件均已各自转红并恢复。
 - 关键决策与已否决方案：不模拟时间，也不保留 `claimed_at` 断言；失败释放只清当前实例 owner，接管后旧实例只能让新实例继续发送。
 - 下一步唯一动作：让四个内存 outbox 替身与生产 owner 规则一致并跑相关测试。
+
+## 验收回派 R9.3
+
+- 当前阶段：repairing / R9.3 完成
+- 本段结论：`test_transcription_flow_regression.py`、`test_layered_cache.py`、`test_temp_cleanup_integration.py`、`test_llm_concurrency.py` 的替身均记录 `notification_owner`，并同步 claim/list/mark/release 的 owner 条件。相关四文件测试通过。
+- 关键决策与已否决方案：不让替身继续使用 "claimed" 哨兵或无条件释放；固定测试 owner 只用于复现生产的进程内互斥规则。
+- 下一步唯一动作：跑收尾全量测试、检查范围与报告证据后提交并推送同一分支。
