@@ -27,3 +27,10 @@
 - 本段结论：新增 `short_url_headers()`（`url_parser.py` 唯一值源，`base.py` 复用），仅 `xhslink.com` / `xhslink.cn` 带移动 UA，其余域名传 `headers=None` 与加 UA 前逐字一致；回归锁覆盖 xhslink 双域名带 UA 与 `v.douyin.com` 不带 UA。窄范围绿。
 - 关键决策与已否决方案：无差别加 UA 会触发抖音按 UA 分流到 `iesdouyin.com`（resolver 400），故按锁定修法做域名白名单而非全局 UA。
 - 下一步唯一动作：R1 红验后做 R2+R3。
+
+## 段落 5 — 轮 1 R2+R3：前端/文档补齐与恒真用例删除
+
+- 当前阶段：implementing，R2+R3 完成
+- 本段结论：`app.js` 的 `videoDomains` 与标题 hostname 分支各补 `xhslink.cn`（grep 命中 2 处，无 JS 测试基建）；`media_resolver.md` 链接形态枚举加一行；删掉镜像逻辑的恒真用例 `test_xiaohongshu_cn_short_link`（词表对齐保留）。
+- 关键决策与已否决方案：无。
+- 下一步唯一动作：全量收尾并写报告。

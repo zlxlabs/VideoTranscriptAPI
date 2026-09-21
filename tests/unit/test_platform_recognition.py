@@ -171,12 +171,6 @@ class TestPlatformRecognition:
         assert platform == 'xiaohongshu'
         # Short link needs resolver, so video_id may be None
 
-    def test_xiaohongshu_cn_short_link(self):
-        """Test Xiaohongshu new short link (xhslink.cn) - platform recognized"""
-        url = "https://xhslink.cn/o/2SDXgXldd0a"
-        platform, video_id = self.extract_platform_and_id(url)
-        assert platform == 'xiaohongshu'
-
     # ========== Edge Cases ==========
 
     def test_generic_url(self):

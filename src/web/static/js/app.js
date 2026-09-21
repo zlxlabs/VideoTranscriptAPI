@@ -275,7 +275,7 @@ class URLExtractor {
         // 已知视频平台域名加分
         const videoDomains = [
             'youtube.com', 'youtu.be', 'bilibili.com', 'b23.tv',
-            'xiaohongshu.com', 'xhslink.com', 'douyin.com', 'v.douyin.com',
+            'xiaohongshu.com', 'xhslink.com', 'xhslink.cn', 'douyin.com', 'v.douyin.com',
             'xiaoyuzhoufm.com', 'tiktok.com', 'vm.tiktok.com',
             'weixin.qq.com'
         ];
@@ -490,7 +490,7 @@ class TaskHistoryManager {
                 return 'YouTube视频';
             } else if (hostname.includes('bilibili.com')) {
                 return 'Bilibili视频';
-            } else if (hostname.includes('xiaohongshu.com')) {
+            } else if (hostname.includes('xiaohongshu.com') || hostname.includes('xhslink.com') || hostname.includes('xhslink.cn')) {
                 return '小红书内容';
             } else if (hostname.includes('douyin.com')) {
                 return '抖音视频';
