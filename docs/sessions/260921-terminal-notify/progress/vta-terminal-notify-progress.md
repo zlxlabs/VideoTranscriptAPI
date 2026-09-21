@@ -78,5 +78,10 @@
 - 下一步唯一动作：全量 pytest 后 push。
 
 
+## 验收回派 R9.1
 
+- 当前阶段：repairing / R9.1 完成
+- 本段结论：用 `claimed_owner TEXT` 和每次 `CacheManager` 启动生成的 UUID 替换时间租约；claim/list/mark/release 均按 owner 互斥。旧分支数据库的 `claimed_at` 在迁移时重命名，失败释放不再误清新持有者。
+- 关键决策与已否决方案：不加 fencing token 或 TTL；同进程严格互斥，跨启动按 owner 不同立即接管，接受单进程服务之外共享数据库可能重复一条通知。
+- 下一步唯一动作：补齐 owner 接管、旧 owner 释放保护、失败释放与有界重试红验。
 

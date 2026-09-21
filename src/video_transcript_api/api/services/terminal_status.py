@@ -58,6 +58,7 @@ def finalize_terminal_status_and_notify(
     logger.info(f"terminal CAS won: {task_id} -> {status}")
 
     if not send_status_notification:
+        cache_manager.claim_pending_terminal_notification(task_id)
         cache_manager.mark_terminal_notification_sent(task_id)
         logger.debug(
             f"caller suppressed terminal status notification: {task_id}"

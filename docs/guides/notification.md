@@ -120,11 +120,9 @@ config.wechat/feishu.webhook     (全局配置)
 
 ## 终态状态通知 outbox
 
-任务写入 `success` / `failed` 且 CAS 获胜时，在同一 SQLite 事务里向 `task_terminal_notifications` 插入一行 pending（`task_id` UNIQUE）。投递线程启动时先扫 `notified_at IS NULL AND attempts < MAX_ATTEMPTS`（`MAX_ATTEMPTS = 3`）且没有有效租约的行补发，文案带原始 `completed_at`，避免和刚提交的任务混在一起。
+任务写入 `success` / `failed` 且 CAS 获胜时，在同一 SQLite 事务里向 `task_terminal_notifications` 插入一行 pending（`task_id` UNIQUE）。投递线程启动时先扫 `notified_at IS NULL AND attempts < MAX_ATTEMPTS`（`MAX_ATTEMPTS = 3`）且不属于本进程的行补发，文案带原始 `completed_at`，避免和刚提交的任务混在一起。
 
-两态 `pending → sent`，不做 `sending`。claim 时写入 `claimed_at` 租约并递增 `attempts`；租约有效期为 120 秒，同一行在租约有效期间不会被第二个投递循环领取。租约过期后可重新领取，覆盖进程崩溃或发送线程消失的窗口。`notified_at` **只在发送未抛异常、且路由至少一个渠道返回 True** 时写入。发送抛异常或渠道全 False 不标 sent，并立即清空 `claimed_at`，留给下一轮补发。claim 与扫描都要求 `attempts < 3` 且 `claimed_at IS NULL OR claimed_at <= 当前 UTC 时间 - 120 秒`。
-
-SQLite 的 `CURRENT_TIMESTAMP` 与 `claimed_at` 比较都使用 UTC、无时区后缀的 `YYYY-MM-DD HH:MM:SS` 文本；Python 侧用带时区的 UTC 当前时间计算并格式化后再参与比较，不依赖 sqlite3 的 datetime adapter。
+两态 `pending → sent`，不做 `sending`。每个 `CacheManager` 启动时生成新的 `claimed_owner`，claim 写入它并递增 `attempts`；同一进程持有的行永不再次领取，与发送耗时无关。进程重启后 owner 不同，遗留行可立即接管，覆盖崩溃窗口。`notified_at` **只在发送未抛异常、且路由至少一个渠道返回 True** 时写入；发送抛异常或渠道全 False 不标 sent，并只由当前 owner 释放 claim。多进程共用同一数据库时可能重复一条通知；本服务按单进程设计（in-memory 队列、thread-local SQLite 连接、单容器）接受此取舍。
 
 投递器只接受路由返回的渠道结果字典，并要求至少一个渠道值为真；`None`、布尔值、模拟对象或渠道全 False 都不会标记 sent，失败租约会立即释放。
 
