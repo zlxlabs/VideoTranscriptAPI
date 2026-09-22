@@ -2494,12 +2494,16 @@ class CacheManager:
             logger.error(f"更新任务状态失败: {e}")
             raise
 
-    def list_unattempted_terminal_notifications(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """List every not-yet-sent row, least-attempted first (I4).
+    def list_unattempted_terminal_notifications(
+        self, limit: int = 20, min_age_seconds: float = 0.0,
+    ) -> List[Dict[str, Any]]:
+        """List eligible not-yet-sent rows, least-attempted first (I4).
 
         Ordering by `attempts` first means a permanently failing head cannot
         starve fresh rows: rows are never removed from this list, but a stuck
-        row sinks to the tail instead of blocking everyone behind it.
+        row sinks to the tail instead of blocking everyone behind it. A
+        positive age gate only delays freshly-created rows; their age grows
+        monotonically, so every row becomes eligible and I4 still holds.
         """
         with self._get_cursor() as cursor:
             cursor.execute(
@@ -2507,9 +2511,15 @@ class CacheManager:
                           notified_at, attempts
                    FROM task_terminal_notifications
                    WHERE notified_at IS NULL
+                     AND (
+                         ? <= 0
+                         OR created_at <= datetime(
+                             'now', printf('-%f seconds', ?)
+                         )
+                     )
                    ORDER BY attempts ASC, created_at ASC
                    LIMIT ?''',
-                (int(limit),),
+                (float(min_age_seconds), float(min_age_seconds), int(limit)),
             )
             return [dict(row) for row in cursor.fetchall()]
 

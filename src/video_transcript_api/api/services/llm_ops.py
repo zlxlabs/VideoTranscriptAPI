@@ -43,7 +43,10 @@ from ...utils.notifications import (
 from ...utils.rendering import get_base_url
 from ...utils.perf_tracker import PerfTracker
 from ...utils.task_status import TaskStatus
-from .terminal_status import finalize_terminal_status_and_notify
+from .terminal_status import (
+    deliver_terminal_notification,
+    finalize_terminal_status_and_notify,
+)
 from ...utils.llm_status import (
     CalibrationStatus,
     ChaptersStatus,
@@ -825,8 +828,11 @@ def _handle_llm_task(llm_task: dict):
                 # "已更新为 success"，两者都是谎言——数据库和审计快照记录的其实是
                 # failed。改为先写 CAS、检查返回值，只有真正赢得这次终态写入时才发送
                 # 完成通知；落败时记录 warning（附带当前的真实终态）且不再通知。
+                # 成功路径先建 outbox，但延后内联投递到内容通知之后，保证终态状态
+                # 消息入队时是本次任务的最后一条；内容通知异常时仍会继续投递终态。
                 done_message = "重新校对完成" if calibrate_only else "校对完成"
                 final_stats = result_dict.get("stats", {})
+                notification_router = get_notification_router()
                 status_written = finalize_terminal_status_and_notify(
                     task_id,
                     TaskStatus.SUCCESS,
@@ -843,9 +849,10 @@ def _handle_llm_task(llm_task: dict):
                         "processing_options": processing_options,
                     },
                     cache_manager=cache_manager,
-                    router=get_notification_router(),
+                    router=notification_router,
                     channel_name=notification_channel,
                     webhooks=notification_webhooks,
+                    defer_delivery=True,
                 )
                 if status_written:
                     logger.info(f"任务状态已更新为 success: {task_id} ({done_message})")
@@ -877,6 +884,17 @@ def _handle_llm_task(llm_task: dict):
                             logger.exception(
                                 f"完成通知发送失败（任务已成功落库，不影响任务结果）: {task_id}"
                             )
+                    deliver_terminal_notification(
+                        task_id,
+                        TaskStatus.SUCCESS,
+                        url=display_url,
+                        title=video_title,
+                        author=llm_task.get("author", ""),
+                        cache_manager=cache_manager,
+                        router=notification_router,
+                        channel_name=notification_channel,
+                        webhooks=notification_webhooks,
+                    )
                 else:
                     current_task = cache_manager.get_task_by_id(task_id)
                     current_status = current_task.get("status") if current_task else "unknown"
