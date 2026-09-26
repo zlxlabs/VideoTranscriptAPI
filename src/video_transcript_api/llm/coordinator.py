@@ -1,10 +1,12 @@
 """协调器模块 - 场景路由和统一入口"""
 
+import hashlib
+import json
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import asdict
 
 from ..utils.logging import setup_logger
-from ..utils.llm_status import ChaptersStatus, SummaryStatus
+from ..utils.llm_status import CalibrationStatus, ChaptersStatus, SummaryStatus
 from .core.config import LLMConfig
 from .core.llm_client import LLMClient
 from .core.cache_manager import CacheManager
@@ -18,6 +20,22 @@ from .processors.summary_processor import SummaryProcessor, SummaryResult
 from .processors.chapters_processor import ChaptersProcessor, ChaptersResult
 
 logger = setup_logger(__name__)
+
+
+def _artifact_input_fingerprint(envelope: Dict[str, Any]) -> str:
+    """Hash a versioned input envelope with deterministic JSON and exact text.
+
+    Dict key order is ignored, list order and every string character are kept.
+    The returned SHA-256 covers the full envelope, not only transcript bytes.
+    """
+    canonical_json = json.dumps(
+        envelope,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
 
 class LLMCoordinator:
@@ -174,6 +192,31 @@ class LLMCoordinator:
 
         # 获取模型配置（敏感词降级由 llm-compat 自动处理）
         selected_models = self.config.get_models()
+        calibration_processor_content = content
+        if isinstance(content, dict) and "segments" in content:
+            calibration_processor_content = content.get("segments", [])
+
+        # Freeze the exact arguments handed to calibration before a processor
+        # can mutate structured input or later stages can observe changed state.
+        calibration_envelope = {
+            "schema_version": "artifact-input-v1",
+            "layer": "calibration",
+            "content": calibration_processor_content,
+            "title": title,
+            "author": author,
+            "description": description,
+            "platform": platform,
+            "media_id": media_id,
+            "options": {
+                "skip_calibration": skip_calibration,
+                "infer_speaker_names": infer_speaker_names,
+                "contradiction_scan": contradiction_scan,
+                "selected_models": selected_models,
+            },
+        }
+        calibration_source_fingerprint = _artifact_input_fingerprint(
+            calibration_envelope
+        )
 
         # 步骤 2: 校对处理（路由到对应处理器）
         logger.info("Step 1/2: Calibration processing")
@@ -212,10 +255,24 @@ class LLMCoordinator:
         # 不会用 None 误覆盖已有的 GENERATED/FAILED 等状态。
         summary_text = None
         summary_status: Optional[SummaryStatus] = None
+        summary_artifact_source = None
         if skip_summary:
             logger.info("Step 2/2: Summary generation SKIPPED (skip_summary=True)")
         else:
             logger.info("Step 2/2: Summary generation")
+            summary_transcription_data = self._extract_transcription_data(content)
+            summary_envelope = {
+                "schema_version": "artifact-input-v1",
+                "layer": "summary",
+                "text": calibrated_text,
+                "title": title,
+                "author": author,
+                "description": description,
+                "speaker_count": speaker_count,
+                "transcription_data": summary_transcription_data,
+                "selected_models": selected_models,
+            }
+            summary_source_fingerprint = _artifact_input_fingerprint(summary_envelope)
             with set_context(stage="summary"):
                 summary_result = self._generate_summary_if_needed(
                     text=calibrated_text,
@@ -223,11 +280,23 @@ class LLMCoordinator:
                     author=author,
                     description=description,
                     speaker_count=speaker_count,
-                    transcription_data=self._extract_transcription_data(content),
+                    transcription_data=summary_transcription_data,
                     selected_models=selected_models,
                 )
             summary_text = summary_result.text
             summary_status = summary_result.status
+            if summary_status == SummaryStatus.GENERATED:
+                summary_generation_kind = "llm"
+            elif summary_status == SummaryStatus.SKIPPED_SHORT:
+                summary_generation_kind = "copied_calibration"
+            else:
+                summary_generation_kind = "unknown"
+            summary_artifact_source = {
+                "recipe_version": "summary-v1",
+                "source_fingerprint": summary_source_fingerprint,
+                "generation_kind": summary_generation_kind,
+                "requested_model": selected_models.get("summary_model", "unknown"),
+            }
 
         # 步骤 4: 章节梗概生成（可跳过；与 summary 对称的诚实状态）
         # chapters_status 为 None 表示"本轮未尝试"，下游合并语义保留旧值。
@@ -281,6 +350,17 @@ class LLMCoordinator:
         if calibration_status is None and calibration_stats_detail:
             calibration_status = calibration_stats_detail.get("calibration_status")
 
+        if calibration_status == CalibrationStatus.FULL:
+            calibration_generation_kind = "llm"
+        elif calibration_status == CalibrationStatus.PARTIAL:
+            calibration_generation_kind = "mixed_llm_and_fallback"
+        elif calibration_status == CalibrationStatus.NONE:
+            calibration_generation_kind = "formatted_fallback"
+        elif calibration_status == CalibrationStatus.DISABLED:
+            calibration_generation_kind = "disabled_local_format"
+        else:
+            calibration_generation_kind = "unknown"
+
         if calibration_stats_detail is None and "total_segments" in calibration_stats_raw:
             # 纯文本路径的统计字段是扁平的，这里合成一份 nested 视图，
             # 使 llm_status.json / 通知警告 / 模板渲染可以统一从 calibration_stats 读取
@@ -310,6 +390,19 @@ class LLMCoordinator:
             },
             "structured_data": calibration_result.get("structured_data"),
             "models_used": selected_models,
+            "artifact_sources": {
+                "calibration": {
+                    "recipe_version": "calibration-v1",
+                    "source_fingerprint": calibration_source_fingerprint,
+                    "generation_kind": calibration_generation_kind,
+                    "requested_model": selected_models.get("calibrate_model", "unknown"),
+                },
+                **(
+                    {"summary": summary_artifact_source}
+                    if summary_artifact_source is not None
+                    else {}
+                ),
+            },
         }
 
     def _route_to_calibration_processor(
