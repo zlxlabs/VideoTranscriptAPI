@@ -31,6 +31,8 @@ def _create_databases(tmp_path, *, old_audit=False):
             )"""
         )
     with sqlite3.connect(audit_path) as connection:
+        connection.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+        connection.execute("INSERT INTO schema_version VALUES (?)", (5 if old_audit else 6,))
         if old_audit:
             connection.execute(
                 """CREATE TABLE task_audit_snapshots (
@@ -57,6 +59,115 @@ def _create_databases(tmp_path, *, old_audit=False):
             )"""
         )
     return cache_path, audit_path
+
+
+@pytest.mark.parametrize(
+    ("mutation", "version_rows", "schema_column", "task_column"),
+    [
+        ("DROP TABLE schema_version", None, "missing_table", None),
+        ("DELETE FROM schema_version", [], None, None),
+        ("INSERT INTO schema_version VALUES (5)", [(6,), (5,)], None, None),
+        (
+            "DROP TABLE schema_version; CREATE TABLE schema_version (version INTEGER); "
+            "INSERT INTO schema_version VALUES (NULL)",
+            [(None,)],
+            None,
+            None,
+        ),
+        ("UPDATE schema_version SET version = 5.5", [(5.5,)], None, None),
+        ("UPDATE schema_version SET version = 7", [(7,)], None, None),
+        (
+            "DROP TABLE schema_version; CREATE TABLE schema_version (other INTEGER)",
+            None,
+            "other",
+            None,
+        ),
+        (
+            "ALTER TABLE task_audit_snapshots DROP COLUMN created_at",
+            [(6,)],
+            None,
+            "created_at",
+        ),
+        (
+            "ALTER TABLE task_audit_snapshots DROP COLUMN observability_json",
+            [(6,)],
+            None,
+            "observability_json",
+        ),
+        (
+            "UPDATE schema_version SET version = 5; "
+            "ALTER TABLE task_audit_snapshots DROP COLUMN chapters_status",
+            [(5,)],
+            None,
+            "chapters_status",
+        ),
+    ],
+)
+def test_cli_rejects_invalid_audit_schema_without_report(
+    tmp_path, mutation, version_rows, schema_column, task_column
+):
+    cache_path, audit_path = _create_databases(tmp_path)
+    with sqlite3.connect(audit_path) as connection:
+        connection.executescript(mutation)
+        if schema_column == "missing_table":
+            assert connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
+            ).fetchone() is None
+        elif schema_column:
+            columns = [
+                row[1]
+                for row in connection.execute("PRAGMA table_info(schema_version)")
+            ]
+            assert columns == [schema_column]
+        else:
+            assert connection.execute(
+                "SELECT version FROM schema_version"
+            ).fetchall() == version_rows
+        if task_column:
+            columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(task_audit_snapshots)"
+                )
+            }
+            assert task_column not in columns
+
+    result = _run(cache_path, audit_path)
+    assert result.returncode != 0 and result.stdout == ""
+
+
+def test_fields_missing_task_status_matches_unknown_count_for_known_statuses(tmp_path):
+    cache_path, audit_path = _create_databases(tmp_path)
+    statuses = {
+        "success": "success", "failed": "failed", "processing": "processing",
+        "queued": "queued", "calibrating": "calibrating", "null": None,
+        "empty": "", "unknown": "waiting",
+    }
+    with sqlite3.connect(cache_path) as connection:
+        connection.executemany(
+            "INSERT INTO task_status (task_id, status, created_at) "
+            "VALUES (:task_id, :status, :created_at)",
+            [
+                dict(task_id=task_id, status=status, created_at="2026-09-01T00:00:00Z")
+                for task_id, status in statuses.items()
+            ],
+        )
+        assert connection.execute(
+            "SELECT task_id, status FROM task_status ORDER BY task_id"
+        ).fetchall() == sorted(statuses.items())
+
+    result = _run(cache_path, audit_path)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["tasks"]["status_counts"] == {
+        "success": 1,
+        "failed": 1,
+        "in_progress": 3,
+        "unknown": 3,
+    }
+    assert report["fields_missing"]["task_status"] == report["tasks"][
+        "status_counts"
+    ]["unknown"]
 
 
 def _insert_task(path, table, values):
@@ -401,8 +512,8 @@ def test_cli_rejects_missing_bad_permission_and_invalid_inputs_without_files(
     assert unknown_schema.returncode != 0
     assert "tasks\": {\"count\": 0" not in unknown_schema.stdout
     with sqlite3.connect(audit_path) as connection:
-        connection.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
-        connection.execute("INSERT INTO schema_version VALUES (4)")
+        connection.execute("UPDATE schema_version SET version = 4")
+        assert connection.execute("SELECT version FROM schema_version").fetchall() == [(4,)]
     unsupported_v4 = _run(cache_path, audit_path)
     assert unsupported_v4.returncode != 0
     assert "unknown audit schema version" in unsupported_v4.stderr

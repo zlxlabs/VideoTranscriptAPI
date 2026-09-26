@@ -24,7 +24,7 @@ ssh n305 'docker exec -i video-transcript-api python - --cache-db /app/data/cach
 
 如果生产 `storage.cache_dir` 改过默认值，将 `--cache-db` 改为该目录下的 `cache.db`。生产查询窗口应显式写成带 `Z` 的 UTC 时间。不要将运行中的 SQLite 文件复制到临时位置后把复制时间当作任务时间。
 
-坏库、未知 schema、缺文件、无权限、无效时间都会返回非零退出码；不打印空报告掩盖错误。只读 CLI 接受 audit schema v5/v6，拒绝 v4 及其他未知版本，不会给数据库补列。
+坏库、未知 schema、缺文件、无权限、无效时间都会返回非零退出码；不打印空报告掩盖错误。只读 CLI 要求 audit 库有 `schema_version` 且恰好一行整数 `version` 为 5 或 6：v5 须具备既有必需列，v6 还须有 `created_at` 与 `observability_json`。它不迁移数据库；契约由 `tests/unit/test_task_observability_report.py` 的 CLI 参数化用例覆盖。
 
 ## 指标口径
 
@@ -34,7 +34,7 @@ ssh n305 'docker exec -i video-transcript-api python - --cache-db /app/data/cach
 - **端到端耗时**：每个任务用 `completed_at - created_at` 计算墙钟毫秒数。缺任一时间或完成早于创建的任务不进入样本，计入 `fields_missing.end_to_end_duration`。
 - **阶段耗时**：从终态快照中的 PerfTracker 已完成区间汇总；每个任务每阶段的耗时是该阶段区间之和，`duration_ms.samples` 是有观测的任务数，p50/p95 使用 nearest-rank。成功/失败是 tracker 区间计数。未走到或没有阶段区间的任务不填 0。
 - **LLM 用量**：`llm_usage` 的调用数、token 与 `duration_sum_ms` 独立列出。并行调用的耗时会相加，可能大于端到端墙钟；两者不能互换。`usage_missing_count` 表示有调用行但 provider 未回报用量；`tasks_without_usage_rows` 是没有调用行的任务数。
-- **字段缺失**：`fields_missing` 按窗口任务显式统计未知状态、缺完成时间、缺观测快照、缺阶段样本与缺端到端样本。没有 `created_at` 的历史记录无法分配到窗口，单独输出为窗口外的 `unassigned_created_at_tasks`，不进入窗口任务数或字段缺失分母，也不使用 API 请求时间猜测。
+- **字段缺失**：`fields_missing.task_status` 与 `tasks.status_counts.unknown` 相等；只有 success、failed、queued、processing、calibrating 是已知任务状态，NULL、空值和陌生值计为 unknown。其他字段按窗口任务显式统计缺完成时间、缺观测快照、缺阶段样本与缺端到端样本。没有 `created_at` 的历史记录无法分配到窗口，单独输出为窗口外的 `unassigned_created_at_tasks`，不进入窗口任务数或字段缺失分母，也不使用 API 请求时间猜测；状态口径也由上述参数化 CLI 测试锁定。
 
 ## 边界与盲区
 

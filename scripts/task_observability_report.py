@@ -295,16 +295,23 @@ def build_report(cache_connection, audit_connection, since_value, until_value):
             "duration_ms", "usage_missing",
         },
     )
-    has_schema_version = audit_connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
-    ).fetchone()
-    if has_schema_version:
-        audit_version_columns = _table_columns(audit_connection, "schema_version")
-        if "version" not in audit_version_columns:
-            raise ValueError("unknown audit schema: schema_version missing version column")
-        versions = audit_connection.execute("SELECT version FROM schema_version").fetchall()
-        if len(versions) != 1 or any(not 5 <= row[0] <= 6 for row in versions):
-            raise ValueError("unknown audit schema version")
+    audit_version_columns = _table_columns(audit_connection, "schema_version")
+    if "version" not in audit_version_columns:
+        raise ValueError("unknown audit schema: schema_version missing version column")
+    versions = audit_connection.execute("SELECT version FROM schema_version").fetchall()
+    if (
+        len(versions) != 1
+        or type(versions[0][0]) is not int
+        or versions[0][0] not in (5, 6)
+    ):
+        raise ValueError("unknown audit schema version")
+    if versions[0][0] == 6:
+        _validate_schema(
+            audit_connection,
+            "audit",
+            "task_audit_snapshots",
+            {"created_at", "observability_json"},
+        )
 
     cache_rows = _read_task_rows(
         cache_connection, "task_status", cache_columns, since_sql, until_sql
@@ -391,6 +398,7 @@ def build_report(cache_connection, audit_connection, since_value, until_value):
         }
     task_ids = set(tasks)
     usage = _usage_summary(audit_connection, task_ids)
+    missing["task_status"] = status_counts["unknown"]
     return {
         "window": {
             "since": _window_text(since),
