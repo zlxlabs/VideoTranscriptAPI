@@ -375,6 +375,7 @@ def _handle_notes_generation(
     llm_task: dict,
     tracker: PerfTracker,
     processing_options: dict,
+    notes_outcome: dict,
 ) -> Optional[dict]:
     """Run and persist a notes-only task without touching existing LLM layers."""
     task_id = llm_task["task_id"]
@@ -474,6 +475,7 @@ def _handle_notes_generation(
                 use_speaker_recognition=use_speaker_recognition,
                 notes_status=NotesStatus.GENERATED,
             )
+        notes_outcome["notes_status"] = NotesStatus.GENERATED
         status_written = finalize_terminal_status_and_notify(
             task_id,
             TaskStatus.SUCCESS,
@@ -515,15 +517,16 @@ def _handle_notes_generation(
             )
             return None
     except Exception:
-        try:
-            cache_manager.save_llm_status(
-                platform=platform,
-                media_id=media_id,
-                use_speaker_recognition=use_speaker_recognition,
-                notes_status=NotesStatus.FAILED,
-            )
-        except Exception:
-            logger.exception(f"详细笔记 failed 状态落盘失败: {task_id}")
+        if notes_outcome.get("notes_status") != NotesStatus.GENERATED:
+            try:
+                cache_manager.save_llm_status(
+                    platform=platform,
+                    media_id=media_id,
+                    use_speaker_recognition=use_speaker_recognition,
+                    notes_status=NotesStatus.FAILED,
+                )
+            except Exception:
+                logger.exception(f"详细笔记 failed 状态落盘失败: {task_id}")
         raise
 
 
@@ -567,6 +570,7 @@ def _handle_llm_task(llm_task: dict):
             logger.info(f"开始处理LLM任务: {task_id}, 标题: {video_title}")
 
             notes_attempted = False
+            notes_outcome = {}
             try:
                 raw_processing_options = llm_task.get("processing_options") or {}
                 if raw_processing_options.get("notes") is True:
@@ -575,6 +579,7 @@ def _handle_llm_task(llm_task: dict):
                         llm_task=llm_task,
                         tracker=tracker,
                         processing_options=raw_processing_options,
+                        notes_outcome=notes_outcome,
                     )
                     if notes_notification_result is not None:
                         try:
@@ -929,7 +934,9 @@ def _handle_llm_task(llm_task: dict):
                 failure_snapshot = {"observability": tracker.observation()}
                 if notes_attempted:
                     failure_snapshot["result"] = {
-                        "notes_status": NotesStatus.FAILED,
+                        "notes_status": notes_outcome.get(
+                            "notes_status", NotesStatus.FAILED
+                        ),
                     }
                 try:
                     # CAS-gated status notify lives in

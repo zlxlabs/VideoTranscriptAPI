@@ -1,5 +1,6 @@
 """Read-only report contract tests; console output stays ASCII-only."""
 
+import importlib.util
 import json
 import os
 import sqlite3
@@ -7,8 +8,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "task_observability_report.py"
+SPEC = importlib.util.spec_from_file_location("task_observability_report", SCRIPT)
+REPORT = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(REPORT)
 SINCE = "2026-09-01T00:00:00Z"
 UNTIL = "2026-09-02T00:00:00Z"
 
@@ -104,6 +110,7 @@ def test_report_deduplicates_tasks_and_separates_wall_and_llm_durations(tmp_path
             "observability_json": json.dumps(
                 {
                     "notes_status": "generated",
+                    "counters": {"cache_hit": 1},
                     "stages": {
                         "transcription": {
                             "elapsed_ms": 4000,
@@ -151,6 +158,7 @@ def test_report_deduplicates_tasks_and_separates_wall_and_llm_durations(tmp_path
                     "error_message": "RAW-FAILURE-DETAIL",
                     "result": {"notes_status": "failed"},
                         "observability": {
+                            "counters": {"cache_hit_partial": 1},
                             "stages": {
                                 "metadata": {
                                     "elapsed_ms": 0,
@@ -232,6 +240,11 @@ def test_report_deduplicates_tasks_and_separates_wall_and_llm_durations(tmp_path
         "unknown": 0,
     }
     assert report["tasks"]["platform_counts"] == {"bilibili": 1, "youtube": 2}
+    assert report["tasks"]["cache_hits"] == {
+        "full": 1,
+        "partial": 1,
+        "unknown": 1,
+    }
     assert report["tasks"]["notes_status"] == {
         "states": {"failed": 1, "generated": 1},
         "unknown_count": 1,
@@ -316,8 +329,13 @@ def test_old_audit_schema_is_read_without_migration_or_cache_status_backfill(tmp
     assert "observability_json" not in columns
 
 
-def test_empty_window_reports_zero_rows_and_no_duration_samples(tmp_path):
+def test_empty_window_reports_zero_samples_and_excludes_unassigned_history(tmp_path):
     cache_path, audit_path = _create_databases(tmp_path)
+    _insert_task(
+        audit_path,
+        "task_audit_snapshots",
+        {"task_id": "unassigned-history", "status": "failed", "platform": "youtube"},
+    )
 
     result = _run(cache_path, audit_path)
 
@@ -331,10 +349,29 @@ def test_empty_window_reports_zero_rows_and_no_duration_samples(tmp_path):
     }
     assert report["llm_usage"]["calls"] == 0
     assert report["llm_usage"]["duration_sum_ms"] == 0
+    assert report["unassigned_created_at_tasks"] == 1
+    other_window = json.loads(_run(
+        cache_path, audit_path, since="2026-09-03T00:00:00Z",
+        until="2026-09-04T00:00:00Z",
+    ).stdout)
+    assert other_window["tasks"]["count"] == 0
+    assert other_window["unassigned_created_at_tasks"] == 1
+    assert "created_at" not in report["fields_missing"]
 
 
-def test_missing_paths_bad_databases_and_invalid_window_fail_without_creating_files(
-    tmp_path,
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses chmod-based permission checks")
+def test_unreadable_database_is_rejected_by_os(tmp_path):
+    cache_path, audit_path = _create_databases(tmp_path)
+    cache_path.chmod(0)
+    try:
+        result = _run(cache_path, audit_path)
+    finally:
+        cache_path.chmod(0o600)
+    assert result.returncode != 0
+
+
+def test_cli_rejects_missing_bad_permission_and_invalid_inputs_without_files(
+    tmp_path, monkeypatch, capsys
 ):
     cache_path, audit_path = _create_databases(tmp_path)
     missing_cache = tmp_path / "does-not-exist.db"
@@ -348,11 +385,6 @@ def test_missing_paths_bad_databases_and_invalid_window_fail_without_creating_fi
         audit_path,
         since="2026-09-01T00:00:00Z' OR 1=1--",
     )
-    cache_path.chmod(0)
-    try:
-        unreadable = _run(cache_path, audit_path)
-    finally:
-        cache_path.chmod(0o600)
     unknown_cache = tmp_path / "unknown-cache.db"
     unknown_audit = tmp_path / "unknown-audit.db"
     with sqlite3.connect(unknown_cache) as connection:
@@ -366,6 +398,22 @@ def test_missing_paths_bad_databases_and_invalid_window_fail_without_creating_fi
     assert bad_database.returncode != 0
     assert "tasks\": {\"count\": 0" not in bad_database.stdout
     assert invalid_window.returncode != 0
-    assert unreadable.returncode != 0
     assert unknown_schema.returncode != 0
     assert "tasks\": {\"count\": 0" not in unknown_schema.stdout
+    with sqlite3.connect(audit_path) as connection:
+        connection.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+        connection.execute("INSERT INTO schema_version VALUES (4)")
+    unsupported_v4 = _run(cache_path, audit_path)
+    assert unsupported_v4.returncode != 0
+    assert "unknown audit schema version" in unsupported_v4.stderr
+
+    def denied(_path):
+        raise PermissionError("database denied")
+
+    monkeypatch.setattr(REPORT, "_open_readonly", denied)
+    result = REPORT.main(
+        ["--cache-db", str(cache_path), "--audit-db", str(audit_path),
+         "--since", SINCE, "--until", UNTIL]
+    )
+    output = capsys.readouterr()
+    assert result != 0 and output.out == "" and "database denied" in output.err

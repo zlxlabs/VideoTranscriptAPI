@@ -142,6 +142,17 @@ def _stage_observations(row):
     raw_stages = observation.get("stages")
     if not isinstance(raw_stages, dict) and isinstance(cache_observation, dict):
         raw_stages = cache_observation.get("stages")
+    raw_counters = observation.get("counters")
+    if not isinstance(raw_counters, dict) and isinstance(cache_observation, dict):
+        raw_counters = cache_observation.get("counters")
+    counters = {
+        name: value
+        for name, value in (raw_counters.items() if isinstance(raw_counters, dict) else ())
+        if name in {"cache_hit", "cache_hit_partial"}
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+        and value >= 0
+    }
     stages = {}
     if isinstance(raw_stages, dict):
         for name, raw in raw_stages.items():
@@ -178,7 +189,7 @@ def _stage_observations(row):
                 "successes": successes,
                 "failures": failures,
             }
-    return notes_status, stages, bool(audit or cache_observation)
+    return notes_status, stages, counters, bool(audit or cache_observation)
 
 
 def _merge_task_rows(audit_rows, cache_rows, since, until):
@@ -292,7 +303,7 @@ def build_report(cache_connection, audit_connection, since_value, until_value):
         if "version" not in audit_version_columns:
             raise ValueError("unknown audit schema: schema_version missing version column")
         versions = audit_connection.execute("SELECT version FROM schema_version").fetchall()
-        if len(versions) != 1 or any(not 4 <= row[0] <= 6 for row in versions):
+        if len(versions) != 1 or any(not 5 <= row[0] <= 6 for row in versions):
             raise ValueError("unknown audit schema version")
 
     cache_rows = _read_task_rows(
@@ -301,7 +312,7 @@ def build_report(cache_connection, audit_connection, since_value, until_value):
     audit_rows = _read_task_rows(
         audit_connection, "task_audit_snapshots", audit_columns, since_sql, until_sql
     )
-    tasks, missing_created = _merge_task_rows(audit_rows, cache_rows, since, until)
+    tasks, unassigned_created = _merge_task_rows(audit_rows, cache_rows, since, until)
 
     status_counts = {"success": 0, "failed": 0, "in_progress": 0, "unknown": 0}
     platform_counts = {}
@@ -309,8 +320,8 @@ def build_report(cache_connection, audit_connection, since_value, until_value):
     unknown_states = {key: 0 for key in state_counts}
     end_to_end = []
     stage_values = {}
+    cache_hits = {"full": 0, "partial": 0, "unknown": 0}
     missing = {
-        "created_at": missing_created,
         "completed_at": 0,
         "observability_snapshot": 0,
         "notes_status": 0,
@@ -332,7 +343,13 @@ def build_report(cache_connection, audit_connection, since_value, until_value):
             platform = "unknown"
         platform_counts[platform] = platform_counts.get(platform, 0) + 1
 
-        notes, stages, has_observation = _stage_observations(row)
+        notes, stages, counters, has_observation = _stage_observations(row)
+        full_hit = counters.get("cache_hit", 0) > 0
+        partial_hit = counters.get("cache_hit_partial", 0) > 0
+        cache_hits["full"] += int(full_hit)
+        cache_hits["partial"] += int(partial_hit)
+        if not counters:
+            cache_hits["unknown"] += 1
         states = {
             "notes_status": notes,
             "summary_status": _state(row.get("summary_status"), SUMMARY_STATES),
@@ -385,6 +402,7 @@ def build_report(cache_connection, audit_connection, since_value, until_value):
             "count": len(tasks),
             "status_counts": status_counts,
             "platform_counts": dict(sorted(platform_counts.items())),
+            "cache_hits": cache_hits,
             "notes_status": {
                 "states": dict(sorted(state_counts["notes_status"].items())),
                 "unknown_count": unknown_states["notes_status"],
@@ -404,6 +422,7 @@ def build_report(cache_connection, audit_connection, since_value, until_value):
         },
         "llm_usage": usage,
         "fields_missing": missing,
+        "unassigned_created_at_tasks": unassigned_created,
     }
 
 

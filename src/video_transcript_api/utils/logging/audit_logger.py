@@ -350,6 +350,18 @@ class AuditLogger:
             allowlisted_observation["notes_status"] = notes_status
         if observed_stages:
             allowlisted_observation["stages"] = observed_stages
+        raw_counters = observation.get("counters")
+        if isinstance(raw_counters, dict):
+            observed_counters = {
+                name: value
+                for name, value in raw_counters.items()
+                if name in {"cache_hit", "cache_hit_partial"}
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+                and value >= 0
+            }
+            if observed_counters:
+                allowlisted_observation["counters"] = observed_counters
         observation_json = (
             json.dumps(allowlisted_observation, sort_keys=True)
             if allowlisted_observation

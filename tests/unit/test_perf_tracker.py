@@ -77,6 +77,16 @@ class TestPerfTrackerTiming:
         assert "private-task-id" not in str(observation)
         assert "private error body" not in str(observation)
 
+    def test_observation_allowlists_cache_hit_counters(self):
+        tracker = PerfTracker(task_id="private-task-id")
+        tracker.count("cache_hit")
+        tracker.count("cache_hit_partial", delta=2)
+        tracker.count("secret_counter", delta=17)
+
+        observation = tracker.observation()
+
+        assert observation["counters"] == {"cache_hit": 1, "cache_hit_partial": 2}
+
     def test_track_same_stage_multiple_times(self):
         """Same stage can be tracked multiple times; durations accumulate."""
         tracker = PerfTracker(task_id="test-004")

@@ -29,7 +29,7 @@ uv sync --extra dev
 make test
 
 # 卡片验证范围
-uv run --extra dev pytest tests/unit tests/integration
+uv run --frozen --extra dev pytest tests/unit tests/integration
 
 # GitHub Required Gate v2 的 legacy quality 入口：uv sync --frozen 后执行全套 pytest
 uv sync --frozen
