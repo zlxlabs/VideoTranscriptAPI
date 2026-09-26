@@ -86,7 +86,7 @@ skill 在调用时从环境读取，**不要**在对话里要求用户粘贴 tok
 
 | 变量 | 必填 | 用途 | 示例 |
 |------|-----|------|------|
-| `VIDEO_TRANSCRIPT_API_BASE_URL` | ✅ | 脚本发 API 请求用的地址 | `http://localhost:8000` / `http://100.68.21.80:8200`（tailnet）|
+| `VIDEO_TRANSCRIPT_API_BASE_URL` | ✅ | 脚本发 API 请求用的地址 | `http://localhost:8000` / `http://<deploy-host>:8200`（tailnet）|
 | `VIDEO_TRANSCRIPT_API_TOKEN` | ✅ | Bearer token | `config.jsonc` 里 `api.auth_token` 或 `users.json` 的某个 key |
 | `VIDEO_TRANSCRIPT_API_PUBLIC_URL` | —  | 给用户点的**公网**地址，不设时用 BASE_URL | `https://vt.example.com` |
 | `VIDEO_TRANSCRIPT_API_WECHAT_WEBHOOK` | —  | 企业微信 webhook 默认值，`--webhook` 传参时覆盖 | `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx` |

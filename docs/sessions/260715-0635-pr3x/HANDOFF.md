@@ -1,7 +1,7 @@
 # PR3 遗留问题实施交接
 
 > 创建时间：2026-07-15 06:35 EDT  
-> 来源仓库：`/home/zlx/projects/personal/VideoTranscriptAPI`  
+> 来源仓库：`~/projects/personal/VideoTranscriptAPI`  
 > 来源分支/提交：`main@39b55701e8f910853e2870712cd199d401a50f83`  
 > 状态：Eng Review 已通过，等待在独立 worktree 中实施
 
@@ -15,7 +15,7 @@
 【硬性要求：所有实现必须在新 worktree 中进行】
 
 当前主工作区：
-/home/zlx/projects/personal/VideoTranscriptAPI
+~/projects/personal/VideoTranscriptAPI
 
 当前主工作区包含尚未提交的 review 计划和 session 交接文档。它们属于用户已有工作，禁止丢弃、覆盖、stash、reset、checkout 或清理。主工作区只能读取，不能用于任何代码、测试、配置或实施文档修改。
 
@@ -24,9 +24,9 @@
 1. 在主工作区只读检查 `git status --short`、`git worktree list` 和目标分支是否存在。
 2. 从提交 `39b55701e8f910853e2870712cd199d401a50f83` 创建全新的工作分支和 sibling worktree。建议：
    - branch: `feat/pr3-review-hardening`
-   - worktree: `/home/zlx/projects/personal/VideoTranscriptAPI-worktrees/pr3-review-hardening`
+   - worktree: `~/projects/personal/VideoTranscriptAPI-worktrees/pr3-review-hardening`
 3. 推荐命令：
-   `git -C /home/zlx/projects/personal/VideoTranscriptAPI worktree add -b feat/pr3-review-hardening /home/zlx/projects/personal/VideoTranscriptAPI-worktrees/pr3-review-hardening 39b55701e8f910853e2870712cd199d401a50f83`
+   `git -C ~/projects/personal/VideoTranscriptAPI worktree add -b feat/pr3-review-hardening ~/projects/personal/VideoTranscriptAPI-worktrees/pr3-review-hardening 39b55701e8f910853e2870712cd199d401a50f83`
 4. 如果分支名或目录已存在，不要删除、覆盖或复用未知 worktree；改用带时间后缀的新分支和新目录。
 5. 创建后立即 `cd` 到新 worktree，验证 `pwd`、`git status --short`、`git rev-parse --show-toplevel` 和 `git branch --show-current`。
 6. 从此以后，所有代码编辑、测试产生的文件、迁移、配置示例、实施文档和本地提交都必须发生在新 worktree。每次编辑或测试前先确认当前 cwd 位于新 worktree，禁止回到主工作区改文件。
@@ -36,7 +36,7 @@
 【权威输入】
 
 主计划文件（当前位于原工作区，作为只读权威来源）：
-/home/zlx/projects/personal/VideoTranscriptAPI/docs/plans/2026-07-15-pr3-review-retrospective.md
+~/projects/personal/VideoTranscriptAPI/docs/plans/2026-07-15-pr3-review-retrospective.md
 
 重点阅读该文件的：
 - “四、CEO Review + Eng Review 后的执行结论”
@@ -48,10 +48,10 @@
 - “GSTACK REVIEW REPORT”
 
 完整测试矩阵：
-/home/zlx/.gstack/projects/zj1123581321-VideoTranscriptAPI/zlx-main-eng-review-test-plan-20260715-061341.md
+~/.gstack/projects/zj1123581321-VideoTranscriptAPI/zlx-main-eng-review-test-plan-20260715-061341.md
 
 机器可读实现任务：
-/home/zlx/.gstack/projects/zj1123581321-VideoTranscriptAPI/tasks-eng-review-20260715-062806.jsonl
+~/.gstack/projects/zj1123581321-VideoTranscriptAPI/tasks-eng-review-20260715-062806.jsonl
 
 Eng Review 状态：CLEAR，48 个问题或测试缺口已折入计划，0 critical gap，0 unresolved decision。相关测试基线为 226 passed。
 

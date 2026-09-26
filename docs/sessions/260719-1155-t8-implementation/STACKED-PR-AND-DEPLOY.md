@@ -59,8 +59,8 @@ floating-toc.js 是旧版，强刷+无痕均无效。根因：用户经 **Cloudf
 - 静态文件内容哈希注入模板（`floating-toc.js?v=<sha256前8位>`），内容变 URL 必变
 - `/static/` 响应加 `Cache-Control: no-cache`（回源验证 + ETag 304）
 
-**访问方式备忘**：生产服务在 n305（Tailscale `100.68.21.80:8200`，容器 8200→8000），
-用户日常经 Cloudflare Tunnel 公网域名访问；旧入口 `100.87.124.57:8010` 已废弃（无监听）。
+**访问方式备忘**：生产服务在 n305（Tailscale `<deploy-host>:8200`，容器 8200→8000），
+用户日常经 Cloudflare Tunnel 公网域名访问；旧入口 `<media-host>:8010` 已废弃（无监听）。
 
 ## 六、遗留 backlog 索引
 

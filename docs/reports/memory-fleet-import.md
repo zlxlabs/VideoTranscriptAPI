@@ -20,14 +20,14 @@
 
 ## 脱敏动作清单
 
-- `project_fleet_onboarding`：归档 DSN 原文为 `http://<key>@100.107.95.24:9000/29`。把 `<key>` 换成变量名占位 `<SENTRY_DSN_VIDEO_TRANSCRIPT_API>`，写成 `http://<SENTRY_DSN_VIDEO_TRANSCRIPT_API>@100.107.95.24:9000/29`。未写入真实 token。`sentry_dsn_secret=SENTRY_DSN_VIDEO_TRANSCRIPT_API` 与 `SENTRY_DSN` 本身是变量名，原样保留。
+- `project_fleet_onboarding`：归档 DSN 原文为 `http://<key>@<ops-host>:9000/29`。把 `<key>` 换成变量名占位 `<SENTRY_DSN_VIDEO_TRANSCRIPT_API>`，写成 `http://<SENTRY_DSN_VIDEO_TRANSCRIPT_API>@<ops-host>:9000/29`。未写入真实 token。`sentry_dsn_secret=SENTRY_DSN_VIDEO_TRANSCRIPT_API` 与 `SENTRY_DSN` 本身是变量名，原样保留。
 - `project_speaker_attribution`：无。
 - `reference_n305_docker_deploy`：无。正文只写 PAT 权限范围（`write:packages` / `read:packages`）和存储位置 `~/.docker/config.json`，没有 token 值。
 
 ## 对「这条以后还有用吗」的异议（只报不删）
 
 - `project_fleet_onboarding`：「两仓 commit 仍在本地 main 未 push」是 2026-07-03 快照，现在多半过期；D5 不接 D3、端口 8200、`/livez` 与 `/health` 分工这些拍板仍有用。
-- `reference_n305_docker_deploy`：开源仓写入内网 IP（`192.168.31.219`）和外部入口域名。去向已锁定，本卡不改落点；若日后按 DECISIONS ② 开源仓内网标识收进私有 memory，由主脑另裁。
+- `reference_n305_docker_deploy`：开源仓写入内网 IP（`192.0.2.13`）和外部入口域名。去向已锁定，本卡不改落点；若日后按 DECISIONS ② 开源仓内网标识收进私有 memory，由主脑另裁。
 - `project_speaker_attribution`：无异议。funasr 1.2.7 句级归属机制与 `dlg-{index}` 锚点仍是本仓工作约束。
 
 ## 假设调整（相对任务卡默认）

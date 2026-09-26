@@ -36,7 +36,7 @@ class TestErrorClassification:
 
     def test_classify_read_timeout(self):
         error = Exception(
-            "HTTPConnectionPool(host='100.107.95.24', port=3001): "
+            "HTTPConnectionPool(host='<ops-host>', port=3001): "
             "Read timed out. (read timeout=900)"
         )
         assert classify_error(error) == LLMTimeoutError

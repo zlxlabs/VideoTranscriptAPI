@@ -8,7 +8,8 @@ export const meta = {
 let a = args
 if (typeof a === 'string') { try { a = JSON.parse(a) } catch (e) { a = {} } }
 if (!a || typeof a !== 'object') a = {}
-const BASE = a.baseDir || '/home/zlx/projects/personal/VideoTranscriptAPI/data/output/xiaoyuzhou'
+const HOME = (typeof process !== 'undefined' && process.env && process.env.HOME) || ''
+const BASE = a.baseDir || HOME + '/projects/personal/VideoTranscriptAPI/data/output/xiaoyuzhou'
 const TRANS = BASE + '/transcripts'
 const OUT = BASE + '/extracted'
 const vols = Array.isArray(a.vols) && a.vols.length ? a.vols

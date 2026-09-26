@@ -56,10 +56,10 @@
 【硬性要求：所有代码改动必须在新 worktree 中进行】
 ═════════════════════════════════════════════════════════
 
-禁止在主工作区 /home/zlx/projects/personal/VideoTranscriptAPI（main）上直接改业务代码。开工后第一步必须新建独立 worktree + 分支：
+禁止在主工作区 ~/projects/personal/VideoTranscriptAPI（main）上直接改业务代码。开工后第一步必须新建独立 worktree + 分支：
 
-    BASE=/home/zlx/projects/personal/VideoTranscriptAPI
-    WT=/home/zlx/projects/personal/VideoTranscriptAPI-worktrees/cachemanager-decompose
+    BASE=~/projects/personal/VideoTranscriptAPI
+    WT=~/projects/personal/VideoTranscriptAPI-worktrees/cachemanager-decompose
     git -C "$BASE" fetch origin
     git -C "$BASE" worktree add -b refactor/cachemanager-decompose-stage1 "$WT" main
     cd "$WT"
@@ -170,7 +170,7 @@ T6. Codex gate：codex exec ... -s read-only（详见 CLAUDE.md），连续 2 �
 
 | 项 | 值 |
 |----|-----|
-| 主仓 | `/home/zlx/projects/personal/VideoTranscriptAPI` |
+| 主仓 | `~/projects/personal/VideoTranscriptAPI` |
 | 基线分支 | `main` |
 | **本 session 工作 worktree（须新建）** | `.../worktrees/cachemanager-decompose` + 分支 `refactor/cachemanager-decompose-stage1` |
 | 目标文件 | `src/video_transcript_api/cache/cache_manager.py`（3420 行） |

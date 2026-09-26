@@ -13,7 +13,7 @@
 1. 在 `b2d67c3` 上起真实 `ThreadingHTTPServer`（`127.0.0.1` 高端口），同时扮演 resolver（`GET /api/stream/wechat_channels/{sph}/direct`）与 CDN（Range / 302 / TCP 掐断）。**未使用 `unittest.mock`**。
 2. 仅把 `VTAPI_CONFIG` 里的 `media_resolver.base_url` 指向 stub、`api_key` 设为测试钥；CDN 要走真实 `validate_url_safe`，故把 `127.0.0.1` 写入 `security.download_url_allowlist`（生产已有的白名单机制，不是 mock）。`169.254.169.254` **不在**白名单。
 3. 用真实 `MediaResolverDownloader().download_file(stream_url, filename)` 跑 6 个对抗场景；stub 侧记录每个请求的 path / headers / 状态；loguru sink 捕获真实日志。
-4. 跨文档：`docs/guides/media_resolver.md`（本 diff）对照上游 `/home/zlx/projects/work/MediaResolverAPI/README.md` 的 `/direct` 与「客户端拼接协议」节。
+4. 跨文档：`docs/guides/media_resolver.md`（本 diff）对照上游 `~/projects/work/MediaResolverAPI/README.md` 的 `/direct` 与「客户端拼接协议」节。
 5. 本轮未重跑 OCR：同一份 H0 diff 已在 R1 `ocr-review` 得到 `status=reviewed`；对同一 diff 再扫不算新证据。
 
 Harness 与原始结果在 `/tmp/pr68-r2-run/`（不入库）：`results.json`、`scenario1_fixed.json`、`routing.json`。
@@ -203,7 +203,7 @@ INFO/异常层通过。DEBUG 层记 P3（见 Findings），不阻塞。不把存
 对照对象：
 
 - 本 diff：`docs/guides/media_resolver.md`（相对 `4e0a5ab` 的 12 行改动）
-- 上游：`/home/zlx/projects/work/MediaResolverAPI/README.md`「GET /api/stream/wechat_channels/{sph_code}/direct」与「客户端拼接协议」
+- 上游：`~/projects/work/MediaResolverAPI/README.md`「GET /api/stream/wechat_channels/{sph_code}/direct」与「客户端拼接协议」
 
 | 上游条款 | 下游文档 | 实现（本轮或 R1） | 出入 |
 |----------|----------|-------------------|------|

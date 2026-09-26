@@ -2,7 +2,7 @@
 
 ## 当前现场
 
-- 仓库：`/home/zlx/projects/personal/VideoTranscriptAPI`
+- 仓库：`~/projects/personal/VideoTranscriptAPI`
 - main HEAD：`6e2bac9583d68516d1723d7606e0581e2f01a32f`，与 `origin/main` 同步。
 - PR #37（PWA）已经合并，旧分支和旧 worktree 已清理。
 - 主工作区有用户改动，必须原样保留：`M TODOS.md`、未跟踪的 `docs/sessions/260715-0635-pr3x-gate/HANDOFF.md`、`docs/sessions/260729-1150-pwa-handoff/README.md`。
@@ -14,17 +14,17 @@
 ## 可复制执行 Prompt
 
 ```text
-你正在 `/home/zlx/projects/personal/VideoTranscriptAPI` 实现“统一三页面浏览器 Bearer 鉴权”增量。请先读仓库根目录 AGENTS.md（中文沟通，console 优先英文），并严格遵守其中的委派、TDD、worktree、评审和提交约定。
+你正在 `~/projects/personal/VideoTranscriptAPI` 实现“统一三页面浏览器 Bearer 鉴权”增量。请先读仓库根目录 AGENTS.md（中文沟通，console 优先英文），并严格遵守其中的委派、TDD、worktree、评审和提交约定。
 
 【第一优先级：隔离工作区】
 在任何应用代码、测试、依赖、配置或生成文件写入前，从最新 `origin/main` 创建同文件系统的新 worktree：
 
-  repo=/home/zlx/projects/personal/VideoTranscriptAPI
-  wt=/home/zlx/projects/personal/VideoTranscriptAPI-auth-refactor
+  repo=~/projects/personal/VideoTranscriptAPI
+  wt=~/projects/personal/VideoTranscriptAPI-auth-refactor
   git -C "$repo" fetch origin main
   git -C "$repo" worktree add -b feat/unified-browser-auth "$wt" origin/main
 
-建议路径和分支分别是 `/home/zlx/projects/personal/VideoTranscriptAPI-auth-refactor` 与 `feat/unified-browser-auth`。如果路径或分支已存在，只做只读核查，禁止删除、覆盖、强制 reset 或 checkout 覆盖；有冲突就停下并报告。所有代码/测试/依赖/提交/push/PR 只在该 worktree 完成。原主工作区只读，绝不复制、提交或清理其中的脏文件（特别是 `TODOS.md` 和已有 `docs/sessions`）。所有实质写入必须显式委派给 `implementer`；仓库级或批量只读探索委派给 `explorer`，主代理只负责规划、审查和验收。
+建议路径和分支分别是 `~/projects/personal/VideoTranscriptAPI-auth-refactor` 与 `feat/unified-browser-auth`。如果路径或分支已存在，只做只读核查，禁止删除、覆盖、强制 reset 或 checkout 覆盖；有冲突就停下并报告。所有代码/测试/依赖/提交/push/PR 只在该 worktree 完成。原主工作区只读，绝不复制、提交或清理其中的脏文件（特别是 `TODOS.md` 和已有 `docs/sessions`）。所有实质写入必须显式委派给 `implementer`；仓库级或批量只读探索委派给 `explorer`，主代理只负责规划、审查和验收。
 
 【目标与边界】
 统一三页面的浏览器 Bearer 鉴权，使缓存命中不再弹 API Key。后端 `verify_token`、权限/所有权检查、公有 `view_token` 阅读语义保持不变；这是 3–5 人的 internal 服务，不引入 cookie 或 OIDC。
@@ -59,9 +59,9 @@
 实现完成后先跑 OCR 前置扫描（工具可用才跑；不可用须记录原因），再做只审本次 diff 的 internal review 循环；按 internal 规则连续 2 轮无新增 P1 才收敛。最后做 live browser/design QA。评审输入需附本 Prompt/规格与风险等级；P1 必修，P2/P3 可接受不修但要记录理由。不要部署。
 
 可参考的评审产物（只读，不要改写）：
-  /home/zlx/.gstack/projects/zj1123581321-VideoTranscriptAPI/zlx-main-eng-review-test-plan-20260729-161411.md
-  /home/zlx/.gstack/projects/zj1123581321-VideoTranscriptAPI/tasks-ceo-review-20260729-154836.jsonl
-  /home/zlx/.gstack/projects/zj1123581321-VideoTranscriptAPI/tasks-eng-review-20260729-161507.jsonl
+  ~/.gstack/projects/zj1123581321-VideoTranscriptAPI/zlx-main-eng-review-test-plan-20260729-161411.md
+  ~/.gstack/projects/zj1123581321-VideoTranscriptAPI/tasks-ceo-review-20260729-154836.jsonl
+  ~/.gstack/projects/zj1123581321-VideoTranscriptAPI/tasks-eng-review-20260729-161507.jsonl
 
 【交付纪律】
 - 仅在新 worktree 提交、push 和开/更新 draft PR；每个增量报告 commit、测试、review 和剩余风险。
@@ -74,8 +74,8 @@
 先在原主工作区只读执行以下命令；任何一项不符合预期都停止，不要删除或覆盖：
 
 ```bash
-repo=/home/zlx/projects/personal/VideoTranscriptAPI
-wt=/home/zlx/projects/personal/VideoTranscriptAPI-auth-refactor
+repo=~/projects/personal/VideoTranscriptAPI
+wt=~/projects/personal/VideoTranscriptAPI-auth-refactor
 git -C "$repo" status --short
 git -C "$repo" fetch origin main
 git -C "$repo" rev-parse origin/main
