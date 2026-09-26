@@ -21,14 +21,14 @@
 
 ## 关键不变式
 
-1. [实测] task_status 的终态快照仍由 `CacheManager.update_task_status` 的 CAS/write-once 路径写入；笔记状态表示本轮产物完整性，仅在笔记文件和媒体状态都写入后记为 generated，随后终态写失败不会覆盖它；生成/保存阶段失败仍写 failed。代码：`llm_ops._handle_notes_generation`、`_handle_llm_task`；测试：`test_notes_terminal_write_failure_keeps_generated_artifact_and_snapshot`、`test_notes_error_after_success_cas_preserves_success_snapshot`、现有 producer success/failure 测试及 `tests/integration/test_immutable_task_snapshot.py`。
+1. [实测] task_status 的终态快照仍由 `CacheManager.update_task_status` 的 CAS/write-once 路径写入；笔记状态表示本轮产物完整性，仅在笔记文件和媒体状态都写入后记为 generated，随后终态写失败不会覆盖它；生成/保存阶段失败仍写 failed。代码：`llm_ops._handle_notes_generation`、`_handle_llm_task`；测试：`test_notes_terminal_exception_preserves_generated_artifact_and_snapshot`（CAS 前/后异常参数化）、`test_notes_worker_snapshot_survives_cache_cleanup_and_cli_reports_real_failure`、`tests/integration/test_immutable_task_snapshot.py`。
 2. [实测] audit 只持久化任务创建/完成时间和白名单观测 JSON，不复制 terminal_snapshot、URL 或错误正文；旧 audit 记录新增列为 NULL，不回填当前媒体缓存状态。代码：`audit_logger.py::_migrate_v6`、`_write_task_snapshot`；测试：`tests/unit/test_audit_snapshots.py` 与 `tests/integration/test_task_observability.py`。
 3. [实测] CLI 以 audit 快照为主、按 task_id 合并 cache 补充，状态统计每个任务最多计一次；created_at 缺失的历史行仅计入窗口外 `unassigned_created_at_tasks`，不能归属任一窗口。只读 CLI 接受 audit schema v5/v6，明确拒绝 v4，不迁移数据库。代码：`scripts/task_observability_report.py`；测试：`tests/unit/test_task_observability_report.py` 覆盖去重、v4 拒绝、旧 schema、跨窗口未归属行、空窗口、坏库及不创建路径。
 4. [实测] UTC 输入必须带时区，窗口左闭右开；end-to-end 使用 created_at 到 completed_at，阶段分布使用已完成 tracker 区间，LLM duration_sum 使用 llm_usage 调用耗时并与墙钟分列。代码：`scripts/task_observability_report.py`、`PerfTracker.observation`；测试：`tests/unit/test_task_observability_report.py` 与 `tests/integration/test_task_observability.py`。
 5. [实测] SQL 值全部绑定；输出只有白名单聚合，失败的 SQLite/schema/权限操作非零退出。代码：`scripts/task_observability_report.py`；测试：`tests/unit/test_task_observability_report.py` 的注入字符串阴性样例、权限/坏库用例及 CLI stdout 检查。
 6. [实测] 正常终态和启动归档修复都调用同一 audit snapshot writer；cache 清理后报告仍由 audit 记录提供。代码：`CacheManager.update_task_status`、`AuditLogger.repair_task_snapshots`、`_write_task_snapshot`；测试：`tests/integration/test_task_observability.py`。
 7. [实测] PerfTracker 只将 `cache_hit`、`cache_hit_partial` 两个非负计数器纳入观测与审计白名单；报表按任务统计正命中数，未记录计数器的任务归 unknown，不推断为缓存未命中。full hit 在终态快照前计数。代码：`PerfTracker.observation`、`AuditLogger._write_task_snapshot`、`scripts/task_observability_report.py`、`transcription.process_transcription`；测试：`test_observation_allowlists_cache_hit_counters`、`test_full_cache_hit_is_persisted_and_reported_by_cli`、CLI 缓存计数 stdout 断言。
-8. [实测] metadata 只有实际发起探测时才进入 tracker；普通探测异常在区间退出后按既有兜底继续，失败阶段仍保留。转录缓存保存失败先离开 track，再调用原有终态失败收口。代码：`transcription.process_transcription`；测试：`test_metadata_failure_is_tracked_while_transcription_continues`、`test_transcription_cache_save_failure_is_tracked_before_terminal_write`（覆盖 CapsWriter/FunASR）。
+8. [实测] metadata 只有实际发起探测时才进入 tracker；普通探测异常在区间退出后按既有兜底继续，失败阶段仍保留。转录缓存保存失败先离开 track，再调用原有终态失败收口。代码：`transcription.process_transcription`；测试：`test_transcription_stage_outcomes_are_persisted`（metadata/no-probe/CapsWriter/FunASR 参数化）。
 
 ## 待验证前提
 
