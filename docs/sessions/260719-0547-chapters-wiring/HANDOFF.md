@@ -23,13 +23,13 @@
 【硬性要求：所有代码改动必须在新 worktree 中进行】
 ════════════════════════════════════════════════════════
 
-禁止在主工作区 `/home/zlx/projects/personal/VideoTranscriptAPI`（main）上直接改业务代码。
-禁止在既有安全批 worktree `/home/zlx/projects/personal/VideoTranscriptAPI-worktrees/chapters-foundation` 上直接堆接线改动（那是 foundation 基线参考，可只读对照）。
+禁止在主工作区 `~/projects/personal/VideoTranscriptAPI`（main）上直接改业务代码。
+禁止在既有安全批 worktree `~/projects/personal/VideoTranscriptAPI-worktrees/chapters-foundation` 上直接堆接线改动（那是 foundation 基线参考，可只读对照）。
 
 开工后**第一步**必须新建独立 worktree + 分支，例如（在 shell 中执行）：
 
-    BASE=/home/zlx/projects/personal/VideoTranscriptAPI
-    WT=/home/zlx/projects/personal/VideoTranscriptAPI-worktrees/chapters-wiring
+    BASE=~/projects/personal/VideoTranscriptAPI
+    WT=~/projects/personal/VideoTranscriptAPI-worktrees/chapters-wiring
     git -C "$BASE" fetch origin
     # 基线：已 rebase 的 feat/chapters-foundation（不要从旧 main 开）
     git -C "$BASE" worktree add -b feat/chapters-wiring "$WT" feat/chapters-foundation
@@ -136,7 +136,7 @@ T1 → T6 →（T7 ∥ T8）→ T9 / T10
 
 | 项 | 值 |
 |----|-----|
-| 主仓 | `/home/zlx/projects/personal/VideoTranscriptAPI` |
+| 主仓 | `~/projects/personal/VideoTranscriptAPI` |
 | 基线分支 | `feat/chapters-foundation` @ `b578608`（+70 commits vs origin/main，未 push） |
 | **本 session 工作 worktree（须新建）** | 建议：`.../worktrees/chapters-wiring` + 分支 `feat/chapters-wiring` |
 | 只读参考 worktree | `.../worktrees/chapters-foundation`（勿在其上堆接线 diff） |

@@ -52,7 +52,7 @@ def test_format_transcript_for_display():
 
 def test_with_real_file():
     """使用实际的转录文件进行测试"""
-    file_path = r"D:\MyFolders\Developments\0Python\250427_VideoTranscriptApi\data\cache\youtube\2025\202510\WBSl49dZMTw\transcript_capswriter.txt"
+    file_path = r"D:\prod\VideoTranscriptAPI\data\cache\youtube\2025\202510\WBSl49dZMTw\transcript_capswriter.txt"
 
     if not os.path.exists(file_path):
         print(f"Warning: Test file not found: {file_path}")

@@ -167,7 +167,7 @@ def test_calibrated_rendering(cache_dir: str):
 def main():
     """主测试函数"""
     # 测试缓存目录
-    cache_dir = r"D:\MyFolders\Developments\0Python\250427_VideoTranscriptApi\data\cache\bilibili\2025\202511\BV1T21KBLEpo"
+    cache_dir = r"D:\prod\VideoTranscriptAPI\data\cache\bilibili\2025\202511\BV1T21KBLEpo"
 
     print("\n" + "="*80)
     print("CapsWriter 转录渲染逻辑测试")

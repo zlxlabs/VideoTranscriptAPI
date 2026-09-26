@@ -130,7 +130,7 @@ def get_subtitle(self, url):
 {
   "youtube_api_server": {
     "enabled": true,
-    "base_url": "http://192.168.31.218:8300",
+    "base_url": "http://192.0.2.12:8300",
     "api_key": "...",
 
     // 🆕 回退策略配置

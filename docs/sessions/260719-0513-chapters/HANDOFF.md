@@ -2,7 +2,7 @@
 
 > 创建时间：2026-07-19 05:13 EDT  
 > 更新：2026-07-19 — 计划升 v2.1.1、任务卡落地；pr3 已合入 origin/main  
-> 来源仓库：`/home/zlx/projects/personal/VideoTranscriptAPI`  
+> 来源仓库：`~/projects/personal/VideoTranscriptAPI`  
 > 安全批分支：`feat/chapters-foundation`  
 > 状态：安全批（T2/T3/T4/T5）完成并通过 30 轮 Codex gate；**接线规格 v2.1.1**；**已 rebase origin/main（无冲突，2292 unit+llm 绿）**；接线批（T1/T6–T10）可开工
 
@@ -73,8 +73,8 @@ TDD；小步 commit；完成实现后 Codex gate 连续 2 轮干净。
 
 | 项目 | 值 |
 |---|---|
-| 主仓库 | `/home/zlx/projects/personal/VideoTranscriptAPI` |
-| 安全批 worktree | `/home/zlx/projects/personal/VideoTranscriptAPI-worktrees/chapters-foundation` |
+| 主仓库 | `~/projects/personal/VideoTranscriptAPI` |
+| 安全批 worktree | `~/projects/personal/VideoTranscriptAPI-worktrees/chapters-foundation` |
 | 安全批分支 | `feat/chapters-foundation` |
 | 计划 | v2.1.1（§5.7 接线修订） |
 | pr3 | 已合 origin/main（#12/#13/#14） |

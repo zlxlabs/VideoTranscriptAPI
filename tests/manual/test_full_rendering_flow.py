@@ -14,7 +14,7 @@ def test_real_cache_rendering():
     print("=== 测试真实缓存目录的渲染流程 ===\n")
 
     # 使用真实的缓存目录
-    cache_dir = r"D:\MyFolders\Developments\0Python\250427_VideoTranscriptApi\data\cache\bilibili\2025\202509\BV14AnVznEMp"
+    cache_dir = r"D:\prod\VideoTranscriptAPI\data\cache\bilibili\2025\202509\BV14AnVznEMp"
 
     if not os.path.exists(cache_dir):
         print(f"❌ 缓存目录不存在: {cache_dir}")
@@ -135,7 +135,7 @@ def test_dialog_renderer_directly():
     print("\n" + "="*50)
     print("直接测试DialogRenderer")
 
-    cache_dir = r"D:\MyFolders\Developments\0Python\250427_VideoTranscriptApi\data\cache\bilibili\2025\202509\BV14AnVznEMp"
+    cache_dir = r"D:\prod\VideoTranscriptAPI\data\cache\bilibili\2025\202509\BV14AnVznEMp"
     calibrated_file = os.path.join(cache_dir, 'llm_calibrated.txt')
 
     if not os.path.exists(calibrated_file):

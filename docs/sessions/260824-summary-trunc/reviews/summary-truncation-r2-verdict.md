@@ -122,7 +122,7 @@ P1 两问总判定：本轮新证据没有找出「本轮截断/FAILED 响应被
 ## 全量测试
 
 ```
-cd /home/zlx/projects/personal/VideoTranscriptAPI-worktrees/summary-trunc-r2
+cd ~/projects/personal/VideoTranscriptAPI-worktrees/summary-trunc-r2
 uv run python -m pytest tests/llm tests/unit -q
 ```
 

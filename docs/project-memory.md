@@ -23,7 +23,7 @@
 - 时区: `TZ=Asia/Shanghai`
 - **宿主端口: `8200:8000`**（**不是** repo 默认的 `8000:8000`！portainer 在 6 天前占了 8000，
   user 手工把 VTA 改到 8200。imflow 的 `/opt/tools/imflow/config.yaml` 写死了
-  `http://192.168.31.219:8200`，可作交叉验证。）
+  `http://192.0.2.13:8200`，可作交叉验证。）
 - 外部入口: `https://sum.lexgogo.site`（Cloudflare Tunnel → n305:8200）
 - 数据卷: `config/` 和 `data/` 挂载到容器
 - 健康端点: `curl http://localhost:8200/health` 返回 `{"status":"healthy",...}`
@@ -73,7 +73,7 @@
 - Dockerfile `ARG/ENV GIT_SHA` + push_to_ghcr.sh 传 `--build-arg GIT_SHA`
 - ops-dispatcher `fleet/registry.yaml` 加条目 id=video-transcript-api,port 8200,glitchtip_project=video-transcript-api,sentry_dsn_secret=SENTRY_DSN_VIDEO_TRANSCRIPT_API,非D3已注释标注
 
-**已上线 2026-07-03:** GlitchTip project=video-transcript-api(id=29,DSN `http://<SENTRY_DSN_VIDEO_TRANSCRIPT_API>@100.107.95.24:9000/29`)、Kuma monitor `fleet-video-transcript-api` 探 `http://100.68.21.80:8200/livez` 均由用户建好。n305 部署目录 `/opt/media/VideoTranscriptAPI` **不是 git 仓**(只有 compose+pull_and_deploy.sh,代码在镜像里),故 compose 用外科手术插入 env_file(非 git pull),已 `.bak-obs` 备份;`docker/ops.env`(600 权限,含 SENTRY_DSN)已落。镜像 `push_to_ghcr.sh` 本地构建推 GHCR(tag latest + b48fa13)→ `pull_and_deploy.sh` 部署。验证全绿:/livez=200、GIT_SHA=b48fa1309b0e、SENTRY_DSN 注入、SDK 日志「已接入」、GlitchTip 测试事件送达、Kuma 探针 TS IP 200。
+**已上线 2026-07-03:** GlitchTip project=video-transcript-api(id=29,DSN `http://<SENTRY_DSN_VIDEO_TRANSCRIPT_API>@<ops-host>:9000/29`)、Kuma monitor `fleet-video-transcript-api` 探 `http://<deploy-host>:8200/livez` 均由用户建好。n305 部署目录 `/opt/media/VideoTranscriptAPI` **不是 git 仓**(只有 compose+pull_and_deploy.sh,代码在镜像里),故 compose 用外科手术插入 env_file(非 git pull),已 `.bak-obs` 备份;`docker/ops.env`(600 权限,含 SENTRY_DSN)已落。镜像 `push_to_ghcr.sh` 本地构建推 GHCR(tag latest + b48fa13)→ `pull_and_deploy.sh` 部署。验证全绿:/livez=200、GIT_SHA=b48fa1309b0e、SENTRY_DSN 注入、SDK 日志「已接入」、GlitchTip 测试事件送达、Kuma 探针 TS IP 200。
 
 **注意:** VTA/ops-dispatcher 两仓 commit(b48fa13 / fd152e0)仍在本地 main **未 push**(镜像从工作树构建,部署不依赖 push)。dsn-output.txt 是手维护清单、provisioner 不写它。provision_glitchtip.py 不支持 --only。
 

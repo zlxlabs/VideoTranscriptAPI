@@ -85,7 +85,7 @@ OCR 前置扫描真实返回 `status=reviewed`、`profile=minimax`、`coverage=c
 
 ## 运行证据
 
-- `cd /home/zlx/projects/personal/VideoTranscriptAPI-worktrees/summary-trunc && uv run pytest tests/llm tests/unit -q`
+- `cd ~/projects/personal/VideoTranscriptAPI-worktrees/summary-trunc && uv run pytest tests/llm tests/unit -q`
   - exit code: `0`
   - 末行：`-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html`
   - 结果进度到 `[100%]`；仅有既存依赖弃用告警及少量测试函数返回非 `None` 告警。

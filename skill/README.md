@@ -30,7 +30,7 @@ skill/
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `VIDEO_TRANSCRIPT_API_BASE_URL` | ✅ | **API 请求地址**。内网/tailnet/局域网优先，延迟低。如 `http://localhost:8000` / `http://100.68.21.80:8200` |
+| `VIDEO_TRANSCRIPT_API_BASE_URL` | ✅ | **API 请求地址**。内网/tailnet/局域网优先，延迟低。如 `http://localhost:8000` / `http://<deploy-host>:8200` |
 | `VIDEO_TRANSCRIPT_API_TOKEN` | ✅ | Bearer token（`config.jsonc` 的 `api.auth_token` 或 `users.json` 里的 key）|
 | `VIDEO_TRANSCRIPT_API_PUBLIC_URL` | — | **给用户点的公网地址**（可选）。不设时用 BASE_URL。如 `https://vt.example.com` |
 | `VIDEO_TRANSCRIPT_API_WECHAT_WEBHOOK` | — | **企业微信 webhook 默认值**（可选）。设置后 submit 自动带上，`--webhook` 传参时覆盖。如 `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx` |

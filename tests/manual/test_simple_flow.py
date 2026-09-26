@@ -13,7 +13,7 @@ def main():
     print("=== 测试表格渲染问题 ===\n")
 
     # 使用真实的缓存目录
-    cache_dir = r"D:\MyFolders\Developments\0Python\250427_VideoTranscriptApi\data\cache\bilibili\2025\202509\BV14AnVznEMp"
+    cache_dir = r"D:\prod\VideoTranscriptAPI\data\cache\bilibili\2025\202509\BV14AnVznEMp"
 
     if not os.path.exists(cache_dir):
         print(f"缓存目录不存在: {cache_dir}")

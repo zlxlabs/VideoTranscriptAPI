@@ -2,7 +2,7 @@
 
 ## 基线
 
-- 工作树：`/home/zlx/projects/personal/VideoTranscriptAPI-worktrees/cachemanager-decompose`
+- 工作树：`~/projects/personal/VideoTranscriptAPI-worktrees/cachemanager-decompose`
 - 分支：`refactor/cachemanager-decompose-stage1`
 - 基线：`d23812b7e5ee68daccf7be33f59e8f5952c1547e`（`origin/main` PR 基线）。发布时发现本地 `main` 比 `origin/main` 领先两个无关提交，已将 7 个 Stage1 提交原样重放到 `origin/main`；没有设计或代码行为偏离。
 - 范围：T1-T5 已完成；仅外移职责 10/11，不涉及连接池、锁或 schema。

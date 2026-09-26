@@ -12,7 +12,7 @@ from video_transcript_api.utils.rendering import DialogRenderer
 def main():
     print("=== 直接测试修复的函数 ===\n")
 
-    cache_dir = r"D:\MyFolders\Developments\0Python\250427_VideoTranscriptApi\data\cache\bilibili\2025\202509\BV14AnVznEMp"
+    cache_dir = r"D:\prod\VideoTranscriptAPI\data\cache\bilibili\2025\202509\BV14AnVznEMp"
 
     if not os.path.exists(cache_dir):
         print(f"缓存目录不存在: {cache_dir}")

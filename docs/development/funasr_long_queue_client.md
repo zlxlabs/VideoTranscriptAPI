@@ -76,7 +76,7 @@ _poll(task_id, file_hash, first_delay, deadline):
 
 ```jsonc
 "funasr_spk_server": {
-  "server_url": "ws://192.168.31.222:8767",
+  "server_url": "ws://192.0.2.11:8767",
   "max_retries": 3,            // 仅用于 connect/transient
   "retry_delay": 5,            // queue_full 无 retry_after 时的兜底退避
   "connection_timeout": 30,

@@ -93,6 +93,6 @@ generated**（`source.kind=dialogs`，181 段落），查看页 181 锚点、
   服务器 :8000 运行中供查看**；关回即恢复暗启动默认）。
 - 备份：/tmp/t8-test-backup/（cache.db.bak、小宇宙缓存、各阶段 HTML 快照）。
 - 本地查看入口：
-  - Terence：http://100.87.124.57:8000/view/view_tgKLtQwW_Yyca9WoQEjM5YO2QL9QWeSfKtQ5XcHgkqY
-  - 巫师：http://100.87.124.57:8000/view/view_V1pKWEcCNMsW47TpltcoaGNzDXrZyreIuT_Gy6_-ssg
-  - 小宇宙：http://100.87.124.57:8000/view/view_TUVgkd46P7Q-UGVA9BvkR6RhyBNseK9XwfK-jre2TUI
+  - Terence：http://<media-host>:8000/view/view_tgKLtQwW_Yyca9WoQEjM5YO2QL9QWeSfKtQ5XcHgkqY
+  - 巫师：http://<media-host>:8000/view/view_V1pKWEcCNMsW47TpltcoaGNzDXrZyreIuT_Gy6_-ssg
+  - 小宇宙：http://<media-host>:8000/view/view_TUVgkd46P7Q-UGVA9BvkR6RhyBNseK9XwfK-jre2TUI

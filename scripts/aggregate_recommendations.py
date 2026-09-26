@@ -19,8 +19,8 @@ import re
 import sys
 import glob
 
-BASE = os.environ.get(
-    "BASE", "/home/zlx/projects/personal/VideoTranscriptAPI/data/output/xiaoyuzhou")
+BASE = os.path.expanduser(os.environ.get(
+    "BASE", "~/projects/personal/VideoTranscriptAPI/data/output/xiaoyuzhou"))
 EXTRACTED = os.path.join(BASE, "extracted")
 TRANS = os.path.join(BASE, "transcripts")
 TOTAL = int(os.environ.get("TOTAL", "234"))

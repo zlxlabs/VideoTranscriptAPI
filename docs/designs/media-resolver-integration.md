@@ -153,7 +153,7 @@ v1 全部实现任务已按 TDD 落地并通过单测（156 用例绿）。落�
 - **终态传播**：`_TERMINAL_RESOLVER_ERRORS`（Auth/InvalidURL/NonVideo/Resolve/Response）在三处 except 重抛，
   冒泡到外层 handler 以 `str(exc)` 反馈用户；可重试网络类（NetworkError/ResolverServerError）保持原 soft-fail。
 
-### T8 success=false 契约 — ✅ 已在线核对（2026-06-20，服务 `http://100.107.95.24:8206`）
+### T8 success=false 契约 — ✅ 已在线核对（2026-06-20，服务 `http://<ops-host>:8206`）
 经 OpenAPI + 实打核对，确认契约（与客户端实现一致）：
 - **鉴权头是 `X-API-Key`**（securitySchemes APIKeyHeader）；无/错 key → **HTTP 401**
   `{"detail":"Invalid or missing API key"}` → `ResolverAuthError` ✓（实打验证通过）。
