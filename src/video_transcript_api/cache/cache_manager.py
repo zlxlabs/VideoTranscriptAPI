@@ -1487,6 +1487,7 @@ class CacheManager:
         summary_status: Optional[str] = None,
         chapters_status: Optional[str] = None,
         notes_status: Optional[str] = None,
+        artifact_provenance: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """写入/合并 llm_status.json（"诚实状态模型"统一落盘文件）。
 
@@ -1506,6 +1507,8 @@ class CacheManager:
                 None 表示不更新（保留旧值，见上方合并语义说明）
             chapters_status: ChaptersStatus 取值（generated/skipped_short/
                 skipped_no_timeline/failed/pending/disabled），None 表示不更新
+            artifact_provenance: 校对/总结来源记录；None 表示不更新，空字典表示清除
+                整个可选记录，非空字典在同一次原子状态写入中替换旧记录
 
         Returns:
             dict: 锁内完成写入后的完整合并快照
@@ -1544,6 +1547,11 @@ class CacheManager:
                     existing['chapters_status'] = chapters_status
                 if notes_status is not None:
                     existing['notes_status'] = notes_status
+                if artifact_provenance is not None:
+                    if artifact_provenance:
+                        existing['artifact_provenance'] = artifact_provenance
+                    else:
+                        existing.pop('artifact_provenance', None)
                 existing['updated_at'] = datetime.datetime.now(datetime.timezone.utc).strftime(
                     '%Y-%m-%d %H:%M:%S'
                 )

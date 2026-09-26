@@ -9,10 +9,13 @@
   - 企微通知发送
 """
 
+import hashlib
 import json
+import os
 import queue
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 from ..context import (
@@ -1192,6 +1195,8 @@ def _build_result_dict(coordinator_result: dict) -> dict:
 
     if "structured_data" in coordinator_result:
         result_dict["structured_data"] = coordinator_result["structured_data"]
+    if "artifact_sources" in coordinator_result:
+        result_dict["artifact_sources"] = coordinator_result["artifact_sources"]
 
     return result_dict
 
@@ -1961,6 +1966,9 @@ def _save_llm_results(
     skip_summary = result_dict.get("skip_summary", False)
     stats = result_dict.get("stats", {})
     models_used = result_dict.get("models_used", {})
+    artifact_sources = result_dict.get("artifact_sources", {})
+    if not isinstance(artifact_sources, dict):
+        artifact_sources = {}
     calibrate_success = result_dict.get("calibrate_success", True)
     summary_success = result_dict.get("summary_success", True)
 
@@ -2164,6 +2172,16 @@ def _save_llm_results(
         if not isinstance(old_llm_status, dict):
             old_llm_status = {}
 
+        old_artifact_provenance = old_llm_status.get("artifact_provenance")
+        old_artifact_layers = (
+            old_artifact_provenance.get("layers", {})
+            if isinstance(old_artifact_provenance, dict)
+            and old_artifact_provenance.get("schema_version") == "artifact-provenance-v1"
+            and isinstance(old_artifact_provenance.get("layers"), dict)
+            else {}
+        )
+        final_artifact_layers = dict(old_artifact_layers)
+
         calibrated_saved = not suppress_calibration
         if calibrated_saved:
             if not cache_manager.save_llm_result(
@@ -2333,8 +2351,6 @@ def _save_llm_results(
                     f"chapters disabled for first time (no prior status): {task_id}"
                 )
         elif chapters_status == ChaptersStatus.GENERATED:
-            from datetime import datetime, timezone
-
             chapters_file_payload = {
                 "format_version": "v1",
                 "source": {
@@ -2401,15 +2417,84 @@ def _save_llm_results(
             if effective_chapters_status is not None
             else old_llm_status.get("chapters_status")
         )
-        cache_manager.save_llm_status(
-            platform=platform,
-            media_id=media_id,
-            use_speaker_recognition=use_speaker_recognition,
-            calibration_status=final_calibration_status,
-            calibration_stats=final_calibration_stats,
-            summary_status=final_summary_status,
-            chapters_status=final_chapters_status,
+
+        if calibrated_saved or summary_saved:
+            def record_saved_artifact(layer: str, filename: str) -> Optional[dict]:
+                source = artifact_sources.get(layer)
+                if not isinstance(source, dict):
+                    return None
+                fingerprint = source.get("source_fingerprint")
+                recipe_version = source.get("recipe_version")
+                if (
+                    not isinstance(fingerprint, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
+                    or not isinstance(recipe_version, str)
+                    or not recipe_version
+                ):
+                    return None
+
+                artifact_cache = cache_manager.get_cache(
+                    platform, media_id,
+                    use_speaker_recognition=use_speaker_recognition,
+                )
+                if not artifact_cache:
+                    raise FileNotFoundError(
+                        f"cache record not found while hashing artifacts for {platform}/{media_id}"
+                    )
+                artifact_dir = Path(artifact_cache["file_path"])
+                output_path = artifact_dir / filename
+                output_sha256 = hashlib.sha256(output_path.read_bytes()).hexdigest()
+                record = {
+                    "schema_version": "artifact-record-v1",
+                    "recipe_version": recipe_version,
+                    "source_fingerprint": fingerprint,
+                    "output_sha256": output_sha256,
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "producer_version": os.environ.get("GIT_SHA", "").strip() or "unknown",
+                    "generation_kind": source.get("generation_kind", "unknown"),
+                    "actual_model": "unknown",
+                    "prompt_version": "unknown",
+                }
+                requested_model = source.get("requested_model")
+                if isinstance(requested_model, str) and requested_model:
+                    record["requested_model"] = requested_model
+                return record
+
+            if calibrated_saved:
+                calibration_record = record_saved_artifact(
+                    "calibration", "llm_calibrated.txt"
+                )
+                if calibration_record is None:
+                    final_artifact_layers.pop("calibration", None)
+                else:
+                    final_artifact_layers["calibration"] = calibration_record
+            if summary_saved:
+                summary_record = record_saved_artifact("summary", "llm_summary.txt")
+                if summary_record is None:
+                    final_artifact_layers.pop("summary", None)
+                else:
+                    final_artifact_layers["summary"] = summary_record
+
+        final_artifact_provenance = (
+            {
+                "schema_version": "artifact-provenance-v1",
+                "layers": final_artifact_layers,
+            }
+            if final_artifact_layers
+            else {}
         )
+        status_updates = {
+            "platform": platform,
+            "media_id": media_id,
+            "use_speaker_recognition": use_speaker_recognition,
+            "calibration_status": final_calibration_status,
+            "calibration_stats": final_calibration_stats,
+            "summary_status": final_summary_status,
+            "chapters_status": final_chapters_status,
+        }
+        if final_artifact_provenance or old_artifact_provenance is not None:
+            status_updates["artifact_provenance"] = final_artifact_provenance
+        cache_manager.save_llm_status(**status_updates)
 
     # calibrated_saved 覆盖了"即便 calibrate_success=False（NONE 全降级）仍落盘
     # 兜底文本"的新语义（codex-review R4 #2）——不能再单纯用 calibrate_success
