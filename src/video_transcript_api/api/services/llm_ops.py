@@ -2419,16 +2419,6 @@ def _save_llm_results(
         )
 
         if calibrated_saved or summary_saved:
-            artifact_cache = cache_manager.get_cache(
-                platform, media_id,
-                use_speaker_recognition=use_speaker_recognition,
-            )
-            if not artifact_cache:
-                raise FileNotFoundError(
-                    f"cache record not found while hashing artifacts for {platform}/{media_id}"
-                )
-            artifact_dir = Path(artifact_cache["file_path"])
-
             def record_saved_artifact(layer: str, filename: str) -> Optional[dict]:
                 source = artifact_sources.get(layer)
                 if not isinstance(source, dict):
@@ -2443,6 +2433,15 @@ def _save_llm_results(
                 ):
                     return None
 
+                artifact_cache = cache_manager.get_cache(
+                    platform, media_id,
+                    use_speaker_recognition=use_speaker_recognition,
+                )
+                if not artifact_cache:
+                    raise FileNotFoundError(
+                        f"cache record not found while hashing artifacts for {platform}/{media_id}"
+                    )
+                artifact_dir = Path(artifact_cache["file_path"])
                 output_path = artifact_dir / filename
                 output_sha256 = hashlib.sha256(output_path.read_bytes()).hexdigest()
                 record = {

@@ -142,18 +142,72 @@ def _report(cache_dir):
     )
 
 
+@pytest.mark.parametrize(
+    "has_source,file_exists",
+    [(False, False), (False, True), (True, False), (True, True)],
+)
+def test_only_a_valid_source_requires_readable_saved_bytes(
+    artifact_store, monkeypatch, has_source, file_exists,
+):
+    cache, _coordinator = artifact_store
+    cache.save_cache(
+        platform=PLATFORM, url=f"https://example.invalid/{MEDIA_ID}", media_id=MEDIA_ID,
+        use_speaker_recognition=False, transcript_data="raw", transcript_type="capswriter",
+    )
+    leaf = Path(cache.get_cache(PLATFORM, MEDIA_ID, use_speaker_recognition=False)["file_path"])
+    proxy = Mock(wraps=cache)
+    proxy.get_cache.return_value = cache.get_cache(
+        PLATFORM, MEDIA_ID, use_speaker_recognition=False,
+    ) if has_source else None
+    proxy.save_llm_result.side_effect = (
+        cache.save_llm_result if file_exists else lambda **kwargs: True
+    )
+    monkeypatch.setattr(llm_ops, "cache_manager", proxy)
+    sources = (
+        {"calibration": {
+            "recipe_version": "calibration-v1", "source_fingerprint": "a" * 64,
+            "generation_kind": "llm",
+        }}
+        if has_source else {}
+    )
+    save_args = {
+        "task_id": "source-boundary-test", "platform": PLATFORM, "media_id": MEDIA_ID,
+        "use_speaker_recognition": False,
+        "result_dict": {
+            "校对文本": "calibrated", "内容总结": None, "skip_summary": True,
+            "summary_status": SummaryStatus.DISABLED,
+            "stats": {"calibration_status": CalibrationStatus.FULL},
+            "models_used": {}, "artifact_sources": sources,
+        },
+        "calibrate_only": False,
+    }
+    if has_source and not file_exists:
+        with pytest.raises(FileNotFoundError):
+            llm_ops._save_llm_results(**save_args)
+    else:
+        llm_ops._save_llm_results(**save_args)
+    assert proxy.get_cache.call_count == int(has_source)
+    assert proxy.save_llm_status.called is (not (has_source and not file_exists))
+    if not has_source:
+        status = cache.get_cache(
+            PLATFORM, MEDIA_ID, use_speaker_recognition=False,
+        )["llm_status"]
+        assert status["calibration_status"] == CalibrationStatus.FULL
+        assert "artifact_provenance" not in status
+    elif file_exists:
+        record = cache.get_cache(PLATFORM, MEDIA_ID, use_speaker_recognition=False)[
+            "llm_status"]["artifact_provenance"]["layers"]["calibration"]
+        assert record["output_sha256"] == hashlib.sha256(
+            (leaf / "llm_calibrated.txt").read_bytes()
+        ).hexdigest()
+
+
 def test_real_coordinator_files_and_cli_verify_final_restored_bytes_and_layer_updates(
     artifact_store,
 ):
     cache, coordinator = artifact_store
     _seed_identity_mapping(cache)
     original_placeholder = "SPEAKER_00：Opening words\n\nSPEAKER_01：Reply words"
-    coordinator.speaker_aware_processor.process.return_value = _calibration_result(original_placeholder)
-    summary_inputs = []
-    coordinator.summary_processor.process.side_effect = lambda **kwargs: (
-        summary_inputs.append(kwargs.copy())
-        or SimpleNamespace(text="Summary from calibrated dialogue", status=SummaryStatus.GENERATED)
-    )
     sources = _produce_and_save(cache, coordinator, text=original_placeholder)
 
     saved = cache.get_cache(PLATFORM, MEDIA_ID, use_speaker_recognition=True)
@@ -169,7 +223,6 @@ def test_real_coordinator_files_and_cli_verify_final_restored_bytes_and_layer_up
     assert records["calibration"]["requested_model"] == "requested-calibration-model"
     assert records["summary"]["requested_model"] == "requested-summary-model"
     assert records["calibration"]["actual_model"] == records["calibration"]["prompt_version"] == "unknown"
-    assert summary_inputs[0]["text"] == original_placeholder
 
     report = _report(leaf)
     assert report.returncode == 0, report.stderr

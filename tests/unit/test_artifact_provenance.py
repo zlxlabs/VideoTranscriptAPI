@@ -151,6 +151,7 @@ def test_dict_segments_fingerprint_matches_the_list_sent_to_processor(tmp_path):
 
     call = coordinator.speaker_aware_processor.process.call_args.kwargs
     assert call["dialogs"] == segments
+    assert result["artifact_sources"]["calibration"]["generation_kind"] == "disabled_local_format"
     expected_envelope = {
         "schema_version": "artifact-input-v1",
         "layer": "calibration",
