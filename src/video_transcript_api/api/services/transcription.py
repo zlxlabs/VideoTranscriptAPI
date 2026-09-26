@@ -589,6 +589,7 @@ def _handoff_to_llm_stage(
     calibrating_status_kwargs: dict,
     task_notifier,
     log_context: str,
+    observability: dict,
 ) -> Optional[dict]:
     """把已完成转录、待补 LLM 层的任务交给 LLM 阶段——转录到 LLM 的五处内部
     交接（process_transcription 的缓存复用分支、YouTube API Server 的两条快速路
@@ -657,6 +658,7 @@ def _handoff_to_llm_stage(
                 task_id,
                 TaskStatus.FAILED,
                 error_message=f"任务状态写入异常: {status_exc}",
+                terminal_snapshot={"observability": observability},
                 cache_manager=cache_manager,
                 notify_via=task_notifier,
             )
@@ -728,6 +730,7 @@ def _handoff_to_llm_stage(
                 TaskStatus.FAILED,
                 error_message=f"LLM任务加入队列失败: {exc}",
                 notify_error=f"【LLM任务加入队列失败】{exc}",
+                terminal_snapshot={"observability": observability},
                 cache_manager=cache_manager,
                 notify_via=task_notifier,
             )
@@ -912,6 +915,7 @@ def process_transcription(
                     url=display_url,
                     title=title,
                     author=author_name,
+                    terminal_snapshot={"observability": tracker.observation()},
                     cache_manager=cache_manager,
                     notify_via=task_notifier,
                 )
@@ -1371,6 +1375,7 @@ def process_transcription(
                 # 通知、再写 CAS 且忽略返回值——CAS 落败时用户已经收到了通知，
                 # 日志却从不提示矛盾。改为先写、检查结果，只有真正赢得
                 # 终态写入时才发送。
+                tracker.count("cache_hit")
                 status_written = finalize_terminal_status_and_notify(
                     task_id,
                     TaskStatus.SUCCESS,
@@ -1391,6 +1396,7 @@ def process_transcription(
                         "calibration_status": mirrored_calibration_status,
                         "summary_status": mirrored_summary_status,
                         "processing_options": processing_options,
+                        "observability": tracker.observation(),
                     },
                     cache_manager=cache_manager,
                     notify_via=task_notifier,
@@ -1433,8 +1439,7 @@ def process_transcription(
                             f"完成通知发送失败（任务已成功落库，不影响任务结果）: {task_id}"
                         )
 
-                # 缓存完全命中（含 LLM 结果），记录计数并输出性能摘要
-                tracker.count("cache_hit")
+                # 缓存完全命中（含 LLM 结果），输出性能摘要
                 tracker.log_summary()
 
                 return {
@@ -1606,6 +1611,7 @@ def process_transcription(
                 },
                 task_notifier=task_notifier,
                 log_context="缓存",
+                observability=tracker.observation(),
             )
             if handoff_failure is not None:
                 return handoff_failure
@@ -1649,14 +1655,14 @@ def process_transcription(
             from urllib.parse import urlparse
             url_scheme = urlparse(url).scheme.lower()
 
-            with tracker.track("metadata"):
-                if url_scheme not in ("http", "https"):
-                    logger.info(
-                        f"[元数据获取] URL scheme 非 http/https（{url_scheme or '空'}），"
-                        f"跳过元数据探测，直接使用 metadata_override 兜底: {parse_url}"
-                    )
-                else:
-                    try:
+            if url_scheme not in ("http", "https"):
+                logger.info(
+                    f"[元数据获取] URL scheme 非 http/https（{url_scheme or '空'}），"
+                    f"跳过元数据探测，直接使用 metadata_override 兜底: {parse_url}"
+                )
+            else:
+                try:
+                    with tracker.track("metadata"):
                         logger.info(f"[元数据获取] 创建下载器实例: {parse_url}")
                         metadata_downloader = create_downloader(parse_url)
                         logger.info(
@@ -1677,14 +1683,14 @@ def process_transcription(
                             f"video_id={metadata_obj.video_id}, "
                             f"title={metadata_obj.title[:50]}"
                         )
-                    except _TERMINAL_RESOLVER_ERRORS:
-                        # P0-1：解析终态异常直达用户，不走默认失败路径
-                        logger.error("[元数据获取] 解析终态异常，向用户透传")
-                        raise
-                    except Exception as e:
-                        logger.warning(f"[元数据获取] 失败: {e}")
-                        parsed_metadata = None
-                        metadata_obj = None
+                except _TERMINAL_RESOLVER_ERRORS:
+                    # P0-1：解析终态异常直达用户，不走默认失败路径
+                    logger.error("[元数据获取] 解析终态异常，向用户透传")
+                    raise
+                except Exception as e:
+                    logger.warning(f"[元数据获取] 失败: {e}")
+                    parsed_metadata = None
+                    metadata_obj = None
 
             # 合并元数据（metadata_override 作为补充或覆盖）
             if parsed_metadata:
@@ -1879,6 +1885,7 @@ def process_transcription(
                             },
                             task_notifier=task_notifier,
                             log_context="youtube-api",
+                            observability=tracker.observation(),
                         )
                         if handoff_failure is not None:
                             return handoff_failure
@@ -2019,6 +2026,7 @@ def process_transcription(
                             },
                             task_notifier=task_notifier,
                             log_context="youtube-api",
+                            observability=tracker.observation(),
                         )
                         if handoff_failure is not None:
                             return handoff_failure
@@ -2179,6 +2187,7 @@ def process_transcription(
                     },
                     task_notifier=task_notifier,
                     log_context="平台字幕",
+                    observability=tracker.observation(),
                 )
                 if handoff_failure is not None:
                     return handoff_failure
@@ -2292,91 +2301,89 @@ def process_transcription(
                     # platform 和 video_id 已在前面设置
 
                     # 根据是否需要说话人识别选择转录器（用 PerfTracker 记录转录阶段耗时）
-                    with tracker.track("transcription"):
-                        if use_speaker_recognition:
-                            # 使用 FunASR 说话人识别服务器
-                            logger.info("使用 FunASR 说话人识别服务器进行转录")
-                            funasr_client = FunASRSpeakerClient()
-                            funasr_result = funasr_client.transcribe_sync(local_file)
+                    cache_save_error = None
+                    try:
+                        with tracker.track("transcription"):
+                            if use_speaker_recognition:
+                                # 使用 FunASR 说话人识别服务器
+                                logger.info("使用 FunASR 说话人识别服务器进行转录")
+                                funasr_client = FunASRSpeakerClient()
+                                funasr_result = funasr_client.transcribe_sync(local_file)
 
-                            # 获取格式化的转录文本
-                            transcript = funasr_result["formatted_text"]
-                            transcription_data = funasr_result["transcription_result"]
+                                # 获取格式化的转录文本
+                                transcript = funasr_result["formatted_text"]
+                                transcription_data = funasr_result["transcription_result"]
 
-                            _finalize_presentation_fields()
-                            # 使用新缓存系统保存
-                            cache_result = cache_manager.save_cache(
-                                platform=platform,
-                                url=url,
-                                media_id=media_id,
-                                use_speaker_recognition=True,
-                                transcript_data=transcription_data,
-                                transcript_type="funasr",
-                                title=video_title,
-                                author=author,
-                                description=description,
-                            )
-
-                            if not cache_result:
-                                error_msg = "保存FunASR转录结果到缓存失败"
-                                logger.error(error_msg)
-                                # Y4 修复（PR3 review hardening 加固轮，同上游各
-                                # save_cache 站点的收口原则）：转录产物未真正落盘，
-                                # 任务却仍会报告成功，改走既有失败收口
-                                # _fail_task_and_notify；外层 with tracker.track(...)
-                                # / try 均以 finally: pass 收尾，这里 return 不会跳过
-                                # 任何清理逻辑（与本函数上方"下载文件失败"分支同款
-                                # 写法）。
-                                return _fail_task_and_notify(
-                                    error_msg, notify_status="转录结果保存失败",
-                                    title=video_title, author_name=author,
+                                _finalize_presentation_fields()
+                                # 使用新缓存系统保存
+                                cache_result = cache_manager.save_cache(
+                                    platform=platform,
+                                    url=url,
+                                    media_id=media_id,
+                                    use_speaker_recognition=True,
+                                    transcript_data=transcription_data,
+                                    transcript_type="funasr",
+                                    title=video_title,
+                                    author=author,
+                                    description=description,
                                 )
 
-                            # 构造与普通转录器兼容的结果
-                            transcription_result = {
-                                "transcript": transcript,
-                                "speaker_recognition": True,
-                                "transcription_data": transcription_data,
-                            }
-                        else:
-                            # 使用普通 CapsWriter 转录器
-                            transcriber = Transcriber()
-                            # 使用时间戳作为临时输出基础名
-                            temp_output_base = datetime.datetime.now().strftime(
-                                "%y%m%d-%H%M%S"
-                            )
-                            transcription_result = transcriber.transcribe(
-                                local_file, temp_output_base
-                            )
-                            transcript = transcription_result.get("transcript", "")
+                                if not cache_result:
+                                    error_msg = "保存FunASR转录结果到缓存失败"
+                                    logger.error(error_msg)
+                                    cache_save_error = error_msg
+                                    raise RuntimeError(error_msg)
 
-                            # CapsWriter timeline：接通 funasr_json_data 落盘
-                            # 为 transcript_capswriter.json（缺省时 None 诚实降级）
-                            _finalize_presentation_fields()
-                            cache_result = cache_manager.save_cache(
-                                platform=platform,
-                                url=url,
-                                media_id=media_id,
-                                use_speaker_recognition=False,
-                                transcript_data=transcript,
-                                transcript_type="capswriter",
-                                title=video_title,
-                                author=author,
-                                description=description,
-                                extra_json_data=transcription_result.get(
-                                    "funasr_json_data"
-                                ),
-                            )
-
-                            if not cache_result:
-                                error_msg = "保存CapsWriter转录结果到缓存失败"
-                                logger.error(error_msg)
-                                # Y4 修复（PR3 review hardening 加固轮，同上面 FunASR
-                                # 分支的收口原则，理由同注释）。
-                                return _fail_task_and_notify(
-                                    error_msg, notify_status="转录结果保存失败",
-                                    title=video_title, author_name=author,
+                                # 构造与普通转录器兼容的结果
+                                transcription_result = {
+                                    "transcript": transcript,
+                                    "speaker_recognition": True,
+                                    "transcription_data": transcription_data,
+                                }
+                            else:
+                                # 使用普通 CapsWriter 转录器
+                                transcriber = Transcriber()
+                                # 使用时间戳作为临时输出基础名
+                                temp_output_base = datetime.datetime.now().strftime(
+                                    "%y%m%d-%H%M%S"
                                 )
+                                transcription_result = transcriber.transcribe(
+                                    local_file, temp_output_base
+                                )
+                                transcript = transcription_result.get("transcript", "")
+
+                                # CapsWriter timeline：接通 funasr_json_data 落盘
+                                # 为 transcript_capswriter.json（缺省时 None 诚实降级）
+                                _finalize_presentation_fields()
+                                cache_result = cache_manager.save_cache(
+                                    platform=platform,
+                                    url=url,
+                                    media_id=media_id,
+                                    use_speaker_recognition=False,
+                                    transcript_data=transcript,
+                                    transcript_type="capswriter",
+                                    title=video_title,
+                                    author=author,
+                                    description=description,
+                                    extra_json_data=transcription_result.get(
+                                        "funasr_json_data"
+                                    ),
+                                )
+
+                                if not cache_result:
+                                    error_msg = "保存CapsWriter转录结果到缓存失败"
+                                    logger.error(error_msg)
+                                    cache_save_error = error_msg
+                                    raise RuntimeError(error_msg)
+
+                    except RuntimeError:
+                        if cache_save_error is None:
+                            raise
+                    if cache_save_error:
+                        return _fail_task_and_notify(
+                            cache_save_error, notify_status="转录结果保存失败",
+                            title=video_title, author_name=author,
+                        )
 
                     # 获取转录文本
                     transcript = transcription_result.get("transcript", "")
@@ -2425,6 +2432,7 @@ def process_transcription(
                         },
                         task_notifier=task_notifier,
                         log_context="常规转录",
+                        observability=tracker.observation(),
                     )
                     if handoff_failure is not None:
                         return handoff_failure
@@ -2477,6 +2485,7 @@ def process_transcription(
                 notify_error=str(exc),
                 channel_name=notification_channel,
                 webhooks=notification_webhooks,
+                terminal_snapshot={"observability": tracker.observation()},
                 cache_manager=cache_manager,
                 router=get_notification_router(),
             )

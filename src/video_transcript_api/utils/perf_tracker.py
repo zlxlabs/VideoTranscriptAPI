@@ -109,11 +109,14 @@ class PerfTracker:
                     stages[stage] = {
                         "elapsed_ms": 0,
                         "count": 0,
+                        "successes": 0,
                         "failures": 0,
                     }
                 stages[stage]["elapsed_ms"] += r["elapsed_ms"]
                 stages[stage]["count"] += 1
-                if not r["success"]:
+                if r["success"]:
+                    stages[stage]["successes"] += 1
+                else:
                     stages[stage]["failures"] += 1
 
             return {
@@ -122,6 +125,22 @@ class PerfTracker:
                 "stages": stages,
                 "counters": dict(self._counters),
             }
+
+    def observation(self) -> Dict:
+        """Return completed intervals and the cache counters used by reporting."""
+        summary = self.summary()
+        counters = {
+            name: value
+            for name, value in summary["counters"].items()
+            if name in {"cache_hit", "cache_hit_partial"}
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+        }
+        observation = {"stages": summary["stages"]}
+        if counters:
+            observation["counters"] = counters
+        return observation
 
     def log_summary(self):
         """将性能摘要输出到日志"""

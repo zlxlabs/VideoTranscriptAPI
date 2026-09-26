@@ -375,6 +375,7 @@ def _handle_notes_generation(
     llm_task: dict,
     tracker: PerfTracker,
     processing_options: dict,
+    notes_outcome: dict,
 ) -> Optional[dict]:
     """Run and persist a notes-only task without touching existing LLM layers."""
     task_id = llm_task["task_id"]
@@ -439,17 +440,16 @@ def _handle_notes_generation(
                 selected_models=selected_models,
                 progress_callback=write_notes_progress,
             )
-
-        if (
-            notes_result.status != NotesStatus.GENERATED
-            or not isinstance(notes_result.text, str)
-            or not notes_result.text.strip()
-        ):
-            error_message = (
-                notes_result.error
-                or "Detailed notes processor returned no complete artifact"
-            )
-            raise RuntimeError(error_message)
+            if (
+                notes_result.status != NotesStatus.GENERATED
+                or not isinstance(notes_result.text, str)
+                or not notes_result.text.strip()
+            ):
+                error_message = (
+                    notes_result.error
+                    or "Detailed notes processor returned no complete artifact"
+                )
+                raise RuntimeError(error_message)
 
         # Keep the commit-time anchor recheck, notes artifact write, and honest
         # status merge in the existing per-media critical section. Normal
@@ -475,6 +475,7 @@ def _handle_notes_generation(
                 use_speaker_recognition=use_speaker_recognition,
                 notes_status=NotesStatus.GENERATED,
             )
+        notes_outcome["notes_status"] = NotesStatus.GENERATED
         status_written = finalize_terminal_status_and_notify(
             task_id,
             TaskStatus.SUCCESS,
@@ -490,6 +491,7 @@ def _handle_notes_generation(
                     "notes_fingerprint": notes_result.fingerprint,
                 },
                 "processing_options": processing_options,
+                "observability": tracker.observation(),
             },
             cache_manager=cache_manager,
             router=get_notification_router(),
@@ -515,15 +517,16 @@ def _handle_notes_generation(
             )
             return None
     except Exception:
-        try:
-            cache_manager.save_llm_status(
-                platform=platform,
-                media_id=media_id,
-                use_speaker_recognition=use_speaker_recognition,
-                notes_status=NotesStatus.FAILED,
-            )
-        except Exception:
-            logger.exception(f"详细笔记 failed 状态落盘失败: {task_id}")
+        if notes_outcome.get("notes_status") != NotesStatus.GENERATED:
+            try:
+                cache_manager.save_llm_status(
+                    platform=platform,
+                    media_id=media_id,
+                    use_speaker_recognition=use_speaker_recognition,
+                    notes_status=NotesStatus.FAILED,
+                )
+            except Exception:
+                logger.exception(f"详细笔记 failed 状态落盘失败: {task_id}")
         raise
 
 
@@ -566,13 +569,17 @@ def _handle_llm_task(llm_task: dict):
             task_notifier = _TaskNotifier()
             logger.info(f"开始处理LLM任务: {task_id}, 标题: {video_title}")
 
+            notes_attempted = False
+            notes_outcome = {}
             try:
                 raw_processing_options = llm_task.get("processing_options") or {}
                 if raw_processing_options.get("notes") is True:
+                    notes_attempted = True
                     notes_notification_result = _handle_notes_generation(
                         llm_task=llm_task,
                         tracker=tracker,
                         processing_options=raw_processing_options,
+                        notes_outcome=notes_outcome,
                     )
                     if notes_notification_result is not None:
                         try:
@@ -847,6 +854,7 @@ def _handle_llm_task(llm_task: dict):
                     terminal_snapshot={
                         "result": result_dict,
                         "processing_options": processing_options,
+                        "observability": tracker.observation(),
                     },
                     cache_manager=cache_manager,
                     router=notification_router,
@@ -923,6 +931,13 @@ def _handle_llm_task(llm_task: dict):
                     f"重新校对失败: {exc}" if llm_task.get("calibrate_only")
                     else f"LLM处理失败: {exc}"
                 )
+                failure_snapshot = {"observability": tracker.observation()}
+                if notes_attempted:
+                    failure_snapshot["result"] = {
+                        "notes_status": notes_outcome.get(
+                            "notes_status", NotesStatus.FAILED
+                        ),
+                    }
                 try:
                     # CAS-gated status notify lives in
                     # finalize_terminal_status_and_notify. The previous
@@ -937,6 +952,7 @@ def _handle_llm_task(llm_task: dict):
                         url=display_url,
                         title=video_title,
                         notify_error=f"【LLM API调用异常】{exc}",
+                        terminal_snapshot=failure_snapshot,
                         channel_name=notification_channel,
                         webhooks=notification_webhooks,
                         cache_manager=cache_manager,
