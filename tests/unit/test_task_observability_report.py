@@ -64,9 +64,10 @@ def _insert_task(path, table, values):
 
 
 def _run(cache_path, audit_path, *, since=SINCE, until=UNTIL):
+    drop_privileges = os.geteuid() == 0 and cache_path.exists() and not cache_path.stat().st_mode & 0o444
     return subprocess.run(
         [
-            sys.executable,
+            "/usr/bin/python3" if drop_privileges else sys.executable,
             str(SCRIPT),
             "--cache-db",
             str(cache_path),
@@ -82,11 +83,7 @@ def _run(cache_path, audit_path, *, since=SINCE, until=UNTIL):
         capture_output=True,
         text=True,
         check=False,
-        preexec_fn=(
-            lambda: os.setuid(65534)
-            if os.geteuid() == 0 and cache_path.exists()
-            and not cache_path.stat().st_mode & 0o444 else None
-        ),
+        preexec_fn=(lambda: os.setuid(65534)) if drop_privileges else None,
     )
 
 
