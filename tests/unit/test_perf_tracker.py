@@ -60,6 +60,23 @@ class TestPerfTrackerTiming:
         assert summary["stages"]["failing"]["failures"] == 1
         assert summary["stages"]["failing"]["count"] == 1
 
+    def test_observation_contains_completed_interval_counts_only(self):
+        tracker = PerfTracker(task_id="private-task-id")
+        with tracker.track("download"):
+            pass
+        with pytest.raises(ValueError):
+            with tracker.track("transcription"):
+                raise ValueError("private error body")
+
+        observation = tracker.observation()
+
+        assert observation["stages"]["download"]["successes"] == 1
+        assert observation["stages"]["download"]["failures"] == 0
+        assert observation["stages"]["transcription"]["successes"] == 0
+        assert observation["stages"]["transcription"]["failures"] == 1
+        assert "private-task-id" not in str(observation)
+        assert "private error body" not in str(observation)
+
     def test_track_same_stage_multiple_times(self):
         """Same stage can be tracked multiple times; durations accumulate."""
         tracker = PerfTracker(task_id="test-004")

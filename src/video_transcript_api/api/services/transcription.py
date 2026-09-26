@@ -589,6 +589,7 @@ def _handoff_to_llm_stage(
     calibrating_status_kwargs: dict,
     task_notifier,
     log_context: str,
+    observability: dict,
 ) -> Optional[dict]:
     """把已完成转录、待补 LLM 层的任务交给 LLM 阶段——转录到 LLM 的五处内部
     交接（process_transcription 的缓存复用分支、YouTube API Server 的两条快速路
@@ -657,6 +658,7 @@ def _handoff_to_llm_stage(
                 task_id,
                 TaskStatus.FAILED,
                 error_message=f"任务状态写入异常: {status_exc}",
+                terminal_snapshot={"observability": observability},
                 cache_manager=cache_manager,
                 notify_via=task_notifier,
             )
@@ -728,6 +730,7 @@ def _handoff_to_llm_stage(
                 TaskStatus.FAILED,
                 error_message=f"LLM任务加入队列失败: {exc}",
                 notify_error=f"【LLM任务加入队列失败】{exc}",
+                terminal_snapshot={"observability": observability},
                 cache_manager=cache_manager,
                 notify_via=task_notifier,
             )
@@ -912,6 +915,7 @@ def process_transcription(
                     url=display_url,
                     title=title,
                     author=author_name,
+                    terminal_snapshot={"observability": tracker.observation()},
                     cache_manager=cache_manager,
                     notify_via=task_notifier,
                 )
@@ -1391,6 +1395,7 @@ def process_transcription(
                         "calibration_status": mirrored_calibration_status,
                         "summary_status": mirrored_summary_status,
                         "processing_options": processing_options,
+                        "observability": tracker.observation(),
                     },
                     cache_manager=cache_manager,
                     notify_via=task_notifier,
@@ -1606,6 +1611,7 @@ def process_transcription(
                 },
                 task_notifier=task_notifier,
                 log_context="缓存",
+                observability=tracker.observation(),
             )
             if handoff_failure is not None:
                 return handoff_failure
@@ -1879,6 +1885,7 @@ def process_transcription(
                             },
                             task_notifier=task_notifier,
                             log_context="youtube-api",
+                            observability=tracker.observation(),
                         )
                         if handoff_failure is not None:
                             return handoff_failure
@@ -2019,6 +2026,7 @@ def process_transcription(
                             },
                             task_notifier=task_notifier,
                             log_context="youtube-api",
+                            observability=tracker.observation(),
                         )
                         if handoff_failure is not None:
                             return handoff_failure
@@ -2177,9 +2185,10 @@ def process_transcription(
                         "author": author,
                         "download_url": download_url,
                     },
-                    task_notifier=task_notifier,
-                    log_context="平台字幕",
-                )
+                task_notifier=task_notifier,
+                log_context="平台字幕",
+                observability=tracker.observation(),
+            )
                 if handoff_failure is not None:
                     return handoff_failure
                 logger.info(
@@ -2425,6 +2434,7 @@ def process_transcription(
                         },
                         task_notifier=task_notifier,
                         log_context="常规转录",
+                        observability=tracker.observation(),
                     )
                     if handoff_failure is not None:
                         return handoff_failure
@@ -2477,6 +2487,7 @@ def process_transcription(
                 notify_error=str(exc),
                 channel_name=notification_channel,
                 webhooks=notification_webhooks,
+                terminal_snapshot={"observability": tracker.observation()},
                 cache_manager=cache_manager,
                 router=get_notification_router(),
             )

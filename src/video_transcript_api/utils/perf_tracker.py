@@ -109,11 +109,14 @@ class PerfTracker:
                     stages[stage] = {
                         "elapsed_ms": 0,
                         "count": 0,
+                        "successes": 0,
                         "failures": 0,
                     }
                 stages[stage]["elapsed_ms"] += r["elapsed_ms"]
                 stages[stage]["count"] += 1
-                if not r["success"]:
+                if r["success"]:
+                    stages[stage]["successes"] += 1
+                else:
                     stages[stage]["failures"] += 1
 
             return {
@@ -122,6 +125,10 @@ class PerfTracker:
                 "stages": stages,
                 "counters": dict(self._counters),
             }
+
+    def observation(self) -> Dict:
+        """Return only completed stage intervals for a terminal snapshot."""
+        return {"stages": self.summary()["stages"]}
 
     def log_summary(self):
         """将性能摘要输出到日志"""

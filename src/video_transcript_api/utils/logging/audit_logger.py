@@ -8,6 +8,7 @@ API调用审计日志模块
 import sqlite3
 import threading
 import json
+import math
 from contextlib import nullcontext
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -18,7 +19,7 @@ from .logger import setup_logger
 logger = setup_logger("audit_logger")
 
 # Schema 版本号，每次表结构变更时递增
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 
 class AuditLogger:
@@ -147,6 +148,9 @@ class AuditLogger:
         if version < 5:
             self._migrate_v5(cursor)
 
+        if version < 6:
+            self._migrate_v6(cursor)
+
         if version < CURRENT_SCHEMA_VERSION:
             self._set_schema_version(cursor, CURRENT_SCHEMA_VERSION)
             logger.info(f"Schema 迁移完成: v{version} -> v{CURRENT_SCHEMA_VERSION}")
@@ -258,6 +262,16 @@ class AuditLogger:
                 "ALTER TABLE task_audit_snapshots ADD COLUMN chapters_status TEXT"
             )
 
+    def _migrate_v6(self, cursor):
+        """Persist task start time and allowlisted terminal observations."""
+        cursor.execute("PRAGMA table_info(task_audit_snapshots)")
+        columns = {row[1] for row in cursor.fetchall()}
+        for column in ("created_at", "observability_json"):
+            if column not in columns:
+                cursor.execute(
+                    f"ALTER TABLE task_audit_snapshots ADD COLUMN {column} TEXT"
+                )
+
     def archive_task_snapshot(self, task: Dict[str, Any]) -> None:
         """Idempotently copy task metadata without reviving revoked capabilities."""
         self._write_task_snapshot(task, revive_expired=False)
@@ -284,13 +298,71 @@ class AuditLogger:
                 "THEN NULL ELSE excluded.view_token END"
             )
             expired_update = "task_audit_snapshots.content_expired"
+        terminal = task.get("terminal_snapshot")
+        if not isinstance(terminal, dict):
+            terminal = {}
+        result = terminal.get("result")
+        if not isinstance(result, dict):
+            result = {}
+        observation = terminal.get("observability")
+        if not isinstance(observation, dict):
+            observation = {}
+        allowed_stages = {
+            "url_parse", "cache_check", "metadata", "download",
+            "transcription", "llm_processing",
+        }
+        observed_stages = {}
+        raw_stages = observation.get("stages")
+        if isinstance(raw_stages, dict):
+            for stage, values in raw_stages.items():
+                if stage not in allowed_stages or not isinstance(values, dict):
+                    continue
+                elapsed = values.get("elapsed_ms")
+                count = values.get("count")
+                successes = values.get("successes")
+                failures = values.get("failures")
+                if (
+                    isinstance(elapsed, bool)
+                    or not isinstance(elapsed, (int, float))
+                    or not math.isfinite(elapsed)
+                    or elapsed < 0
+                    or not isinstance(count, int)
+                    or isinstance(count, bool)
+                    or count < 1
+                    or not isinstance(successes, int)
+                    or isinstance(successes, bool)
+                    or not isinstance(failures, int)
+                    or isinstance(failures, bool)
+                    or successes < 0
+                    or failures < 0
+                    or successes + failures != count
+                ):
+                    continue
+                observed_stages[stage] = {
+                    "elapsed_ms": round(elapsed, 2),
+                    "count": count,
+                    "successes": successes,
+                    "failures": failures,
+                }
+        allowlisted_observation = {}
+        notes_status = result.get("notes_status")
+        if isinstance(notes_status, str) and notes_status in {"generated", "failed"}:
+            allowlisted_observation["notes_status"] = notes_status
+        if observed_stages:
+            allowlisted_observation["stages"] = observed_stages
+        observation_json = (
+            json.dumps(allowlisted_observation, sort_keys=True)
+            if allowlisted_observation
+            else None
+        )
         with self._get_cursor() as cursor:
             cursor.execute(f'''
                 INSERT INTO task_audit_snapshots
                 (task_id, view_token, title, author, platform, status,
                  calibration_status, summary_status, chapters_status, submitted_by,
-                 processing_options, completed_at, content_expired, archived_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
+                 processing_options, created_at, completed_at, observability_json,
+                 content_expired, archived_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
                 ON CONFLICT(task_id) DO UPDATE SET
                     view_token={view_token_update},
                     title=excluded.title,
@@ -302,7 +374,9 @@ class AuditLogger:
                     chapters_status=excluded.chapters_status,
                     submitted_by=excluded.submitted_by,
                     processing_options=excluded.processing_options,
+                    created_at=COALESCE(excluded.created_at, task_audit_snapshots.created_at),
                     completed_at=excluded.completed_at,
+                    observability_json=COALESCE(excluded.observability_json, task_audit_snapshots.observability_json),
                     content_expired={expired_update},
                     archived_at=CURRENT_TIMESTAMP
             ''', (
@@ -310,7 +384,8 @@ class AuditLogger:
                 task.get("platform"), task.get("status") or "unknown",
                 task.get("calibration_status"), task.get("summary_status"),
                 task.get("chapters_status"),
-                task.get("submitted_by"), options, task.get("completed_at"),
+                task.get("submitted_by"), options, task.get("created_at"),
+                task.get("completed_at"), observation_json,
             ))
 
     def expire_task_snapshot(self, task_id: str) -> bool:

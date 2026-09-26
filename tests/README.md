@@ -25,11 +25,15 @@ uv sync --extra dev
 ## 常用命令
 
 ```bash
-# 当前 CI 基线：仅运行 unit 和 cache，不代表全套测试
+# 本地快速基线：unit 和 cache
 make test
 
-# 直接运行 CI 基线范围
-uv run pytest tests/unit tests/cache
+# 卡片验证范围
+uv run --extra dev pytest tests/unit tests/integration
+
+# GitHub Required Gate v2 的 legacy quality 入口：uv sync --frozen 后执行全套 pytest
+uv sync --frozen
+uv run --frozen pytest -q
 
 # 按需运行其他本地测试目录
 uv run pytest tests/integration
@@ -39,8 +43,16 @@ uv run pytest tests/transcript
 uv run pytest tests/deployment
 ```
 
-`make test` 当前只覆盖 `tests/unit tests/cache`。其他目录可以按需在本地单独
-运行，但并未被纳入该 CI 基线。
+`make test` 当前只覆盖 `tests/unit tests/cache`。GitHub workflow 调用
+`zlxlabs/gate/.github/workflows/gate-v2.yml@v2`；当仓库没有可执行的
+`scripts/gate-quality` 时，quality job 使用 legacy 步骤，运行 `uv sync --frozen`
+和 `uv run --frozen pytest -q`。本地测试前同步 `dev` extra，避免 `pytest` 回落到
+系统解释器。
+
+任务观测回归位于 `tests/unit/test_task_observability_report.py` 和
+`tests/integration/test_task_observability.py`：前者覆盖只读 CLI、旧 schema、UTC
+窗口、去重、缺字段与失败判据；后者走真实 notes worker → cache/audit SQLite → CLI
+子进程，并验证启动归档修复、缓存清理后的审计快照和迁移幂等性。
 
 ## 手动测试门禁
 
