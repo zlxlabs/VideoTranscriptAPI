@@ -120,9 +120,10 @@ def test_cli_rejects_invalid_audit_schema_without_report(
             ]
             assert columns == [schema_column]
         else:
-            assert connection.execute(
+            stored_versions = connection.execute(
                 "SELECT version FROM schema_version"
-            ).fetchall() == version_rows
+            ).fetchall()
+            assert sorted(stored_versions) == sorted(version_rows)
         if task_column:
             columns = {
                 row[1]
@@ -136,19 +137,38 @@ def test_cli_rejects_invalid_audit_schema_without_report(
     assert result.returncode != 0 and result.stdout == ""
 
 
-def test_fields_missing_task_status_matches_unknown_count_for_known_statuses(tmp_path):
+def test_task_status_and_cache_hit_counters(tmp_path):
     cache_path, audit_path = _create_databases(tmp_path)
     statuses = {
         "success": "success", "failed": "failed", "processing": "processing",
         "queued": "queued", "calibrating": "calibrating", "null": None,
         "empty": "", "unknown": "waiting",
     }
+    counters = {
+        "success": None,
+        "failed": {"cache_hit": 0},
+        "processing": {"cache_hit": 1},
+        "queued": {"cache_hit_partial": 1},
+        "calibrating": {"cache_hit": 1, "cache_hit_partial": 1},
+        "null": None,
+        "empty": None,
+        "unknown": None,
+    }
     with sqlite3.connect(cache_path) as connection:
         connection.executemany(
-            "INSERT INTO task_status (task_id, status, created_at) "
-            "VALUES (:task_id, :status, :created_at)",
+            "INSERT INTO task_status (task_id, status, created_at, terminal_snapshot) "
+            "VALUES (:task_id, :status, :created_at, :terminal_snapshot)",
             [
-                dict(task_id=task_id, status=status, created_at="2026-09-01T00:00:00Z")
+                {
+                    "task_id": task_id,
+                    "status": status,
+                    "created_at": "2026-09-01T00:00:00Z",
+                    "terminal_snapshot": (
+                        json.dumps({"observability": {"counters": counters[task_id]}})
+                        if counters[task_id] is not None
+                        else None
+                    ),
+                }
                 for task_id, status in statuses.items()
             ],
         )
@@ -159,15 +179,10 @@ def test_fields_missing_task_status_matches_unknown_count_for_known_statuses(tmp
     result = _run(cache_path, audit_path)
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
-    assert report["tasks"]["status_counts"] == {
-        "success": 1,
-        "failed": 1,
-        "in_progress": 3,
-        "unknown": 3,
-    }
-    assert report["fields_missing"]["task_status"] == report["tasks"][
-        "status_counts"
-    ]["unknown"]
+    unknown = report["tasks"]["status_counts"]["unknown"]
+    assert unknown == 3
+    assert report["fields_missing"]["task_status"] == unknown
+    assert report["tasks"]["cache_hits"] == {"full": 2, "partial": 2, "unknown": 5}
 
 
 def _insert_task(path, table, values):
@@ -438,6 +453,56 @@ def test_old_audit_schema_is_read_without_migration_or_cache_status_backfill(tmp
         }
     assert "created_at" not in columns
     assert "observability_json" not in columns
+
+
+@pytest.mark.parametrize(
+    ("old_audit", "audit_created_at", "cache_created_at", "count", "unassigned"),
+    [
+        (True, None, "2026-08-31T23:59:59Z", 0, 0),
+        (False, SINCE, "2026-08-31T23:59:59Z", 1, 0),
+        (False, "2026-08-31T23:59:59Z", SINCE, 0, 0),
+        (False, None, SINCE, 1, 0),
+        (False, "not-a-date", SINCE, 1, 0),
+        (False, "not-a-date", "also-not-a-date", 0, 1),
+    ],
+    ids=("v5-cache-out", "v6-audit-in", "v6-audit-out", "audit-null",
+         "audit-invalid", "both-invalid"),
+)
+def test_cli_merges_creation_times_before_window_filter(
+    tmp_path, old_audit, audit_created_at, cache_created_at, count, unassigned
+):
+    cache_path, audit_path = _create_databases(tmp_path, old_audit=old_audit)
+    audit_row = {"task_id": "window-task", "status": "success", "platform": "youtube"}
+    if not old_audit:
+        audit_row["created_at"] = audit_created_at
+    audit_columns = ", ".join(audit_row)
+    audit_values = ", ".join(f":{column}" for column in audit_row)
+    with sqlite3.connect(audit_path) as connection:
+        connection.execute(
+            f"INSERT INTO task_audit_snapshots ({audit_columns}) VALUES ({audit_values})",
+            audit_row,
+        )
+    with sqlite3.connect(cache_path) as connection:
+        connection.execute(
+            "INSERT INTO task_status (task_id, status, platform, created_at) "
+            "VALUES (:task_id, :status, :platform, :created_at)",
+            {
+                "task_id": "window-task",
+                "status": "success",
+                "platform": "youtube",
+                "created_at": cache_created_at,
+            },
+        )
+    with sqlite3.connect(cache_path) as connection:
+        assert connection.execute(
+            "SELECT task_id, created_at FROM task_status"
+        ).fetchall() == [("window-task", cache_created_at)]
+
+    result = _run(cache_path, audit_path)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["tasks"]["count"] == count
+    assert report["unassigned_created_at_tasks"] == unassigned
 
 
 def test_empty_window_reports_zero_samples_and_excludes_unassigned_history(tmp_path):

@@ -28,8 +28,8 @@ ssh n305 'docker exec -i video-transcript-api python - --cache-db /app/data/cach
 
 ## 指标口径
 
-- **任务计数**：audit 快照优先，cache 中仍存在的任务只补充缺失字段；按 `task_id` 去重。状态分别为成功、失败、进行中和未知，进行中包括 queued、processing、calibrating。
-- **缓存命中**：按任务分别报告已观测到的完整命中、部分命中和命中状态未知数。只有正的 `cache_hit`/`cache_hit_partial` 计数能证明对应命中；没有计数器的旧快照或未走到相关分支的任务计为 unknown，不推断为 miss。
+- **任务计数**：完整读取 audit 与 cache 后，先按 `task_id` 合并再按 `[since, until)` 过滤。有效 audit `created_at` 优先；audit 时间为 NULL 或无效值时采用有效 cache 时间，两边都无效才计入 `unassigned_created_at_tasks`。状态分别为成功、失败、进行中和未知，进行中包括 queued、processing、calibrating。
+- **缓存命中**：`unknown` 表示完整和部分命中都没有正计数，包含计数缺失或为 0，不代表缓存未命中。`full` 与 `partial` 按任务分别计数，可能同时命中；三项不能相加当作任务总数。
 - **笔记/总结/章节状态**：输出已知状态分布与 `unknown_count`。缺字段、未尝试和旧快照均保持未知；零个任务与一个值为 0 的耗时不是同一件事。
 - **端到端耗时**：每个任务用 `completed_at - created_at` 计算墙钟毫秒数。缺任一时间或完成早于创建的任务不进入样本，计入 `fields_missing.end_to_end_duration`。
 - **阶段耗时**：从终态快照中的 PerfTracker 已完成区间汇总；每个任务每阶段的耗时是该阶段区间之和，`duration_ms.samples` 是有观测的任务数，p50/p95 使用 nearest-rank。成功/失败是 tracker 区间计数。未走到或没有阶段区间的任务不填 0。

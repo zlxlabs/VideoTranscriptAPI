@@ -90,25 +90,14 @@ def _validate_schema(connection, label, table, required):
     return columns
 
 
-def _read_task_rows(connection, table, columns, since, until):
+def _read_task_rows(connection, table, columns):
     optional = {"created_at", "terminal_snapshot", "observability_json"}
     selected = [
         field if field in columns else f"NULL AS {field}"
         for field in (*BASE_FIELDS, "terminal_snapshot", "observability_json")
         if field not in optional or field in columns
     ]
-    where = ""
-    params = ()
-    if "created_at" in columns:
-        where = (
-            "WHERE created_at IS NULL OR julianday(created_at) IS NULL "
-            "OR (julianday(created_at) >= julianday(?) "
-            "AND julianday(created_at) < julianday(?))"
-        )
-        params = (since, until)
-    return connection.execute(
-        f"SELECT {', '.join(selected)} FROM {table} {where}", params
-    ).fetchall()
+    return connection.execute(f"SELECT {', '.join(selected)} FROM {table}").fetchall()
 
 
 def _json_object(value):
@@ -203,6 +192,9 @@ def _merge_task_rows(audit_rows, cache_rows, since, until):
             existing = merged.setdefault(task_id, {})
             for field, value in row.items():
                 if value is not None:
+                    if field == "created_at" and _sqlite_utc(existing.get(field)) is not None:
+                        if _sqlite_utc(value) is None:
+                            continue
                     existing[field] = value
 
     selected = {}
@@ -313,12 +305,8 @@ def build_report(cache_connection, audit_connection, since_value, until_value):
             {"created_at", "observability_json"},
         )
 
-    cache_rows = _read_task_rows(
-        cache_connection, "task_status", cache_columns, since_sql, until_sql
-    )
-    audit_rows = _read_task_rows(
-        audit_connection, "task_audit_snapshots", audit_columns, since_sql, until_sql
-    )
+    cache_rows = _read_task_rows(cache_connection, "task_status", cache_columns)
+    audit_rows = _read_task_rows(audit_connection, "task_audit_snapshots", audit_columns)
     tasks, unassigned_created = _merge_task_rows(audit_rows, cache_rows, since, until)
 
     status_counts = {"success": 0, "failed": 0, "in_progress": 0, "unknown": 0}
@@ -355,7 +343,7 @@ def build_report(cache_connection, audit_connection, since_value, until_value):
         partial_hit = counters.get("cache_hit_partial", 0) > 0
         cache_hits["full"] += int(full_hit)
         cache_hits["partial"] += int(partial_hit)
-        if not counters:
+        if not full_hit and not partial_hit:
             cache_hits["unknown"] += 1
         states = {
             "notes_status": notes,
