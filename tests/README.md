@@ -49,10 +49,9 @@ uv run pytest tests/deployment
 和 `uv run --frozen pytest -q`。本地测试前同步 `dev` extra，避免 `pytest` 回落到
 系统解释器。
 
-任务观测回归位于 `tests/unit/test_task_observability_report.py` 和
-`tests/integration/test_task_observability.py`：前者覆盖只读 CLI、旧 schema、UTC
-窗口、去重、缺字段与失败判据；后者走真实 notes worker → cache/audit SQLite → CLI
-子进程，并验证启动归档修复、缓存清理后的审计快照和迁移幂等性。
+任务观测回归：`tests/unit/test_task_observability_report.py` 覆盖只读 CLI、旧 schema、
+UTC 窗口、去重、缺字段与失败判据；`tests/integration/test_task_observability.py`
+贯通 notes worker、cache/audit SQLite 与 CLI 子进程，验证归档修复、缓存清理和迁移。
 
 ## 手动测试门禁
 

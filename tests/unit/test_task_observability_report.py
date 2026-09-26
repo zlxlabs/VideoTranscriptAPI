@@ -1,6 +1,7 @@
 """Read-only report contract tests; console output stays ASCII-only."""
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -81,6 +82,11 @@ def _run(cache_path, audit_path, *, since=SINCE, until=UNTIL):
         capture_output=True,
         text=True,
         check=False,
+        preexec_fn=(
+            lambda: os.setuid(65534)
+            if os.geteuid() == 0 and cache_path.exists()
+            and not cache_path.stat().st_mode & 0o444 else None
+        ),
     )
 
 
@@ -345,7 +351,6 @@ def test_missing_paths_bad_databases_and_invalid_window_fail_without_creating_fi
         audit_path,
         since="2026-09-01T00:00:00Z' OR 1=1--",
     )
-    unreadable = None
     cache_path.chmod(0)
     try:
         unreadable = _run(cache_path, audit_path)
