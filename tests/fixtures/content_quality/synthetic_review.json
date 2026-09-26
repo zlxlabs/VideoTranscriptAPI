@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "reviewer": "synthetic-reviewer",
+  "samples": [
+    {
+      "sample_id": "syn-001",
+      "source_type": "synthetic",
+      "input_ref": "syn-fixture#syn-001.input_text",
+      "input_text": "The review covers 8 projects.\nThe report lists 12 units.\nThe team did not ship the draft.\nDelivery only if finance approves; owner Lee by Friday.",
+      "candidates": [
+        {
+          "version": "candidate-synthetic-v1", "version_note": "", "generated_at": "2026-09-25", "generation_note": "",
+          "output_ref": "syn-fixture#syn-001/v1.output_text",
+          "output_text": "The review covers 8 projects.\nThe report lists 21 units.\nThe team shipped the draft.\nDelivery only if finance approves; owner Lee by Friday.",
+          "dimensions": {
+            "numbers": {"outcome": "error", "evidence": {"input": "line 2: 12", "output": "line 2: 21"}},
+            "negation": {"outcome": "error", "evidence": {"input": "line 3: did not ship", "output": "line 3: shipped"}},
+            "conditions": {"outcome": "correct", "evidence": null},
+            "speaker_attribution": {"outcome": "unknown", "evidence": null},
+            "key_omissions": {"outcome": "unreviewed", "evidence": null}
+          }
+        },
+        {
+          "version": "candidate-synthetic-v2", "version_note": "", "generated_at": "2026-09-25", "generation_note": "",
+          "output_ref": "syn-fixture#syn-001/v2.output_text",
+          "output_text": "The review covers 8 projects.\nThe report lists 12 units.\nThe team did not ship the draft.\nDelivery only if finance approves; owner Lee.",
+          "dimensions": {
+            "numbers": {"outcome": "correct", "evidence": null},
+            "negation": {"outcome": "correct", "evidence": null},
+            "conditions": {"outcome": "correct", "evidence": null},
+            "speaker_attribution": {"outcome": "correct", "evidence": null},
+            "key_omissions": {"outcome": "error", "evidence": {"input": "line 4: by Friday", "output": "line 4: output omits Friday deadline"}}
+          }
+        }
+      ]
+    },
+    {
+      "sample_id": "syn-002",
+      "source_type": "synthetic",
+      "input_ref": "syn-fixture#syn-002.input_text",
+      "input_text": "Finish review in 3 days.\nPublish only if approved.\nLee is the owner.",
+      "candidates": [
+        {
+          "version": "candidate-synthetic-v1", "version_note": "", "generated_at": "2026-09-25", "generation_note": "",
+          "output_ref": "syn-fixture#syn-002/v1.output_text",
+          "output_text": "Finish review in 4 days.\nPublish when approved.\n",
+          "dimensions": {
+            "numbers": {"outcome": "error", "evidence": {"input": "line 1: 3 days", "output": "line 1: 4 days"}},
+            "negation": {"outcome": "correct", "evidence": null},
+            "conditions": {"outcome": "error", "evidence": {"input": "line 2: only if approved", "output": "line 2: approved"}},
+            "speaker_attribution": {"outcome": "correct", "evidence": null},
+            "key_omissions": {"outcome": "error", "evidence": {"input": "line 3: Lee is the owner", "output": "line 3 is absent"}}
+          }
+        },
+        {
+          "version": "candidate-synthetic-v2", "version_note": "", "generated_at": "2026-09-25", "generation_note": "",
+          "output_ref": "syn-fixture#syn-002/v2.output_text",
+          "output_text": "Finish review in 3 days.\nPublish only if approved.\nLee is the owner.",
+          "dimensions": {
+            "numbers": {"outcome": "correct", "evidence": null},
+            "negation": {"outcome": "correct", "evidence": null},
+            "conditions": {"outcome": "correct", "evidence": null},
+            "speaker_attribution": {"outcome": "correct", "evidence": null},
+            "key_omissions": {"outcome": "correct", "evidence": null}
+          }
+        }
+      ]
+    },
+    {
+      "sample_id": "syn-003",
+      "source_type": "synthetic",
+      "input_ref": "syn-fixture#syn-003.input_text",
+      "input_text": "Speaker A: I will hold the release.\nSpeaker B: I did not agree.",
+      "candidates": [
+        {
+          "version": "candidate-synthetic-v1", "version_note": "", "generated_at": "2026-09-25", "generation_note": "",
+          "output_ref": "syn-fixture#syn-003/v1.output_text",
+          "output_text": "Speaker B will hold the release.\nSpeaker B did not agree.",
+          "dimensions": {
+            "numbers": {"outcome": "unreviewed", "evidence": null},
+            "negation": {"outcome": "unknown", "evidence": null},
+            "conditions": {"outcome": "correct", "evidence": null},
+            "speaker_attribution": {"outcome": "error", "evidence": {"input": "line 1: speaker A", "output": "line 1: speaker B"}},
+            "key_omissions": {"outcome": "unreviewed", "evidence": null}
+          }
+        },
+        {
+          "version": "candidate-synthetic-v2", "version_note": "", "generated_at": "2026-09-25", "generation_note": "",
+          "output_ref": "syn-fixture#syn-003/v2.output_text",
+          "output_text": "Speaker A: I will hold the release.\nSpeaker B: I did not agree.",
+          "dimensions": {
+            "numbers": {"outcome": "unreviewed", "evidence": null},
+            "negation": {"outcome": "unreviewed", "evidence": null},
+            "conditions": {"outcome": "unreviewed", "evidence": null},
+            "speaker_attribution": {"outcome": "unreviewed", "evidence": null},
+            "key_omissions": {"outcome": "unreviewed", "evidence": null}
+          }
+        },
+        {
+          "version": "unknown", "version_note": "Synthetic candidate label unavailable.",
+          "generated_at": "unknown", "generation_note": "Synthetic generation date unavailable.",
+          "output_ref": "syn-fixture#syn-003/unidentified.output_text",
+          "output_text": "Synthetic candidate unavailable.",
+          "dimensions": {
+            "numbers": {"outcome": "unknown", "evidence": null},
+            "negation": {"outcome": "unknown", "evidence": null},
+            "conditions": {"outcome": "unreviewed", "evidence": null},
+            "speaker_attribution": {"outcome": "unreviewed", "evidence": null},
+            "key_omissions": {"outcome": "unreviewed", "evidence": null}
+          }
+        }
+      ]
+    }
+  ]
+}
