@@ -105,7 +105,9 @@ class ViewTokenResolver:
         """Assemble the transcript-page payload shared by success and interrupted.
 
         Interrupted is a presentation status: the task row stays failed, but
-        usable cache text is shown instead of the failure page.
+        usable cache text is shown instead of the failure page. Both statuses
+        read the transcript body through the same normalize_segments path, so a
+        structured FunASR payload never leaks its repr to the page.
         """
         summary_state, summary = self._resolve_summary_state(task_info, cache_data)
         notes_state, notes = self._resolve_notes_state(cache_data)
@@ -114,19 +116,12 @@ class ViewTokenResolver:
             cache_data.get("transcript_data"),
         )
         if transcript is None:
-            raw = cache_data.get("transcript_data")
-            if not isinstance(raw, str) and raw is not None:
-                if status == "interrupted":
-                    segments = normalize_segments(raw)
-                    transcript = (
-                        "\n".join(seg["text"] for seg in segments)
-                        if segments
-                        else "转录文本获取中..."
-                    )
-                else:
-                    transcript = str(raw)
-            else:
-                transcript = "转录文本获取中..."
+            segments = normalize_segments(cache_data.get("transcript_data"))
+            transcript = (
+                "\n".join(seg["text"] for seg in segments)
+                if segments
+                else "转录文本获取中..."
+            )
 
         llm_config = self._cache_manager.get_task_llm_config(task_info["task_id"])
         if not llm_config:
