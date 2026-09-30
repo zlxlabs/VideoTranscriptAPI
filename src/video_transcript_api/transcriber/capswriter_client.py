@@ -9,18 +9,15 @@ CapsWriter语音转文字客户端 - 精简版
 import os
 import sys
 import json
-import base64
 import math
 import time
 import asyncio
 import re
-import uuid
-import subprocess
 import argparse
 from pathlib import Path
 from typing import Tuple, List, Optional, Dict, Any
 
-import websockets
+from capswriter_asr import AsrError, transcribe_file_sync
 from loguru import logger
 
 # 添加项目根目录到系统路径
@@ -448,12 +445,6 @@ class CapsWriterClient:
         self.retry_delay = retry_delay or project_config.get("capswriter", {}).get(
             "retry_delay", 5
         )
-        self.websocket = None
-        self.current_task_id = None
-        # 最近一次连接被关闭时服务端发来的 close code/reason（异常断开时为 None），
-        # 供 transcribe_file 的重试逻辑判断是否值得重试
-        self.last_close_code = None
-        self.last_close_reason = None
 
         # 确保临时目录存在
         os.makedirs(self.output_dir, exist_ok=True)
@@ -478,192 +469,6 @@ class CapsWriterClient:
             self.log(f"错误: 文件不存在: {file_path}", "error")
             return False
         return True
-
-    async def _extract_audio(self, file_path: Path) -> Tuple[Optional[bytes], float]:
-        """
-        从文件中提取音频数据
-
-        参数:
-            file_path: 文件路径
-
-        返回:
-            tuple: (音频数据, 音频时长)
-        """
-        ffmpeg_cmd = [
-            "ffmpeg",
-            "-i",
-            str(file_path),
-            "-f",
-            "f32le",  # 32位浮点格式
-            "-ac",
-            "1",  # 单声道
-            "-ar",
-            "16000",  # 16kHz采样率
-            "-",
-        ]
-
-        self.log("正在提取音频...")
-
-        try:
-            process = subprocess.Popen(
-                ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-            )
-            audio_data = process.stdout.read()
-            audio_duration = len(audio_data) / 4 / 16000  # 4字节/采样 * 16000采样/秒
-
-            self.log(f"音频提取完成，时长: {audio_duration:.2f}秒")
-            return audio_data, audio_duration
-        except Exception as e:
-            self.log(f"音频提取失败: {e}", "error")
-            return None, 0
-
-    async def _check_websocket(self) -> bool:
-        """检查并建立WebSocket连接"""
-        if self.websocket and self.websocket.close_code is None:
-            return True
-
-        max_retries = 5
-        retry_delay = 2
-
-        for attempt in range(1, max_retries + 1):
-            try:
-                server_url = f"ws://{Config.server_addr}:{Config.server_port}"
-                self.log(f"连接到服务器: {server_url} (尝试 {attempt}/{max_retries})")
-
-                self.websocket = await asyncio.wait_for(
-                    websockets.connect(server_url, max_size=None), timeout=10.0
-                )
-
-                self.log(f"已连接到服务器: {server_url}")
-                return True
-            except (ConnectionRefusedError, TimeoutError, OSError) as e:
-                if attempt < max_retries:
-                    self.log(f"连接失败，{retry_delay}秒后重试...", "warning")
-                    await asyncio.sleep(retry_delay)
-                else:
-                    self.log(
-                        f"连接服务器失败，已达到最大重试次数 ({max_retries})", "error"
-                    )
-
-        return False
-
-    async def _close_websocket(self):
-        """关闭WebSocket连接"""
-        if self.websocket and self.websocket.close_code is None:
-            await self.websocket.close()
-            self.websocket = None
-            self.log("已关闭服务器连接", "warning")
-
-    def _record_close(self, exc: websockets.ConnectionClosed):
-        """记录连接关闭信息并输出日志，返回可读描述"""
-        close_frame = exc.rcvd  # 服务端发来的关闭帧；TCP 层异常断开时为 None
-        self.last_close_code = close_frame.code if close_frame else None
-        self.last_close_reason = close_frame.reason if close_frame else None
-        return (
-            f"close code: {self.last_close_code or 'N/A'}, "
-            f"reason: {self.last_close_reason or 'N/A'}"
-        )
-
-    async def _send_audio_data(
-        self, file_path: Path, audio_data: bytes, audio_duration: float
-    ) -> Optional[str]:
-        """发送音频数据到服务器"""
-        if not await self._check_websocket():
-            self.log("无法连接到服务器，取消转录", "error")
-            return None
-
-        # 生成任务ID
-        task_id = str(uuid.uuid1())
-        self.current_task_id = task_id
-
-        self.log(f"任务ID: {task_id}")
-        self.log(f"处理文件: {file_path}")
-
-        # 分段发送音频数据
-        offset = 0
-        chunk_size = 16000 * 4 * 60  # 每分钟的数据大小
-        reported_milestones = set()  # 本次发送已输出过的进度里程碑
-
-        while offset < len(audio_data):
-            chunk_end = min(offset + chunk_size, len(audio_data))
-            is_final = chunk_end >= len(audio_data)
-
-            # 构建消息
-            message = {
-                "task_id": task_id,
-                "seg_duration": Config.file_seg_duration,
-                "seg_overlap": Config.file_seg_overlap,
-                "is_final": is_final,
-                "time_start": time.time(),
-                "time_frame": time.time(),
-                "source": "file",
-                "data": base64.b64encode(audio_data[offset:chunk_end]).decode("utf-8"),
-            }
-
-            # 发送消息（长音频上传耗时较长，服务端可能因 keepalive 超时中途关闭连接）
-            try:
-                await self.websocket.send(json.dumps(message))
-            except websockets.ConnectionClosed as e:
-                close_info = self._record_close(e)
-                self.log(f"发送音频数据时连接被服务端关闭 ({close_info})", "error")
-                return None
-
-            # 更新进度（仅在关键里程碑时输出，降低日志噪音）
-            progress = min(chunk_end / 4 / 16000, audio_duration)
-            progress_percent = progress / audio_duration * 100
-
-            # 只在 20%, 40%, 60%, 80%, 100% 时输出
-            milestones = [20, 40, 60, 80, 100]
-            for milestone in milestones:
-                if milestone not in reported_milestones and progress_percent >= milestone:
-                    reported_milestones.add(milestone)
-                    self.log(
-                        f"发送进度: {progress:.2f}秒 / {audio_duration:.2f}秒 ({progress_percent:.1f}%)"
-                    )
-                    break
-
-            if is_final:
-                break
-
-            offset = chunk_end
-
-        self.log("音频数据发送完成")
-        return task_id
-
-    async def _receive_results(self) -> Optional[Dict[str, Any]]:
-        """接收服务器返回的转录结果"""
-        if not self.websocket:
-            self.log("WebSocket连接已关闭", "error")
-            return None
-
-        self.log("等待转录结果...")
-
-        try:
-            async for message in self.websocket:
-                try:
-                    result = json.loads(message)
-
-                    # 显示进度（DEBUG 级别，避免日志噪音）
-                    if "duration" in result:
-                        self.log(f"转录进度: {result['duration']:.2f}秒", "debug")
-
-                    # 检查是否为最终结果
-                    if result.get("is_final", False):
-                        self.log("转录完成！")
-                        process_time = result["time_complete"] - result["time_start"]
-                        rtf = process_time / result["duration"]
-                        self.log(f"处理耗时: {process_time:.2f}秒, RTF: {rtf:.3f}")
-                        return result
-                except json.JSONDecodeError:
-                    self.log("接收到非JSON数据，已忽略", "warning")
-                    continue
-        except websockets.ConnectionClosed as e:
-            close_info = self._record_close(e)
-            self.log(f"WebSocket连接已关闭 ({close_info})", "error")
-        except Exception as e:
-            self.log(f"接收结果时出错: {e}", "error")
-
-        return None
 
     async def _save_results(
         self, file_path: Path, result: Dict[str, Any]
@@ -821,9 +626,9 @@ class CapsWriterClient:
 
         return generated_files
 
-    async def transcribe_file_async(self, file_path: str) -> Tuple[bool, List[Path]]:
+    def transcribe_file(self, file_path: str) -> Tuple[bool, List[Path]]:
         """
-        异步转录文件
+        同步转录文件（官方 SDK 负责传输，按错误契约重试）
 
         参数:
             file_path: 要转录的文件路径
@@ -832,94 +637,59 @@ class CapsWriterClient:
             tuple: (bool成功状态, list生成的文件)
         """
         file_path = Path(file_path)
-        self.last_close_code = None
-        self.last_close_reason = None
-
-        try:
-            # 1. 检查文件
-            if not await self._check_file(file_path):
-                return False, []
-
-            # 2. 提取音频
-            audio_data, audio_duration = await self._extract_audio(file_path)
-            if not audio_data:
-                return False, []
-
-            # 3. 发送音频
-            task_id = await self._send_audio_data(file_path, audio_data, audio_duration)
-            if not task_id:
-                return False, []
-
-            # 4. 接收结果
-            result = await self._receive_results()
-            if not result:
-                return False, []
-
-            # 5. 保存结果
-            generated_files = await self._save_results(file_path, result)
-
-            # 6. 清理
-            await self._close_websocket()
-
-            return True, generated_files
-
-        except Exception as e:
-            self.log(f"转录过程中出错: {e}", "error")
-            await self._close_websocket()
-            return False, []
-
-    def transcribe_file(self, file_path: str) -> Tuple[bool, List[Path]]:
-        """
-        同步转录文件（带重试逻辑）
-
-        参数:
-            file_path: 要转录的文件路径
-
-        返回:
-            tuple: (bool成功状态, list生成的文件)
-        """
         attempts = 0
         last_error = None
+        last_error_code = None
+        should_retry = True
 
-        while attempts < self.max_retries:
+        while attempts < self.max_retries and should_retry:
             attempts += 1
             try:
                 self.log(
                     f"开始转录文件: {file_path} (尝试 {attempts}/{self.max_retries})"
                 )
-                success, generated_files = asyncio.run(
-                    self.transcribe_file_async(file_path)
+                server_url = f"ws://{Config.server_addr}:{Config.server_port}"
+                transcript = transcribe_file_sync(
+                    file_path,
+                    server_url,
+                    encoding="flac",
+                    seg_duration=Config.file_seg_duration,
+                    seg_overlap=Config.file_seg_overlap,
                 )
 
-                if success and generated_files:
+                result = dict(transcript.raw)
+                result.update(
+                    {
+                        "text": transcript.text,
+                        "tokens": transcript.tokens,
+                        "timestamps": transcript.timestamps,
+                        "duration": transcript.duration,
+                    }
+                )
+                generated_files = asyncio.run(self._save_results(file_path, result))
+
+                if generated_files:
                     self.log(f"转录完成，生成文件: {[str(f) for f in generated_files]}")
                     return True, generated_files
-                else:
-                    last_error = "未生成任何文件或转录失败"
+                last_error = "未生成任何文件或转录失败"
+                should_retry = False
 
-            except Exception as e:
-                last_error = str(e)
-                self.log(f"转录尝试 {attempts} 失败: {last_error}", "warning")
+            except AsrError as exc:
+                last_error = exc.message
+                last_error_code = exc.code
+                should_retry = exc.retryable is True
+            except Exception as exc:
+                last_error = str(exc)
+                should_retry = False
 
-            # 服务端以 1011 (internal error) 主动断连通常是 keepalive 超时等
-            # 确定性问题：重试会以同样方式失败，还让服务端白白重新转录一遍，
-            # 直接中止并提示排查服务端配置
-            if self.last_close_code == 1011:
-                last_error = (
-                    f"服务端主动关闭连接 (close code 1011"
-                    f"{': ' + self.last_close_reason if self.last_close_reason else ''})，"
-                    "重试无意义已提前中止，请检查 CapsWriter 服务端 keepalive 配置"
-                )
-                self.log(last_error, "error")
-                break
-
-            # 如果不是最后一次尝试，等待后重试
-            if attempts < self.max_retries:
+            if should_retry and attempts < self.max_retries:
                 self.log(f"等待 {self.retry_delay} 秒后重试...")
                 time.sleep(self.retry_delay)
 
-        # 达到最大重试次数仍然失败
-        error_msg = f"转录文件失败: {file_path}, 原因: {last_error}"
+        error_msg = f"转录文件失败: {file_path}"
+        if last_error_code is not None:
+            error_msg += f", code={last_error_code}"
+        error_msg += f", 原因: {last_error}"
         self.log(error_msg, "error")
         return False, []
 

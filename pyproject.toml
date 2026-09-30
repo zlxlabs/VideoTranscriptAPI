@@ -5,6 +5,7 @@ description = "基于Python的视频转录API服务，支持从多个平台下�
 requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.9.0",
+    "capswriter-asr",
     "commentjson>=0.9.0",
     "fastapi>=0.115.0",
     "ffmpeg-python>=0.2.0",
@@ -81,4 +82,5 @@ exclude_lines = [
 ]
 
 [tool.uv.sources]
+capswriter-asr = { git = "https://github.com/zlxlabs/CapsWriter-ASR-Server.git", rev = "55dff89cfc0eebb914be00e01d84b2cd2d3eb3c0", subdirectory = "sdk" }
 llm-compat = { git = "https://github.com/zlxlabs/llm-compat.git", tag = "v0.10.0" }
