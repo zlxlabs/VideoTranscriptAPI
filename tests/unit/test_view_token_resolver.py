@@ -53,6 +53,19 @@ def _make_success_task(cm, media_id="vid1"):
     return task
 
 
+def _content_view_task_info(task):
+    """Build the task_info shape `_assemble_content_view` reads directly.
+
+    `create_task` only echoes task_id/view_token; the public path normally
+    supplies the full DB row. Direct calls need created_at spelled out.
+    """
+    return {
+        "task_id": task["task_id"],
+        "view_token": task["view_token"],
+        "created_at": "2026-09-21 12:00:00",
+    }
+
+
 def _make_failed_task(cm, media_id, error_message, *, save_transcript=None):
     """Create a failed task, optionally with a CapsWriter cache body."""
     if save_transcript is not None:
@@ -446,6 +459,49 @@ class TestViewTokenResolver:
 
         assert view_data["status"] == "failed"
         assert view_data["message"] == reason
+
+    def test_success_funasr_dict_renders_segments_as_text(self, cm, resolver):
+        """Red E: success + FunASR dict body -> segment text, never dict repr."""
+        task = _make_success_task(cm, "vid-success-dict")
+
+        payload = resolver._assemble_content_view(
+            _content_view_task_info(task),
+            {
+                "title": "Speaker Recognition Video",
+                "file_path": str(cm.cache_dir),
+                "use_speaker_recognition": True,
+                "transcript_data": {
+                    "task_id": "t1",
+                    "segments": [
+                        {"start_time": 0.0, "end_time": 1.0, "text": "第一段"},
+                        {"start_time": 1.0, "end_time": 2.0, "text": "第二段"},
+                    ],
+                },
+            },
+            "https://example.com/watch?v=vid-success-dict",
+            status="success",
+        )
+
+        assert "第一段" in payload["transcript"]
+        assert "第二段" in payload["transcript"]
+        assert "{'" not in payload["transcript"]
+        assert "segments" not in payload["transcript"]
+
+    def test_success_funasr_dict_without_text_shows_placeholder(self, cm, resolver):
+        """Red E: success + dict body with no usable text -> existing placeholder."""
+        task = _make_success_task(cm, "vid-success-empty-dict")
+
+        payload = resolver._assemble_content_view(
+            _content_view_task_info(task),
+            {
+                "file_path": str(cm.cache_dir),
+                "transcript_data": {"task_id": "t1", "segments": []},
+            },
+            "https://example.com/watch?v=vid-success-empty-dict",
+            status="success",
+        )
+
+        assert payload["transcript"] == "转录文本获取中..."
 
     def test_failed_task_without_cache_keeps_default_failed_page(self, cm, resolver):
         task = _make_failed_task(cm, "vid-no-cache", "download failed")
