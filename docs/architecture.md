@@ -54,7 +54,7 @@ FastAPI lifespan 为每个应用实例创建并绑定独立的 `RuntimeContext`�
 | **Apple Podcast** | ApplePodcastDownloader | 网页解析获取音频直链 |
 | **通用链接** | GenericDownloader | 直接流式下载、断点续传（SSRF 校验 + 重定向逐跳校验） |
 
-注：`downloaders.use_media_resolver=true` 时抖音/小红书同样改走 `MediaResolverDownloader`（指南见 docs/guides/media_resolver.md）。
+注：`downloaders.use_media_resolver=true` 时抖音/小红书同样改走 `MediaResolverDownloader`。解析服务是 [MediaResolverAPI](https://github.com/zlxlabs/MediaResolverAPI)，接入说明见 [docs/guides/media_resolver.md](guides/media_resolver.md)。
 
 **工厂模式实现**：
 
@@ -77,12 +77,14 @@ def create_downloader(url):
 
 ## 双引擎转录
 
-### CapsWriter-Offline（通用转录）
+### CapsWriter ASR（通用转录，协议 v2）
 
-- WebSocket 实时流式传输
-- 音频分段处理：25s 片段 + 2s 重叠
-- 自动格式转换（MP3/WAV/M4A 等）
-- 默认端口：6006
+普通转录走 [CapsWriter ASR Server](https://github.com/zlxlabs/CapsWriter-ASR-Server) 的**协议 v2**，经官方 Python SDK 上传。不再使用本仓手写的 v1 帧。字段、编码和错误码以 [协议文档](https://github.com/zlxlabs/CapsWriter-ASR-Server/blob/master/docs/reference/protocol.md) 为准。
+
+- 协议版本：v2。健康检查须报告 `protocol_version >= 2`；SDK 不会回退到 v1
+- 默认上传编码：flac
+- 切段：沿用配置中的片段时长与重叠（代码默认 25 秒片段、2 秒重叠）
+- 默认端口：6016
 
 ### FunASR（说话人识别）
 

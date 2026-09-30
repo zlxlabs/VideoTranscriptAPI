@@ -15,7 +15,7 @@
 ## 核心特性
 
 - **多平台支持**：YouTube、Bilibili、抖音、小红书、微信视频号与 X(Twitter)（经 MediaResolverAPI）、小宇宙播客、Apple Podcast，工厂模式自动匹配下载器
-- **双引擎转录**：CapsWriter-Offline（通用转录）+ FunASR（说话人识别）
+- **双引擎转录**：[CapsWriter ASR Server](https://github.com/zlxlabs/CapsWriter-ASR-Server) 协议 v2（通用转录）+ FunASR（说话人识别）
 - **智能文本处理**：LLM 自动校对 ASR 错误、专有名词纠错、按说话人采样+置信度降级的说话人推断、内容总结
 - **处理深度可控**：`processing_options` 开关按任务控制是否校对/总结，分层缓存产物只增不减，重复请求自动复用已有层
 - **诚实状态模型**：校对（full/partial/none/disabled）与总结（generated/skipped_short/failed/pending/disabled）状态全链路透传，不再用占位字符串掩盖失败
@@ -26,9 +26,9 @@
 
 - [Tikhub API key，用于音视频解析下载。有 aff](https://user.tikhub.io/register?referral_code=YArXsaWi)
 - [funasr_spk_server：funasr server 对应暴露 api，支持音视频转写，分角色，自动合并相同人物的话。](https://github.com/zj1123581321/funasr_spk_server)
-- [CapsWriter-Offline：CapsWriter 的离线版，一个好用的 PC 端的语音输入工具，支持热词、LLM处理。](https://github.com/HaujetZhao/CapsWriter-Offline)
+- [CapsWriter ASR Server：局域网语音识别服务。本项目通过官方 SDK 使用协议 v2，不再使用手写 v1 帧。字段与错误码以协议文档为准。](https://github.com/zlxlabs/CapsWriter-ASR-Server/blob/master/docs/reference/protocol.md)
 - [youtube_download_api：YouTube 视频下载服务，作为 yt-dlp 的可选替代后端。](https://github.com/zj1123581321/youtube_download_api)（可选）
-- MediaResolverAPI：短视频/视频号 URL → 无水印直链 + 元数据的集中解析服务，接管抖音/小红书/微信视频号/X(Twitter) 解析（见[使用指南](docs/guides/media_resolver.md)，X 自动选最低码率 variants 档提速）。
+- [MediaResolverAPI](https://github.com/zlxlabs/MediaResolverAPI)：短视频/视频号 URL → 无水印直链 + 元数据的集中解析服务，接管抖音/小红书/微信视频号/X(Twitter) 解析（见[使用指南](docs/guides/media_resolver.md)，X 自动选最低码率 variants 档提速）。
 - OpenAI 兼容的 API，比如 Deepseek，量大管饱。
 
 ---
@@ -39,7 +39,7 @@
 
 - Python 3.11+
 - FFmpeg
-- 转录服务器（CapsWriter / FunASR 二选一或同时部署）
+- 转录服务器（[CapsWriter ASR Server 协议 v2](https://github.com/zlxlabs/CapsWriter-ASR-Server) / FunASR 二选一或同时部署）
 
 ### 本地安装
 
@@ -94,7 +94,7 @@ docker compose up -d --build
 
 本仓库只提供部署能力；脚本不会自行 SSH 或自动上线。服务器首次运行会从 `docker/docker-compose.deploy.yml` 生成根目录 `docker-compose.yml`，配置文件位于 `<deploy-dir>/config/config.jsonc`，成功使用的 digest 记录在 `<deploy-dir>/.deploy-image`。同一项目目录的部署由 `.deploy.lock` 串行化；所有 Compose 操作固定使用部署根目录作为 project directory，并与候选预检加载同一份根目录 `.env`。重启前还会确认现有 Compose 文件确实把服务渲染为候选 digest。旧 Compose 不兼容时会先备份为 `docker-compose.yml.pre-digest.bak`，再迁移到仓库模板；候选失败回滚时会恢复原 Compose，并叠加仅覆盖镜像的配置把旧版本固定到记录的 digest。首次切换硬化脚本时，旧容器即使由 tag 启动也会先按原仓库解析为可回滚 digest；若旧镜像还没有 Docker `HEALTHCHECK`，回滚验证会改用容器内 `/livez` 探测。候选镜像启动失败、健康检查失败、启动后脚本被中断或成功 digest 状态文件无法原子提交时，脚本都会恢复旧 digest 并确认旧版本重新健康后才退出。
 
-> **注意**：CapsWriter / FunASR 需单独部署，配置中的服务地址不能用 `localhost`，需改为宿主机 IP 或 `host.docker.internal`。
+> **注意**：CapsWriter ASR Server（协议 v2）与 FunASR 需单独部署，配置中的服务地址不能用 `localhost`，需改为宿主机 IP 或 `host.docker.internal`。协议说明见 [CapsWriter ASR 协议 v2](https://github.com/zlxlabs/CapsWriter-ASR-Server/blob/master/docs/reference/protocol.md)。
 
 ---
 

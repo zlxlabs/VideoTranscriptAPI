@@ -4,7 +4,7 @@
 
 ## 这是什么
 
-[MediaResolverAPI](https://github.com/) 是一个独立的「短视频 URL → 无水印直链 + 元数据」解析服务，
+[MediaResolverAPI](https://github.com/zlxlabs/MediaResolverAPI) 是一个独立的「短视频 URL → 无水印直链 + 元数据」解析服务，
 内置 TikHub 多端点降级 + Cobalt 兜底。本项目可选地把**抖音 / 小红书 / 微信视频号 / X(Twitter) 的解析**外包给它，从而：
 
 - 把易碎的 TikHub 解析逻辑集中到专用服务，本仓库退化为「下载 + 转录 + LLM」；

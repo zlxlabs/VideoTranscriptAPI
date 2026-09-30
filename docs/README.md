@@ -49,6 +49,10 @@ docs/
   - 输出格式（JSON/SRT）
   - 客户端使用示例
 
+- [CapsWriter ASR 协议 v2](https://github.com/zlxlabs/CapsWriter-ASR-Server/blob/master/docs/reference/protocol.md)
+  - 本项目普通转录使用的协议版本；官方 SDK 不回退到 v1
+  - 服务仓库：[CapsWriter-ASR-Server](https://github.com/zlxlabs/CapsWriter-ASR-Server)
+
 - [YouTube 下载 API](guides/api/youtube_client_guide.md)
   - YouTube 下载器配置
   - 参数说明
