@@ -30,11 +30,13 @@
     },
 
     // ============================================================
-    // CapsWriter-Offline 转录服务配置
-    // 通用语音转录引擎，速度快、资源消耗低
+    // CapsWriter ASR Server（协议 v2）
+    // https://github.com/zlxlabs/CapsWriter-ASR-Server
+    // 协议：https://github.com/zlxlabs/CapsWriter-ASR-Server/blob/master/docs/reference/protocol.md
+    // 本服务经官方 SDK 连接，不使用 v1 手写帧
     // ============================================================
     "capswriter": {
-        "server_url": "ws://localhost:6016",  // WebSocket 服务地址
+        "server_url": "ws://localhost:6016",  // WebSocket 服务地址（须为协议 v2）
         "max_retries": 5,                // 连接最大重试次数
         "retry_delay": 3,                // 重试间隔（秒）
         "connection_timeout": 10         // 连接超时时间（秒）
@@ -466,6 +468,7 @@
 
     // ============================================================
     // MediaResolverAPI 配置（短视频 URL -> 无水印直链 + 元数据）
+    // https://github.com/zlxlabs/MediaResolverAPI
     // 仅在 downloaders.use_media_resolver=true 时生效
     // ============================================================
     "media_resolver": {
