@@ -720,3 +720,79 @@ def test_matching_lengths_report_no_mismatch(tmp_path, monkeypatch):
     quality = payload["timeline_quality"]
     assert quality["input_mismatch"] is None
     assert quality["degraded"] is False
+
+
+# ---------------------------------------------------------------------------
+# #111 第二轮：空输入 / None 输入不得崩，且文本永不丢失
+# ---------------------------------------------------------------------------
+
+# 主脑探针的 5 个输入 + 3 个 None 元素/非字符串元素变体
+EMPTY_INPUT_CASES = [
+    ("全空", "", [], []),
+    ("空text有tok", "", ["a"], [1.0]),
+    ("有text空tok", "Hello.", [], []),
+    ("text有tok但ts空", "Hello.", ["a"], []),
+    ("timestamps为None", "Hello.", ["a"], None),
+    ("timestamps含None元素", "Hello world.", [" Hello", " world", " ."], [0.0, None, 1.0]),
+    ("tokens含None元素", "Hello world.", [" Hello", None, " world", " ."], [0.0, 0.5, 1.0, 1.5]),
+    ("tokens含非字符串", "Hello world.", [" Hello", 5, " world", " ."], [0.0, 0.5, 1.0, 1.5]),
+    ("tokens非序列", "Hello world.", "not a list", [0.0, 1.0]),
+]
+
+
+@pytest.mark.parametrize(
+    "label,text,tokens,timestamps", EMPTY_INPUT_CASES, ids=[case[0] for case in EMPTY_INPUT_CASES]
+)
+def test_degenerate_inputs_never_crash_and_never_drop_text(
+    label, text, tokens, timestamps
+):
+    # 不抛异常本身就是断言：修复前 "" + 非空 tokens 抛 ValueError、
+    # timestamps=None 抛 TypeError: object of type 'NoneType' has no len()
+    segments = _create_segments_from_capswriter(
+        text=text, tokens=tokens, timestamps=timestamps
+    )
+
+    assert isinstance(segments, list)
+    assert "".join(seg["text"] for seg in segments) == text, (
+        f"{label}: 文本永不丢失（不可用的时间输入不能换来空结果）"
+    )
+    if not text:
+        assert segments == [], f"{label}: 空文本没有可产出的分段"
+    # 时间轴整体不可用的输入（tokens/timestamps 非序列、为空、含非法元素）
+    # 必须诚实降级为 None；仅含 None 元素的 timestamps 仍能给出有效时间，
+    # 那种情形由 test_none_timestamps_element_keeps_surrounding_times 单独锁死。
+    if label in {"timestamps为None", "tokens含None元素", "tokens含非字符串", "tokens非序列"}:
+        for seg in segments:
+            assert seg["start_time"] is None and seg["end_time"] is None, (
+                f"{label}: 时间轴不可用时必须诚实降级为 None"
+            )
+
+
+def test_timestamps_none_is_blocked_before_any_len_call():
+    """显式 is None/isinstance 判定必须挡在 len() 之前（不靠 truthiness）。"""
+    segments = _create_segments_from_capswriter(
+        text="Hello there.", tokens=[" Hello", " there", " ."], timestamps=None
+    )
+    assert [seg["text"] for seg in segments] == ["Hello there."]
+    assert segments[0]["start_time"] is None
+
+
+def test_none_timestamps_element_keeps_surrounding_times():
+    """timestamps 含 None 元素：其它有效时间照常使用，无效位置降级为 None。"""
+    text = " Hello world."
+    segments = _create_segments_from_capswriter(
+        text=text,
+        tokens=[" Hello", " world", " ."],
+        timestamps=[0.0, None, 2.0],
+    )
+    assert "".join(seg["text"] for seg in segments) == text
+    assert segments[0]["start_time"] == pytest.approx(0.0)
+    assert segments[0]["end_time"] == pytest.approx(2.0)
+
+
+def test_token_timeline_still_rejects_empty_text():
+    """内部对象的不变式保留：为迁就调用方放宽断言是被禁止的。"""
+    from video_transcript_api.transcriber.token_timeline import TokenTimeline
+
+    with pytest.raises(ValueError):
+        TokenTimeline.align("", ["a"], [1.0])

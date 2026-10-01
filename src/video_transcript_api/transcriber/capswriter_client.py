@@ -313,6 +313,56 @@ def _timeline_coverage(
     return last_end / parsed_duration
 
 
+def _safe_len(value: Any) -> int:
+    """取长度，不可取（非序列 / None）时返回 -1——用于日志，绝不抛异常。"""
+    try:
+        return len(value)
+    except TypeError:
+        return -1
+
+
+def _is_token_sequence(value: Any) -> bool:
+    """tokens 是否为非空字符串序列（None / 空 / 非序列 / 含非字符串元素均为 False）。"""
+    if not isinstance(value, (list, tuple)) or not value:
+        return False
+    return all(isinstance(token, str) for token in value)
+
+
+def _is_timestamp_sequence(value: Any) -> bool:
+    """timestamps 是否为非空数值序列；``None`` **元素**是合法降级输入（时间取 None）。"""
+    if not isinstance(value, (list, tuple)) or not value:
+        return False
+    return all(
+        item is None
+        or (isinstance(item, (int, float)) and not isinstance(item, bool))
+        for item in value
+    )
+
+
+def _segments_without_timeline(
+    text: str, min_len: int, max_len: int
+) -> List[Dict[str, Any]]:
+    """tokens/timestamps 不可用时的诚实降级：按分句区间产出分段，时间全为 None。
+
+    文本守恒优先于时间轴：返回空列表等于把可读文本一起丢掉。
+    """
+    segments: List[Dict[str, Any]] = []
+    for span in _split_text_by_punctuation(text):
+        sentence = text[span.start:span.end]
+        if not sentence:
+            continue
+        segments.append(
+            {
+                "start_time": None,
+                "end_time": None,
+                "text": sentence,
+                "span": span,
+                "length": len(sentence),
+            }
+        )
+    return _optimize_segment_lengths(segments, min_len, max_len, text)
+
+
 def _create_segments_from_capswriter(
     text: str,
     tokens: List[str],
@@ -335,6 +385,23 @@ def _create_segments_from_capswriter(
     Returns:
         segments 列表
     """
+    # 入口守卫：必须先于任何 len() / TokenTimeline 构造（#111 第二轮 crash）
+    if not isinstance(text, str) or not text:
+        logger.error(
+            f"text 无效（需为非空字符串），无法创建 segments: type={type(text).__name__}"
+        )
+        return []
+
+    if not _is_token_sequence(tokens) or not _is_timestamp_sequence(timestamps):
+        # 文本永不丢失：tokens/timestamps 不可用时仍按区间产出分段，时间诚实降级为 None
+        logger.warning(
+            f"capswriter timeline unusable_tokens_or_timestamps: "
+            f"tokens_type={type(tokens).__name__} tokens_len={_safe_len(tokens)} "
+            f"timestamps_type={type(timestamps).__name__} "
+            f"timestamps_len={_safe_len(timestamps)}"
+        )
+        return _segments_without_timeline(text, min_len, max_len)
+
     logger.debug(
         f"开始创建 segments: text={len(text)}, tokens={len(tokens)}, timestamps={len(timestamps)}"
     )
@@ -349,10 +416,6 @@ def _create_segments_from_capswriter(
         )
         tokens = tokens[: mismatch["truncated_to"]]
         timestamps = timestamps[: mismatch["truncated_to"]]
-
-    if not tokens or not timestamps:
-        logger.error("tokens 或 timestamps 为空，无法创建 segments")
-        return []
 
     # 时间轴：唯一知道 tokens 与规范投影的对象，坐标系不出这一层
     if timeline is None:
