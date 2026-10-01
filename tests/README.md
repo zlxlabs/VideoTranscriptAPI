@@ -64,6 +64,11 @@ VTAPI_TESTS_MANUAL=1 uv run pytest tests/manual/test_wechat_real.py --collect-on
 `VTAPI_TESTS_MANUAL=1` 执行手动测试。请勿将会发送 webhook 的测试作为常规
 验收命令运行。
 
+该开关只认 `1`：写成 `true` / `yes` / `TRUE` 等其它拼写一律不生效（手动测试
+会发真实 webhook、用真实凭据，危险操作的开关应当保守）。它只控制
+`tests/manual/` 下用例的收集与否，不影响其余测试，也不影响默认测试套件的
+占位配置预热——预热由 `config.jsonc` 是否缺失决定。
+
 ## pytest markers
 
 项目已注册以下 marker：

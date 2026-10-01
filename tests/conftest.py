@@ -31,12 +31,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src
 # `from .logger import ...` 会复用这个已经"预热"过缓存的模块对象，
 # load_config() 命中缓存分支，不再触碰磁盘上的 config.jsonc。
 #
-# 重要：默认测试套件永远注入占位配置，不再检查磁盘上是否存在真实
-# config.jsonc。原先"本机已有真实配置就跳过预热"的分支已删除——那样会让
-# 默认套件的行为随开发机是否有真实配置而漂移（覆盖不同代码分支、结果不可
-# 复现），且真实凭据路径下个别测试打印的 API key 前缀等信息存在通过
-# `pytest -s` 或失败日志泄露的风险。真正需要读取真实配置的场景，只保留给
-# `tests/manual/` 下显式手动运行的测试（见下方 _tests_manual_env_enabled）。
+# 重要：注入与否只看磁盘上是否存在 config.jsonc（见下方调用点），
+# 与 VTAPI_TESTS_MANUAL 无关。真正需要读取真实配置的场景，只保留给
+# `tests/manual/` 下显式手动运行的测试（见 tests/manual/conftest.py）。
 #
 # 注意：部分测试文件用 `from src.video_transcript_api...` 而不是
 # `from video_transcript_api...` 导入（两种写法在 sys.path 上都能解析到，
@@ -93,17 +90,42 @@ def _seed_config_cache_for_missing_config_jsonc() -> None:
 # 做什么，让其显式设置 `VTAPI_TESTS_MANUAL=1`（已在下方各手动测试文件的
 # 运行示例中体现）即可，不存在任何猜测和边角案例——命令行里出现多少次
 # "tests/manual" 字样、以什么形式出现，都不影响判断结果。
+#
+# 该开关只认 "1"（见 _tests_manual_env_enabled），且只控制 tests/manual 的
+# 收集与否，绝不影响占位配置预热——预热由 config.jsonc 是否缺失决定。
 # ---------------------------------------------------------------------------
 def _tests_manual_env_enabled() -> bool:
-    """判断环境变量 VTAPI_TESTS_MANUAL 是否被显式设置为真值。
+    """VTAPI_TESTS_MANUAL 开关的唯一判定定义（tests/manual/conftest.py 复用）。
 
-    宽容大小写和常见写法（"1"/"true"/"True"/"yes"），未设置或设置为其他
-    值一律视为假，走默认套件的占位配置预热路径。
+    只认 "1"。手动测试会发真实企业微信 webhook、连真实网络、用真实凭据，
+    危险操作的开关应当保守：只认最明确的那一种拼写，true/yes 一律不生效。
     """
-    return os.environ.get("VTAPI_TESTS_MANUAL", "").strip() in ("1", "true", "True", "yes")
+    return os.environ.get("VTAPI_TESTS_MANUAL", "").strip() == "1"
 
 
-if not _tests_manual_env_enabled():
+def _config_jsonc_path() -> str:
+    """返回仓库内 config.jsonc 的路径。"""
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "config",
+        "config.jsonc",
+    )
+
+
+def _config_jsonc_missing() -> bool:
+    """config.jsonc 是否缺失（被 .gitignore 排除，全新 checkout / CI 上常态）。"""
+    return not os.path.exists(_config_jsonc_path())
+
+
+# 触发条件与函数名对齐：预热只在 config.jsonc 缺失时发生。
+#
+# 原先这里写的是 `if not _tests_manual_env_enabled()`，让一个与该函数毫无
+# 关系的环境变量决定是否预热。后果是设成 VTAPI_TESTS_MANUAL=true 会被判为
+# "手动模式开启"从而跳过预热，手动测试一个没跑，反而把主门禁弄红——
+# 一个开关的失败后果应该是"少跑一些"，不该是"主门禁红"。
+# 现在开关只控制 tests/manual 的收集（见 tests/manual/conftest.py），
+# 不再影响配置预热：一个开关只做一件事。
+if _config_jsonc_missing():
     _seed_config_cache_for_missing_config_jsonc()
 
 from video_transcript_api.utils.notifications import (
