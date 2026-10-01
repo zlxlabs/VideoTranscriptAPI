@@ -44,6 +44,9 @@ def test_sdk_transport_passes_config_and_writes_transcript_sidecars(
         raw={"task_id": "task-1", "time_start": 10.0, "time_complete": 12.5},
     )
     with patch(
+        "video_transcript_api.transcriber.capswriter_client.resolve_transcription_source",
+        return_value=media_path,
+    ), patch(
         "video_transcript_api.transcriber.capswriter_client.transcribe_file_sync",
         return_value=transcript,
     ) as sdk_call:

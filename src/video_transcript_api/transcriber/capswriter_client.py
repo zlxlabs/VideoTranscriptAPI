@@ -14,6 +14,7 @@ import time
 import asyncio
 import re
 import argparse
+import tempfile
 from pathlib import Path
 from typing import Tuple, List, Optional, Dict, Any
 
@@ -24,6 +25,7 @@ from loguru import logger
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ..utils.logging import load_config
 # 时间解析唯一权威：禁止在本模块另起一套 isfinite/parse 逻辑
+from .media_preflight import resolve_transcription_source
 from .segments import interpolate_segment_times, parse_time_to_seconds
 
 
@@ -628,7 +630,7 @@ class CapsWriterClient:
 
     def transcribe_file(self, file_path: str) -> Tuple[bool, List[Path]]:
         """
-        同步转录文件（官方 SDK 负责传输，按错误契约重试）
+        同步转录文件（转录前体检，官方 SDK 负责传输，按错误契约重试）
 
         参数:
             file_path: 要转录的文件路径
@@ -637,61 +639,71 @@ class CapsWriterClient:
             tuple: (bool成功状态, list生成的文件)
         """
         file_path = Path(file_path)
+        source_path = resolve_transcription_source(file_path, Path(tempfile.gettempdir()))
+        if source_path != file_path:
+            self.log(
+                f"Media preflight normalized source: {file_path} -> {source_path}"
+            )
+
         attempts = 0
         last_error = None
         last_error_code = None
         should_retry = True
 
-        while attempts < self.max_retries and should_retry:
-            attempts += 1
-            try:
-                self.log(
-                    f"开始转录文件: {file_path} (尝试 {attempts}/{self.max_retries})"
-                )
-                server_url = f"ws://{Config.server_addr}:{Config.server_port}"
-                transcript = transcribe_file_sync(
-                    file_path,
-                    server_url,
-                    encoding="flac",
-                    seg_duration=Config.file_seg_duration,
-                    seg_overlap=Config.file_seg_overlap,
-                )
+        try:
+            while attempts < self.max_retries and should_retry:
+                attempts += 1
+                try:
+                    self.log(
+                        f"开始转录文件: {file_path} (尝试 {attempts}/{self.max_retries})"
+                    )
+                    server_url = f"ws://{Config.server_addr}:{Config.server_port}"
+                    transcript = transcribe_file_sync(
+                        source_path,
+                        server_url,
+                        encoding="flac",
+                        seg_duration=Config.file_seg_duration,
+                        seg_overlap=Config.file_seg_overlap,
+                    )
 
-                result = dict(transcript.raw)
-                result.update(
-                    {
-                        "text": transcript.text,
-                        "tokens": transcript.tokens,
-                        "timestamps": transcript.timestamps,
-                        "duration": transcript.duration,
-                    }
-                )
-                generated_files = asyncio.run(self._save_results(file_path, result))
+                    result = dict(transcript.raw)
+                    result.update(
+                        {
+                            "text": transcript.text,
+                            "tokens": transcript.tokens,
+                            "timestamps": transcript.timestamps,
+                            "duration": transcript.duration,
+                        }
+                    )
+                    generated_files = asyncio.run(self._save_results(file_path, result))
 
-                if generated_files:
-                    self.log(f"转录完成，生成文件: {[str(f) for f in generated_files]}")
-                    return True, generated_files
-                last_error = "未生成任何文件或转录失败"
-                should_retry = False
+                    if generated_files:
+                        self.log(f"转录完成，生成文件: {[str(f) for f in generated_files]}")
+                        return True, generated_files
+                    last_error = "未生成任何文件或转录失败"
+                    should_retry = False
 
-            except AsrError as exc:
-                last_error = exc.message
-                last_error_code = exc.code
-                should_retry = exc.retryable is True
-            except Exception as exc:
-                last_error = str(exc)
-                should_retry = False
+                except AsrError as exc:
+                    last_error = exc.message
+                    last_error_code = exc.code
+                    should_retry = exc.retryable is True
+                except Exception as exc:
+                    last_error = str(exc)
+                    should_retry = False
 
-            if should_retry and attempts < self.max_retries:
-                self.log(f"等待 {self.retry_delay} 秒后重试...")
-                time.sleep(self.retry_delay)
+                if should_retry and attempts < self.max_retries:
+                    self.log(f"等待 {self.retry_delay} 秒后重试...")
+                    time.sleep(self.retry_delay)
 
-        error_msg = f"转录文件失败: {file_path}"
-        if last_error_code is not None:
-            error_msg += f", code={last_error_code}"
-        error_msg += f", 原因: {last_error}"
-        self.log(error_msg, "error")
-        return False, []
+            error_msg = f"转录文件失败: {file_path}"
+            if last_error_code is not None:
+                error_msg += f", code={last_error_code}"
+            error_msg += f", 原因: {last_error}"
+            self.log(error_msg, "error")
+            return False, []
+        finally:
+            if source_path != file_path:
+                source_path.unlink(missing_ok=True)
 
 
 def main():

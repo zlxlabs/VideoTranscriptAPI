@@ -40,6 +40,9 @@ def test_retryable_asr_error_reaches_max_retries():
     error = AsrError("overloaded", "try again", retryable=True)
 
     with patch(
+        "video_transcript_api.transcriber.capswriter_client.resolve_transcription_source",
+        return_value=Path("audio.mp4"),
+    ), patch(
         "video_transcript_api.transcriber.capswriter_client.transcribe_file_sync",
         side_effect=error,
     ) as sdk_call, patch(
@@ -57,6 +60,9 @@ def test_non_retryable_asr_error_calls_sdk_once_and_logs_code():
     error = AsrError("bad_request", "invalid request", retryable=False)
 
     with patch(
+        "video_transcript_api.transcriber.capswriter_client.resolve_transcription_source",
+        return_value=Path("audio.mp4"),
+    ), patch(
         "video_transcript_api.transcriber.capswriter_client.transcribe_file_sync",
         side_effect=error,
     ) as sdk_call, patch(
@@ -81,6 +87,9 @@ def test_non_asr_error_calls_sdk_once():
     client = _make_client(max_retries=5, retry_delay=7)
 
     with patch(
+        "video_transcript_api.transcriber.capswriter_client.resolve_transcription_source",
+        return_value=Path("audio.mp4"),
+    ), patch(
         "video_transcript_api.transcriber.capswriter_client.transcribe_file_sync",
         side_effect=RuntimeError("unexpected failure"),
     ) as sdk_call, patch(
@@ -98,6 +107,9 @@ def test_success_returns_immediately_after_saving_results():
     client._save_results = AsyncMock(return_value=[Path("result.txt")])
 
     with patch(
+        "video_transcript_api.transcriber.capswriter_client.resolve_transcription_source",
+        return_value=Path("audio.mp4"),
+    ), patch(
         "video_transcript_api.transcriber.capswriter_client.transcribe_file_sync",
         return_value=_successful_transcript(),
     ) as sdk_call, patch(
@@ -115,6 +127,9 @@ def test_missing_output_is_deterministic_failure_without_retry():
     client._save_results = AsyncMock(return_value=[])
 
     with patch(
+        "video_transcript_api.transcriber.capswriter_client.resolve_transcription_source",
+        return_value=Path("audio.mp4"),
+    ), patch(
         "video_transcript_api.transcriber.capswriter_client.transcribe_file_sync",
         return_value=_successful_transcript(),
     ) as sdk_call, patch(
