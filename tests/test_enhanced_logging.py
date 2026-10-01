@@ -78,13 +78,21 @@ def _run_enhanced_logging_cases():
     print('-' * 80)
 
     try:
+        # 正文一律由 tokens 原样拼接，text 仅为兼容旧调用方保留：空 text
+        # 不得丢弃合法的 token 流（上游契约保证 text_accu == join(tokens)）。
         segments = _create_segments_from_capswriter(
             text="",
             tokens=tokens,
             timestamps=timestamps,
         )
         print(f'\nResult: {len(segments)} segments generated')
-        assert segments == [], "空文本应返回空 segments"
+        assert segments, "空 text 但 tokens 非空时应按 tokens 产出"
+        assert "".join(s["text"] for s in segments) == "".join(tokens)
+
+        # tokens 本身为空才是真的无内容
+        assert _create_segments_from_capswriter(
+            text="", tokens=[], timestamps=[]
+        ) == [], "tokens 为空时应返回空 segments"
     except Exception as e:
         raise AssertionError(f"空文本不应抛异常: {e}") from e
 

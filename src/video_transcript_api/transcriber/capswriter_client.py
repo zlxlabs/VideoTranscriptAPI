@@ -13,7 +13,9 @@ import hashlib
 import math
 import time
 import asyncio
+import itertools
 import json as _json
+import os
 import re
 import argparse
 from pathlib import Path
@@ -168,13 +170,20 @@ def _validate_capswriter_contract(
     return "".join(tokens), list(tokens), list(timestamps)
 
 
+_TEMP_COUNTER = itertools.count()
+
+
 def _write_temp(target: Path, content: str) -> Path:
     """Write content to ``<target>.tmp`` and return that path.
 
     写临时文件再 rename 是为了让「本次产物」与「目录里已有产物」在失败时
     互不干扰：失败只需删掉自己的 .tmp（#121）。
     """
-    temporary = target.with_name(target.name + ".tmp")
+    # output_dir 是共享工作区（get_workspace_dir），同一 media_id 被并发处理时
+    # 两个任务会写同名 .tmp。带唯一后缀避免互相覆盖。
+    temporary = target.with_name(
+        f"{target.name}.tmp-{os.getpid()}-{next(_TEMP_COUNTER)}"
+    )
     try:
         with open(temporary, "w", encoding="utf-8") as handle:
             handle.write(content)
@@ -232,7 +241,17 @@ def _split_oversized_segments(
             piece_end = offset + len(piece)
             start_token_idx = _find_token_idx(token_prefixes, offset)
             end_token_idx = _find_token_idx(token_prefixes, max(offset, piece_end - 1))
+            start_time = _finite_time_or_none(timestamps[start_token_idx])
             end_time = _finite_time_or_none(timestamps[end_token_idx])
+            if (
+                start_time is not None
+                and end_time is not None
+                and end_time <= start_time
+            ):
+                # 段内 token 时间全部相同（契约允许重复时间戳）时无法给出
+                # 有意义的时长；宁可标为不可用，也不要交付零时长段伪装成
+                # 有时间覆盖——那会让下游拿到错误的时间轴。
+                end_time = None
             if end_time is None and piece_index == last_index:
                 # 末块无有效 token 时间时回退到音频时长（与整段切分口径一致）
                 end_time = _finite_time_or_none(duration)
@@ -373,9 +392,7 @@ def _create_segments_from_capswriter(
     Returns:
         segments 列表
     """
-    if not text:
-        return []
-    del text
+    del text  # 正文一律由 tokens 原样拼接，text 参数仅为兼容旧调用方保留
     if not tokens or not timestamps:
         logger.error("tokens 或 timestamps 为空，无法创建 segments")
         return []
@@ -601,9 +618,6 @@ class CapsWriterClient:
                 generated_files.append(json_file)
                 self.log(f"已生成详细信息文件: {json_file}")
 
-            # 就位阶段：先把已存在的目标挪到 .bak，再逐个 rename。
-            # 若中途失败则回滚，避免留下「新的 txt + 旧的侧车」这种混合版本
-            # 产物——调用方收到失败状态，但目录里的产物已被换掉一半。
             # 逐个就位。刻意不做跨文件回滚：备份+回滚在备份阶段中途失败时
             # 会把未备份的上一次成功产物删掉（真实数据丢失），风险大于收益。
             # 单文件原子性已由 tmp+rename 保证；失败时已就位的是新版本、

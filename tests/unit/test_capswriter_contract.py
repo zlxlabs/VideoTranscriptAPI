@@ -1,4 +1,5 @@
 import asyncio
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -258,7 +259,7 @@ def test_commit_stage_failure_never_deletes_existing_artifacts(tmp_path, monkeyp
     calls = {"n": 0}
 
     def flaky_replace(self, target):
-        if self.name.endswith(".tmp"):
+        if ".tmp-" in self.name:
             calls["n"] += 1
             if calls["n"] >= 2:
                 raise OSError("rename failed")
@@ -271,7 +272,7 @@ def test_commit_stage_failure_never_deletes_existing_artifacts(tmp_path, monkeyp
 
     after = {p.name: p.read_text() for p in tmp_path.iterdir()}
     assert set(before) <= set(after), f"已存在产物被删除: {set(before) - set(after)}"
-    assert not [k for k in after if k.endswith((".tmp", ".bak"))], sorted(after)
+    assert not [k for k in after if ".tmp-" in k or k.endswith(".bak")], sorted(after)
 
 
 def test_half_written_temp_file_is_cleaned_immediately(tmp_path, monkeypatch):
@@ -283,7 +284,7 @@ def test_half_written_temp_file_is_cleaned_immediately(tmp_path, monkeypatch):
 
     def flaky_open(file, mode="r", *args, **kwargs):
         handle = real_open(file, mode, *args, **kwargs)
-        if str(file).endswith(".tmp") and "w" in mode:
+        if ".tmp-" in str(file) and "w" in mode:
             handle.write("半截")
             handle.flush()
             handle.close()
@@ -361,3 +362,46 @@ def test_segment_with_multiple_secondary_punct_is_further_split():
         s["length"] for s in segments
     )
     assert "".join(s["text"] for s in segments) == body
+
+
+def test_zero_duration_split_segments_degrade_to_none():
+    """段内 token 时间全相同时不得产出零时长段（会给出错误时间轴）。"""
+    from video_transcript_api.transcriber.capswriter_client import (
+        Config,
+        _create_segments_from_capswriter,
+    )
+
+    body = "hello " * 30 + ", " + "world " * 30
+    tokens = list(body)
+    timestamps = [1.0] * len(tokens)  # 契约允许重复时间戳
+
+    previous = Config.max_segment_length
+    try:
+        Config.max_segment_length = 50
+        segments = _create_segments_from_capswriter(
+            text=body, tokens=tokens, timestamps=timestamps
+        )
+    finally:
+        Config.max_segment_length = previous
+
+    for segment in segments:
+        if segment["start_time"] is not None and segment["end_time"] is not None:
+            assert segment["end_time"] > segment["start_time"], (
+                "零时长段会伪装成有时间覆盖"
+            )
+    assert "".join(s["text"] for s in segments) == body, "文本不得丢失"
+
+
+def test_temp_file_names_do_not_collide_between_concurrent_writes():
+    """共享工作区下同名目标的两次写入不得复用同一临时文件名。"""
+    from video_transcript_api.transcriber.capswriter_client import _write_temp
+
+    d = Path(tempfile.mkdtemp())
+    target = d / "shared.txt"
+    first = _write_temp(target, "one")
+    second = _write_temp(target, "two")
+    try:
+        assert first.name != second.name, "并发写同名目标会撞临时文件名"
+    finally:
+        first.unlink(missing_ok=True)
+        second.unlink(missing_ok=True)
