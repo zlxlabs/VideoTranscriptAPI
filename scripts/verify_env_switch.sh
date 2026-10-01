@@ -71,26 +71,19 @@ else
   report "(a) pytest tests with no config/config.jsonc" "$?"
 fi
 
-# (b) real config/config.jsonc (developer machine norm) -- source it from the
-# main checkout when available, since config.jsonc is gitignored per worktree.
-# MAIN_REPO may be given explicitly; otherwise it is discovered from git.
-MAIN_REPO="${MAIN_REPO:-}"
-if [ -z "$MAIN_REPO" ]; then
-  MAIN_REPO="$(git worktree list --porcelain 2>/dev/null |
-    awk '/^worktree /{print $2}' |
-    while read -r wt; do
-      if [ "$wt" != "$(pwd)" ] && [ -f "$wt/config/config.jsonc" ]; then
-        printf '%s\n' "$wt"; break
-      fi
-    done)"
-fi
-if [ -n "$MAIN_REPO" ] && [ -f "$MAIN_REPO/config/config.jsonc" ]; then
-  cp "$MAIN_REPO/config/config.jsonc" config/config.jsonc
-  uv run --frozen pytest tests -q --tb=short >/dev/null 2>&1
-  report "(b) pytest tests with a real config/config.jsonc" "$?"
-  rm -f config/config.jsonc
+# (b) a config/config.jsonc exists on disk (developer-machine norm). Built from
+# config.example.jsonc with a sentinel api_key -- no real credentials here. The
+# gate must ignore it and inject the placeholder anyway (9371d52d); a copy of the
+# example would be indistinguishable from the placeholder, the sentinel is not.
+CONFIG_PATH="config/config.jsonc"
+if [ -e "$CONFIG_PATH" ]; then
+  echo "SKIP  (b) $CONFIG_PATH already present; remove it to run this check"
 else
-  echo "SKIP  (b) no real config.jsonc available in another worktree (set MAIN_REPO)"
+  sed 's/your-tikhub-api-key-here/sentinel-on-disk-config-must-not-win/' \
+    config/config.example.jsonc > "$CONFIG_PATH"
+  uv run --frozen pytest tests -q --tb=short >/dev/null 2>&1
+  report "(b) pytest tests with a config/config.jsonc on disk" "$?"
+  rm -f "$CONFIG_PATH"
 fi
 
 echo

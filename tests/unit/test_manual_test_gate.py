@@ -9,6 +9,7 @@ assert real subprocess exit codes and real collection results.
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -123,33 +124,64 @@ def test_manual_file_is_collected_when_switch_is_one():
 
 
 @pytest.mark.parametrize("value", [None, "true", "yes", "1"], ids=lambda v: "unset" if v is None else v)
-def test_config_seeding_does_not_depend_on_the_switch(monkeypatch, value):
-    """Placeholder config resolves even with the switch explicitly unset.
+@pytest.mark.parametrize("config_present", [False, True], ids=["no-config", "config-present"])
+def test_config_seeding_does_not_depend_on_the_switch(monkeypatch, value, config_present):
+    """The placeholder config is injected in BOTH disk states, for every switch value.
+
+    Both halves of the promise are parameterised here on purpose. An earlier
+    version only ran the "config.jsonc missing" state while its docstring claimed
+    both, so the regression it was meant to lock (seeding skipped whenever a
+    config.jsonc exists) stayed green -- a promise wider than the coverage, the
+    very defect this card exists to remove.
+
+    What the probe asserts: the placeholder values win over anything on disk,
+    in both states. That is the promise of 9371d52d (default suite never reads
+    config.jsonc: no per-developer drift, no credential prefixes in logs) and it
+    is the only assertion with teeth for the "config-present" state: a copy of
+    config.example.jsonc is byte-identical to the injected placeholder, so it
+    cannot distinguish "seeded" from "read the file". The on-disk config is
+    therefore a sentinel file with a distinctive api_key -- no real credentials
+    ever enter test code, and any implementation that lets the file win fails
+    here.
 
     The probe has to live under tests/unit/ because that is the only way to make
     pytest load tests/conftest.py -- the very code under test here.
-
-    load_config() must return the placeholder values both when config.jsonc is
-    missing (seeding path, the situation issue #116 was reported in) and when
-    it exists as the placeholder copy that `make test` installs.
     """
     if value is None:
         monkeypatch.delenv("VTAPI_TESTS_MANUAL", raising=False)
+
+    live_config = PROJECT_ROOT / "config" / "config.jsonc"
+    example_config = PROJECT_ROOT / "config" / "config.example.jsonc"
+    sentinel_api_key = "sentinel-on-disk-config-must-not-win"
+    backup = None
+    if config_present:
+        if live_config.exists():
+            backup = live_config.with_suffix(".jsonc.bak")
+            shutil.move(live_config, backup)
+        live_config.write_text(
+            example_config.read_text(encoding="utf-8").replace(
+                "your-tikhub-api-key-here", sentinel_api_key
+            ),
+            encoding="utf-8",
+        )
 
     probe = PROJECT_ROOT / "tests" / "unit" / "_probe_config_seed_tmp.py"
     probe.write_text(
         "from video_transcript_api.utils.logging.logger import load_config\n"
         "\n"
-        "def test_config_resolves_to_placeholder():\n"
-        "    config = load_config()\n"
-        "    assert config['tikhub']['api_key'] == 'your-tikhub-api-key-here', \\\n"
-        "        'neither the seeded placeholder nor config.jsonc provided a config'\n",
+        "def test_placeholder_config_was_injected():\n"
+        "    api_key = load_config()['tikhub']['api_key']\n"
+        "    assert api_key == 'your-tikhub-api-key-here', \\\n"
+        "        'on-disk config.jsonc won over the injected placeholder: ' + str(api_key)\n",
         encoding="utf-8",
     )
     try:
         result = _run_pytest(value, "tests/unit/_probe_config_seed_tmp.py")
     finally:
         probe.unlink()
+        live_config.unlink(missing_ok=True)
+        if backup is not None:
+            shutil.move(backup, live_config)
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "1 passed" in result.stdout
