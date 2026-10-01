@@ -23,7 +23,7 @@ import pytest
 from video_transcript_api.transcriber.capswriter_client import (
     CapsWriterClient,
     Config,
-    _remove_punctuation,
+    _validate_capswriter_contract,
 )
 
 
@@ -47,39 +47,39 @@ def compat_config(monkeypatch):
 
 
 def _build_result_payload():
-    """A result whose first sentence has valid times and whose (overlong)
-    second sentence carries NaN / Inf / missing (None) timestamps.
+    """A contract-valid payload whose first sentence keeps finite times and
+    whose (overlong) second sentence ends on a missing (None) timestamp.
 
-    tokens are one character each so the token-position mapping reconstructs
-    exactly text-without-punctuation (alignment check passes silently).
+    The second sentence's first token carries a finite start so the first
+    sentence keeps both ends; its last token is None, so every segment split
+    out of it degrades honestly to None. An Inf in the middle of the sentence
+    proves the emitted JSON stays strict no matter what the raw stream holds.
     """
     s1 = "前面的句子时间有效。"
     s2 = "这是一个超长句子，" + "填" * 340 + "，用来触发切分逻辑。"
     text = s1 + s2
 
-    text_clean = _remove_punctuation(text)
-    tokens = list(text_clean)
+    # One character per token, punctuation included: the body is "".join(tokens)
+    # and carries its own punctuation, so the primary-punctuation split runs on
+    # exactly this string.
+    tokens = list(text)
 
-    s1_clean_len = len(_remove_punctuation(s1))
-    timestamps = []
-    for i in range(len(tokens)):
-        if i < s1_clean_len:
-            timestamps.append(round(i * 0.1, 2))
-        else:
-            timestamps.append(float("nan"))
-    # Sprinkle Inf and missing (None) into the long-sentence range.
-    timestamps[s1_clean_len] = float("inf")
+    s2_start = len(s1)
+    timestamps = [round(i * 0.05, 2) for i in range(len(tokens))]
+    timestamps[s2_start] = 5.0
     timestamps[-1] = None
+    timestamps[s2_start + 5] = float("inf")
 
     result = {
         "task_id": "task-bad-times",
-        "text": text,
+        "text_accu": text,
         "tokens": tokens,
         "timestamps": timestamps,
         "duration": 12.0,
         "time_complete": 3.0,
         "time_start": 1.0,
     }
+    _validate_capswriter_contract(result)
     return result, text
 
 

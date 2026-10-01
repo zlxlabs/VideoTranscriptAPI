@@ -154,14 +154,12 @@ class Transcriber:
 
                     # 处理 FunASR 兼容格式的 JSON 文件
                     elif file_path_str.endswith("_funasr.json"):
-                        try:
-                            import json
-
-                            with open(file_path_str, "r", encoding="utf-8") as f:
-                                result["funasr_json_data"] = json.load(f)
-                            logger.info(f"已读取 FunASR 兼容格式 JSON: {file_path_str}")
-                        except Exception as e:
-                            logger.warning(f"读取 FunASR JSON 失败: {str(e)}")
+                        # 侧车是本次转读的必需产物：读取失败必须同样失败。
+                        # 这里若降级为 warning，缓存会收到
+                        # funasr_json_data=None 并照常处理，时间轴产物静默丢失。
+                        with open(file_path_str, "r", encoding="utf-8") as f:
+                            result["funasr_json_data"] = json.load(f)
+                        logger.info(f"已读取 FunASR 兼容格式 JSON: {file_path_str}")
 
                 # 确保找到了txt文件
                 if not result["txt_path"]:

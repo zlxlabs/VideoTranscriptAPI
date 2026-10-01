@@ -7,7 +7,7 @@ Test enhanced logging for FunASR conversion
 原实现依赖 tests/output/capswriter_format_test/ 下由另一个已不存在的脚本
 （tests/test_capswriter_formats.py）生成的中间产物，在干净检出里恒定缺失，
 于是函数走 return False 分支被 pytest 静默判绿。这里改成自带一份合成的
-CapsWriter 数据（token 逐字、去标点，与 _remove_punctuation 对齐），
+CapsWriter 数据（逐字 token，正文 = "".join(tokens) = text_accu），
 让四条边界路径真正被执行和断言。
 """
 
@@ -19,18 +19,16 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
 from video_transcript_api.transcriber.capswriter_client import (
-    _create_segments_from_capswriter
+    _create_segments_from_capswriter,
+    _validate_capswriter_contract,
 )
 from loguru import logger
-
-_PUNCT = "，。！？、；：,;:!? "
 
 
 def _synthetic_capswriter_data():
     """造一份最小的 CapsWriter 形态数据：(text, tokens, timestamps)。
 
-    token 按「去掉标点后的每个字一个 token」构造，使 reconstructed 与
-    text_clean 对齐（否则函数只会打一条对齐警告，测不到真实分段行为）。
+    token 逐字（标点也在正文里），使 "".join(tokens) == text_accu。
     """
     sentences = [
         "今天我们聊一聊语音转写这件事",
@@ -38,7 +36,7 @@ def _synthetic_capswriter_data():
         "最后总结一下要点",
     ]
     text = "。".join(sentences)
-    chars = [c for c in text if c not in _PUNCT]
+    chars = list(text)
     timestamps = [round(i * 0.2, 2) for i in range(len(chars))]
     return text, chars, timestamps
 
@@ -60,7 +58,6 @@ def _run_enhanced_logging_cases():
     print('-' * 80)
 
     segments = _create_segments_from_capswriter(
-        text=text,
         tokens=tokens,
         timestamps=timestamps,
         min_len=2,
@@ -76,41 +73,10 @@ def _run_enhanced_logging_cases():
             f"segment 时间为 None: {seg}"
         assert seg['end_time'] > seg['start_time'], f"segment 结束时间不晚于开始: {seg}"
 
-    print('\n[TEST 2] Empty text - should fail gracefully')
-    print('-' * 80)
-
-    try:
-        segments = _create_segments_from_capswriter(
-            text="",
-            tokens=tokens,
-            timestamps=timestamps,
-            min_len=80,
-            max_len=300
-        )
-        print(f'\nResult: {len(segments)} segments generated')
-        assert segments == [], "空文本应返回空 segments"
-    except Exception as e:
-        raise AssertionError(f"空文本不应抛异常: {e}") from e
-
-    print('\n[TEST 3] Length mismatch - should handle gracefully')
+    print('\n[TEST 2] Empty tokens - should fail gracefully')
     print('-' * 80)
 
     segments = _create_segments_from_capswriter(
-        text=text,
-        tokens=tokens[:max(1, len(tokens) // 2)],  # 故意不匹配
-        timestamps=timestamps,
-        min_len=2,
-        max_len=30
-    )
-
-    print(f'\nResult: {len(segments)} segments generated')
-    assert segments, "长度不匹配时截断后仍应产出 segment"
-
-    print('\n[TEST 4] Empty tokens - should fail gracefully')
-    print('-' * 80)
-
-    segments = _create_segments_from_capswriter(
-        text=text,
         tokens=[],
         timestamps=[],
         min_len=80,
@@ -119,6 +85,34 @@ def _run_enhanced_logging_cases():
 
     print(f'\nResult: {len(segments)} segments generated')
     assert segments == [], "空 tokens 应返回空 segments"
+
+    print('\n[TEST 3] Length mismatch - must be rejected by the contract')
+    print('-' * 80)
+
+    try:
+        _validate_capswriter_contract({
+            'text_accu': text,
+            'tokens': tokens[:max(1, len(tokens) // 2)],  # 故意不匹配
+            'timestamps': timestamps,
+        })
+        raise AssertionError("长度不匹配必须被契约拒绝")
+    except Exception as e:
+        if 'condition=tokens_timestamps_length_mismatch' not in str(e):
+            raise AssertionError(f"契约拒绝原因不可 grep: {e}") from e
+
+    print('\n[TEST 4] Token join mismatch - must be rejected by the contract')
+    print('-' * 80)
+
+    try:
+        _validate_capswriter_contract({
+            'text_accu': text.replace('。', ''),
+            'tokens': tokens,
+            'timestamps': timestamps,
+        })
+        raise AssertionError("join 与 text_accu 不一致必须被契约拒绝")
+    except Exception as e:
+        if 'condition=tokens_join_text_accu_mismatch' not in str(e):
+            raise AssertionError(f"契约拒绝原因不可 grep: {e}") from e
 
     print('\n' + '=' * 80)
     print('LOGGING TEST COMPLETED')
