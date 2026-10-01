@@ -201,9 +201,13 @@ def _split_text_by_punctuation(text: str) -> List[Tuple[str, int]]:
 
 
 def _optimize_segment_lengths(
-    segments: List[Dict[str, Any]], min_len: int, max_len: int, text: str = ""
+    segments: List[Dict[str, Any]], min_len: int, max_len: int, text: str
 ) -> List[Dict[str, Any]]:
-    """优化段落长度：合并短句、分割长句"""
+    """优化段落长度：合并短句、分割长句。
+
+    ``text`` 是必填的原文：合并时按区间并集从原文重新切片。给它默认值会
+    让漏传变成「从空串切片」→ 正文静默丢失（比 TypeError 危险得多）。
+    """
     if not segments:
         return []
 
@@ -376,20 +380,33 @@ def _create_segments_from_capswriter(
     sentences = _split_text_by_punctuation(body)
     logger.debug(f"按标点分句: {len(sentences)} 个句子")
 
+    def _first_speech_token(char_pos: int) -> int:
+        """正文下标 -> 该处第一��非空白 token 的下标。
+
+        服务端把空格也作为 token 返回，而空格的时间戳继承邻近词：直接取用
+        空白 token 会让句首时间偏早。
+        """
+        position = _find_token_idx(token_positions, char_pos)
+        while position < len(tokens) - 1 and not tokens[position].strip():
+            position += 1
+        return position
+
+    # 先定出每句的起始 token，段尾一律取「下一句的起始时间」——
+    # 这样相邻段之间不可能出现无依据的时间间隙（两边独立查表会漏掉
+    # 「start 跳过空白 token 而 end 没跳」这种不对称）。
+    starts = [_first_speech_token(offset) for _sentence, offset, _end in sentences]
+
     segments = []
     for idx, (sentence, char_offset, char_end) in enumerate(sentences):
-        # 该句首 token：正文下标 -> token 下标。句首可能是空白 token
-        # （服务端把空格也作为 token 返回），而空格的时间戳继承邻近词，
-        # 直接用它会让句首时间偏早；因此向后找第一个非空白 token。
-        start_token_idx = _find_token_idx(token_positions, char_offset)
-        while start_token_idx < len(tokens) - 1 and not tokens[start_token_idx].strip():
-            start_token_idx += 1
+        start_token_idx = starts[idx]
 
         if idx + 1 < len(sentences):
-            end_token_idx = _find_token_idx(token_positions, sentences[idx + 1][1])
+            end_token_idx = starts[idx + 1]
         else:
-            # 末句没有「下一句首」，回退到全文最后一个 token 的时间戳
+            # 末句没有「下一句首」，回退到全文最后一个非空白 token 的时间戳
             end_token_idx = len(timestamps) - 1
+            while end_token_idx > 0 and not str(tokens[end_token_idx]).strip():
+                end_token_idx -= 1
 
         # 安全范围检查
         start_token_idx = max(0, min(start_token_idx, len(timestamps) - 1))

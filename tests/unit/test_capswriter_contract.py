@@ -455,3 +455,57 @@ def test_sentence_start_skips_blank_token_time(tmp_path):
     )
     for segment in segments:
         assert segment["start_time"] is not None
+
+
+def test_adjacent_segments_have_no_time_gap_with_blank_tokens(tmp_path):
+    """相邻 segment 之间不得出现无依据的时间间隙。
+
+    两边独立查表时，「start 跳过空白 token 而 end 没跳」会留下一个 token 的
+    间隙。段尾一律取「下一句的起始时间」即可结构性避免。
+    """
+    client = _make_client(tmp_path)
+    s1 = "This is a long sentence that clearly exceeds the minimum length requirement here."
+    s2 = "Another quite long sentence right here so it will not get merged with the first."
+    tokens = [" "] + list(s1) + ["。", " "] + list(s2) + ["。"]
+    text_accu = "".join(tokens)
+    timestamps = [round(1.0 + i * 0.31, 2) for i in range(len(tokens))]
+
+    generated = asyncio.run(
+        client._save_results(
+            tmp_path / "audio.webm",
+            {
+                "task_id": "gap",
+                "text": text_accu,
+                "text_accu": text_accu,
+                "tokens": tokens,
+                "timestamps": timestamps,
+                "duration": timestamps[-1] + 1.0,
+                "time_start": 1.0,
+                "time_complete": 2.0,
+            },
+        )
+    )
+
+    sidecar = next(p for p in generated if "funasr" in p.name)
+    segments = json.loads(sidecar.read_text(encoding="utf-8"))["segments"]
+    assert len(segments) >= 2, "样本应至少切成两段"
+    assert "".join(s["text"] for s in segments) == text_accu
+    for earlier, later in zip(segments, segments[1:]):
+        if earlier["end_time"] is not None and later["start_time"] is not None:
+            assert abs(later["start_time"] - earlier["end_time"]) < 1e-6, (
+                f"段间出现时间间隙: {earlier['end_time']} -> {later['start_time']}"
+            )
+
+
+def test_optimize_segment_lengths_requires_text_parameter():
+    """text 必填：给它默认值会让漏传变成「从空串切片」→ 正文静默丢失。"""
+    import inspect
+
+    from video_transcript_api.transcriber.capswriter_client import (
+        _optimize_segment_lengths,
+    )
+
+    signature = inspect.signature(_optimize_segment_lengths)
+    assert signature.parameters["text"].default is inspect.Parameter.empty, (
+        "text 必须是无默认值的必填参数"
+    )
