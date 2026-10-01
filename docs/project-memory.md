@@ -116,3 +116,8 @@
 未做（另卡）：存量 501 份缓存不重算；不落盘原始 tokens；不推服务端协议改造。
 
 相关：[[feedback-codex-implementer]]
+
+补充（#111 修复轮，2026-10-01）：**文本永不丢失**必须一路守到分句器——纯标点/纯空白
+区间不能丢（全标点输入曾整段消失、尾部空白曾被吃掉）；canonical 为空的 span 保留文本、
+时间降级为 None。tokens 与 timestamps 不等长**不静默**：记 `input_mismatch` + 强制
+degraded（独立于 coverage/aligned_ratio 阈值），日志 `capswriter timeline input_mismatch:`。
