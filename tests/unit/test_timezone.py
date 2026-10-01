@@ -2,11 +2,15 @@
 """
 测试时区转换功能
 """
-import os
 import sys
 from datetime import datetime, timezone, timedelta
 
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+# 注意：本文件曾用 os.chdir(tests/unit) 来"定位项目目录"，但被测代码
+# （timezone_helper.get_configured_timezone -> load_config）只从 __file__ 推导
+# 配置路径、与 cwd 无关，那次 chdir 纯属副作用：它把进程级 cwd 永久改成
+# tests/unit，导致此后所有测试里解析相对路径（如 ./data/logs/debug）的代码把
+# 产物写进 tests/unit/。已删除；tests/conftest.py 的 _guard_cwd 守卫负责
+# 拦下任何新的 cwd 泄漏。
 
 
 def test_timezone_functionality():
@@ -17,9 +21,6 @@ def test_timezone_functionality():
 def _run_timezone_cases():
     """实际断言时区解析/格式化/配置读取（__main__ 脚本入口需要 bool 算退出码）"""
     print("开始测试时区转换功能...")
-
-    project_root = os.path.dirname(os.path.abspath(__file__))
-    os.chdir(project_root)
 
     from video_transcript_api.utils.timeutil import (
         parse_timezone_offset,
@@ -100,41 +101,44 @@ def _run_timezone_cases():
     # 5. 测试不同时区配置
     print("\n步骤5: 测试不同时区配置...")
 
-    import importlib
     import video_transcript_api.utils.timeutil.timezone_helper as timezone_helper_module
 
     test_time = "2025-08-20 12:00:00"
-    for tz in ["UTC+0", "UTC-5", "UTC+9", "UTC+05:30"]:
-        # 直接改配置，再 reload 模块让 timezone_helper 读到新值
-        original_config = timezone_helper_module.load_config()
-        original_tz = original_config["web"]["timezone"]
-        original_config["web"]["timezone"] = tz
+    # load_config() 返回进程内同一份缓存 dict，而被测的 get_configured_timezone()
+    # 每次调用都现读 config["web"]["timezone"]，模块里没有时区状态需要重算，
+    # 因此原地改 dict 就够了——importlib.reload 已删除：reload 只会重建一个新的
+    # 模块对象（且会与 timeutil 包里已导入的旧函数分裂成两个模块身份），
+    # 对本用例的断言没有任何作用。
+    original_config = timezone_helper_module.load_config()
+    original_tz = original_config["web"]["timezone"]
+    try:
+        for tz in ["UTC+0", "UTC-5", "UTC+9", "UTC+05:30"]:
+            original_config["web"]["timezone"] = tz
 
-        importlib.reload(timezone_helper_module)
+            from video_transcript_api.utils.timeutil import (
+                get_configured_timezone as get_configured_timezone_tz,
+                format_datetime_for_display as format_display_tz,
+            )
 
-        from video_transcript_api.utils.timeutil import (
-            get_configured_timezone as get_configured_timezone_reloaded,
-            format_datetime_for_display as format_display_reloaded,
-        )
+            offset_hours = get_configured_timezone_tz().utcoffset(
+                datetime.now()
+            ).total_seconds() / 3600
+            assert offset_hours == tz_to_hours(tz), \
+                f"{tz} 生效偏移 {offset_hours}h，期望 {tz_to_hours(tz)}h"
 
-        offset_hours = get_configured_timezone_reloaded().utcoffset(
-            datetime.now()
-        ).total_seconds() / 3600
-        assert offset_hours == tz_to_hours(tz), \
-            f"{tz} 生效偏移 {offset_hours}h，期望 {tz_to_hours(tz)}h"
-
-        display_time = format_display_reloaded(test_time)
-        expected_display_time = (
-            datetime(2025, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
-            .astimezone(get_configured_timezone_reloaded())
-            .strftime("%Y年%m月%d日 %H:%M")
-        )
-        assert display_time.startswith(expected_display_time), \
-            f"{tz}: {display_time} 期望以 {expected_display_time} 开头"
-        print(f"  [OK] {tz}: {test_time} UTC -> {display_time}")
-
-    # 恢复原始配置
-    timezone_helper_module.load_config()["web"]["timezone"] = "UTC+8"
+            display_time = format_display_tz(test_time)
+            expected_display_time = (
+                datetime(2025, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+                .astimezone(get_configured_timezone_tz())
+                .strftime("%Y年%m月%d日 %H:%M")
+            )
+            assert display_time.startswith(expected_display_time), \
+                f"{tz}: {display_time} 期望以 {expected_display_time} 开头"
+            print(f"  [OK] {tz}: {test_time} UTC -> {display_time}")
+    finally:
+        # 恢复原值（不是硬编码 "UTC+8"，那会覆盖掉本机/占位配置里的真实取值），
+        # 且放进 finally 以保证断言失败或异常时同样恢复。
+        original_config["web"]["timezone"] = original_tz
 
     print("\n[SUCCESS] 时区转换功能测试完成！")
     print("功能总结:")

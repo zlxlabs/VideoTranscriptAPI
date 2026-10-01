@@ -113,6 +113,34 @@ from video_transcript_api.utils.notifications import (
 from video_transcript_api.llm.core import usage_context
 
 
+@pytest.fixture(autouse=True)
+def _guard_cwd(request):
+    """哨兵：禁止任何测试改变进程级 cwd。
+
+    为什么需要（issue #113 / #115）：`os.chdir()` 改的是进程全局状态，不随
+    测试结束回滚。历史上 tests/unit/test_timezone.py 里的 `os.chdir(tests/unit)`
+    就把整个 pytest 进程的工作目录永久改了，导致此后所有按相对路径解析数据
+    目录的代码（例如 ./data/logs/debug）把产物写进 tests/unit/ —— 全量门禁
+    每次运行都在 tests/ 下凭空产出新文件。
+
+    这里做两件事，缺一不可：
+      1. 报警：cwd 变了就让该测试失败，报错里写明是哪个测试、改成了什么。
+         只做清理的守卫会让下一个引入泄漏的人以为一切正常。
+      2. 清理：无论成败都把 cwd 还原，否则一次泄漏会污染其后所有测试，
+         让排查变得几乎不可能。
+    """
+    before = os.getcwd()
+    yield
+    after = os.getcwd()
+    if after != before:
+        os.chdir(before)
+        pytest.fail(
+            f"测试 {request.node.nodeid} 泄漏了进程级 cwd：{before!r} -> {after!r}。"
+            " 测试内不要调用 os.chdir()；确需切换请用 monkeypatch.chdir()，"
+            " 它会在测试结束后自动还原。"
+        )
+
+
 @pytest.fixture(scope="session", autouse=True)
 def setup_global_notifiers():
     """
