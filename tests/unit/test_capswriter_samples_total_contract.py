@@ -47,6 +47,7 @@ async def _count_decoded_samples(ffmpeg: str, media_path: Path) -> int:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
+    assert process.stdout is not None
     sample_bytes = 0
     while chunk := await process.stdout.read(1024 * 1024):
         sample_bytes += len(chunk)
@@ -114,7 +115,7 @@ async def test_sdk_final_frame_samples_total_matches_independent_decode(
             max_size=None,
             ping_interval=None,
         ) as server:
-            port = server.sockets[0].getsockname()[1]
+            port = next(iter(server.sockets)).getsockname()[1]
             await transcribe_file(
                 media_path,
                 f"ws://127.0.0.1:{port}",
