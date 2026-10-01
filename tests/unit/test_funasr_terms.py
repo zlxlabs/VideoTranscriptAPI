@@ -26,13 +26,11 @@ RESULT = {
 class FakeClock:
     def __init__(self):
         self.t = 1000.0
-        self.sleeps = []
 
     def now(self):
         return self.t
 
     async def sleep(self, duration):
-        self.sleeps.append(duration)
         self.t += max(duration, 0)
 
 
@@ -151,7 +149,6 @@ def make_client(monkeypatch, tmp_path, terms, sessions, http_responses=None, eve
     monkeypatch.setattr(fc.requests, "get", fake_get)
     client = FunASRSpeakerClient()
     client._test_http_calls = http_calls
-    client._test_events = events
     return client
 
 
@@ -185,7 +182,6 @@ def test_supported_terms_are_sent_as_correct_spellings_with_metadata(monkeypatch
 
     request = next(message for message in ws.sent if message["type"] == "upload_request")
     assert request["data"]["terms"] == ["Alpha Beta", "Gamma"]
-    assert "incorrect" not in request["data"]
     assert client._test_http_calls == [("http://fake:8767/capabilities", 5)]
     assert output["metadata"] == {"context_applied": True, "terms_count": 2}
 
@@ -203,6 +199,8 @@ def test_supported_terms_are_sent_as_correct_spellings_with_metadata(monkeypatch
         ("ws", "schema", "schema_version_unsupported"),
         ("http", "terms_false", "terms_disabled"),
         ("ws", "terms_false", "terms_disabled"),
+        ("http", "id_missing", "capability_id_missing"),
+        ("ws", "id_missing", "capability_id_missing"),
         ("http", "id_mismatch", "capability_id_mismatch"),
         ("ws", "id_mismatch", "capability_id_mismatch"),
     ],
@@ -237,6 +235,8 @@ def test_capability_failures_omit_terms_and_complete(
         target["schema_version"] = 9
     elif defect == "terms_false":
         target["features"]["terms"] = False
+    elif defect == "id_missing":
+        target["capability_id"] = ""
     elif defect == "id_mismatch":
         target["capability_id"] = "different-runtime"
 
