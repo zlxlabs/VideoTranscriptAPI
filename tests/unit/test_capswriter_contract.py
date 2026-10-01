@@ -552,3 +552,8 @@ def test_trailing_whitespace_segment_never_has_start_after_end(tmp_path):
                 f"start>end: {segment['start_time']} > {segment['end_time']} "
                 f"text={segment['text']!r}"
             )
+        if not segment["text"].strip():
+            # 纯空白段不对应任何语音，必须标为不可用而不是占住时间轴
+            assert segment["start_time"] is None and segment["end_time"] is None, (
+                f"纯空白段不应有时间戳: {segment['start_time']} -> {segment['end_time']}"
+            )

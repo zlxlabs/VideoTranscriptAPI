@@ -429,6 +429,13 @@ def _create_segments_from_capswriter(
         start_time = _finite_time_or_none(timestamps[start_token_idx])
         end_time = _finite_time_or_none(timestamps[end_token_idx])
 
+        # 纯空白片段不对应任何语音：给它时间戳会凭空占住一段时间轴
+        # （夹紧后表现为 start == end 的零时长段），下游会误以为该区间有内容。
+        # 按既有诚实降级口径标为不可用；文本本身仍然保留。
+        if not sentence.strip():
+            start_time = None
+            end_time = None
+
         segments.append(
             {
                 "start_time": round(start_time, 2) if start_time is not None else None,
