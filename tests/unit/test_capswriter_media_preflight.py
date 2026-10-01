@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,6 +13,12 @@ from video_transcript_api.transcriber.capswriter_client import CapsWriterClient
 from video_transcript_api.transcriber.media_preflight import (
     resolve_transcription_source,
 )
+
+
+PRODUCTION_FIXTURE_DIR = Path("/tmp/vta-preflight-fixtures")
+GL_MP4 = PRODUCTION_FIXTURE_DIR / "gl.mp4"
+BT_MP4 = PRODUCTION_FIXTURE_DIR / "bt.mp4"
+NORMAL_M4A = PRODUCTION_FIXTURE_DIR / "normal.m4a"
 
 
 def _completed(stdout: str = "", returncode: int = 0):
@@ -39,18 +46,6 @@ def _metadata(
     return json.dumps({"format": {"duration": str(duration)}, "streams": [stream]})
 
 
-def _packets(*entries: tuple[float, float]) -> str:
-    """Build the packet-tail ffprobe response."""
-    return json.dumps(
-        {
-            "packets": [
-                {"pts_time": str(pts), "duration_time": str(duration)}
-                for pts, duration in entries
-            ]
-        }
-    )
-
-
 def _make_client() -> CapsWriterClient:
     """Build a client without loading project configuration."""
     with patch.object(CapsWriterClient, "__init__", lambda self: None):
@@ -67,10 +62,7 @@ def test_consistent_container_uses_original_path_without_ffmpeg(tmp_path):
 
     with patch(
         "video_transcript_api.transcriber.media_preflight.subprocess.run",
-        side_effect=[
-            _completed(_metadata(10.0)),
-            _completed(_packets((9.980000, 0.020000))),
-        ],
+        return_value=_completed(_metadata(10.005333, nb_frames="469")),
     ) as run:
         resolved = resolve_transcription_source(media_path, tmp_path)
 
@@ -93,7 +85,6 @@ def test_mismatched_aac_is_normalized_to_16khz_mono_flac(tmp_path):
                     nb_frames="212853",
                 )
             ),
-            _completed(_packets((4540.840000, 0.024000))),
             _completed(),
         ]
     )
@@ -132,15 +123,30 @@ def test_small_duration_difference_does_not_normalize(tmp_path):
 
     with patch(
         "video_transcript_api.transcriber.media_preflight.subprocess.run",
-        side_effect=[
-            _completed(_metadata(10.0)),
-            _completed(_packets((10.200000, 0.000000))),
-        ],
+        return_value=_completed(_metadata(10.0, nb_frames="478")),
     ) as run:
         resolved = resolve_transcription_source(media_path, tmp_path)
 
     assert resolved == media_path
     assert all(call.args[0][0] == "ffprobe" for call in run.call_args_list)
+
+
+def test_missing_frame_count_uses_original_path(tmp_path):
+    media_path = tmp_path / "unknown.mp4"
+    media_path.write_bytes(b"fixture")
+
+    with patch(
+        "video_transcript_api.transcriber.media_preflight.subprocess.run",
+        return_value=_completed(_metadata(10.0, nb_frames="N/A")),
+    ) as run, patch(
+        "video_transcript_api.transcriber.media_preflight.logger.warning"
+    ) as warning:
+        resolved = resolve_transcription_source(media_path, tmp_path)
+
+    assert resolved == media_path
+    assert all(call.args[0][0] == "ffprobe" for call in run.call_args_list)
+    warning.assert_called_once()
+    assert "Media preflight sample count unavailable" in warning.call_args.args[0]
 
 
 def test_ffprobe_failure_is_fail_fast(tmp_path):
@@ -181,7 +187,6 @@ def test_ffmpeg_failure_removes_partial_flac(tmp_path):
                     nb_frames="212853",
                 )
             ),
-            _completed(_packets((4540.840000, 0.024000))),
             _completed(returncode=1),
         ]
     )
@@ -211,6 +216,18 @@ def test_preflight_failure_does_not_call_sdk(tmp_path):
             client.transcribe_file(str(media_path))
 
     sdk_call.assert_not_called()
+
+
+def test_preflight_error_includes_media_path(tmp_path):
+    media_path = tmp_path / "broken.mp4"
+    media_path.write_bytes(b"fixture")
+
+    with patch(
+        "video_transcript_api.transcriber.media_preflight.subprocess.run",
+        return_value=_completed(returncode=1),
+    ):
+        with pytest.raises(RuntimeError, match=str(media_path)):
+            resolve_transcription_source(media_path, tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -252,3 +269,63 @@ def test_normalized_source_is_removed_on_success_failure_and_exception(
                 assert (success, files) == (False, [])
 
     assert not normalized_path.exists()
+
+
+@pytest.mark.skipif(
+    not GL_MP4.exists() or not BT_MP4.exists(),
+    reason="production recorder fixtures not present at /tmp/vta-preflight-fixtures",
+)
+def test_production_recorder_files_are_normalized(tmp_path):
+    from video_transcript_api.transcriber.media_preflight import (
+        _probe_media_duration,
+    )
+
+    cases = (
+        (GL_MP4, 4356.138625, 4540.864),
+        (BT_MP4, 1220.437146, 1228.907),
+    )
+    for media_path, expected_declared, expected_audio in cases:
+        declared, estimated = _probe_media_duration(media_path)
+        assert estimated is not None
+        assert abs(declared - expected_declared) < 0.001
+        assert abs(estimated - expected_audio) < 0.001
+        assert abs(declared - estimated) > 1.0
+
+        real_run = subprocess.run
+
+        def fake_run(command, **kwargs):
+            if command[0] == "ffmpeg":
+                Path(command[-1]).write_bytes(b"FLAC")
+                return _completed()
+            return real_run(command, **kwargs)
+
+        with patch(
+            "video_transcript_api.transcriber.media_preflight.subprocess.run",
+            side_effect=fake_run,
+        ):
+            resolved = resolve_transcription_source(media_path, tmp_path)
+        try:
+            assert resolved != media_path
+            assert resolved.suffix == ".flac"
+            assert resolved.read_bytes() == b"FLAC"
+        finally:
+            if resolved != media_path:
+                resolved.unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(
+    not NORMAL_M4A.exists(),
+    reason="normal.m4a fixture not present at /tmp/vta-preflight-fixtures",
+)
+def test_normal_m4a_uses_original_path_without_ffmpeg():
+    with patch(
+        "video_transcript_api.transcriber.media_preflight.subprocess.run",
+        wraps=subprocess.run,
+    ) as run:
+        resolved = resolve_transcription_source(NORMAL_M4A, NORMAL_M4A.parent)
+
+    assert resolved == NORMAL_M4A
+    commands = [call.args[0] for call in run.call_args_list]
+    assert commands
+    assert all(command[0] == "ffprobe" for command in commands)
+    assert not any(command[0] == "ffmpeg" for command in commands)

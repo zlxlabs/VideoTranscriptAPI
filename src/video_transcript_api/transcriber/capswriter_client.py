@@ -639,18 +639,21 @@ class CapsWriterClient:
             tuple: (bool成功状态, list生成的文件)
         """
         file_path = Path(file_path)
-        source_path = resolve_transcription_source(file_path, Path(tempfile.gettempdir()))
-        if source_path != file_path:
-            self.log(
-                f"Media preflight normalized source: {file_path} -> {source_path}"
-            )
-
+        source_path = file_path
         attempts = 0
         last_error = None
         last_error_code = None
         should_retry = True
 
         try:
+            source_path = resolve_transcription_source(
+                file_path, Path(tempfile.gettempdir())
+            )
+            if source_path != file_path:
+                self.log(
+                    f"Media preflight normalized source: {file_path} -> {source_path}"
+                )
+
             while attempts < self.max_retries and should_retry:
                 attempts += 1
                 try:

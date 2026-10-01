@@ -31,4 +31,8 @@
 - 相关测试：卡面列出的 9 个测试文件共 `41 passed`。
 - 全量门禁：`make test` 退出码 0；pytest 进度核对为 `3379 passed, 0 skipped in 78.439s`。
 - 静态检查：相关 Python 文件 `compileall` 通过；新增源文件与测试文件 ASCII-only。
-- 预算：相对基线 `565 insertions(+), 50 deletions(-)`，低于 800 行硬上限，高于 400 行目标；超出来自新增体检单测与清理/失败分支覆盖。
+## 2026-10-01 21:56
+
+- 里程碑：R1 返工，废弃尾部包探测，改用 AAC `nb_frames * 1024 / sample_rate`。
+- 变更：测量不可得时走原路径并打 `Media preflight sample count unavailable` 日志；ffprobe 崩溃/JSON 不可解析仍 fail fast；`transcribe_file` 把体检纳入 try/finally，错误带媒体路径。
+- 验证：待跑单测与真实 fixture。
