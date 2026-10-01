@@ -10,7 +10,12 @@ View Token复用功能测试
 from video_transcript_api.cache import CacheManager
 
 def test_view_token_reuse():
-    """测试view_token复用功能"""
+    """测试view_token复用功能（pytest 入口）"""
+    assert _run_view_token_reuse_cases()
+
+
+def _run_view_token_reuse_cases():
+    """实际断言 view_token 复用行为（拆出来是为了 __main__ 脚本入口能拿 bool 算退出码）"""
     
     # 使用测试数据库
     cache_manager = CacheManager(db_path=":memory:")
@@ -45,17 +50,11 @@ def test_view_token_reuse():
     
     # 验证结果
     print("\n3. 验证结果...")
-    if first_task_id != second_task_id:
-        print("   [OK] 正确创建了不同的task_id")
-    else:
-        print("   [ERROR] 错误：两次请求返回了相同的task_id")
-        return False
-    
-    if first_view_token == second_view_token:
-        print("   [OK] 正确复用了相同的view_token")
-    else:
-        print("   [ERROR] 错误：两次请求返回了不同的view_token")
-        return False
+    assert first_task_id != second_task_id, "错误：两次请求返回了相同的task_id"
+    print("   [OK] 正确创建了不同的task_id")
+
+    assert first_view_token == second_view_token, "错误：两次请求返回了不同的view_token"
+    print("   [OK] 正确复用了相同的view_token")
     
     # 第三次请求（不同的说话人识别设置）：应该创建新的task_id和新的view_token
     print("\n4. 第三次请求相同URL但不同说话人识别设置...")
@@ -65,17 +64,11 @@ def test_view_token_reuse():
     print(f"   第三个任务ID: {third_task_id}")
     print(f"   第三个view_token: {third_view_token}")
     
-    if third_task_id != first_task_id and third_task_id != second_task_id:
-        print("   [OK] 不同设置正确创建了新的task_id")
-    else:
-        print("   [ERROR] 不同设置错误复用了task_id")
-        return False
-    
-    if third_view_token != first_view_token:
-        print("   [OK] 不同设置正确创建了新的view_token")
-    else:
-        print("   [ERROR] 不同设置错误复用了view_token")
-        return False
+    assert third_task_id not in (first_task_id, second_task_id), "不同设置错误复用了task_id"
+    print("   [OK] 不同设置正确创建了新的task_id")
+
+    assert third_view_token != first_view_token, "不同设置错误复用了view_token"
+    print("   [OK] 不同设置正确创建了新的view_token")
     
     # 模拟第三个任务也完成
     cache_manager.update_task_status(third_task_id, "success", 
@@ -92,22 +85,16 @@ def test_view_token_reuse():
     print(f"   第四个任务ID: {fourth_task_id}")
     print(f"   第四个view_token: {fourth_view_token}")
     
-    if fourth_task_id != third_task_id:
-        print("   [OK] 正确创建了新的task_id")
-    else:
-        print("   [ERROR] 错误复用了task_id")
-        return False
-    
-    if fourth_view_token == third_view_token:
-        print("   [OK] 正确复用了说话人识别设置的view_token")
-    else:
-        print("   [ERROR] 错误：未复用说话人识别设置的view_token")
-        return False
-    
+    assert fourth_task_id != third_task_id, "错误复用了task_id"
+    print("   [OK] 正确创建了新的task_id")
+
+    assert fourth_view_token == third_view_token, "错误：未复用说话人识别设置的view_token"
+    print("   [OK] 正确复用了说话人识别设置的view_token")
+
     print("\n=== 所有测试通过 ===")
     return True
 
 if __name__ == "__main__":
-    success = test_view_token_reuse()
+    success = _run_view_token_reuse_cases()
     if not success:
         sys.exit(1)

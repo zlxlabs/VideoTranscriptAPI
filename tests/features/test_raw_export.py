@@ -13,6 +13,11 @@ from src.video_transcript_api.api.routes.views import sanitize_filename, generat
 
 def test_sanitize_filename():
     """Test filename sanitization function"""
+    assert _run_sanitize_filename_cases()
+
+
+def _run_sanitize_filename_cases():
+    """实际断言文件名清洗行为（__main__ 脚本入口需要 bool 算退出码）"""
     print("Testing filename sanitization...")
 
     test_cases = [
@@ -51,6 +56,11 @@ def test_sanitize_filename():
 
 def test_generate_download_filename():
     """Test download filename generation function"""
+    assert _run_generate_download_filename_cases()
+
+
+def _run_generate_download_filename_cases():
+    """实际断言下载文件名生成行为（__main__ 脚本入口需要 bool 算退出码）"""
     print("Testing download filename generation...")
 
     test_cases = [
@@ -97,9 +107,12 @@ def test_generate_download_filename():
 
 def test_url_encoding():
     """Test URL encoding for Chinese filenames"""
-    print("Testing URL encoding...")
+    _run_url_encoding_cases()
 
-    from urllib.parse import quote
+
+def _run_url_encoding_cases():
+    """实际断言 URL 编码行为（__main__ 脚本入口需要 bool 算退出码）"""
+    from urllib.parse import quote, unquote
 
     test_cases = [
         "深度学习入门-校对文本-哔哩哔哩.txt",
@@ -111,6 +124,11 @@ def test_url_encoding():
         encoded = quote(filename)
         print(f"Original: {filename}")
         print(f"Encoded:  {encoded}")
+        # 编码结果必须只含 ASCII（可安全进 URL），且能无损还原
+        assert encoded.isascii(), f"编码结果含非 ASCII 字符: {encoded}"
+        assert unquote(encoded) == filename, f"编码不可逆: {encoded}"
+        # 空格必须被转义，空格原样出现会截断 URL
+        assert " " not in encoded, f"编码结果未转义空格: {encoded}"
         print()
 
     return True
@@ -148,9 +166,9 @@ if __name__ == "__main__":
     results = []
 
     # Run all tests
-    results.append(("Sanitize Filename", test_sanitize_filename()))
-    results.append(("Generate Download Filename", test_generate_download_filename()))
-    results.append(("URL Encoding", test_url_encoding()))
+    results.append(("Sanitize Filename", _run_sanitize_filename_cases()))
+    results.append(("Generate Download Filename", _run_generate_download_filename_cases()))
+    results.append(("URL Encoding", _run_url_encoding_cases()))
 
     # Summary
     print("=" * 60)
