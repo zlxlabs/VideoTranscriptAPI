@@ -205,7 +205,8 @@ docs/
 - [配置示例](../config/config.example.jsonc) - 配置文件模板
 
 ### 测试
-- [运行测试](../Makefile) - 本地门禁 `make test`（`tests/unit` 与 `tests/cache`）
+- [运行测试](../Makefile) - 本地/门禁入口 `make test`（执行 `pytest -q tests`，排除 `tests/manual`）。范围正本见 [测试说明](../tests/README.md)
+- [测试薄包装](../scripts/run_tests.py) - 已修复的 pytest 薄包装；推荐入口仍是 `make test`
 - [单元测试](../tests/unit/) - 单元测试目录
 - [集成测试](../tests/integration/) - 集成测试目录
 
