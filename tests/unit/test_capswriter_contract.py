@@ -151,3 +151,33 @@ def test_prefix_sum_uses_raw_tokens_and_repeated_times_without_zero_segments():
         else:
             assert segment["end_time"] == timestamps[-1]
         assert segment["start_time"] != segment["end_time"]
+
+
+def test_discards_partial_artifacts_when_writing_fails(tmp_path, monkeypatch):
+    """写盘中途失败必须清理本次已写出的产物，且不得报告成功。
+
+    全部产物已在内存构建完成，失败只发生在写盘阶段。若不清理，输出目录会留下
+    半组文件，调用方可能把它当成本次成功结果——与「侧车失败也算成功」同类（#121）。
+    """
+    import json as _json
+
+    client = _make_client(tmp_path)
+    result = _valid_result()
+    real_dump = _json.dump
+    calls = {"n": 0}
+
+    def flaky_dump(payload, fh, **kwargs):
+        # Config.generate_json=False，故 json.dump 只被 funasr 侧车调用一次；
+        # 此时 txt 已先行落盘，正好制造「半组文件」场景。
+        calls["n"] += 1
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        "video_transcript_api.transcriber.capswriter_client.json.dump", flaky_dump
+    )
+
+    with pytest.raises(OSError):
+        asyncio.run(client._save_results(tmp_path / "audio.webm", result))
+
+    leftovers = sorted(p.name for p in tmp_path.iterdir())
+    assert leftovers == [], f"写盘失败后残留产物: {leftovers}"

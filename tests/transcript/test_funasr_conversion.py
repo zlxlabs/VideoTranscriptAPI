@@ -96,8 +96,6 @@ def _run_conversion_cases():
         text=text,
         tokens=tokens,
         timestamps=timestamps,
-        min_len=80,
-        max_len=300
     )
 
     print(f'  Generated segments: {len(segments)}')

@@ -145,6 +145,24 @@ def _validate_capswriter_contract(
         logger.warning(message)
         raise ValueError(message)
 
+    # 上游契约允许相邻时间戳重复（空格/标点 token 继承邻近词时间，实测相邻
+    # 重复率约 73%），但要求非递减。倒退属于异常输入：不拦的话分段仍会生成
+    # 并落盘，产出「结果错但不报错」的时间轴（本仓 P1 红线）。fail fast（#121）。
+    previous = None
+    for index, stamp in enumerate(timestamps):
+        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+            continue
+        value = float(stamp)
+        if previous is not None and value < previous:
+            message = (
+                "CAPSWRITER_CONTRACT_FAILED "
+                "condition=timestamps_not_non_decreasing "
+                f"index={index} value={value} previous={previous}"
+            )
+            logger.warning(message)
+            raise ValueError(message)
+        previous = value
+
     return "".join(tokens), list(tokens), list(timestamps)
 
 
@@ -255,8 +273,6 @@ def _create_segments_from_capswriter(
     text: str,
     tokens: List[str],
     timestamps: List[Any],
-    min_len: int = 80,
-    max_len: int = 300,
     duration: Any = None,
 ) -> List[Dict[str, Any]]:
     """
@@ -266,8 +282,6 @@ def _create_segments_from_capswriter(
         text: 仅为兼容旧调用方保留；正文始终由 tokens 原样拼接
         tokens: BPE token 列表
         timestamps: 时间戳列表
-        min_len: 最小段落长度
-        max_len: 最大段落长度
         duration: 音频时长，末句末 token 时间缺失时使用
 
     Returns:
@@ -275,7 +289,7 @@ def _create_segments_from_capswriter(
     """
     if not text:
         return []
-    del text, min_len, max_len
+    del text
     if not tokens or not timestamps:
         logger.error("tokens 或 timestamps 为空，无法创建 segments")
         return []
@@ -418,8 +432,6 @@ class CapsWriterClient:
                 text=text,
                 tokens=tokens,
                 timestamps=timestamps,
-                min_len=80,
-                max_len=300,
                 duration=result.get("duration"),
             )
             if not segments:
@@ -476,27 +488,43 @@ class CapsWriterClient:
             generated_files.append(json_file)
             self.log(f"已生成详细信息文件: {json_file}")
 
-        if Config.generate_txt:
-            with open(txt_file, "w", encoding="utf-8") as f:
-                f.write(text)
-            generated_files.append(txt_file)
-            self.log(f"已生成文本文件: {txt_file}")
+        try:
+            if Config.generate_txt:
+                with open(txt_file, "w", encoding="utf-8") as f:
+                    f.write(text)
+                generated_files.append(txt_file)
+                self.log(f"已生成文本文件: {txt_file}")
 
-        if Config.generate_merge_txt:
-            with open(merge_txt_file, "w", encoding="utf-8") as f:
-                f.write(text)
-            generated_files.append(merge_txt_file)
-            self.log(f"已生成合并文本文件: {merge_txt_file}")
+            if Config.generate_merge_txt:
+                with open(merge_txt_file, "w", encoding="utf-8") as f:
+                    f.write(text)
+                generated_files.append(merge_txt_file)
+                self.log(f"已生成合并文本文件: {merge_txt_file}")
 
-        if funasr_data is not None:
-            with open(funasr_file, "w", encoding="utf-8") as f:
-                json.dump(funasr_data, f, ensure_ascii=False, indent=2)
-            generated_files.append(funasr_file)
-            self.log(
-                f"已生成 FunASR 兼容文件: {funasr_file} "
-                f"({len(funasr_data['segments'])} 个片段)"
-            )
+            if funasr_data is not None:
+                with open(funasr_file, "w", encoding="utf-8") as f:
+                    json.dump(funasr_data, f, ensure_ascii=False, indent=2)
+                generated_files.append(funasr_file)
+                self.log(
+                    f"已生成 FunASR 兼容文件: {funasr_file} "
+                    f"({len(funasr_data['segments'])} 个片段)"
+                )
 
+        except OSError as exc:
+            # 写盘中途失败：清理本次已写出的产物。全部产物已在内存构建完成，
+            # 所以失败只发生在写盘阶段；不清理就会留下半组文件，调用方可能
+            # 把它当成本次成功结果（与「侧车失败也算成功」同一类误读，#121）。
+            # 目标路径全量清理：open(w) 已经创建了文件但还没 append 进
+            # generated_files 的那一个也会残留（半写文件），只清
+            # generated_files 会漏掉它。
+            for path in (json_file, txt_file, merge_txt_file, funasr_file):
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except OSError as cleanup_exc:
+                    logger.warning(f"清理残留产物失败: {path} ({cleanup_exc})")
+            raise OSError(
+                f"转录产物写盘失败，已清理残留产物: {exc}"
+            ) from exc
         preview = text[:100] + "..." if len(text) > 100 else text
         self.log(f"转录结果预览: {preview}")
         return generated_files

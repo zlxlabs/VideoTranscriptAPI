@@ -79,7 +79,7 @@ def _run_structure_cases():
     text, tokens, timestamps = _synthetic_capswriter_data()
 
     segments = _create_segments_from_capswriter(
-        text=text, tokens=tokens, timestamps=timestamps, min_len=2, max_len=30
+        text=text, tokens=tokens, timestamps=timestamps
     )
     print(f'  Generated {len(segments)} segments')
 

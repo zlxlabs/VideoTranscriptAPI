@@ -63,8 +63,6 @@ def _run_enhanced_logging_cases():
         text=text,
         tokens=tokens,
         timestamps=timestamps,
-        min_len=2,
-        max_len=30
     )
 
     print(f'\nResult: {len(segments)} segments generated')
@@ -84,8 +82,6 @@ def _run_enhanced_logging_cases():
             text="",
             tokens=tokens,
             timestamps=timestamps,
-            min_len=80,
-            max_len=300
         )
         print(f'\nResult: {len(segments)} segments generated')
         assert segments == [], "空文本应返回空 segments"
@@ -104,8 +100,6 @@ def _run_enhanced_logging_cases():
             text=text,
             tokens=mismatched_tokens,
             timestamps=timestamps,
-            min_len=2,
-            max_len=30
         )
         raise AssertionError(
             f"长度不匹配时应当抛异常，却返回了 {len(segments)} 个 segment"
@@ -123,8 +117,6 @@ def _run_enhanced_logging_cases():
         text=text,
         tokens=[],
         timestamps=[],
-        min_len=80,
-        max_len=300
     )
 
     print(f'\nResult: {len(segments)} segments generated')
