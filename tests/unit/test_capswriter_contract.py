@@ -509,3 +509,46 @@ def test_optimize_segment_lengths_requires_text_parameter():
     assert signature.parameters["text"].default is inspect.Parameter.empty, (
         "text 必须是无默认值的必填参数"
     )
+
+
+def test_trailing_whitespace_segment_never_has_start_after_end(tmp_path):
+    """尾部纯空白段不得出现 start_time > end_time（时间轴静默损坏）。
+
+    尾部空白段的起始 token 会跳过所有空白落到末尾，而段尾按「最后一个非空白
+    token」回退，两者可能倒挂。
+    """
+    client = _make_client(tmp_path)
+    long_sentence = (
+        "This sentence is deliberately long so that it exceeds the minimum "
+        "segment length requirement."
+    )
+    tokens = list(long_sentence) + ["。", " ", " ", " "]
+    text_accu = "".join(tokens)
+    timestamps = [round(1.0 + i * 0.25, 2) for i in range(len(tokens))]
+
+    generated = asyncio.run(
+        client._save_results(
+            tmp_path / "audio.webm",
+            {
+                "task_id": "trailing-ws",
+                "text": text_accu,
+                "text_accu": text_accu,
+                "tokens": tokens,
+                "timestamps": timestamps,
+                "duration": timestamps[-1] + 1.0,
+                "time_start": 1.0,
+                "time_complete": 2.0,
+            },
+        )
+    )
+
+    sidecar = next(p for p in generated if "funasr" in p.name)
+    segments = json.loads(sidecar.read_text(encoding="utf-8"))["segments"]
+    assert len(segments) >= 2, "长句后应另有一段承载尾部空白"
+    assert "".join(s["text"] for s in segments) == text_accu
+    for segment in segments:
+        if segment["start_time"] is not None and segment["end_time"] is not None:
+            assert segment["start_time"] <= segment["end_time"], (
+                f"start>end: {segment['start_time']} > {segment['end_time']} "
+                f"text={segment['text']!r}"
+            )

@@ -387,9 +387,15 @@ def _create_segments_from_capswriter(
         空白 token 会让句首时间偏早。
         """
         position = _find_token_idx(token_positions, char_pos)
-        while position < len(tokens) - 1 and not tokens[position].strip():
+        last_speech = position
+        while position < len(tokens):
+            if tokens[position].strip():
+                return position
+            last_speech = position
             position += 1
-        return position
+        # 整段都是空白：停在最后一个 token 上（它承载尾部空白的时间），
+        # 由下面的 end >= start 夹紧保证不会出现 start > end。
+        return min(last_speech, len(tokens) - 1)
 
     # 先定出每句的起始 token，段尾一律取「下一句的起始时间」——
     # 这样相邻段之间不可能出现无依据的时间间隙（两边独立查表会漏掉
@@ -411,6 +417,10 @@ def _create_segments_from_capswriter(
         # 安全范围检查
         start_token_idx = max(0, min(start_token_idx, len(timestamps) - 1))
         end_token_idx = max(0, min(end_token_idx, len(timestamps) - 1))
+        # 结构性保证不倒挂：尾部纯空白段的首 token 可能晚于回退得到的尾 token，
+        # 不夹紧就会产出 start_time > end_time 的段（时间轴静默损坏）。
+        if end_token_idx < start_token_idx:
+            end_token_idx = start_token_idx
 
         # 提取时间：NaN/Inf/缺失（None）等无效值经唯一权威解析统一降级为
         # None（与 _split_long_segment 的诚实降级同一口径）——文本永不丢失，
