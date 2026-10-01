@@ -58,10 +58,30 @@ fi
 
 echo
 echo "== 3. single truth definition =="
-uv run --frozen pytest -q \
-  tests/unit/test_env_switch_behavior.py \
-  tests/unit/test_manual_test_gate.py >/dev/null 2>&1
+uv run --frozen pytest -q tests/unit/test_manual_test_gate.py >/dev/null 2>&1
 report "behaviour tests for the switch" "$?"
+
+echo
+echo "== 4. suite is green in BOTH config environments =="
+# (a) no config/config.jsonc (CI norm)
+if [ -e config/config.jsonc ]; then
+  echo "SKIP  (a) config/config.jsonc already present"
+else
+  uv run --frozen pytest tests -q --tb=short >/dev/null 2>&1
+  report "(a) pytest tests with no config/config.jsonc" "$?"
+fi
+
+# (b) real config/config.jsonc (developer machine norm) -- source it from the
+# main checkout when available, since config.jsonc is gitignored per worktree.
+MAIN_REPO="${MAIN_REPO:-/home/zlx/projects/personal/VideoTranscriptAPI}"
+if [ -f "$MAIN_REPO/config/config.jsonc" ]; then
+  cp "$MAIN_REPO/config/config.jsonc" config/config.jsonc
+  uv run --frozen pytest tests -q --tb=short >/dev/null 2>&1
+  report "(b) pytest tests with a real config/config.jsonc" "$?"
+  rm -f config/config.jsonc
+else
+  echo "SKIP  (b) no real config.jsonc found at $MAIN_REPO"
+fi
 
 echo
 if [ "$failures" -eq 0 ]; then
