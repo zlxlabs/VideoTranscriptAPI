@@ -2388,24 +2388,42 @@ def test_aclose_bounded_when_background_task_is_slow_to_cancel(tmp_path, monkeyp
         runtime.background_tasks.append(task)
         await asyncio.sleep(0)
 
-        start = time.monotonic()
-        resources_safe = await runtime.aclose()
-        elapsed = time.monotonic() - start
+        # 这条关闭日志由生产路径上的 self.logger（setup_logger 返回的 loguru
+        # logger）打出。本用例只挂了 1 个后台任务，消息里必须出现数字 1，
+        # 不能留下字面量 %d。sink 在断言后卸掉。本用例 resources_safe 为
+        # False，aclose 不会走到 shutdown_logger() 里的 logger.remove()。
+        captured = []
+        sink_id = runtime.logger.add(
+            lambda message: captured.append(str(message)),
+            format="{message}",
+        )
+        try:
+            start = time.monotonic()
+            resources_safe = await runtime.aclose()
+            elapsed = time.monotonic() - start
 
-        # 旧行为下限：gather 完全无超时保护，耗时会等于该任务真正响应
-        # 取消所需的时间（这里是 small_budget * 10）。新行为：asyncio.wait
-        # 在 timeout 到达时如实返回，不等待 pending 任务，elapsed 应当
-        # 接近 small_budget 这个量级，而不是 small_budget * 10。
-        assert elapsed < small_budget * 5, (
-            f"elapsed={elapsed:.3f}s, expected bounded close to the "
-            f"{small_budget}s budget, not the task's actual ~"
-            f"{small_budget * 10}s cancellation-response time"
-        )
-        assert resources_safe is False, (
-            "an unconfirmed-cancelled background task is an unsafe "
-            "condition even when _stop_workers itself would report safe "
-            "(no real worker_futures exist in this scenario)"
-        )
+            # 旧行为下限：gather 完全无超时保护，耗时会等于该任务真正响应
+            # 取消所需的时间（这里是 small_budget * 10）。新行为：asyncio.wait
+            # 在 timeout 到达时如实返回，不等待 pending 任务，elapsed 应当
+            # 接近 small_budget 这个量级，而不是 small_budget * 10。
+            assert elapsed < small_budget * 5, (
+                f"elapsed={elapsed:.3f}s, expected bounded close to the "
+                f"{small_budget}s budget, not the task's actual ~"
+                f"{small_budget * 10}s cancellation-response time"
+            )
+            assert resources_safe is False, (
+                "an unconfirmed-cancelled background task is an unsafe "
+                "condition even when _stop_workers itself would report safe "
+                "(no real worker_futures exist in this scenario)"
+            )
+            shutdown_lines = [
+                line for line in captured if "未能在关闭预算内响应取消" in line
+            ]
+            assert len(shutdown_lines) == 1, shutdown_lines
+            assert "1" in shutdown_lines[0], shutdown_lines[0]
+            assert "%d" not in shutdown_lines[0], shutdown_lines[0]
+        finally:
+            runtime.logger.remove(sink_id)
 
         # 测试自己收尾：等后台任务真正停下，避免留下悬挂的 asyncio 任务。
         try:
