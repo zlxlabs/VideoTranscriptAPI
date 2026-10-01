@@ -94,3 +94,25 @@
 
 进度：**Inc1 已合并 main（2026-07-28 PR#32，c598915）并已部署 n305**（digest 固定 c5989154a2b9，healthy；本地重放验证过问题集会触发 low_confidence_cluster_dropped，Speaker4 占 17.9% 段落）。**Inc2（语义矛盾检测，只标记不改名）已合并 main（2026-07-28 PR#33，7e127b1）并已部署 n305**（tag 7e127b1a1437，healthy；部署曾被 n305→ghcr 网络中断阻塞约 2h，用户侧修复后完成）。spec 第 7 节 v2 契约：suspect override 不写 name、reason 枚举单一来源（schemas/contradiction_scan.py 的 CONTRADICTION_REASONS）、幻觉 id 过滤、>20% unreliable、分窗扫描（400/窗重叠10、任一窗失败整体 failed）、门控与 infer_speaker_names 解耦、任务级开关 contradiction_scan（processing_options 全链路含 cache_manager 白名单）。gate 曾红一轮（3 major 全接受）。下一步：部署后跑 10-20 集真实节目攒 suspect 精确率，再裁决 Inc3/Inc4。内容：segment_id（两遍去重保稳定）、segment_overrides 容器+渲染机制、speaker_risk_flags（R1/R2）、分层采样（人均预算截断保三层非空）、UI 免责声明/风险横幅/待确认徽标。渲染锚点保持 dlg-{index}，segment_id 走 data-segment-id（floating-toc.js 依赖，勿改回）。
 后续：Inc2 语义矛盾检测（只标记，含 backlog：override 徽标 status 白名单扩展、tooltip 阈值与配置联动）、Inc3 有证据局部纠正、Inc4 人工锚点。生产 fixture 原料在 docs/sessions/260728-1050-q7m2/fixtures/raw/（已 gitignore）。相关：[[feedback-codex-implementer]]。
+
+## CapsWriter 时间轴坐标系（issue #109，2026-10-01）
+
+**结论：** token→时间轴的映射只在 `transcriber/token_timeline.py` 的 `TokenTimeline` 里实现，
+唯一对外坐标是原始 `text` 的 `TextSpan`；调用方禁止出现累加游标（`char_offset +=`）。
+
+已失效并撤除的约定：`_remove_punctuation`（去标点去空格的字符游标）——它与
+「原样累加 tokens」是两套坐标系，token 风格变成 SentencePiece 式（自带空格与标点）后
+误差单调累积，英文内容把整条时间轴压到 ~0.81（生产：10506.92s 音频，末段停在 8469.03s）。
+`alignment_diff` 告警同时撤除（拿症状当检测器），换成衡量产物的
+`coverage`（末段 end/duration）与 `aligned_ratio`，低于阈值写
+`timeline_quality` 字段 + `capswriter timeline degraded:` 结构化日志，**不判任务失败**。
+
+对齐实现：投影后逐字相同走恒等快速路径；否则 12 字符公共子串锚点链（O(n)）。
+字符级 `difflib.SequenceMatcher(autojunk=False)` 实测 125,699 字符 / 丢 20% token 需
+**999.978s**，已否决，不要改回去。
+
+顺带修：英文句号 `.` 现在也切句（旧实现只切 `。！？!?`，英文陈述句从不按句断）。
+
+未做（另卡）：存量 501 份缓存不重算；不落盘原始 tokens；不推服务端协议改造。
+
+相关：[[feedback-codex-implementer]]

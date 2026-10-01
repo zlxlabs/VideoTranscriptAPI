@@ -15,6 +15,7 @@ import asyncio
 import re
 import argparse
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Tuple, List, Optional, Dict, Any
 
 from capswriter_asr import AsrError, transcribe_file_sync
@@ -25,6 +26,18 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ..utils.logging import load_config
 # 时间解析唯一权威：禁止在本模块另起一套 isfinite/parse 逻辑
 from .segments import interpolate_segment_times, parse_time_to_seconds
+# token -> 时间轴映射唯一权威：坐标系封在 TokenTimeline 内，本模块只持有 text 下标
+from .token_timeline import (
+    TextSpan,
+    TimelineQuality,
+    TokenTimeline,
+    canonical_projection,
+    clean_token,
+)
+
+# 运行时守卫阈值：低于即标记 degraded（文本没坏，时间轴质量差，不判任务失败）
+TIMELINE_COVERAGE_THRESHOLD = 0.96
+TIMELINE_ALIGNED_RATIO_THRESHOLD = 0.90
 
 
 class Config:
@@ -88,66 +101,48 @@ class Config:
 # ============================================================================
 
 
-def _clean_token(token: str) -> str:
-    """清理 token，去除 BPE 标记"""
-    return token.replace("@@", "")
+# 历史遗留兼容别名：仓内生产路径已不再使用这两个函数，仅
+# tests/transcript/test_funasr_conversion.py 直接导入它们（该文件不在本卡
+# 修改边界内）。新代码一律走 TokenTimeline。
+_clean_token = clean_token
 
 
 def _build_token_position_map(tokens: List[str]) -> Tuple[List[int], str]:
-    """
-    构建 token 到字符位置的映射
-
-    Returns:
-        (token_to_char_pos, reconstructed_text)
-    """
-    token_to_char_pos = []
+    """遗留兼容：token 起始字符下标 + 原样累加文本。生产路径不再使用。"""
+    positions: List[int] = []
     reconstructed = ""
-
     for token in tokens:
-        token_to_char_pos.append(len(reconstructed))
-        clean = _clean_token(token)
-        reconstructed += clean
-
-    token_to_char_pos.append(len(reconstructed))
-    return token_to_char_pos, reconstructed
+        positions.append(len(reconstructed))
+        reconstructed += clean_token(token)
+    positions.append(len(reconstructed))
+    return positions, reconstructed
 
 
-def _find_token_idx(token_positions: List[int], char_pos: int) -> int:
-    """找到字符位置对应的 token 索引"""
-    for i in range(len(token_positions) - 1):
-        if token_positions[i] <= char_pos < token_positions[i + 1]:
-            return i
-    return len(token_positions) - 2
+def _split_text_by_punctuation(text: str) -> List[TextSpan]:
+    """按主要标点分句，返回原始 text 上的半开区间列表。
 
-
-def _split_text_by_punctuation(text: str) -> List[str]:
-    """按主要标点符号分句，保留标点"""
-    primary_punct = r"([。！？!?])"
-    parts = re.split(primary_punct, text)
-
-    sentences = []
-    i = 0
-    while i < len(parts):
-        sentence = parts[i]
-        if i + 1 < len(parts) and parts[i + 1] in "。！？!?":
-            sentence += parts[i + 1]
-            i += 2
-        else:
-            i += 1
-
-        if sentence.strip():
-            sentences.append(sentence.strip())
-
-    return sentences
-
-
-def _remove_punctuation(text: str) -> str:
-    """移除文本中的标点符号和空格"""
-    return re.sub(r"[，。！？、；：,;:!?\s]", "", text)
+    - 不做 ``strip()``：区间必须与原文严格对齐，strip 会吃掉句间空白，使段落文本
+      偏离 ``transcript_capswriter.txt``。
+    - 英文句号 ``.`` 也切：历史实现只在 ``。！？!?`` 切，英文陈述句从来就没按句断过
+      （issue #109 附带修复的独立文本质量缺陷）。
+    """
+    spans: List[TextSpan] = []
+    cursor = 0
+    for match in re.finditer(r"[。！？!?]+|\.(?=\s|$)", text):
+        end = match.end()
+        if text[cursor:end].strip():
+            spans.append(TextSpan(start=cursor, end=end))
+        cursor = end
+    if text[cursor:].strip():
+        spans.append(TextSpan(start=cursor, end=len(text)))
+    return spans
 
 
 def _optimize_segment_lengths(
-    segments: List[Dict[str, Any]], min_len: int, max_len: int
+    segments: List[Dict[str, Any]],
+    min_len: int,
+    max_len: int,
+    text: str,
 ) -> List[Dict[str, Any]]:
     """优化段落长度：合并短句、分割长句"""
     if not segments:
@@ -168,10 +163,15 @@ def _optimize_segment_lengths(
 
         if buffer_len < min_len:
             if combined_len <= max_len:
-                # 合并
+                # 合并：取区间并集，文本稍后由 text[span] 切出（不拼字符串）
+                merged_span = TextSpan(
+                    start=min(buffer["span"].start, seg["span"].start),
+                    end=max(buffer["span"].end, seg["span"].end),
+                )
+                buffer["span"] = merged_span
                 buffer["end_time"] = seg["end_time"]
-                buffer["text"] = buffer["text"] + seg["text"]
-                buffer["length"] = combined_len
+                buffer["text"] = text[merged_span.start:merged_span.end]
+                buffer["length"] = len(buffer["text"])
             else:
                 optimized.append(buffer)
                 buffer = seg.copy()
@@ -279,12 +279,26 @@ def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str,
     return split_segments
 
 
+def _timeline_coverage(
+    segments: List[Dict[str, Any]], duration: Any
+) -> float:
+    """末段 end_time / duration；无法判定时返回 1.0（不误报降级）。"""
+    parsed_duration = _finite_time_or_none(duration)
+    if not parsed_duration or parsed_duration <= 0 or not segments:
+        return 1.0
+    last_end = _finite_time_or_none(segments[-1].get("end_time"))
+    if last_end is None:
+        return 0.0
+    return last_end / parsed_duration
+
+
 def _create_segments_from_capswriter(
     text: str,
     tokens: List[str],
     timestamps: List[float],
     min_len: int = 80,
     max_len: int = 300,
+    timeline: Optional[TokenTimeline] = None,
 ) -> List[Dict[str, Any]]:
     """
     从 CapsWriter 数据创建 FunASR 格式的 segments
@@ -295,6 +309,7 @@ def _create_segments_from_capswriter(
         timestamps: 时间戳列表
         min_len: 最小段落长度
         max_len: 最大段落长度
+        timeline: 已构建好的时间轴（调用方复用时传入；缺省就地构建）
 
     Returns:
         segments 列表
@@ -317,72 +332,53 @@ def _create_segments_from_capswriter(
         logger.error("tokens 或 timestamps 为空，无法创建 segments")
         return []
 
-    # 构建 token 位置映射
-    token_positions, reconstructed = _build_token_position_map(tokens)
-    logger.debug(f"Token 位置映射完成: reconstructed length={len(reconstructed)}")
+    # 时间轴：唯一知道 tokens 与规范投影的对象，坐标系不出这一层
+    if timeline is None:
+        timeline = TokenTimeline.align(text, tokens, timestamps)
+    quality = timeline.quality
+    logger.debug(
+        f"TokenTimeline 已就绪: aligned_ratio={quality.aligned_ratio:.4f}, "
+        f"unmatched_chars={quality.unmatched_chars}"
+    )
 
-    # 分句
-    sentences = _split_text_by_punctuation(text)
-    logger.debug(f"按标点分句: {len(sentences)} 个句子")
+    # 分句（返回 text 区间，不 strip）
+    spans = _split_text_by_punctuation(text)
+    logger.debug(f"按标点分句: {len(spans)} 个句子")
 
-    # 验证对齐
-    text_clean = _remove_punctuation(text)
-    alignment_diff = abs(len(text_clean) - len(reconstructed))
+    # 每个 span 独立向时间轴查时间——没有累加游标，误差不累积
+    segments: List[Dict[str, Any]] = []
 
-    if alignment_diff > 5:
-        logger.warning(
-            f"对齐警告: text_clean={len(text_clean)}, reconstructed={len(reconstructed)}, diff={alignment_diff}"
-        )
-        logger.warning(f"  这可能导致时间戳不准确，请检查输入数据")
-    else:
-        logger.debug(f"对齐检查通过: diff={alignment_diff}")
-
-    # 映射每个句子到 token 范围
-    segments = []
-    char_offset = 0
-
-    for idx, sentence in enumerate(sentences):
-        sentence_clean = _remove_punctuation(sentence)
-        sentence_len = len(sentence_clean)
-
-        if sentence_len == 0:
-            logger.debug(f"句子 {idx + 1} 为空，跳过")
+    for idx, span in enumerate(spans):
+        sentence = text[span.start:span.end]
+        if not canonical_projection(sentence):
+            logger.debug(f"句子 {idx + 1} 规范化后为空，跳过")
             continue
 
-        # 查找对应的 token 范围
-        start_token_idx = _find_token_idx(token_positions, char_offset)
-        end_token_idx = _find_token_idx(token_positions, char_offset + sentence_len - 1)
-
-        # 安全范围检查
-        start_token_idx = max(0, min(start_token_idx, len(timestamps) - 1))
-        end_token_idx = max(0, min(end_token_idx, len(timestamps) - 1))
-
-        # 提取时间：NaN/Inf/缺失（None）等无效值经唯一权威解析统一降级为
+        # 时间：NaN/Inf/缺失（None）等无效值经唯一权威解析统一降级为
         # None（与 _split_long_segment 的诚实降级同一口径）——文本永不丢失，
         # 时间宁可为 None 也不能让 round(None)/round(nan) 之类的异常或
         # NaN/Inf 字面量污染整个 FunASR 兼容侧车的生成。
-        start_time = _finite_time_or_none(timestamps[start_token_idx])
-        end_time = _finite_time_or_none(timestamps[end_token_idx])
+        start_time, _start_anchored = timeline.start_of(span)
+        end_time, _end_anchored = timeline.end_of(span)
 
         segments.append(
             {
                 "start_time": round(start_time, 2) if start_time is not None else None,
                 "end_time": round(end_time, 2) if end_time is not None else None,
                 "text": sentence,
+                "span": span,
                 "length": len(sentence),
             }
         )
 
         logger.debug(
-            f"句子 {idx + 1}: {sentence_len} 字符 -> tokens[{start_token_idx}:{end_token_idx}] -> {start_time}s-{end_time}s"
+            f"句子 {idx + 1}: text[{span.start}:{span.end}] -> {start_time}s-{end_time}s"
         )
-
-        char_offset += sentence_len
 
     logger.debug(f"初始分段完成: {len(segments)} 个 segments")
 
-    # 长度优化
-    optimized = _optimize_segment_lengths(segments, min_len, max_len)
+    # 长度优化（合并取区间并集，文本仍由 text[span] 切出）
+    optimized = _optimize_segment_lengths(segments, min_len, max_len, text)
     logger.debug(f"长度优化完成: {len(optimized)} 个 segments")
 
     # 最终统计
@@ -542,6 +538,10 @@ class CapsWriterClient:
                         f"输入数据: text={len(text)} 字符, tokens={len(tokens)}, timestamps={len(timestamps)}"
                     )
 
+                    duration = result.get("duration", 0)
+                    timeline = TokenTimeline.align(text, tokens, timestamps, duration)
+                    quality = timeline.quality
+
                     # 创建 segments
                     segments = _create_segments_from_capswriter(
                         text=text,
@@ -549,6 +549,7 @@ class CapsWriterClient:
                         timestamps=timestamps,
                         min_len=80,
                         max_len=300,
+                        timeline=timeline,
                     )
 
                     if not segments:
@@ -559,11 +560,45 @@ class CapsWriterClient:
 
                     self.log(f"成功创建 {len(segments)} 个 segments")
 
+                    # 运行时守卫：衡量**产物**（覆盖率/对齐率），不再拿两套不同规范的
+                    # 字符串长度差当检测器（旧 alignment_diff 就是用 bug 的症状当
+                    # bug 的检测器，修好坐标系后必然变小、阈值 5 对英文恒触发）。
+                    coverage = _timeline_coverage(segments, duration)
+                    degraded = (
+                        coverage < TIMELINE_COVERAGE_THRESHOLD
+                        or quality.aligned_ratio < TIMELINE_ALIGNED_RATIO_THRESHOLD
+                    )
+                    timeline_quality = {
+                        "coverage": coverage,
+                        "aligned_ratio": quality.aligned_ratio,
+                        "unmatched_chars": quality.unmatched_chars,
+                        "coverage_threshold": TIMELINE_COVERAGE_THRESHOLD,
+                        "aligned_ratio_threshold": TIMELINE_ALIGNED_RATIO_THRESHOLD,
+                        "degraded": degraded,
+                    }
+                    if degraded:
+                        # 降级不判任务失败（文本没坏），但必须留可 grep 的结构化日志
+                        logger.warning(
+                            f"capswriter timeline degraded: file={file_path.name} "
+                            f"task_id={result.get('task_id', '')} "
+                            f"coverage={coverage:.4f} aligned_ratio={quality.aligned_ratio:.4f} "
+                            f"unmatched_chars={quality.unmatched_chars} "
+                            f"coverage_threshold={TIMELINE_COVERAGE_THRESHOLD} "
+                            f"aligned_ratio_threshold={TIMELINE_ALIGNED_RATIO_THRESHOLD}"
+                        )
+                    else:
+                        logger.info(
+                            f"capswriter timeline metrics: file={file_path.name} "
+                            f"coverage={coverage:.4f} aligned_ratio={quality.aligned_ratio:.4f} "
+                            f"unmatched_chars={quality.unmatched_chars}"
+                        )
+
                     # 构建 FunASR 兼容格式
                     funasr_data = {
                         "task_id": result.get("task_id", ""),
                         "file_name": file_path.name,
                         "duration": result.get("duration", 0),
+                        "timeline_quality": timeline_quality,
                         "segments": [
                             {
                                 "start_time": seg["start_time"],
