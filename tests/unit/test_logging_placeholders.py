@@ -1,17 +1,28 @@
 """Printf-vs-loguru scan.
 
 判据：日志方法、消息是字符串常量、含 printf 且另有格式参数的调用，只按该调用点的接收者来源分三态。
-扫描范围：src/ 与 tests/ 下全部 .py（含 tests/manual 与各子目录）。此范围之外的代码（main.py、scripts/、skill/）不受本门禁保护。
+扫描范围：src/、tests/、scripts/ 下全部 .py（含 tests/manual 与 scripts 子目录），加上仓库根 main.py。
+printf 转换符：a A d i o u x X e E f F g G c C r s。%% 是转义，不当占位符。只认百分号后紧挨着的那个字母。
+A/C 不是 CPython `%` 运算符的合法转换符，但本门禁仍视它们为 printf 风格：loguru 不会替它们填参数。
+它们同时也是 strftime 指令，所以不能只靠字母表，必须看调用。
+日期上下文只认「这个调用的函数名就是 strftime」（time.strftime、d.strftime、from time import strftime）。
+不看字符串像不像日期。logger.info("2026-01-02 03:04:05 %m%s", y) 不是 strftime，%s 又带了格式参数，判 loguru。
+%m 本身不是 printf 转换符。只有 %m、没有上面那个集合里的字母时，本扫描不报。
 证明 loguru：setup_logger 链、from loguru import logger、赋给变量或 self 后的直接调用；属性名含 logger（如 self.logger）且赋值不冲突时也算。
 证明标准库：沿名字的来源链判断，不靠写死的 import 别名。import logging、import logging as 任意别名、from logging import getLogger（含 as 别名）之后，getLogger(...).method 或再赋给别的变量，都算标准库；logging 模块上的方法（lg.info）也算。同一行里列号更靠前的绑定算「调用点之前」。
 同一名字在调用点之前已有两种来源 → 来源不明并失败；第二次绑定之前只有一种来源的，分别判定。禁止按「文件里出现过 getLogger」整文件放行。
-%% 是转义，不当占位符。logger.log(level, message, ...) 的消息在第二个实参。
-仍会漏（已知边界，不做跨模块数据流）：参数传入或函数返回的 logger；从属性/容器取出后再赋给普通名字；消息来自变量、拼接或 f-string；getattr、描述符、猴子补丁；把 getLogger 再赋给普通名字后调用（get = log.getLogger）；函数局部遮蔽与分支赋值。%10s 与 %(name)s 也不识别。扫描范围以外的文件即使写了 printf 也不会被本测试看见。
+logger.log(level, message, ...) 的消息在第二个实参。
+仍会漏（已知边界，不是遗漏）：
+范围之外：skill/ 不在本次扫描根里。那里的 printf 本测试看不见。
+上下文判不了：参数传入或函数返回的 logger；从属性/容器取出后再赋给普通名字；消息来自变量、拼接或 f-string；getattr、描述符、猴子补丁；把 getLogger 再赋给普通名字后调用（get = log.getLogger）；函数局部遮蔽与分支赋值；包在其它助手函数里的 strftime 或日志调用。
+形式认不全：%10s、%-10s、%(name)s（宽度、旗标、映射键不在「百分号后紧挨着转换符」这条规则里）。
 """
 import ast
 from pathlib import Path
 
 _LOG = {"trace", "debug", "info", "success", "warning", "warn", "error", "exception", "critical", "fatal", "log"}
+# a is CPython ascii(). A/C are not CPython % types; the gate still treats them as printf-style.
+_PRINTF_TYPES = frozenset("diouxXeEfFgGcrsaAC")
 _SITES = [
     "src/video_transcript_api/llm/__init__.py:57",
     "src/video_transcript_api/llm/llm.py:802",
@@ -26,7 +37,7 @@ def _printf(text):
         if found + 1 < len(text) and text[found + 1] == "%":
             index = found + 2
             continue
-        if found + 1 < len(text) and text[found + 1] in "sdfdr":
+        if found + 1 < len(text) and text[found + 1] in _PRINTF_TYPES:
             return True
         index = found + 1
     return False
@@ -117,6 +128,13 @@ def classify_printf_calls(tree):
         if isinstance(node, ast.Lambda):
             walk_calls(node.body)
             return
+        # strftime is date context. %d/%x/%X/%c/%a/%A/%C/%F inside it are not log printf calls.
+        called = node.func if isinstance(node, ast.Call) else None
+        called_name = getattr(called, "id", None) or getattr(called, "attr", "")
+        if called_name == "strftime":
+            for child in ast.iter_child_nodes(node):
+                walk_calls(child)
+            return
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in _LOG and _candidate(node):
             kind = recv(node.func.value, node.lineno)
             found.append((node.lineno, kind if kind in {"loguru", "stdlib", "unknown"} else "unknown"))
@@ -167,19 +185,29 @@ def classify_printf_calls(tree):
 
 
 def _scan_src():
-    """Every .py under src/ and tests/, including tests/manual. Paths are repo-relative."""
+    """src/, tests/, scripts/, and repo-root main.py. skill/ is outside this gate."""
     repo = Path(__file__).resolve().parents[2]
     buckets = {"loguru": [], "stdlib": [], "unknown": []}
-    for base in (repo / "src", repo / "tests"):
-        for path in sorted(base.rglob("*.py")):
-            relative = path.relative_to(repo).as_posix()
-            for lineno, kind in classify_printf_calls(ast.parse(path.read_text(encoding="utf-8"))):
-                buckets[kind].append(f"{relative}:{lineno}")
-    return buckets
+    files = []
+    for base in (repo / "src", repo / "tests", repo / "scripts"):
+        files.extend(sorted(base.rglob("*.py")))
+    files.append(repo / "main.py")
+    rels = []
+    for path in files:
+        relative = path.relative_to(repo).as_posix()
+        rels.append(relative)
+        for lineno, kind in classify_printf_calls(ast.parse(path.read_text(encoding="utf-8"))):
+            buckets[kind].append(f"{relative}:{lineno}")
+    return buckets, rels
 
 
 def test_loguru_calls_do_not_use_printf_placeholders():
-    buckets = _scan_src()
+    repo = Path(__file__).resolve().parents[2]
+    buckets, rels = _scan_src()
+    scripts = {path.relative_to(repo).as_posix() for path in (repo / "scripts").rglob("*.py")}
+    assert "main.py" in rels
+    assert scripts and scripts <= set(rels)
+    assert not any(rel.startswith("skill/") for rel in rels)
     assert buckets["loguru"] == [], buckets["loguru"]
     assert buckets["unknown"] == [], buckets["unknown"]
     assert buckets["stdlib"] == _SITES
@@ -208,7 +236,20 @@ def test_placeholder_scan_synthetic_sources():
         ("a call before the second binding stays stdlib", "import logging\nlogger = logging.getLogger('a')\nlogger.info('early %s', y)\nlogger = setup_logger('b')\nlogger.info('late %s', y)\n", ["stdlib", "unknown"]),
         ("escaped %% is not a placeholder", "from loguru import logger\nlogger.info('progress 100%%s done', 1)\n", []),
         ("escaped %% does not hide a real %s", "from loguru import logger\nlogger.info('100%% %s', 1)\n", ["loguru"]),
+        # Date context is the call, not the shape of the text. These formats contain %d, which is also printf.
+        ("time.strftime is date context", "import time\ntime.strftime('%Y-%m-%dT%H:%M:%S')\n", []),
+        ("instance strftime is date context", "d.strftime('%y%m%d-%H%M%S')\n", []),
+        ("imported strftime function is date context", "from time import strftime\nstrftime('%A %C %F')\n", []),
+        # %m is not a printf type. %s is. A date-shaped prefix does not make this strftime.
+        ("date-shaped logger text with %m%s is loguru", "from loguru import logger\nlogger.info('2026-01-02 03:04:05 %m%s', y)\n", ["loguru"]),
+        ("strftime-only %m on a logger is not printf", "from loguru import logger\nlogger.info('2026-01-02 03:04:05 %m', y)\n", []),
+        ("percent-encoded text that is not a log call is ignored", "url = 'http://localhost/%E8%A7%86.mp4'\n", []),
     ]
+    assert _PRINTF_TYPES == set("sdfrxoegcAEFCXGiua")
+    for spec in "sdfrxoegcAEFCXGiua":
+        source = "from loguru import logger\nlogger.info('v %" + spec + "', y)\n"
+        got = [kind for _, kind in classify_printf_calls(ast.parse(source))]
+        assert got == ["loguru"], (spec, got)
     for note, source, kinds in cases:
         got = [kind for _, kind in classify_printf_calls(ast.parse(source))]
         assert got == kinds, (note, got)
