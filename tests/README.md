@@ -1,9 +1,9 @@
 # 测试说明
 
-测试使用 pytest，建议先同步开发依赖：
+测试使用 pytest，开发依赖位于默认同步的 `dev` dependency group：
 
 ```bash
-uv sync --extra dev
+uv sync
 ```
 
 ## 目录结构
@@ -29,7 +29,7 @@ uv sync --extra dev
 make test
 
 # 卡片验证范围
-uv run --frozen --extra dev pytest tests/unit tests/integration
+uv run --frozen pytest tests/unit tests/integration
 
 # GitHub Required Gate v2 的 legacy quality 入口：uv sync --frozen 后执行全套 pytest
 uv sync --frozen
@@ -46,8 +46,8 @@ uv run pytest tests/deployment
 `make test` 当前只覆盖 `tests/unit tests/cache`。GitHub workflow 调用
 `zlxlabs/gate/.github/workflows/gate-v2.yml@v2`；当仓库没有可执行的
 `scripts/gate-quality` 时，quality job 使用 legacy 步骤，运行 `uv sync --frozen`
-和 `uv run --frozen pytest -q`。本地测试前同步 `dev` extra，避免 `pytest` 回落到
-系统解释器。
+和 `uv run --frozen pytest -q`。`uv sync --frozen` 默认同步 `dev` dependency group，
+因此 `uv run` 使用项目环境中的 pytest。
 
 任务观测回归：`tests/unit/test_task_observability_report.py` 覆盖只读 CLI、旧 schema、
 UTC 窗口、去重、缺字段与失败判据；`tests/integration/test_task_observability.py`

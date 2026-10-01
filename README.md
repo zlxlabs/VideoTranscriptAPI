@@ -242,10 +242,10 @@ video-transcript-api/
 ## 测试
 
 ```bash
-uv run python scripts/run_tests.py     # 运行所有测试
-uv run pytest tests/unit/              # 单元测试
-uv run pytest tests/integration/       # 集成测试
+make test
 ```
+
+`make test` 只运行 `tests/unit` 和 `tests/cache`，不是全套测试。
 
 ---
 
