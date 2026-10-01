@@ -121,3 +121,8 @@
 区间不能丢（全标点输入曾整段消失、尾部空白曾被吃掉）；canonical 为空的 span 保留文本、
 时间降级为 None。tokens 与 timestamps 不等长**不静默**：记 `input_mismatch` + 强制
 degraded（独立于 coverage/aligned_ratio 阈值），日志 `capswriter timeline input_mismatch:`。
+补充（#111 第二轮，2026-10-01）：空/None 输入守卫必须**先于任何 len() 与构造调用**——
+原守卫用 `if not tokens or not timestamps`，但 `len()` 在它之前就调用了，
+`timestamps=None` 直接 TypeError；`text=""` 则崩在 TokenTimeline 的自检上。
+现在入口用显式 isinstance/is None 判定；tokens/timestamps 不可用时**保留文本**、
+时间降级为 None（返回 [] 等于丢可读文本）。
