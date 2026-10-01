@@ -239,3 +239,73 @@ def test_failed_write_preserves_previous_successful_artifacts(tmp_path, monkeypa
     for name, content in before.items():
         assert after[name] == content, f"已有产物被破坏: {name}"
     assert not [k for k in after if k.endswith(".tmp")], f"残留临时文件: {after.keys()}"
+
+
+def test_commit_stage_failure_rolls_back_to_previous_artifacts(tmp_path, monkeypatch):
+    """就位阶段中途失败必须回滚，不能留下「新 txt + 旧侧车」的混合版本。"""
+    client = _make_client(tmp_path)
+    result = _valid_result()
+    asyncio.run(client._save_results(tmp_path / "audio.webm", result))
+    before = {p.name: p.read_text() for p in tmp_path.iterdir()}
+    assert before
+
+    original_replace = Path.replace
+    calls = {"n": 0}
+
+    def flaky_replace(self, target):
+        # 只在「临时文件就位」阶段失败；备份阶段（target → .bak）必须正常，
+        # 否则测到的不是混合版本场景
+        if self.name.endswith(".tmp"):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise OSError("rename failed")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+
+    with pytest.raises(OSError):
+        asyncio.run(client._save_results(tmp_path / "audio.webm", result))
+
+    after = {p.name: p.read_text() for p in tmp_path.iterdir()}
+    assert set(before) <= set(after), f"回滚丢失产物: {set(before) - set(after)}"
+    for name, content in before.items():
+        assert after[name] == content, f"回滚后产物被破坏: {name}"
+    assert not [k for k in after if k.endswith((".tmp", ".bak"))], sorted(after)
+
+
+def test_oversized_segment_without_secondary_punctuation_is_still_split():
+    """没有次级标点的超长段也必须受 max_len 约束（否则会输出超长片段）。"""
+    from video_transcript_api.transcriber.capswriter_client import (
+        Config,
+        _create_segments_from_capswriter,
+    )
+
+    body = "词" * 800  # 无任何标点
+    tokens = list(body)
+    timestamps = [index * 0.1 for index in range(len(tokens))]
+
+    previous = Config.max_segment_length
+    try:
+        Config.max_segment_length = 300
+        segments = _create_segments_from_capswriter(
+            text=body, tokens=tokens, timestamps=timestamps
+        )
+    finally:
+        Config.max_segment_length = previous
+
+    assert len(segments) > 1, "无标点超长段未被切开"
+    assert max(s["length"] for s in segments) <= 300
+    assert "".join(s["text"] for s in segments) == body
+
+
+def test_each_artifact_is_reported_exactly_once(tmp_path, monkeypatch):
+    """generate_json 打开时，产物列表不得出现重复项。"""
+    from video_transcript_api.transcriber import capswriter_client as caps_mod
+
+    monkeypatch.setattr(caps_mod.Config, "generate_json", True)
+    client = _make_client(tmp_path)
+    files = asyncio.run(client._save_results(tmp_path / "audio.webm", _valid_result()))
+    names = [p.name for p in files]
+    assert len(names) == len(set(names)), f"产物列表重复: {names}"
+    for name in names:
+        assert list(tmp_path.iterdir()).count(tmp_path / name) == 1

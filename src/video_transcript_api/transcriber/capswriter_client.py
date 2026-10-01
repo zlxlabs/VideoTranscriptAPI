@@ -200,10 +200,18 @@ def _split_oversized_segments(
             result.append(segment)
             continue
         char_start = segment["char_start"]
-        pieces = [piece for piece in splitter.split(text[char_start:segment["char_end"]]) if piece]
+        body = text[char_start:segment["char_end"]]
+        pieces = [piece for piece in splitter.split(body) if piece]
         if len(pieces) <= 1:
-            result.append(segment)
-            continue
+            # 没有任何次级标点可切：按上限硬切，且切点落在字符边界上
+            # （否则会截断出半个词）。无标点长段同样必须受 max_len 约束。
+            if len(body) > max_len:
+                pieces = [
+                    body[offset:offset + max_len] for offset in range(0, len(body), max_len)
+                ]
+            else:
+                result.append(segment)
+                continue
         offset = char_start
         last_index = len(pieces) - 1
         for piece_index, piece in enumerate(pieces):
@@ -547,16 +555,6 @@ class CapsWriterClient:
             )
 
         generated_files: List[Path] = []
-        if Config.generate_json:
-            with open(json_file, "w", encoding="utf-8") as f:
-                json.dump(
-                    {"timestamps": timestamps, "tokens": tokens},
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            generated_files.append(json_file)
-            self.log(f"已生成详细信息文件: {json_file}")
 
         # 原子落盘：全部先写 <目标>.tmp，全部成功后再 rename 就位。
         # 失败只删除本次自己的 .tmp，绝不碰目录里已存在的产物——
@@ -589,8 +587,27 @@ class CapsWriterClient:
                 generated_files.append(json_file)
                 self.log(f"已生成详细信息文件: {json_file}")
 
-            for temporary, target in pending:
-                temporary.replace(target)
+            # 就位阶段：先把已存在的目标挪到 .bak，再逐个 rename。
+            # 若中途失败则回滚，避免留下「新的 txt + 旧的侧车」这种混合版本
+            # 产物——调用方收到失败状态，但目录里的产物已被换掉一半。
+            backups: List[Tuple[Path, Path]] = []
+            try:
+                for _temporary, target in pending:
+                    if target.exists():
+                        backup = target.with_name(target.name + ".bak")
+                        target.replace(backup)
+                        backups.append((backup, target))
+                for temporary, target in pending:
+                    temporary.replace(target)
+            except OSError as exc:
+                for _temporary, target in pending:
+                    target.unlink(missing_ok=True)
+                for backup, target in backups:
+                    backup.replace(target)
+                raise
+            else:
+                for backup, _target in backups:
+                    backup.unlink(missing_ok=True)
             pending = []
         except OSError as exc:
             for temporary, _target in pending:
