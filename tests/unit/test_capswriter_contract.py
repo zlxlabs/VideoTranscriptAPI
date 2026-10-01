@@ -557,3 +557,40 @@ def test_trailing_whitespace_segment_never_has_start_after_end(tmp_path):
             assert segment["start_time"] is None and segment["end_time"] is None, (
                 f"纯空白段不应有时间戳: {segment['start_time']} -> {segment['end_time']}"
             )
+
+
+def test_merging_whitespace_segment_keeps_valid_end_time(tmp_path):
+    """与纯空白段合并后，有效文本的 end_time 不得变成 None。
+
+    空白段诚实降级为 None；若合并时无脑用它覆盖 buffer 的 end_time，
+    一次合并就会让整段有效文本失去结束时间。
+    """
+    client = _make_client(tmp_path)
+    tokens = ["Hi", "。", " ", " "]
+    text_accu = "".join(tokens)
+    timestamps = [round(1.0 + i * 0.3, 2) for i in range(len(tokens))]
+
+    generated = asyncio.run(
+        client._save_results(
+            tmp_path / "audio.webm",
+            {
+                "task_id": "merge-ws",
+                "text": text_accu,
+                "text_accu": text_accu,
+                "tokens": tokens,
+                "timestamps": timestamps,
+                "duration": timestamps[-1] + 1.0,
+                "time_start": 1.0,
+                "time_complete": 2.0,
+            },
+        )
+    )
+
+    sidecar = next(p for p in generated if "funasr" in p.name)
+    segments = json.loads(sidecar.read_text(encoding="utf-8"))["segments"]
+    assert "".join(s["text"] for s in segments) == text_accu
+    for segment in segments:
+        if segment["text"].strip():
+            assert segment["end_time"] is not None, (
+                f"有效文本段的 end_time 变成了 None: {segment['text']!r}"
+            )

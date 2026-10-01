@@ -226,8 +226,11 @@ def _optimize_segment_lengths(
 
         if buffer_len < min_len:
             if combined_len <= max_len:
-                # 合并：取区间并集后从原文重新切片，不做字符串拼接
-                buffer["end_time"] = seg["end_time"]
+                # 合并：取区间并集后从原文重新切片，不做字符串拼接。
+                # 空白段没有有效时间（诚实降级为 None），绝不能让它覆盖
+                # buffer 的 end_time——否则一次合并会让整段有效文本失去结束时间。
+                if seg["end_time"] is not None:
+                    buffer["end_time"] = seg["end_time"]
                 buffer["char_end"] = seg["char_end"]
                 buffer["text"] = text[buffer["char_start"]:seg["char_end"]]
                 buffer["length"] = combined_len
