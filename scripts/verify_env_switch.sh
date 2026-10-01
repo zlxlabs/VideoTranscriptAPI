@@ -73,14 +73,24 @@ fi
 
 # (b) real config/config.jsonc (developer machine norm) -- source it from the
 # main checkout when available, since config.jsonc is gitignored per worktree.
-MAIN_REPO="${MAIN_REPO:-/home/zlx/projects/personal/VideoTranscriptAPI}"
-if [ -f "$MAIN_REPO/config/config.jsonc" ]; then
+# MAIN_REPO may be given explicitly; otherwise it is discovered from git.
+MAIN_REPO="${MAIN_REPO:-}"
+if [ -z "$MAIN_REPO" ]; then
+  MAIN_REPO="$(git worktree list --porcelain 2>/dev/null |
+    awk '/^worktree /{print $2}' |
+    while read -r wt; do
+      if [ "$wt" != "$(pwd)" ] && [ -f "$wt/config/config.jsonc" ]; then
+        printf '%s\n' "$wt"; break
+      fi
+    done)"
+fi
+if [ -n "$MAIN_REPO" ] && [ -f "$MAIN_REPO/config/config.jsonc" ]; then
   cp "$MAIN_REPO/config/config.jsonc" config/config.jsonc
   uv run --frozen pytest tests -q --tb=short >/dev/null 2>&1
   report "(b) pytest tests with a real config/config.jsonc" "$?"
   rm -f config/config.jsonc
 else
-  echo "SKIP  (b) no real config.jsonc found at $MAIN_REPO"
+  echo "SKIP  (b) no real config.jsonc available in another worktree (set MAIN_REPO)"
 fi
 
 echo
