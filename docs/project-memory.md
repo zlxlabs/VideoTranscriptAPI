@@ -79,6 +79,27 @@
 
 参考 [[reference_n305_docker_deploy]]、playbook `ops-dispatcher/docs/fleet-onboarding-playbook.md`。
 
+## CapsWriter 文件任务契约
+
+记录于 2026-10-01（issue #109，PR 以 `card/VideoTranscriptAPI-261001-rescope` 分支提出）。
+
+上游 CapsWriter 文件任务契约已实现并部署生产，生产实测三条不变式全部成立：
+1. `raw["text_accu"]` 存在且为非空字符串；
+2. `len(tokens) == len(timestamps)`；
+3. `"".join(tokens) == text_accu`（逐字）。
+
+由此两条仓专属事实：
+
+- **正文唯一权威是 `"".join(tokens)`**。`raw["text"]` 是独立回显稿，与 `text_accu` **不同**；
+  拿它当字符坐标源会把时间轴压缩约 19%。字符坐标 = token 长度前缀和。
+- **相邻时间戳大量重复**：实测 812 次（72.8%），倒退 0 次。空格/标点 token 继承邻近词时间。
+  所以分段的 `end_time` 取「下一句首 token 的时间戳」，取本句末 token 会产出大量
+  `start == end` 的零长度段。
+
+校验点：`transcriber/capswriter_client.py` 的 `_validate_capswriter_contract`，失败抛
+`CapsWriterContractError`，消息以 `CAPSWRITER_CONTRACT_FAILED condition=<具体哪条>` 开头
+（可 grep）。测试：`tests/unit/test_capswriter_contract.py`。
+
 ## 说话人归属
 
 这条事实记录于 2026-07-28（归档 frontmatter `modified`: 2026-07-28T15:19:15.142Z）。

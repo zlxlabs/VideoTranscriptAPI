@@ -16,29 +16,29 @@ sys.path.insert(0, str(project_root / "src"))
 
 from video_transcript_api.transcriber.capswriter_client import (
     _create_segments_from_capswriter,
-    _clean_token,
-    _build_token_position_map,
+    _token_char_prefix,
     _split_text_by_punctuation
 )
 
-_PUNCT = "，。！？、；：,;:!? "
-
 # 历史上这里依赖 tests/output/capswriter_format_test/ 下的中间产物，由一个已不存在的
 # 脚本生成，干净检出里恒定缺失 → 函数走 return False 被 pytest 静默判绿。
-# 现在没有这些文件时改用自带合成数据（逐字 token，与 _remove_punctuation 对齐）。
+# 现在没有这些文件时改用自带合成数据（逐字 token，正文 = "".join(tokens)）。
 _REGRESSION_JSON = Path('tests/output/capswriter_format_test/json/spk_extract.json')
 _REGRESSION_TXT = Path('tests/output/capswriter_format_test/all/spk_extract.merge.txt')
 
 
 def _synthetic_capswriter_data():
-    """造一份最小的 CapsWriter 形态数据：(text, tokens, timestamps)"""
+    """造一份最小的 CapsWriter 形态数据：(text, tokens, timestamps)
+
+    满足上游契约：正文 = "".join(tokens) = text_accu。
+    """
     sentences = [
         "今天我们聊一聊语音转写这件事",
         "先说结论再展开细节",
         "最后总结一下要点",
     ]
     text = "。".join(sentences)
-    chars = [c for c in text if c not in _PUNCT]
+    chars = list(text)
     timestamps = [round(i * 0.2, 2) for i in range(len(chars))]
     return text, chars, timestamps
 
@@ -76,30 +76,24 @@ def _run_conversion_cases():
     # 测试辅助函数
     print(f'\n[TEST 1] Testing helper functions...')
 
-    # Test _clean_token
-    assert _clean_token('l@@') == 'l', 'Failed: _clean_token'
-    assert _clean_token('ily') == 'ily', 'Failed: _clean_token'
-    print('  _clean_token: OK')
-
-    # Test _build_token_position_map
-    test_tokens = ['好', '欢', 'l@@', 'ily']
-    positions, reconstructed = _build_token_position_map(test_tokens)
-    assert reconstructed == '好欢lily', f'Failed: reconstructed = {reconstructed}'
-    # 位置: 好(0), 欢(1), l(2), ily(3), 结束(6)
-    assert positions == [0, 1, 2, 3, 6], f'Failed: positions = {positions}'
-    print('  _build_token_position_map: OK')
+    # Test _token_char_prefix
+    test_tokens = ['好', '欢', 'l', 'ily']
+    prefix = _token_char_prefix(test_tokens)
+    assert prefix == [0, 1, 2, 3, 6], f'Failed: prefix = {prefix}'
+    print('  _token_char_prefix: OK')
 
     # Test _split_text_by_punctuation
-    test_text = "你好。我是主持人。欢迎！"
-    sentences = _split_text_by_punctuation(test_text)
-    assert len(sentences) == 3, f'Failed: expected 3 sentences, got {len(sentences)}'
+    sentences = _split_text_by_punctuation("你好。我是主持人。欢迎！")
+    assert [s for s, _ in sentences] == ['你好。', '我是主持人。', '欢迎！'], \
+        f'Failed: sentences = {sentences}'
+    assert [offset for _, offset in sentences] == [0, 3, 9], \
+        f'Failed: offsets = {[o for _, o in sentences]}'
     print('  _split_text_by_punctuation: OK')
 
     # 测试主转换函数
     print(f'\n[TEST 2] Testing main conversion function...')
 
     segments = _create_segments_from_capswriter(
-        text=text,
         tokens=tokens,
         timestamps=timestamps,
         min_len=80,

@@ -23,8 +23,6 @@ from video_transcript_api.transcriber.capswriter_client import (
     _create_segments_from_capswriter,
 )
 
-_PUNCT = "，。！？、；：,;:!? "
-
 REQUIRED_FIELDS = [
     'task_id', 'file_name', 'duration', 'segments', 'created_at',
     'processing_time', 'error',
@@ -33,14 +31,17 @@ REQUIRED_SEGMENT_FIELDS = ['start_time', 'end_time', 'text']
 
 
 def _synthetic_capswriter_data():
-    """造一份最小的 CapsWriter 形态数据：(text, tokens, timestamps)"""
+    """造一份最小的 CapsWriter 形态数据：(text, tokens, timestamps)
+
+    满足上游契约：正文 = "".join(tokens) = text_accu。
+    """
     sentences = [
         "今天我们聊一聊语音转写这件事",
         "先说结论再展开细节",
         "最后总结一下要点",
     ]
     text = "。".join(sentences)
-    chars = [c for c in text if c not in _PUNCT]
+    chars = list(text)
     timestamps = [round(i * 0.2, 2) for i in range(len(chars))]
     return text, chars, timestamps
 
@@ -79,7 +80,7 @@ def _run_structure_cases():
     text, tokens, timestamps = _synthetic_capswriter_data()
 
     segments = _create_segments_from_capswriter(
-        text=text, tokens=tokens, timestamps=timestamps, min_len=2, max_len=30
+        tokens=tokens, timestamps=timestamps, min_len=2, max_len=30
     )
     print(f'  Generated {len(segments)} segments')
 
