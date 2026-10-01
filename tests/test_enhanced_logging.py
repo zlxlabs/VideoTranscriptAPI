@@ -3,10 +3,15 @@
 
 """
 Test enhanced logging for FunASR conversion
+
+原实现依赖 tests/output/capswriter_format_test/ 下由另一个已不存在的脚本
+（tests/test_capswriter_formats.py）生成的中间产物，在干净检出里恒定缺失，
+于是函数走 return False 分支被 pytest 静默判绿。这里改成自带一份合成的
+CapsWriter 数据（token 逐字、去标点，与 _remove_punctuation 对齐），
+让四条边界路径真正被执行和断言。
 """
 
 import sys
-import json
 from pathlib import Path
 
 # Add project root to path
@@ -18,31 +23,38 @@ from video_transcript_api.transcriber.capswriter_client import (
 )
 from loguru import logger
 
+_PUNCT = "，。！？、；：,;:!? "
+
+
+def _synthetic_capswriter_data():
+    """造一份最小的 CapsWriter 形态数据：(text, tokens, timestamps)。
+
+    token 按「去掉标点后的每个字一个 token」构造，使 reconstructed 与
+    text_clean 对齐（否则函数只会打一条对齐警告，测不到真实分段行为）。
+    """
+    sentences = [
+        "今天我们聊一聊语音转写这件事",
+        "先说结论再展开细节",
+        "最后总结一下要点",
+    ]
+    text = "。".join(sentences)
+    chars = [c for c in text if c not in _PUNCT]
+    timestamps = [round(i * 0.2, 2) for i in range(len(chars))]
+    return text, chars, timestamps
+
 
 def test_enhanced_logging():
-    """测试增强后的日志输出"""
+    """测试增强后的日志输出（pytest 入口）"""
+    assert _run_enhanced_logging_cases()
+
+
+def _run_enhanced_logging_cases():
+    """实际执行四条边界路径（__main__ 脚本入口需要 bool 来算 sys.exit 退出码）"""
     print('=' * 80)
     print('TESTING ENHANCED LOGGING')
     print('=' * 80)
 
-    # 使用测试数据
-    json_file = Path('tests/output/capswriter_format_test/json/spk_extract.json')
-    txt_file = Path('tests/output/capswriter_format_test/all/spk_extract.merge.txt')
-
-    if not json_file.exists() or not txt_file.exists():
-        print('ERROR: Test data not found')
-        print('Please run: python tests/test_capswriter_formats.py first')
-        return False
-
-    # 加载数据
-    with open(json_file, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-
-    with open(txt_file, 'r', encoding='utf-8') as f:
-        text = f.read().strip()
-
-    tokens = data.get('tokens', [])
-    timestamps = data.get('timestamps', [])
+    text, tokens, timestamps = _synthetic_capswriter_data()
 
     print('\n[TEST 1] Normal case - should succeed')
     print('-' * 80)
@@ -51,11 +63,18 @@ def test_enhanced_logging():
         text=text,
         tokens=tokens,
         timestamps=timestamps,
-        min_len=80,
-        max_len=300
+        min_len=2,
+        max_len=30
     )
 
     print(f'\nResult: {len(segments)} segments generated')
+    assert segments, "正常输入未生成任何 segment"
+    for seg in segments:
+        assert set(seg) >= {'start_time', 'end_time', 'text'}, f"segment 缺字段: {seg}"
+        assert seg['text'], "segment 文本为空"
+        assert seg['start_time'] is not None and seg['end_time'] is not None, \
+            f"segment 时间为 None: {seg}"
+        assert seg['end_time'] > seg['start_time'], f"segment 结束时间不晚于开始: {seg}"
 
     print('\n[TEST 2] Empty text - should fail gracefully')
     print('-' * 80)
@@ -69,21 +88,23 @@ def test_enhanced_logging():
             max_len=300
         )
         print(f'\nResult: {len(segments)} segments generated')
+        assert segments == [], "空文本应返回空 segments"
     except Exception as e:
-        print(f'\nCaught exception: {e}')
+        raise AssertionError(f"空文本不应抛异常: {e}") from e
 
     print('\n[TEST 3] Length mismatch - should handle gracefully')
     print('-' * 80)
 
     segments = _create_segments_from_capswriter(
         text=text,
-        tokens=tokens[:100],  # 故意不匹配
+        tokens=tokens[:max(1, len(tokens) // 2)],  # 故意不匹配
         timestamps=timestamps,
-        min_len=80,
-        max_len=300
+        min_len=2,
+        max_len=30
     )
 
     print(f'\nResult: {len(segments)} segments generated')
+    assert segments, "长度不匹配时截断后仍应产出 segment"
 
     print('\n[TEST 4] Empty tokens - should fail gracefully')
     print('-' * 80)
@@ -97,6 +118,7 @@ def test_enhanced_logging():
     )
 
     print(f'\nResult: {len(segments)} segments generated')
+    assert segments == [], "空 tokens 应返回空 segments"
 
     print('\n' + '=' * 80)
     print('LOGGING TEST COMPLETED')
@@ -114,5 +136,9 @@ if __name__ == '__main__':
         level="DEBUG"
     )
 
-    success = test_enhanced_logging()
+    try:
+        success = _run_enhanced_logging_cases()
+    except AssertionError as e:
+        print(f'[FAIL] 断言失败: {e}')
+        sys.exit(1)
     sys.exit(0 if success else 1)

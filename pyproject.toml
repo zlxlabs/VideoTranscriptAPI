@@ -65,6 +65,13 @@ markers = [
     "network: tests that hit real external services",
 ]
 addopts = "-q --strict-markers"
+# 门禁承诺：不允许有测试用「返回值」表达判定（pytest 9 不检查测试函数返回值，
+# `return True/False` 会被静默丢弃 → 恒绿）。只承诺这一条；它抓不到吞异常后隐式返回
+# None 的 print 型测试、写在 except 里的 assert、unittest.TestCase 方法的返回值，
+# 以及本身无意义的断言（assert True）。故不设豁免白名单——白名单会成为新的腐化点。
+filterwarnings = [
+    "error::pytest.PytestReturnNotNoneWarning",
+]
 
 [tool.coverage.run]
 source = ["src/video_transcript_api"]
