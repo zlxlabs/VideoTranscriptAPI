@@ -94,3 +94,15 @@
 
 进度：**Inc1 已合并 main（2026-07-28 PR#32，c598915）并已部署 n305**（digest 固定 c5989154a2b9，healthy；本地重放验证过问题集会触发 low_confidence_cluster_dropped，Speaker4 占 17.9% 段落）。**Inc2（语义矛盾检测，只标记不改名）已合并 main（2026-07-28 PR#33，7e127b1）并已部署 n305**（tag 7e127b1a1437，healthy；部署曾被 n305→ghcr 网络中断阻塞约 2h，用户侧修复后完成）。spec 第 7 节 v2 契约：suspect override 不写 name、reason 枚举单一来源（schemas/contradiction_scan.py 的 CONTRADICTION_REASONS）、幻觉 id 过滤、>20% unreliable、分窗扫描（400/窗重叠10、任一窗失败整体 failed）、门控与 infer_speaker_names 解耦、任务级开关 contradiction_scan（processing_options 全链路含 cache_manager 白名单）。gate 曾红一轮（3 major 全接受）。下一步：部署后跑 10-20 集真实节目攒 suspect 精确率，再裁决 Inc3/Inc4。内容：segment_id（两遍去重保稳定）、segment_overrides 容器+渲染机制、speaker_risk_flags（R1/R2）、分层采样（人均预算截断保三层非空）、UI 免责声明/风险横幅/待确认徽标。渲染锚点保持 dlg-{index}，segment_id 走 data-segment-id（floating-toc.js 依赖，勿改回）。
 后续：Inc2 语义矛盾检测（只标记，含 backlog：override 徽标 status 白名单扩展、tooltip 阈值与配置联动）、Inc3 有证据局部纠正、Inc4 人工锚点。生产 fixture 原料在 docs/sessions/260728-1050-q7m2/fixtures/raw/（已 gitignore）。相关：[[feedback-codex-implementer]]。
+
+## CapsWriter 文件任务契约（2026-10-01）
+
+上游已部署的文件任务响应以 `raw["text_accu"]`、`raw["tokens"]` 和
+`raw["timestamps"]` 为唯一时间轴事实源。客户端落盘前必须逐字校验
+`"".join(tokens) == text_accu` 且两组列表等长；不满足时抛错并记录
+`CAPSWRITER_CONTRACT_FAILED`，禁止回退到 `Transcript.text`。
+
+FunASR 兼容侧车由原始 token 的字符长度前缀和定位：句首取首 token 时间，
+句尾取下一句首 token 时间，末句取末 token 起点（缺失时取音频时长）。时间戳
+允许相邻重复，只要求非递减；`timeline_quality.coverage` 仅表示末 token
+起点与音频时长的比例，不是契约校验或完整率。

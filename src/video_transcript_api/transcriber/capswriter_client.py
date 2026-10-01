@@ -9,6 +9,7 @@ CapsWriter语音转文字客户端 - 精简版
 import os
 import sys
 import json
+import hashlib
 import math
 import time
 import asyncio
@@ -75,7 +76,7 @@ class Config:
             print(f"加载项目配置失败，使用默认配置: {e}")
 
     @classmethod
-    def update_server(cls, addr: str = None, port: int = None):
+    def update_server(cls, addr: Optional[str] = None, port: Optional[int] = None):
         """更新服务器连接信息"""
         if addr:
             cls.server_addr = addr
@@ -88,113 +89,93 @@ class Config:
 # ============================================================================
 
 
-def _clean_token(token: str) -> str:
-    """清理 token，去除 BPE 标记"""
-    return token.replace("@@", "")
+def _text_summary(value: Any) -> str:
+    """Return a non-sensitive summary for contract diagnostics."""
+    if not isinstance(value, str):
+        return f"type={type(value).__name__}"
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    return f"len={len(value)} sha256={digest}"
 
 
-def _build_token_position_map(tokens: List[str]) -> Tuple[List[int], str]:
-    """
-    构建 token 到字符位置的映射
+def _validate_capswriter_contract(
+    result: Dict[str, Any],
+) -> Tuple[str, List[str], List[Any]]:
+    """Validate the upstream file-task contract before any output is written."""
+    text_accu = result.get("text_accu")
+    tokens = result.get("tokens", [])
+    timestamps = result.get("timestamps", [])
 
-    Returns:
-        (token_to_char_pos, reconstructed_text)
-    """
-    token_to_char_pos = []
-    reconstructed = ""
+    try:
+        joined_text = "".join(tokens)
+    except TypeError:
+        joined_text = None
 
+    token_count = len(tokens) if hasattr(tokens, "__len__") else -1
+    timestamp_count = len(timestamps) if hasattr(timestamps, "__len__") else -1
+    joined_summary = _text_summary(joined_text)
+    accu_summary = _text_summary(text_accu)
+
+    if not isinstance(text_accu, str) or not text_accu:
+        message = (
+            "CAPSWRITER_CONTRACT_FAILED "
+            "condition=text_accu_missing_or_empty "
+            f"text_accu={accu_summary} joined={joined_summary} "
+            f"tokens_len={token_count} timestamps_len={timestamp_count}"
+        )
+        logger.warning(message)
+        raise ValueError(message)
+
+    if token_count != timestamp_count:
+        message = (
+            "CAPSWRITER_CONTRACT_FAILED "
+            "condition=tokens_timestamps_length_mismatch "
+            f"text_accu={accu_summary} joined={joined_summary} "
+            f"tokens_len={token_count} timestamps_len={timestamp_count}"
+        )
+        logger.warning(message)
+        raise ValueError(message)
+
+    if joined_text != text_accu:
+        message = (
+            "CAPSWRITER_CONTRACT_FAILED "
+            "condition=tokens_join_text_accu_mismatch "
+            f"text_accu={accu_summary} joined={joined_summary} "
+            f"tokens_len={token_count} timestamps_len={timestamp_count}"
+        )
+        logger.warning(message)
+        raise ValueError(message)
+
+    return "".join(tokens), list(tokens), list(timestamps)
+
+
+def _token_prefixes(tokens: List[str]) -> List[int]:
+    """Build exact half-open character boundaries for the raw token stream."""
+    prefixes = [0]
     for token in tokens:
-        token_to_char_pos.append(len(reconstructed))
-        clean = _clean_token(token)
-        reconstructed += clean
-
-    token_to_char_pos.append(len(reconstructed))
-    return token_to_char_pos, reconstructed
+        prefixes.append(prefixes[-1] + len(token))
+    return prefixes
 
 
-def _find_token_idx(token_positions: List[int], char_pos: int) -> int:
-    """找到字符位置对应的 token 索引"""
-    for i in range(len(token_positions) - 1):
-        if token_positions[i] <= char_pos < token_positions[i + 1]:
-            return i
-    return len(token_positions) - 2
+def _find_token_idx(token_prefixes: List[int], char_pos: int) -> int:
+    """Find the token containing a character position."""
+    for index in range(len(token_prefixes) - 1):
+        if token_prefixes[index] <= char_pos < token_prefixes[index + 1]:
+            return index
+    return len(token_prefixes) - 2
 
 
-def _split_text_by_punctuation(text: str) -> List[str]:
-    """按主要标点符号分句，保留标点"""
-    primary_punct = r"([。！？!?])"
-    parts = re.split(primary_punct, text)
-
-    sentences = []
-    i = 0
-    while i < len(parts):
-        sentence = parts[i]
-        if i + 1 < len(parts) and parts[i + 1] in "。！？!?":
-            sentence += parts[i + 1]
-            i += 2
-        else:
-            i += 1
-
-        if sentence.strip():
-            sentences.append(sentence.strip())
-
-    return sentences
-
-
-def _remove_punctuation(text: str) -> str:
-    """移除文本中的标点符号和空格"""
-    return re.sub(r"[，。！？、；：,;:!?\s]", "", text)
-
-
-def _optimize_segment_lengths(
-    segments: List[Dict[str, Any]], min_len: int, max_len: int
-) -> List[Dict[str, Any]]:
-    """优化段落长度：合并短句、分割长句"""
-    if not segments:
-        return []
-
-    optimized = []
-    buffer = None
-
-    for seg in segments:
-        seg_len = seg["length"]
-
-        if buffer is None:
-            buffer = seg.copy()
-            continue
-
-        buffer_len = buffer["length"]
-        combined_len = buffer_len + seg_len
-
-        if buffer_len < min_len:
-            if combined_len <= max_len:
-                # 合并
-                buffer["end_time"] = seg["end_time"]
-                buffer["text"] = buffer["text"] + seg["text"]
-                buffer["length"] = combined_len
-            else:
-                optimized.append(buffer)
-                buffer = seg.copy()
-        elif min_len <= buffer_len <= max_len:
-            optimized.append(buffer)
-            buffer = seg.copy()
-        else:
-            optimized.append(buffer)
-            buffer = seg.copy()
-
-    if buffer is not None:
-        optimized.append(buffer)
-
-    # 处理超长句子
-    final = []
-    for seg in optimized:
-        if seg["length"] > max_len:
-            split_segs = _split_long_segment(seg, max_len)
-            final.extend(split_segs)
-        else:
-            final.append(seg)
-
-    return final
+def _split_text_by_punctuation(text: str) -> List[Tuple[int, int]]:
+    """Split text into contiguous half-open spans without dropping characters."""
+    spans: List[Tuple[int, int]] = []
+    cursor = 0
+    for match in re.finditer(r"[。！？!?]+|\.(?=\s|$)", text):
+        end = match.end()
+        if cursor < end:
+            spans.append((cursor, end))
+        cursor = end
+    if cursor < len(text):
+        spans.append((cursor, len(text)))
+    return spans
 
 
 def _finite_time_or_none(value: Any) -> Optional[float]:
@@ -210,192 +191,127 @@ def _finite_time_or_none(value: Any) -> Optional[float]:
     return parsed if math.isfinite(parsed) else None
 
 
-def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str, Any]]:
-    """在次级标点处分割超长句子。
+def _timeline_coverage(timestamps: List[Any], duration: Any) -> Optional[float]:
+    """Measure the last token start time against the audio duration."""
+    parsed_duration = _finite_time_or_none(duration)
+    last_timestamp = _finite_time_or_none(timestamps[-1]) if timestamps else None
+    if parsed_duration is None or parsed_duration <= 0 or last_timestamp is None:
+        return None
+    return last_timestamp / parsed_duration
 
-    时间插值必须拒绝非有限值：start_time / duration 任一非有限时，诚实
-    降级为 start_time=end_time=None，文本照常切分、永不丢字。
+
+def _split_long_segment(
+    segment: Dict[str, Any], max_len: int
+) -> List[Dict[str, Any]]:
+    """Split an already-built generic segment for legacy adapter callers.
+
+    CapsWriter production segments no longer use this helper: their boundaries
+    come directly from token timestamps. It remains for the shared subtitle
+    adapter's existing finite-time tests and does not participate in token
+    coordinate calculation.
     """
     text = segment["text"]
-    secondary_punct = r"([，,；;])"
-    parts = re.split(secondary_punct, text)
-
+    parts = re.split(r"([，,；;])", text)
     if len(parts) <= 1:
         return [segment]
 
-    split_segments = []
+    split_segments: List[Dict[str, Any]] = []
     current = ""
-    orig_start = _finite_time_or_none(segment.get("start_time"))
-    orig_end = _finite_time_or_none(segment.get("end_time"))
-
     for part in parts:
-        if len(current + part) <= max_len:
+        if len(current + part) <= max_len or not current:
             current += part
         else:
-            if current:
-                split_segments.append(
-                    {
-                        "text": current,
-                        "length": len(current),
-                    }
-                )
-
-                current = part
-            else:
-                current = part
-
+            split_segments.append({"text": current, "length": len(current)})
+            current = part
     if current:
-        split_segments.append(
-            {
-                "text": current,
-                "length": len(current),
-            }
-        )
+        split_segments.append({"text": current, "length": len(current)})
 
     if not split_segments:
         return [segment]
 
+    original_start = _finite_time_or_none(segment.get("start_time"))
+    original_end = _finite_time_or_none(segment.get("end_time"))
     time_pairs = interpolate_segment_times(
-        orig_start,
-        orig_end,
-        [split_segment["text"] for split_segment in split_segments],
+        original_start,
+        original_end,
+        [part["text"] for part in split_segments],
     )
-    if orig_start is not None and orig_end is not None and orig_start == orig_end:
-        # Adapter compatibility branch: the legacy CapsWriter path preserved
-        # equal start/end timestamps for zero-span split segments. Keep that
-        # behavior here while the shared interpolator retains end <= start ->
-        # None for its honest general-purpose contract.
-        time_pairs = [
-            (orig_start, orig_end) for _ in split_segments
-        ]
-    for split_segment, (start_time, end_time) in zip(split_segments, time_pairs):
-        split_segment["start_time"] = (
+    if (
+        original_start is not None
+        and original_end is not None
+        and original_start == original_end
+    ):
+        time_pairs = [(original_start, original_end) for _ in split_segments]
+
+    for part, (start_time, end_time) in zip(split_segments, time_pairs):
+        part["start_time"] = (
             round(start_time, 2) if start_time is not None else None
         )
-        split_segment["end_time"] = (
-            round(end_time, 2) if end_time is not None else None
-        )
-
+        part["end_time"] = round(end_time, 2) if end_time is not None else None
     return split_segments
 
 
 def _create_segments_from_capswriter(
     text: str,
     tokens: List[str],
-    timestamps: List[float],
+    timestamps: List[Any],
     min_len: int = 80,
     max_len: int = 300,
+    duration: Any = None,
 ) -> List[Dict[str, Any]]:
     """
     从 CapsWriter 数据创建 FunASR 格式的 segments
 
     Args:
-        text: 带标点的完整文本
+        text: 仅为兼容旧调用方保留；正文始终由 tokens 原样拼接
         tokens: BPE token 列表
         timestamps: 时间戳列表
         min_len: 最小段落长度
         max_len: 最大段落长度
+        duration: 音频时长，末句末 token 时间缺失时使用
 
     Returns:
         segments 列表
     """
-    logger.debug(
-        f"开始创建 segments: text={len(text)}, tokens={len(tokens)}, timestamps={len(timestamps)}"
-    )
-
-    # 检查长度是否匹配
-    if len(tokens) != len(timestamps):
-        logger.warning(
-            f"长度不匹配: tokens={len(tokens)}, timestamps={len(timestamps)}"
-        )
-        min_len_val = min(len(tokens), len(timestamps))
-        tokens = tokens[:min_len_val]
-        timestamps = timestamps[:min_len_val]
-        logger.info(f"已截断至相同长度: {min_len_val}")
-
-    if not tokens or not timestamps:
+    if not text:
+        return []
+    del text, min_len, max_len
+    if not tokens or not timestamps or len(tokens) != len(timestamps):
         logger.error("tokens 或 timestamps 为空，无法创建 segments")
         return []
 
-    # 构建 token 位置映射
-    token_positions, reconstructed = _build_token_position_map(tokens)
-    logger.debug(f"Token 位置映射完成: reconstructed length={len(reconstructed)}")
+    text = "".join(tokens)
+    token_prefixes = _token_prefixes(tokens)
+    spans = _split_text_by_punctuation(text)
+    segments: List[Dict[str, Any]] = []
 
-    # 分句
-    sentences = _split_text_by_punctuation(text)
-    logger.debug(f"按标点分句: {len(sentences)} 个句子")
-
-    # 验证对齐
-    text_clean = _remove_punctuation(text)
-    alignment_diff = abs(len(text_clean) - len(reconstructed))
-
-    if alignment_diff > 5:
-        logger.warning(
-            f"对齐警告: text_clean={len(text_clean)}, reconstructed={len(reconstructed)}, diff={alignment_diff}"
-        )
-        logger.warning(f"  这可能导致时间戳不准确，请检查输入数据")
-    else:
-        logger.debug(f"对齐检查通过: diff={alignment_diff}")
-
-    # 映射每个句子到 token 范围
-    segments = []
-    char_offset = 0
-
-    for idx, sentence in enumerate(sentences):
-        sentence_clean = _remove_punctuation(sentence)
-        sentence_len = len(sentence_clean)
-
-        if sentence_len == 0:
-            logger.debug(f"句子 {idx + 1} 为空，跳过")
-            continue
-
-        # 查找对应的 token 范围
-        start_token_idx = _find_token_idx(token_positions, char_offset)
-        end_token_idx = _find_token_idx(token_positions, char_offset + sentence_len - 1)
-
-        # 安全范围检查
-        start_token_idx = max(0, min(start_token_idx, len(timestamps) - 1))
-        end_token_idx = max(0, min(end_token_idx, len(timestamps) - 1))
-
-        # 提取时间：NaN/Inf/缺失（None）等无效值经唯一权威解析统一降级为
-        # None（与 _split_long_segment 的诚实降级同一口径）——文本永不丢失，
-        # 时间宁可为 None 也不能让 round(None)/round(nan) 之类的异常或
-        # NaN/Inf 字面量污染整个 FunASR 兼容侧车的生成。
+    for index, (char_start, char_end) in enumerate(spans):
+        start_token_idx = _find_token_idx(token_prefixes, char_start)
         start_time = _finite_time_or_none(timestamps[start_token_idx])
-        end_time = _finite_time_or_none(timestamps[end_token_idx])
+
+        if index + 1 < len(spans):
+            next_start, _ = spans[index + 1]
+            next_token_idx = _find_token_idx(token_prefixes, next_start)
+            end_time = _finite_time_or_none(timestamps[next_token_idx])
+        else:
+            end_time = _finite_time_or_none(timestamps[-1])
+            if end_time is None:
+                end_time = _finite_time_or_none(duration)
 
         segments.append(
             {
-                "start_time": round(start_time, 2) if start_time is not None else None,
-                "end_time": round(end_time, 2) if end_time is not None else None,
-                "text": sentence,
-                "length": len(sentence),
+                "start_time": start_time,
+                "end_time": end_time,
+                "text": text[char_start:char_end],
+                "length": char_end - char_start,
+                "char_start": char_start,
+                "char_end": char_end,
+                "start_token_idx": start_token_idx,
             }
         )
 
-        logger.debug(
-            f"句子 {idx + 1}: {sentence_len} 字符 -> tokens[{start_token_idx}:{end_token_idx}] -> {start_time}s-{end_time}s"
-        )
-
-        char_offset += sentence_len
-
-    logger.debug(f"初始分段完成: {len(segments)} 个 segments")
-
-    # 长度优化
-    optimized = _optimize_segment_lengths(segments, min_len, max_len)
-    logger.debug(f"长度优化完成: {len(optimized)} 个 segments")
-
-    # 最终统计
-    if optimized:
-        lengths = [seg["length"] for seg in optimized]
-        in_range = sum(1 for l in lengths if min_len <= l <= max_len)
-        logger.info(
-            f"Segments 生成完成: {len(optimized)} 个片段, {in_range}/{len(optimized)} 在目标范围内"
-        )
-    else:
-        logger.warning("未生成任何 segments")
-
-    return optimized
+    logger.info(f"Segments 生成完成: {len(segments)} 个片段")
+    return segments
 
 
 # ============================================================================
@@ -408,11 +324,11 @@ class CapsWriterClient:
 
     def __init__(
         self,
-        server_addr: str = None,
-        server_port: int = None,
-        output_dir: str = None,
-        max_retries: int = None,
-        retry_delay: int = None,
+        server_addr: Optional[str] = None,
+        server_port: Optional[int] = None,
+        output_dir: Optional[str] = None,
+        max_retries: Optional[int] = None,
+        retry_delay: Optional[int] = None,
     ):
         """
         初始化客户端
@@ -473,157 +389,105 @@ class CapsWriterClient:
     async def _save_results(
         self, file_path: Path, result: Dict[str, Any]
     ) -> List[Path]:
-        """保存转录结果"""
-        if not result:
-            return []
-
+        """Validate and persist the complete CapsWriter result."""
+        text, tokens, timestamps = _validate_capswriter_contract(result)
         base_path = file_path.with_suffix("")
-        generated_files = []
+        output_dir = Path(self.output_dir)
+        json_file = output_dir / f"{base_path.name}.json"
+        txt_file = output_dir / f"{base_path.name}.txt"
+        merge_txt_file = output_dir / f"{base_path.name}.merge.txt"
+        funasr_file = output_dir / f"{base_path.name}_funasr.json"
 
-        try:
-            # 提取结果数据
-            text = result.get("text", "")
-            timestamps = result.get("timestamps", [])
-            tokens = result.get("tokens", [])
+        # Build every artifact in memory first. A sidecar failure therefore
+        # cannot leave a successful-looking text-only result on disk.
+        funasr_data = None
+        if Config.generate_funasr_compat:
+            self.log("开始生成 FunASR 兼容格式 JSON...")
+            segments = _create_segments_from_capswriter(
+                text=text,
+                tokens=tokens,
+                timestamps=timestamps,
+                min_len=80,
+                max_len=300,
+                duration=result.get("duration"),
+            )
+            if not segments:
+                raise ValueError("no segments generated")
 
-            # 定义输出文件路径
-            json_file = Path(self.output_dir) / f"{base_path.name}.json"
-            txt_file = Path(self.output_dir) / f"{base_path.name}.txt"
-            merge_txt_file = Path(self.output_dir) / f"{base_path.name}.merge.txt"
-
-            # 保存JSON文件
-            if Config.generate_json:
-                with open(json_file, "w", encoding="utf-8") as f:
-                    json.dump(
-                        {"timestamps": timestamps, "tokens": tokens},
-                        f,
-                        ensure_ascii=False,
-                        indent=2,
+            time_start = result.get("time_start", 0)
+            time_complete = result.get("time_complete", 0)
+            processing_time = time_complete - time_start
+            funasr_data = {
+                "task_id": result.get("task_id", ""),
+                "file_name": file_path.name,
+                "duration": result.get("duration", 0),
+                "timeline_quality": {
+                    "coverage": _timeline_coverage(
+                        timestamps, result.get("duration")
                     )
-                generated_files.append(json_file)
-                self.log(f"已生成详细信息文件: {json_file}")
-
-            # 保存文本文件（单行完整文本，供LLM处理）
-            if Config.generate_txt:
-                with open(txt_file, "w", encoding="utf-8") as f:
-                    f.write(text)
-                generated_files.append(txt_file)
-                self.log(f"已生成文本文件: {txt_file}")
-
-            # 保存合并文本文件（兼容旧格式）
-            if Config.generate_merge_txt:
-                with open(merge_txt_file, "w", encoding="utf-8") as f:
-                    f.write(text)
-                generated_files.append(merge_txt_file)
-                self.log(f"已生成合并文本文件: {merge_txt_file}")
-
-            # 保存 FunASR 兼容格式的 JSON
-            if Config.generate_funasr_compat:
-                self.log("开始生成 FunASR 兼容格式 JSON...")
-                try:
-                    # 使用带前缀的文件名，临时保存在 output_dir（后续会被复制到缓存目录）
-                    funasr_file = (
-                        Path(self.output_dir) / f"{base_path.name}_funasr.json"
-                    )
-
-                    # 验证输入数据
-                    if not text:
-                        self.log("警告: 文本为空，跳过 FunASR 格式生成", "warning")
-                        raise ValueError("text is empty")
-
-                    if not tokens or not timestamps:
-                        self.log(
-                            f"警告: tokens 或 timestamps 为空 (tokens={len(tokens)}, timestamps={len(timestamps)})",
-                            "warning",
-                        )
-                        raise ValueError("tokens or timestamps is empty")
-
-                    self.log(
-                        f"输入数据: text={len(text)} 字符, tokens={len(tokens)}, timestamps={len(timestamps)}"
-                    )
-
-                    # 创建 segments
-                    segments = _create_segments_from_capswriter(
-                        text=text,
-                        tokens=tokens,
-                        timestamps=timestamps,
-                        min_len=80,
-                        max_len=300,
-                    )
-
-                    if not segments:
-                        self.log(
-                            "警告: 未生成任何 segments，跳过 FunASR 格式生成", "warning"
-                        )
-                        raise ValueError("no segments generated")
-
-                    self.log(f"成功创建 {len(segments)} 个 segments")
-
-                    # 构建 FunASR 兼容格式
-                    funasr_data = {
-                        "task_id": result.get("task_id", ""),
-                        "file_name": file_path.name,
-                        "duration": result.get("duration", 0),
-                        "segments": [
-                            {
-                                "start_time": seg["start_time"],
-                                "end_time": seg["end_time"],
-                                "text": seg["text"],
-                            }
-                            for seg in segments
-                        ],
-                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        "processing_time": result.get("time_complete", 0)
-                        - result.get("time_start", 0),
-                        "error": None,
+                },
+                "segments": [
+                    {
+                        "start_time": segment["start_time"],
+                        "end_time": segment["end_time"],
+                        "text": segment["text"],
                     }
+                    for segment in segments
+                ],
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "processing_time": processing_time,
+                "error": None,
+            }
 
-                    # 统计信息：无效时间已降级为 None 的 segment（见
-                    # _create_segments_from_capswriter / _split_long_segment
-                    # 的诚实降级）没有可统计的时长，直接跳过——不能无条件做
-                    # end - start 算术，否则 None - None 抛 TypeError，整个
-                    # FunASR 兼容侧车会被 except 吞掉、跳过生成。
-                    total_duration = sum(
-                        seg["end_time"] - seg["start_time"]
-                        for seg in segments
-                        if seg["start_time"] is not None and seg["end_time"] is not None
-                    )
-                    avg_length = (
-                        sum(len(seg["text"]) for seg in segments) / len(segments)
-                        if segments
-                        else 0
-                    )
+            total_duration = sum(
+                segment["end_time"] - segment["start_time"]
+                for segment in segments
+                if segment["start_time"] is not None
+                and segment["end_time"] is not None
+            )
+            average_length = sum(len(segment["text"]) for segment in segments) / len(
+                segments
+            )
+            self.log(
+                f"Segments 统计: 总时长={total_duration:.2f}s, "
+                f"平均长度={average_length:.1f}字符"
+            )
 
-                    self.log(
-                        f"Segments 统计: 总时长={total_duration:.2f}s, 平均长度={avg_length:.1f}字符"
-                    )
+        generated_files: List[Path] = []
+        if Config.generate_json:
+            with open(json_file, "w", encoding="utf-8") as f:
+                json.dump(
+                    {"timestamps": timestamps, "tokens": tokens},
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            generated_files.append(json_file)
+            self.log(f"已生成详细信息文件: {json_file}")
 
-                    with open(funasr_file, "w", encoding="utf-8") as f:
-                        json.dump(funasr_data, f, ensure_ascii=False, indent=2)
+        if Config.generate_txt:
+            with open(txt_file, "w", encoding="utf-8") as f:
+                f.write(text)
+            generated_files.append(txt_file)
+            self.log(f"已生成文本文件: {txt_file}")
 
-                    generated_files.append(funasr_file)
-                    self.log(
-                        f"✓ 已生成 FunASR 兼容文件: {funasr_file} ({len(segments)} 个片段)"
-                    )
+        if Config.generate_merge_txt:
+            with open(merge_txt_file, "w", encoding="utf-8") as f:
+                f.write(text)
+            generated_files.append(merge_txt_file)
+            self.log(f"已生成合并文本文件: {merge_txt_file}")
 
-                except Exception as e:
-                    self.log(f"✗ 生成 FunASR 兼容格式失败: {e}", "warning")
-                    self.log(
-                        f"  提示: 主要转录文件（txt）已正常生成，可忽略此警告",
-                        "warning",
-                    )
-                    import traceback
+        if funasr_data is not None:
+            with open(funasr_file, "w", encoding="utf-8") as f:
+                json.dump(funasr_data, f, ensure_ascii=False, indent=2)
+            generated_files.append(funasr_file)
+            self.log(
+                f"已生成 FunASR 兼容文件: {funasr_file} "
+                f"({len(funasr_data['segments'])} 个片段)"
+            )
 
-                    self.log(f"  详细错误: {traceback.format_exc()}", "warning")
-
-            # 显示转录结果摘要
-            if text:
-                preview = text[:100] + "..." if len(text) > 100 else text
-                self.log(f"转录结果预览: {preview}")
-
-        except Exception as e:
-            self.log(f"保存结果时出错: {e}", "error")
-
+        preview = text[:100] + "..." if len(text) > 100 else text
+        self.log(f"转录结果预览: {preview}")
         return generated_files
 
     def transcribe_file(self, file_path: str) -> Tuple[bool, List[Path]]:
@@ -636,7 +500,7 @@ class CapsWriterClient:
         返回:
             tuple: (bool成功状态, list生成的文件)
         """
-        file_path = Path(file_path)
+        media_path = Path(file_path)
         attempts = 0
         last_error = None
         last_error_code = None
@@ -646,11 +510,11 @@ class CapsWriterClient:
             attempts += 1
             try:
                 self.log(
-                    f"开始转录文件: {file_path} (尝试 {attempts}/{self.max_retries})"
+                    f"开始转录文件: {media_path} (尝试 {attempts}/{self.max_retries})"
                 )
                 server_url = f"ws://{Config.server_addr}:{Config.server_port}"
                 transcript = transcribe_file_sync(
-                    file_path,
+                    media_path,
                     server_url,
                     encoding="flac",
                     seg_duration=Config.file_seg_duration,
@@ -658,15 +522,8 @@ class CapsWriterClient:
                 )
 
                 result = dict(transcript.raw)
-                result.update(
-                    {
-                        "text": transcript.text,
-                        "tokens": transcript.tokens,
-                        "timestamps": transcript.timestamps,
-                        "duration": transcript.duration,
-                    }
-                )
-                generated_files = asyncio.run(self._save_results(file_path, result))
+                result.setdefault("duration", transcript.duration)
+                generated_files = asyncio.run(self._save_results(media_path, result))
 
                 if generated_files:
                     self.log(f"转录完成，生成文件: {[str(f) for f in generated_files]}")
@@ -686,7 +543,7 @@ class CapsWriterClient:
                 self.log(f"等待 {self.retry_delay} 秒后重试...")
                 time.sleep(self.retry_delay)
 
-        error_msg = f"转录文件失败: {file_path}"
+        error_msg = f"转录文件失败: {media_path}"
         if last_error_code is not None:
             error_msg += f", code={last_error_code}"
         error_msg += f", 原因: {last_error}"

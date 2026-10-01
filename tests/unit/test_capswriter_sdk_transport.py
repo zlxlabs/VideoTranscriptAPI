@@ -37,11 +37,18 @@ def test_sdk_transport_passes_config_and_writes_transcript_sidecars(
     monkeypatch.setattr(Config, "generate_funasr_compat", True)
 
     transcript = Transcript(
-        text="hello!",
-        tokens=list("hello"),
-        timestamps=[0.0, 0.1, 0.2, 0.3, 0.4],
+        text="independent echo text",
+        tokens=list("hello!"),
+        timestamps=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
         duration=1.5,
-        raw={"task_id": "task-1", "time_start": 10.0, "time_complete": 12.5},
+        raw={
+            "task_id": "task-1",
+            "time_start": 10.0,
+            "time_complete": 12.5,
+            "text_accu": "hello!",
+            "tokens": list("hello!"),
+            "timestamps": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
+        },
     )
     with patch(
         "video_transcript_api.transcriber.capswriter_client.transcribe_file_sync",
@@ -72,5 +79,5 @@ def test_sdk_transport_passes_config_and_writes_transcript_sidecars(
     assert sidecar["duration"] == 1.5
     assert sidecar["processing_time"] == 2.5
     assert sidecar["segments"] == [
-        {"start_time": 0.0, "end_time": 0.4, "text": "hello!"}
+        {"start_time": 0.0, "end_time": 0.5, "text": "hello!"}
     ]
