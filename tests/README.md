@@ -17,7 +17,7 @@ uv sync
 | `tests/llm/` | LLM 相关的本地测试。 |
 | `tests/transcript/` | 转录兼容性与转换测试。 |
 | `tests/deployment/` | 部署及健康检查相关测试。 |
-| `tests/platforms/` | 平台适配器测试。 |
+| `tests/platforms/` | 仅有 `__init__.py` 和演示脚本 `demo_bilibili_metadata.py`，目前没有自动测试。 |
 | `tests/manual/` | 需要人工明确确认的网络、服务或真实凭据测试。 |
 | `tests/test_*.py` | 位于 `tests/` 根目录的补充测试。 |
 | `scripts/perf/concurrent_load.py` | 手工并发压测脚本，不属于 pytest 回归测试。 |
@@ -25,15 +25,11 @@ uv sync
 ## 常用命令
 
 ```bash
-# 本地快速基线：unit 和 cache
+# 全量自动测试：发现 tests/ 下的测试，排除 tests/manual/
 make test
 
 # 卡片验证范围
 uv run --frozen pytest tests/unit tests/integration
-
-# GitHub Required Gate v2 的 legacy quality 入口：uv sync --frozen 后执行全套 pytest
-uv sync --frozen
-uv run --frozen pytest -q
 
 # 按需运行其他本地测试目录
 uv run pytest tests/integration
@@ -43,11 +39,9 @@ uv run pytest tests/transcript
 uv run pytest tests/deployment
 ```
 
-`make test` 当前只覆盖 `tests/unit tests/cache`。GitHub workflow 调用
-`zlxlabs/gate/.github/workflows/gate-v2.yml@v2`；当仓库没有可执行的
-`scripts/gate-quality` 时，quality job 使用 legacy 步骤，运行 `uv sync --frozen`
-和 `uv run --frozen pytest -q`。`uv sync --frozen` 默认同步 `dev` dependency group，
-因此 `uv run` 使用项目环境中的 pytest。
+`make test` 是 CI 和本地的全量自动测试入口：执行 `uv sync --frozen`，再运行
+`uv run --frozen pytest -q tests`。pytest 配置会排除 `tests/manual/`；根目录的
+`tests/test_*.py` 和各自动测试目录都会被发现。
 
 任务观测回归：`tests/unit/test_task_observability_report.py` 覆盖只读 CLI、旧 schema、
 UTC 窗口、去重、缺字段与失败判据；`tests/integration/test_task_observability.py`

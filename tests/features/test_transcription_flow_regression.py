@@ -1114,6 +1114,18 @@ class TestLlmHandoffRegistersBeforePut:
 # report called out by name.
 # ---------------------------------------------------------------------------
 class TestHandoffToLlmStageFailureModes:
+    observability = {
+        "stages": {
+            "transcription": {
+                "elapsed_ms": 12.5,
+                "count": 1,
+                "successes": 1,
+                "failures": 0,
+            }
+        },
+        "counters": {"cache_hit": 1},
+    }
+
     def _kwargs(self, task_id="task_handoff"):
         return dict(
             task_id=task_id,
@@ -1127,6 +1139,7 @@ class TestHandoffToLlmStageFailureModes:
             },
             task_notifier=DummyNotifier(),
             log_context="test",
+            observability=self.observability,
         )
 
     def test_calibrating_write_exception_skips_handoff_and_converges_failed(
@@ -1160,6 +1173,10 @@ class TestHandoffToLlmStageFailureModes:
         ]
         assert len(failed_writes) == 1
         assert "boom-calibrating" in failed_writes[0][2]["error_message"]
+        assert (
+            failed_writes[0][2]["terminal_snapshot"]["observability"]
+            == self.observability
+        )
 
     def test_calibrating_cas_false_skips_handoff_and_reports_actual_status(
         self, monkeypatch, patch_runtime, bound_runtime
