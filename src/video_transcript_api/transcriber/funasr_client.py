@@ -25,11 +25,15 @@ import asyncio
 import websockets
 import hashlib
 import base64
+import unicodedata
+import requests
 from pathlib import Path
 from datetime import datetime
+from urllib.parse import urlsplit, urlunsplit
 from loguru import logger
 
 from ..utils.logging import load_config
+from ..terminology.terminology_db import get_terminology_db
 
 
 # --------------------------------------------------------------------------- #
@@ -70,6 +74,9 @@ _RETRY_AFTER_MIN, _RETRY_AFTER_MAX = 1, 60
 # 终态集合（停轮询）
 _TERMINAL_FAIL = {"failed", "timed_out", "cancelled"}
 _POLL_MISS_ERRORS = {"task_expired", "task_not_found"}
+_TERMS_MAX_ITEMS = 50
+_TERMS_MAX_ITEM_LENGTH = 64
+_TERMS_MAX_TOTAL_LENGTH = 1024
 
 
 def _clamp(value, lo, hi):
@@ -92,12 +99,18 @@ class FunASRSpeakerClient:
         self.total_timeout = self.server_config.get("total_timeout", 3600)
         self.first_delay_fallback = self.server_config.get("first_delay_fallback", 5)
         self.websocket = None
+        self._requested_terms = []
+        self._connection_terms = []
+        self._terms_count_sent = 0
 
     # ----------------------------------------------------------------- #
     # 连接管理
     # ----------------------------------------------------------------- #
-    async def connect_to_server(self):
+    async def connect_to_server(self, probe_terms=True):
         """连接到服务器"""
+        if probe_terms:
+            self._connection_terms = []
+            self._terms_count_sent = 0
         try:
             logger.info(f"连接到 FunASR 服务器: {self.server_url}")
             # 使用推荐的连接配置（适配服务器端设置）
@@ -119,19 +132,30 @@ class FunASRSpeakerClient:
                     f"接收到服务器欢迎消息: {welcome_message.get('data', {}).get('message', '')}"
                 )
 
+            if probe_terms and self._requested_terms:
+                welcome_data = welcome_message.get("data", {})
+                ws_capabilities = (
+                    welcome_data.get("capabilities")
+                    if welcome_message.get("type") == "connected"
+                    and isinstance(welcome_data, dict)
+                    else None
+                )
+                if await self._supports_terms(ws_capabilities):
+                    self._connection_terms = list(self._requested_terms)
+
             logger.info("FunASR 服务器连接成功")
             return True
         except Exception as e:
             logger.error(f"连接 FunASR 服务器失败: {e}")
             return False
 
-    async def connect_with_retry(self, max_retry=None):
+    async def connect_with_retry(self, max_retry=None, probe_terms=True):
         """带重试的连接"""
         if max_retry is None:
             max_retry = self.max_retries
         for attempt in range(max_retry):
             try:
-                if await self.connect_to_server():
+                if await self.connect_to_server(probe_terms=probe_terms):
                     return True
 
                 if attempt < max_retry - 1:
@@ -146,6 +170,94 @@ class FunASRSpeakerClient:
                 else:
                     raise e
         return False
+
+    @staticmethod
+    def _capabilities_url(server_url):
+        parsed = urlsplit(server_url)
+        scheme = {"ws": "http", "wss": "https"}.get(parsed.scheme)
+        if scheme is None:
+            raise ValueError("unsupported FunASR WebSocket URL scheme")
+        base_path = parsed.path.rstrip("/")
+        return urlunsplit((scheme, parsed.netloc, f"{base_path}/capabilities", "", ""))
+
+    @staticmethod
+    def _capability_error(capabilities):
+        if not isinstance(capabilities, dict):
+            return "capabilities_missing"
+        if "schema_version" not in capabilities:
+            return "capabilities_missing"
+        if type(capabilities["schema_version"]) is not int or capabilities["schema_version"] != 1:
+            return "schema_version_unsupported"
+        features = capabilities.get("features")
+        if not isinstance(features, dict) or "terms" not in features:
+            return "terms_feature_missing"
+        if features["terms"] is not True:
+            return "terms_disabled"
+        capability_id = capabilities.get("capability_id")
+        if not isinstance(capability_id, str) or not capability_id.strip():
+            return "capability_id_missing"
+        return None
+
+    async def _supports_terms(self, ws_capabilities):
+        """Fail closed unless HTTP and this WebSocket connection agree."""
+        try:
+            response = await asyncio.to_thread(
+                requests.get,
+                self._capabilities_url(self.server_url),
+                timeout=5,
+            )
+            response.raise_for_status()
+        except Exception:
+            logger.warning("terms_not_supported reason=capabilities_http_error")
+            return False
+
+        try:
+            http_capabilities = response.json()
+        except Exception:
+            logger.warning("terms_not_supported reason=capabilities_http_non_json")
+            return False
+
+        for capabilities in (http_capabilities, ws_capabilities):
+            reason = self._capability_error(capabilities)
+            if reason:
+                logger.warning(f"terms_not_supported reason={reason}")
+                return False
+        if http_capabilities["capability_id"] != ws_capabilities["capability_id"]:
+            logger.warning("terms_not_supported reason=capability_id_mismatch")
+            return False
+        return True
+
+    @staticmethod
+    def _prepare_terms(raw_terms):
+        """Normalize and clip correct spellings to FunASR effective limits."""
+        terms = []
+        seen = set()
+        total_length = 0
+        dropped = 0
+        for raw_term in raw_terms:
+            if not isinstance(raw_term, str):
+                dropped += 1
+                continue
+            term = " ".join(unicodedata.normalize("NFKC", raw_term).split())
+            if not term or len(term) > _TERMS_MAX_ITEM_LENGTH or term in seen:
+                dropped += 1
+                continue
+            if len(terms) >= _TERMS_MAX_ITEMS or total_length + len(term) > _TERMS_MAX_TOTAL_LENGTH:
+                dropped += 1
+                continue
+            terms.append(term)
+            seen.add(term)
+            total_length += len(term)
+        if dropped:
+            logger.info(
+                f"terms_clipped dropped_count={dropped} accepted_count={len(terms)}"
+            )
+        return terms
+
+    def _add_terms(self, request):
+        if self._connection_terms:
+            request["data"]["terms"] = list(self._connection_terms)
+            self._terms_count_sent = len(self._connection_terms)
 
     async def disconnect_from_server(self):
         """断开服务器连接"""
@@ -289,6 +401,7 @@ class FunASRSpeakerClient:
                 "force_refresh": force_refresh,
             },
         }
+        self._add_terms(request)
         await self.send_message(request)
         response = await self.receive_message()
 
@@ -341,6 +454,7 @@ class FunASRSpeakerClient:
                 "force_refresh": force_refresh,
             },
         }
+        self._add_terms(request)
         await self.send_message(request)
         response = await self.receive_message()
 
@@ -521,13 +635,20 @@ class FunASRSpeakerClient:
         start_time = time.time()
         deadline = start_time + self.total_timeout
 
+        self._requested_terms = (
+            self._prepare_terms(get_terminology_db().export_correct_terms())
+            if self.server_config.get("send_terms", False)
+            else []
+        )
+        self._terms_count_sent = 0
+
         task_id = None          # 已入队任务；断线重连时保留以避免重传
         first_delay = 0
         unexpected_errors = 0
 
         while time.time() < deadline:
             try:
-                if not await self.connect_with_retry():
+                if not await self.connect_with_retry(probe_terms=task_id is None):
                     raise Exception("无法连接到 FunASR 服务器")
 
                 # 已有 task_id（断线续轮）→ 跳过上传，直接轮询
@@ -588,6 +709,21 @@ class FunASRSpeakerClient:
         if not result:
             raise Exception("未收到转录结果")
         if isinstance(result, dict):
+            if self._terms_count_sent:
+                metadata = result.get("metadata")
+                context_applied = (
+                    metadata.get("context_applied")
+                    if isinstance(metadata, dict)
+                    else None
+                )
+                terms_count = metadata.get("terms_count") if isinstance(metadata, dict) else None
+                if context_applied is not True or type(terms_count) is not int or terms_count != self._terms_count_sent:
+                    logger.error(
+                        "terms_metadata_mismatch "
+                        f"context_applied={context_applied!r} "
+                        f"terms_count={terms_count!r} "
+                        f"expected_terms_count={self._terms_count_sent}"
+                    )
             processing_time = time.time() - start_time
             logger.info(
                 f"转录完成: {len(result.get('segments', []))} 个片段, "
