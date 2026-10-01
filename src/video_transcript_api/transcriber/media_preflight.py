@@ -11,32 +11,23 @@ from pathlib import Path
 from typing import Any
 
 
-MEDIA_DURATION_TOLERANCE_SECONDS = 2.0
+MEDIA_DURATION_TOLERANCE_SECONDS = 1.0
 FFPROBE_TAIL_SECONDS = 1.0
-AAC_SAMPLES_PER_FRAME = 1024
 
 
 def resolve_transcription_source(media_path: Path, work_dir: Path) -> Path:
     """Return the source path that should be sent to CapsWriter.
 
-    The initial probe reads container and stream metadata only. AAC files with
-    a frame count use that metadata as the fast path; other codecs use a
-    packet-tail probe. Only a duration mismatch beyond the tolerance causes a
-    full normalization pass.
+    The probes read container metadata and packet timestamps only. The packet
+    tail is used to avoid treating a negative start timestamp as decoded audio.
+    Only a duration mismatch beyond the tolerance causes a full normalization
+    pass.
     """
     media_path = Path(media_path)
     work_dir = Path(work_dir)
     declared_duration, audio_duration = _probe_media_duration(media_path)
 
-    if (
-        math.isclose(
-            declared_duration,
-            audio_duration,
-            abs_tol=MEDIA_DURATION_TOLERANCE_SECONDS,
-        )
-        or abs(declared_duration - audio_duration)
-        <= MEDIA_DURATION_TOLERANCE_SECONDS
-    ):
+    if abs(declared_duration - audio_duration) <= MEDIA_DURATION_TOLERANCE_SECONDS:
         return media_path
 
     return _normalize_media_to_flac(media_path, work_dir)
@@ -46,33 +37,13 @@ def _probe_media_duration(media_path: Path) -> tuple[float, float]:
     """Read the declared and metadata-derived audio durations."""
     metadata = _run_ffprobe_metadata(media_path)
     format_data = metadata.get("format")
-    streams = metadata.get("streams")
-    if not isinstance(format_data, dict) or not isinstance(streams, list):
+    if not isinstance(format_data, dict):
         raise RuntimeError("ffprobe output is missing media metadata")
-    if not streams or not isinstance(streams[0], dict):
-        raise RuntimeError("ffprobe output has no audio stream")
 
     declared_duration = _parse_finite_number(
         format_data.get("duration"), "format duration"
     )
-    stream = streams[0]
-    codec_name = stream.get("codec_name")
-    frame_count = stream.get("nb_frames")
-    sample_rate = stream.get("sample_rate")
-
-    if (
-        codec_name == "aac"
-        and frame_count not in (None, "N/A")
-        and sample_rate not in (None, "N/A")
-    ):
-        frame_count_value = _parse_non_negative_integer(frame_count, "AAC frame count")
-        sample_rate_value = _parse_finite_number(sample_rate, "audio sample rate")
-        if sample_rate_value <= 0:
-            raise RuntimeError("ffprobe returned an invalid audio sample rate")
-        audio_duration = frame_count_value * AAC_SAMPLES_PER_FRAME / sample_rate_value
-    else:
-        audio_duration = _probe_audio_packet_tail(media_path, declared_duration)
-
+    audio_duration = _probe_audio_packet_tail(media_path, declared_duration)
     return declared_duration, audio_duration
 
 
@@ -85,7 +56,7 @@ def _run_ffprobe_metadata(media_path: Path) -> dict[str, Any]:
         "-select_streams",
         "a:0",
         "-show_entries",
-        "format=duration:stream=codec_name,sample_rate,nb_frames",
+        "format=duration",
         "-of",
         "json",
         str(media_path),
@@ -122,7 +93,7 @@ def _probe_audio_packet_tail(media_path: Path, declared_duration: float) -> floa
         "-show_entries",
         "packet=pts_time,duration_time",
         "-of",
-        "csv=p=0",
+        "json",
         str(media_path),
     ]
     result = subprocess.run(
@@ -135,15 +106,31 @@ def _probe_audio_packet_tail(media_path: Path, declared_duration: float) -> floa
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe packet probe failed with exit code {result.returncode}")
 
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("ffprobe packet output is not valid JSON") from exc
+    packets = payload.get("packets") if isinstance(payload, dict) else None
+    if not isinstance(packets, list):
+        raise RuntimeError("ffprobe packet output is not parseable")
+
     last_packet_end: float | None = None
-    for line in result.stdout.splitlines():
-        fields = [field.strip() for field in line.split(",")]
-        if len(fields) != 2:
+    for packet in packets:
+        if not isinstance(packet, dict):
             raise RuntimeError("ffprobe packet output is not parseable")
-        if "N/A" in fields:
+        packet_pts_value = packet.get("pts_time")
+        packet_duration_value = packet.get("duration_time")
+        if packet_pts_value in (None, "N/A") or packet_duration_value in (
+            None,
+            "N/A",
+        ):
             continue
-        packet_pts = _parse_finite_number(fields[0], "packet PTS")
-        packet_duration = _parse_finite_number(fields[1], "packet duration")
+        packet_pts = _parse_finite_number(
+            packet_pts_value, "packet PTS", allow_negative=True
+        )
+        packet_duration = _parse_finite_number(
+            packet_duration_value, "packet duration"
+        )
         if packet_duration < 0:
             raise RuntimeError("ffprobe returned a negative packet duration")
         packet_end = packet_pts + packet_duration
@@ -206,23 +193,14 @@ def _normalize_media_to_flac(media_path: Path, work_dir: Path) -> Path:
             output_path.unlink(missing_ok=True)
 
 
-def _parse_finite_number(value: Any, field_name: str) -> float:
-    """Parse a finite non-negative numeric ffprobe field."""
+def _parse_finite_number(
+    value: Any, field_name: str, *, allow_negative: bool = False
+) -> float:
+    """Parse a finite ffprobe number, optionally allowing negative values."""
     try:
         parsed = float(value)
     except (TypeError, ValueError) as exc:
         raise RuntimeError(f"ffprobe returned an invalid {field_name}") from exc
-    if not math.isfinite(parsed) or parsed < 0:
-        raise RuntimeError(f"ffprobe returned an invalid {field_name}")
-    return parsed
-
-
-def _parse_non_negative_integer(value: Any, field_name: str) -> int:
-    """Parse a non-negative integer ffprobe field."""
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(f"ffprobe returned an invalid {field_name}") from exc
-    if parsed < 0:
+    if not math.isfinite(parsed) or (not allow_negative and parsed < 0):
         raise RuntimeError(f"ffprobe returned an invalid {field_name}")
     return parsed

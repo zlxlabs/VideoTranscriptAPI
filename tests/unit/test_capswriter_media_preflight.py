@@ -39,6 +39,18 @@ def _metadata(
     return json.dumps({"format": {"duration": str(duration)}, "streams": [stream]})
 
 
+def _packets(*entries: tuple[float, float]) -> str:
+    """Build the packet-tail ffprobe response."""
+    return json.dumps(
+        {
+            "packets": [
+                {"pts_time": str(pts), "duration_time": str(duration)}
+                for pts, duration in entries
+            ]
+        }
+    )
+
+
 def _make_client() -> CapsWriterClient:
     """Build a client without loading project configuration."""
     with patch.object(CapsWriterClient, "__init__", lambda self: None):
@@ -55,7 +67,10 @@ def test_consistent_container_uses_original_path_without_ffmpeg(tmp_path):
 
     with patch(
         "video_transcript_api.transcriber.media_preflight.subprocess.run",
-        return_value=_completed(_metadata(10.0, nb_frames="469")),
+        side_effect=[
+            _completed(_metadata(10.0)),
+            _completed(_packets((9.980000, 0.020000))),
+        ],
     ) as run:
         resolved = resolve_transcription_source(media_path, tmp_path)
 
@@ -78,6 +93,7 @@ def test_mismatched_aac_is_normalized_to_16khz_mono_flac(tmp_path):
                     nb_frames="212853",
                 )
             ),
+            _completed(_packets((4540.840000, 0.024000))),
             _completed(),
         ]
     )
@@ -116,7 +132,10 @@ def test_small_duration_difference_does_not_normalize(tmp_path):
 
     with patch(
         "video_transcript_api.transcriber.media_preflight.subprocess.run",
-        return_value=_completed(_metadata(10.0, nb_frames="478")),
+        side_effect=[
+            _completed(_metadata(10.0)),
+            _completed(_packets((10.200000, 0.000000))),
+        ],
     ) as run:
         resolved = resolve_transcription_source(media_path, tmp_path)
 
@@ -162,6 +181,7 @@ def test_ffmpeg_failure_removes_partial_flac(tmp_path):
                     nb_frames="212853",
                 )
             ),
+            _completed(_packets((4540.840000, 0.024000))),
             _completed(returncode=1),
         ]
     )

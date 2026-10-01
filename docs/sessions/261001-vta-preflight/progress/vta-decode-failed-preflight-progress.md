@@ -15,3 +15,11 @@
 - 清理：SDK 成功、不可重试失败和 `KeyboardInterrupt` 异常路径均在 `finally` 删除规范化文件。
 - 验证：媒体体检单测 10 passed；CapsWriter 回归单测 7 passed。
 - 后续：补齐真实 ffmpeg fixture 取证、反向红验、静态检查并运行全量门禁。
+
+## 2026-10-01 21:35
+
+- 里程碑：完成真实 ffmpeg fixture 复核并修正探测判据。
+- 发现：仅按 AAC `nb_frames` 推算时长会误伤带异常负时间戳的合法解码结果；改为读取声明尾部的音频包 JSON，使用最后包的 `pts_time + duration_time`。
+- 取证：重复时间戳直播流 fixture 的 `ffprobe format.duration=4.806522`，原始 `ffmpeg -ar 16000 -ac 1 -f f32le` 解码样本数为 `241859`；规范化 FLAC 的 `ffprobe duration=15.116188`，解码样本数仍为 `241859`。
+- 清理：规范化文件在清理前出现在临时目录，清理后目录只剩原始 fixture。
+- 后续：执行反向红验、ASCII 字符串检查、相关测试和 `make test`。
