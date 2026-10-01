@@ -36,3 +36,10 @@
 - 里程碑：R1 返工，废弃尾部包探测，改用 AAC `nb_frames * 1024 / sample_rate`。
 - 变更：测量不可得时走原路径并打 `Media preflight sample count unavailable` 日志；ffprobe 崩溃/JSON 不可解析仍 fail fast；`transcribe_file` 把体检纳入 try/finally，错误带媒体路径。
 - 验证：待跑单测与真实 fixture。
+
+## 2026-10-01 22:06
+
+- 里程碑：R1 验收完成。
+- 真实 fixture：gl.mp4 / bt.mp4 判定 normalize，flac `duration*16000` 与解码样本数一致；normal.m4a 判定 original，未转码。
+- 红验：一致路径 `if False`、不一致路径 `if True` 均为 AssertionError，已还原判据行。
+- 全量门禁：`make test` 退出码 0，进度核对 `3383 passed, 0 skipped in 208.399s`。
