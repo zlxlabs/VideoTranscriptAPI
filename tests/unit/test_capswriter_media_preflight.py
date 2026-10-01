@@ -60,9 +60,14 @@ def test_consistent_container_uses_original_path_without_ffmpeg(tmp_path):
     media_path = tmp_path / "download.mp4"
     media_path.write_bytes(b"fixture")
 
+    def fake_run(command, **kwargs):
+        if command[0] == "ffmpeg":
+            Path(command[-1]).write_bytes(b"FLAC")
+        return _completed(_metadata(10.005333, nb_frames="469"))
+
     with patch(
         "video_transcript_api.transcriber.media_preflight.subprocess.run",
-        return_value=_completed(_metadata(10.005333, nb_frames="469")),
+        side_effect=fake_run,
     ) as run:
         resolved = resolve_transcription_source(media_path, tmp_path)
 
