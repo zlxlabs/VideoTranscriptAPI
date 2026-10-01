@@ -506,11 +506,13 @@ def test_degraded_run_logs_greppable_line(tmp_path, monkeypatch):
     line = records[0]
     assert "capswriter timeline degraded:" in line
     assert "coverage=" in line and "aligned_ratio=" in line
+    assert "segments_with_missing_time=0" in line
 
     import json
 
     payload = json.loads((tmp_path / "audio_funasr.json").read_text(encoding="utf-8"))
     assert payload["timeline_quality"]["degraded"] is True
+    assert payload["timeline_quality"]["segments_with_missing_time"] == 0
     assert payload["timeline_quality"]["coverage"] < TIMELINE_COVERAGE_THRESHOLD
     assert payload["timeline_quality"]["aligned_ratio"] >= TIMELINE_ALIGNED_RATIO_THRESHOLD
 
@@ -702,6 +704,52 @@ def test_length_mismatch_forces_degraded_even_when_thresholds_pass(tmp_path, mon
     assert "timestamps_len=3" in mismatches[0]
 
 
+def test_missing_time_segment_forces_degraded_even_when_thresholds_pass(
+    tmp_path, monkeypatch
+):
+    """A delivered None-time segment must degrade independently of metrics."""
+    # The first sentence is long enough to stay separate. The punctuation-only
+    # span then merges with the short second sentence and keeps its None start.
+    first = "First " + "word " * 15 + "here."
+    text = first + " ... Second one."
+    tokens = first[:-1].split() + ["Second", "one"]
+    timestamps = [
+        1.0 + index * (5.9 / (len(tokens) - 1))
+        for index in range(len(tokens))
+    ]
+
+    payload, records = _run_sidecar(
+        tmp_path,
+        monkeypatch,
+        {
+            "task_id": "task-missing-time",
+            "text": text,
+            "tokens": tokens,
+            "timestamps": timestamps,
+            "duration": 7.0,
+            "time_complete": 1.0,
+            "time_start": 0.0,
+        },
+    )
+
+    quality = payload["timeline_quality"]
+    assert quality["coverage"] >= TIMELINE_COVERAGE_THRESHOLD
+    assert quality["aligned_ratio"] >= TIMELINE_ALIGNED_RATIO_THRESHOLD
+    assert quality["unmatched_chars"] == 0
+    assert quality["segments_with_missing_time"] == 1
+    assert quality["degraded"] is True
+    assert any(
+        segment["start_time"] is None or segment["end_time"] is None
+        for segment in payload["segments"]
+    )
+
+    degraded_lines = [
+        line for line in records if "capswriter timeline degraded:" in line
+    ]
+    assert degraded_lines
+    assert "segments_with_missing_time=1" in degraded_lines[0]
+
+
 @pytest.mark.parametrize("style", ["sentencepiece", "punctuation_model"])
 def test_matching_lengths_report_no_mismatch(tmp_path, monkeypatch, style):
     text, tokens, timestamps = _build(style, ENGLISH_SENTENCES)
@@ -721,6 +769,14 @@ def test_matching_lengths_report_no_mismatch(tmp_path, monkeypatch, style):
     )
     quality = payload["timeline_quality"]
     assert quality["input_mismatch"] is None
+    assert quality["coverage"] >= TIMELINE_COVERAGE_THRESHOLD
+    assert quality["aligned_ratio"] >= TIMELINE_ALIGNED_RATIO_THRESHOLD
+    assert quality["unmatched_chars"] == 0
+    assert quality["segments_with_missing_time"] == 0
+    assert all(
+        segment["start_time"] is not None and segment["end_time"] is not None
+        for segment in payload["segments"]
+    )
     assert quality["degraded"] is False
 
 

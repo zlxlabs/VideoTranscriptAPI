@@ -662,8 +662,15 @@ class CapsWriterClient:
                     # 长度不一致强制 degraded，且独立于两个阈值：即使覆盖率碰巧达标
                     # 也不得放行（#111 finding：静默截断的产物看起来完全正常）
                     input_mismatch = _input_mismatch(tokens, timestamps)
+                    segments_with_missing_time = sum(
+                        1
+                        for segment in segments
+                        if segment["start_time"] is None
+                        or segment["end_time"] is None
+                    )
                     degraded = (
                         input_mismatch is not None
+                        or segments_with_missing_time > 0
                         or coverage < TIMELINE_COVERAGE_THRESHOLD
                         or quality.aligned_ratio < TIMELINE_ALIGNED_RATIO_THRESHOLD
                         or quality.unmatched_chars > TIMELINE_UNMATCHED_CHARS_THRESHOLD
@@ -676,6 +683,7 @@ class CapsWriterClient:
                         "coverage_threshold": TIMELINE_COVERAGE_THRESHOLD,
                         "aligned_ratio_threshold": TIMELINE_ALIGNED_RATIO_THRESHOLD,
                         "input_mismatch": input_mismatch,
+                        "segments_with_missing_time": segments_with_missing_time,
                         "degraded": degraded,
                     }
                     if degraded:
@@ -687,7 +695,8 @@ class CapsWriterClient:
                             f"unmatched_chars={quality.unmatched_chars} "
                             f"unmatched_chars_threshold={TIMELINE_UNMATCHED_CHARS_THRESHOLD} "
                             f"coverage_threshold={TIMELINE_COVERAGE_THRESHOLD} "
-                            f"aligned_ratio_threshold={TIMELINE_ALIGNED_RATIO_THRESHOLD}"
+                            f"aligned_ratio_threshold={TIMELINE_ALIGNED_RATIO_THRESHOLD} "
+                            f"segments_with_missing_time={segments_with_missing_time}"
                         )
                     else:
                         logger.info(
