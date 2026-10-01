@@ -239,7 +239,7 @@ async def transcribe_video(
     task_id = cache_manager.generate_task_id()
     inflight_registry = get_inflight_registry()
     if not inflight_registry.try_register("transcription", task_id):
-        logger.warning("在途转录任务已达受理上限，拒绝任务: %s", url)
+        logger.warning("在途转录任务已达受理上限，拒绝任务: {}", url)
         raise HTTPException(status_code=503, detail="任务处理已达上限，请稍后重试")
 
     # 登记表配额从这里开始"归属"这次 HTTP 请求，直到下面 put_nowait 成功
@@ -319,7 +319,7 @@ async def transcribe_video(
                     registration_owned = False
                     logger.info(f"任务已加入队列: {task_id}, URL: {url}")
                 except asyncio.QueueFull:
-                    logger.warning("任务队列已满，拒绝任务: %s, task_id=%s", url, task_id)
+                    logger.warning("任务队列已满，拒绝任务: {}, task_id={}", url, task_id)
                     # 任务行已经在上面 create_task() 里落库为 queued——队列拒绝后
                     # 不把它 CAS 成 failed 的话，客户端会永久轮询一个永远不会被
                     # 消费的任务（M2c）。error_message/CAS 写法与 worker 侧转录
@@ -472,7 +472,7 @@ async def get_task_status(
                 user_agent=request.headers.get("User-Agent"),
                 remote_ip=request.client.host if request.client else None,
             )
-            logger.warning("任务不存在: %s", task_id)
+            logger.warning("任务不存在: {}", task_id)
             raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
 
         status = task_info.get("status") or TaskStatus.QUEUED
@@ -673,7 +673,7 @@ async def recalibrate(
     task_id = cache_manager.generate_task_id()
     inflight_registry = get_inflight_registry()
     if not inflight_registry.try_register("llm", task_id):
-        logger.warning("在途 LLM 任务已达受理上限，拒绝重新校对任务: %s", view_token)
+        logger.warning("在途 LLM 任务已达受理上限，拒绝重新校对任务: {}", view_token)
         raise HTTPException(status_code=503, detail="任务处理已达上限，请稍后重试")
 
     # 登记表配额从这里开始"归属"这次 HTTP 请求，直到下面 llm_queue.
@@ -793,7 +793,7 @@ async def recalibrate(
             registration_owned = False
             logger.info(f"重新校对任务已加入 LLM 队列: {task_id}")
         except queue.Full:
-            logger.warning("LLM 队列已满，拒绝重新校对任务: %s", task_id)
+            logger.warning("LLM 队列已满，拒绝重新校对任务: {}", task_id)
             # 上面的 INSERT 已经把这个新任务行落库为 processing——队列拒绝后不
             # CAS 成 failed 的话，客户端会永久轮询一个永远不会被消费的任务
             # (M2c)。写法与 transcribe 路径的等价分支一致：update_task_status
@@ -960,7 +960,7 @@ async def resummarize(
     task_id = cache_manager.generate_task_id()
     inflight_registry = get_inflight_registry()
     if not inflight_registry.try_register("llm", task_id):
-        logger.warning("在途 LLM 任务已达受理上限，拒绝重新生成总结任务: %s", view_token)
+        logger.warning("在途 LLM 任务已达受理上限，拒绝重新生成总结任务: {}", view_token)
         raise HTTPException(status_code=503, detail="任务处理已达上限，请稍后重试")
 
     # 登记表配额从这里开始"归属"这次 HTTP 请求，直到下面 llm_queue.
@@ -1081,7 +1081,7 @@ async def resummarize(
             registration_owned = False
             logger.info(f"重新生成总结任务已加入 LLM 队列: {task_id}")
         except queue.Full:
-            logger.warning("LLM 队列已满，拒绝重新生成总结任务: %s", task_id)
+            logger.warning("LLM 队列已满，拒绝重新生成总结任务: {}", task_id)
             terminal_write_ok = _fail_task_after_creation(
                 task_id, "LLM 队列已满，重新生成总结提交被拒绝",
                 log_context="LLM 队列已满后写入 failed 终态失败",
@@ -1234,7 +1234,7 @@ async def generate_notes(
     task_id = cache_manager.generate_task_id()
     inflight_registry = get_inflight_registry()
     if not inflight_registry.try_register("llm", task_id):
-        logger.warning("在途 LLM 任务已达受理上限，拒绝详细笔记任务: %s", view_token)
+        logger.warning("在途 LLM 任务已达受理上限，拒绝详细笔记任务: {}", view_token)
         raise HTTPException(status_code=503, detail="任务处理已达上限，请稍后重试")
 
     registration_owned = True
@@ -1341,7 +1341,7 @@ async def generate_notes(
             registration_owned = False
             logger.info(f"详细笔记任务已加入 LLM 队列: {task_id}")
         except queue.Full:
-            logger.warning("LLM 队列已满，拒绝详细笔记任务: %s", task_id)
+            logger.warning("LLM 队列已满，拒绝详细笔记任务: {}", task_id)
             terminal_write_ok = _fail_task_after_creation(
                 task_id,
                 "LLM 队列已满，详细笔记提交被拒绝",

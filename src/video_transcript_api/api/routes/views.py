@@ -526,7 +526,7 @@ def handle_page_export(view_data: Dict[str, Any], export_type: str) -> Response:
     try:
         content = file_path.read_text(encoding="utf-8")
     except Exception as exc:
-        logger.error("读取文件失败: %s, 错误: %s", file_path, exc)
+        logger.error("读取文件失败: {}, 错误: {}", file_path, exc)
         return HTMLResponse(
             content="<html><body><p>读取文件失败</p></body></html>",
             status_code=500,
@@ -714,7 +714,7 @@ def handle_raw_export(view_data: Dict[str, Any], export_type: str) -> Response:
     try:
         content = file_path.read_text(encoding="utf-8")
     except Exception as exc:
-        logger.error("读取文件失败: %s, 错误: %s", file_path, exc)
+        logger.error("读取文件失败: {}, 错误: {}", file_path, exc)
         return Response(
             content="❌ 读取文件失败，请稍后重试",
             media_type="text/plain; charset=utf-8",
@@ -756,7 +756,7 @@ async def add_task_by_web(request: Request):
             content = await asyncio.to_thread(index_file.read_text, encoding="utf-8")
             return HTMLResponse(content=content)
         else:
-            logger.error("Web任务添加页面文件不存在: %s", index_file)
+            logger.error("Web任务添加页面文件不存在: {}", index_file)
             return HTMLResponse(
                 content="<h1>页面未找到</h1><p>请确保 index.html 文件存在于 static 目录中。</p>",
                 status_code=404,
@@ -828,7 +828,7 @@ async def export_content(view_token: str, export_type: str, request: Request):
         try:
             content = await asyncio.to_thread(file_path.read_text, encoding="utf-8")
         except Exception as exc:
-            logger.error("读取文件失败: %s, 错误: %s", file_path, exc)
+            logger.error("读取文件失败: {}, 错误: {}", file_path, exc)
             return Response(
                 content="❌ 读取文件失败，请稍后重试",
                 media_type="text/plain; charset=utf-8",
@@ -857,7 +857,7 @@ async def export_content(view_token: str, export_type: str, request: Request):
         }
 
         logger.info(
-            "导出文件: %s, 文件名: %s, view_token: %s",
+            "导出文件: {}, 文件名: {}, view_token: {}",
             export_type,
             filename,
             view_data.get("view_token", "unknown")[:20],

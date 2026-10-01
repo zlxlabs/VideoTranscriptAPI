@@ -412,9 +412,9 @@ def _handle_notes_generation(
         if isinstance(chapters, list):
             chapter_count = len(chapters)
         else:
-            logger.warning("Detailed notes chapters payload is missing a chapter list: %s", task_id)
+            logger.warning("Detailed notes chapters payload is missing a chapter list: {}", task_id)
     except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("Failed to read detailed notes chapter count for %s: %s", task_id, exc)
+        logger.warning("Failed to read detailed notes chapter count for {}: {}", task_id, exc)
 
     def write_notes_progress(done: int, total: int) -> None:
         """Persist notes progress without interrupting the notes generation flow."""
@@ -424,7 +424,7 @@ def _handle_notes_generation(
                 progress={"stage": "notes", "done": done, "total": total},
             )
             if not written:
-                logger.warning("Detailed notes progress update was rejected: %s", task_id)
+                logger.warning("Detailed notes progress update was rejected: {}", task_id)
         except Exception:
             logger.exception("Failed to persist detailed notes progress: %s", task_id)
 

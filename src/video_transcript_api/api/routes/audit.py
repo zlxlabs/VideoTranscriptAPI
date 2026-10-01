@@ -470,7 +470,7 @@ async def get_history(
             try:
                 total, items = await asyncio.to_thread(_run_query)
             except sqlite3.OperationalError as e2:
-                logger.error("history query: database still locked after retry: %s", e2)
+                logger.error("history query: database still locked after retry: {}", e2)
                 raise HTTPException(status_code=503, detail="服务暂时不可用，请稍后重试")
         else:
             logger.exception("history query failed: %s", e)
@@ -566,7 +566,7 @@ async def get_filter_options(user_info: dict = Depends(verify_token)):
             try:
                 webhooks, platforms, authors = await asyncio.to_thread(_run_query)
             except sqlite3.OperationalError as e2:
-                logger.error("filter-options: database still locked: %s", e2)
+                logger.error("filter-options: database still locked: {}", e2)
                 raise HTTPException(status_code=503, detail="服务暂时不可用，请稍后重试")
         else:
             logger.exception("filter-options query failed: %s", e)
@@ -790,7 +790,7 @@ async def get_task_summary(
                 view_token, task_id, user_id, cache_manager, audit_logger,
             )
         except Exception as e:
-            logger.error("summary auth check failed, denying access (fail-closed): %s", e)
+            logger.error("summary auth check failed, denying access (fail-closed): {}", e)
             raise HTTPException(status_code=503, detail="归属校验暂时不可用，请稍后重试")
         if not owned:
             raise HTTPException(status_code=403, detail="无权访问该任务")

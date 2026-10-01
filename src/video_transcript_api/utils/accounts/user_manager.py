@@ -138,7 +138,7 @@ class UserManager:
         with self._lock:
             self._users_data = validated
         if validated:
-            logger.info("Loaded %d configured users", len(validated))
+            logger.info("Loaded {} configured users", len(validated))
         else:
             logger.info("Users configuration is missing; legacy fallback mode is active")
     
