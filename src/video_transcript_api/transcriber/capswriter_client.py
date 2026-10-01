@@ -178,18 +178,19 @@ def _split_text_by_punctuation(text: str) -> List[Tuple[str, int]]:
     """
     primary_punct = "。！？!?"
 
-    sentences: List[Tuple[str, int]] = []
+    # 返回 [(句子文本, 首字符下标, 尾字符下标(不含))]。
+    # 文本按**原始区间**切出（含边缘空白），不做 strip：strip 掉的前导/尾随
+    # 空白会让侧车正文不再等于 "".join(tokens)。
+    sentences: List[Tuple[str, int, int]] = []
     start = 0
     for idx, char in enumerate(text):
         if char in primary_punct:
-            chunk = text[start : idx + 1]
-            if chunk.strip():
-                sentences.append((chunk.strip(), start))
+            if idx + 1 > start:
+                sentences.append((text[start : idx + 1], start, idx + 1))
             start = idx + 1
 
-    tail = text[start:]
-    if tail.strip():
-        sentences.append((tail.strip(), start))
+    if len(text) > start:
+        sentences.append((text[start:], start, len(text)))
 
     return sentences
 
@@ -376,13 +377,13 @@ def _create_segments_from_capswriter(
     logger.debug(f"按标点分句: {len(sentences)} 个句子")
 
     segments = []
-    for idx, (sentence, char_offset) in enumerate(sentences):
-        # 该句首 token：正文下标 -> token 下标
+    for idx, (sentence, char_offset, char_end) in enumerate(sentences):
+        # 该句首 token：正文下标 -> token 下标。句首可能是空白 token
+        # （服务端把空格也作为 token 返回），而空格的时间戳继承邻近词，
+        # 直接用它会让句首时间偏早；因此向后找第一个非空白 token。
         start_token_idx = _find_token_idx(token_positions, char_offset)
-        # 该句在原文里的结束位置（下一句首；末句到正文末尾）
-        char_end = (
-            sentences[idx + 1][1] if idx + 1 < len(sentences) else len(body)
-        )
+        while start_token_idx < len(tokens) - 1 and not tokens[start_token_idx].strip():
+            start_token_idx += 1
 
         if idx + 1 < len(sentences):
             end_token_idx = _find_token_idx(token_positions, sentences[idx + 1][1])

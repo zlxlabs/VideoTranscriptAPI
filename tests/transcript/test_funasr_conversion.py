@@ -84,10 +84,10 @@ def _run_conversion_cases():
 
     # Test _split_text_by_punctuation
     sentences = _split_text_by_punctuation("你好。我是主持人。欢迎！")
-    assert [s for s, _ in sentences] == ['你好。', '我是主持人。', '欢迎！'], \
+    assert [s for s, _, _ in sentences] == ['你好。', '我是主持人。', '欢迎！'], \
         f'Failed: sentences = {sentences}'
-    assert [offset for _, offset in sentences] == [0, 3, 9], \
-        f'Failed: offsets = {[o for _, o in sentences]}'
+    assert [offset for _, offset, _ in sentences] == [0, 3, 9], \
+        f'Failed: offsets = {[o for _, o, _ in sentences]}'
     print('  _split_text_by_punctuation: OK')
 
     # 测试主转换函数

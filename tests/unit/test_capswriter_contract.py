@@ -413,3 +413,45 @@ def test_merged_segments_keep_interword_whitespace(tmp_path):
     assert segments
     joined = "".join(s["text"] for s in segments)
     assert joined == text_accu, f"正文丢字符: {joined!r} != {text_accu!r}"
+
+
+def test_sentence_start_skips_blank_token_time(tmp_path):
+    """句首是空白 token 时，起始时间必须取首个非空白 token，而不是空格的时间。
+
+    服务端把空格也作为 token 返回，且空格的时间戳继承邻近词；直接用空白
+    token 的时间会让每句起点系统性偏早。
+    """
+    client = _make_client(tmp_path)
+    # 首句以空白 token 开头：正文 " Hello。 Bye."
+    tokens = [" ", "Hello", "。", " ", "Bye", " ", "now", "."]
+    text_accu = "".join(tokens)
+    timestamps = [1.0, 1.5, 2.0, 3.5, 4.0, 5.0, 5.5, 6.0]
+
+    generated = asyncio.run(
+        client._save_results(
+            tmp_path / "audio.webm",
+            {
+                "task_id": "blank-start",
+                "text": text_accu,
+                "text_accu": text_accu,
+                "tokens": tokens,
+                "timestamps": timestamps,
+                "duration": 7.0,
+                "time_start": 1.0,
+                "time_complete": 2.0,
+            },
+        )
+    )
+
+    sidecar = next(p for p in generated if "funasr" in p.name)
+    segments = json.loads(sidecar.read_text(encoding="utf-8"))["segments"]
+    assert "".join(s["text"] for s in segments) == text_accu
+
+    first = segments[0]
+    # tokens[0] 是空白、时间 1.0；首个非空白是 tokens[1]、时间 1.5
+    assert first["start_time"] == timestamps[1], (
+        f"首句起点应为首个非空白 token 的时间 {timestamps[1]}，"
+        f"实际 {first['start_time']}（若等于 {timestamps[0]} 说明用了空白 token）"
+    )
+    for segment in segments:
+        assert segment["start_time"] is not None
