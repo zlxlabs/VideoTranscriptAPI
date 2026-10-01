@@ -127,4 +127,4 @@ repro {"case": "repro_drift", "canonical_equal": false, "expected_starts": [3.0,
 bash -c 'python3 -m compileall -q scripts/benchmarks'
 ```
 
-本调研分支的 PR 编号和 URL：待首次提交并创建 draft PR 后回填。
+本调研分支的 draft PR：[PR #117](https://github.com/zlxlabs/VideoTranscriptAPI/pull/117)。
