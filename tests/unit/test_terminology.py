@@ -131,6 +131,17 @@ class TestTerminologyQuery:
         github_entries = [t for t in result if t["correct"] == "GitHub"]
         assert len(github_entries) == 1
 
+    def test_export_correct_terms_uses_only_correct_spellings_in_order(self):
+        db = TerminologyDB()
+        db.terms = [
+            {"incorrect": "Russt", "correct": "Rust", "category": "tech"},
+            {"incorrect": "Pythen", "correct": "Python", "category": "tech"},
+            {"incorrect": "Rustt", "correct": "Rust", "category": "tech"},
+            {"incorrect": "invalid", "correct": 42, "category": "tech"},
+        ]
+
+        assert db.export_correct_terms() == ["Rust", "Python", "Rust"]
+
 
 class TestTerminologyPromptFormat:
     """Verify prompt formatting output."""

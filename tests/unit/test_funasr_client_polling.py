@@ -19,6 +19,7 @@ so no real sleeping or network happens. All console logging is English only.
 
 import json
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -108,6 +109,17 @@ def make_client(monkeypatch, sessions, clock, cfg=None):
     or a zero-arg factory returning a fresh FakeWS on each connect.
     """
     monkeypatch.setattr(fc, "load_config", lambda: cfg or DEFAULT_CFG)
+    monkeypatch.setattr(
+        fc,
+        "get_terminology_db",
+        lambda: SimpleNamespace(export_correct_terms=lambda: []),
+    )
+    http_calls = []
+    monkeypatch.setattr(
+        fc.requests,
+        "get",
+        lambda *args, **kwargs: http_calls.append((args, kwargs)),
+    )
 
     if callable(sessions):
         factory = sessions
@@ -129,6 +141,7 @@ def make_client(monkeypatch, sessions, clock, cfg=None):
     monkeypatch.setattr(fc.time, "time", clock.now)
 
     client = FunASRSpeakerClient()
+    client._test_http_calls = http_calls
     return client, created
 
 
@@ -168,6 +181,16 @@ def test_cache_hit_returns_immediately(monkeypatch, tmp_path):
 
     assert out == result_payload()
     assert ws.sent_types == ["upload_request"]  # no upload_data sent
+    upload = ws.sent[0]
+    assert upload["data"] == {
+        "file_name": "audio.mp3",
+        "file_size": 1024,
+        "file_hash": client.calculate_file_hash(tmp_path / "audio.mp3"),
+        "output_format": "json",
+        "force_refresh": False,
+    }
+    assert "terms" not in upload["data"]
+    assert client._test_http_calls == []
 
 
 # --------------------------------------------------------------------------- #

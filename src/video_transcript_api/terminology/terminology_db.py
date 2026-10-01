@@ -117,6 +117,17 @@ class TerminologyDB:
 
         return matched
 
+    def export_correct_terms(self) -> List[str]:
+        """导出词库中的正确写法，供 ASR 热词使用。
+
+        不依赖待转录文本，因此与 ``query`` 的文本匹配语义分开。
+        """
+        return [
+            term["correct"]
+            for term in self.terms
+            if isinstance(term.get("correct"), str)
+        ]
+
     def format_for_prompt(self, matched_terms: Optional[List[Dict[str, str]]] = None) -> str:
         """将专有名词列表格式化为 LLM prompt 注入文本
 
