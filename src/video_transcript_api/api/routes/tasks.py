@@ -378,14 +378,14 @@ async def transcribe_video(
                     )
                     logger.info(f"已发送任务创建通知: {task_id}，使用URL: {display_url}")
                 except Exception as exc:
-                    logger.exception("发送任务创建通知失败: %s, 错误: %s", task_id, exc)
+                    logger.exception("发送任务创建通知失败: {}, 错误: {}", task_id, exc)
             except HTTPException:
                 # 上面 QueueFull 分支显式抛出的 503 是最终答案，不能被下面
                 # 这条兜底的 except Exception 重新包装成 500（HTTPException 本身
                 # 也是 Exception 的子类，不加这条会被无条件吞掉——M2a 的一部分）。
                 raise
             except Exception as queue_exc:
-                logger.exception("任务加入队列失败: %s, 错误: %s", task_id, queue_exc)
+                logger.exception("任务加入队列失败: {}, 错误: {}", task_id, queue_exc)
                 # 非 QueueFull 的普通入队异常（本地 Codex review 第 14 轮）：任务行
                 # 已经落库为 queued，与上面 QueueFull 分支同样必须收口成 failed，
                 # 否则客户端会永久轮询一个永远不会被消费的任务。终态写入自身出错
@@ -438,7 +438,7 @@ async def transcribe_video(
                 user_agent=request.headers.get("User-Agent"),
                 remote_ip=request.client.host if request.client else None,
             )
-            logger.exception("提交转录任务失败: %s", exc)
+            logger.exception("提交转录任务失败: {}", exc)
             raise HTTPException(status_code=500, detail=f"提交转录任务失败: {exc}")
     finally:
         if registration_owned:
@@ -534,7 +534,7 @@ async def get_task_status(
             user_agent=request.headers.get("User-Agent"),
             remote_ip=request.client.host if request.client else None,
         )
-        logger.exception("获取任务状态异常: %s", exc)
+        logger.exception("获取任务状态异常: {}", exc)
         raise HTTPException(status_code=500, detail=f"获取任务状态失败: {exc}")
 
 

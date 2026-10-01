@@ -259,7 +259,7 @@ async def _periodic_maintenance(config: dict) -> None:
                 if deleted:
                     logger.info(f"定期清理：删除 {deleted} 条超过 {audit_days} 天的审计日志")
         except Exception as exc:
-            logger.exception("定期清理执行失败（下个周期重试）: %s", exc)
+            logger.exception("定期清理执行失败（下个周期重试）: {}", exc)
         await asyncio.sleep(24 * 3600)
 
 
@@ -386,7 +386,7 @@ def create_app(
             if recovered:
                 logger.warning(f"启动恢复：已将 {recovered} 个中断任务标记为 failed")
         except Exception as exc:
-            logger.exception("启动恢复扫描失败: %s", exc)
+            logger.exception("启动恢复扫描失败: {}", exc)
             # 本地 codex review 第 6 轮 G3：一次性启动恢复失败，不代表
             # 遗留的非终态任务就此不管——置位 recovery_pending，交给
             # _periodic_maintenance 在下一轮维护里限定 cutoff 重试一次
@@ -417,7 +417,7 @@ def create_app(
         except Exception as exc:
             # Task rows remain authoritative and are never deleted on failure;
             # the daily bounded repair will retry.
-            logger.exception("启动审计快照修复失败: %s", exc)
+            logger.exception("启动审计快照修复失败: {}", exc)
 
         # 设置 LLM 模块默认配置（用于 JSON 结构化输出）
         set_default_config(config)
@@ -473,7 +473,7 @@ def create_app(
                 init_risk_control(config)
                 logger.info("风控模块初始化完成")
             except Exception as exc:
-                logger.exception("风控模块初始化失败: %s", exc)
+                logger.exception("风控模块初始化失败: {}", exc)
                 logger.warning("风控模块将被禁用")
 
         # 启动 ASR 服务监控

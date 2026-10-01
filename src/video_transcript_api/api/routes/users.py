@@ -25,5 +25,5 @@ async def get_user_profile(user_info: dict = Depends(verify_token)):
             },
         )
     except Exception as exc:
-        logger.exception("获取用户配置异常: %s", exc)
+        logger.exception("获取用户配置异常: {}", exc)
         raise HTTPException(status_code=500, detail=f"获取用户配置失败: {exc}")

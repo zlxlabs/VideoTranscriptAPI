@@ -2495,7 +2495,7 @@ class CacheManager:
                         try:
                             self.audit_logger.archive_task_snapshot(task)
                         except Exception:
-                            logger.exception("终态任务审计快照归档失败，将由修复任务重试: %s", task_id)
+                            logger.exception("终态任务审计快照归档失败，将由修复任务重试: {}", task_id)
             return updated
 
         except Exception as e:

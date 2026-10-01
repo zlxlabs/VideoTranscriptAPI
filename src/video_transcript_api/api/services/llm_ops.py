@@ -426,7 +426,7 @@ def _handle_notes_generation(
             if not written:
                 logger.warning("Detailed notes progress update was rejected: {}", task_id)
         except Exception:
-            logger.exception("Failed to persist detailed notes progress: %s", task_id)
+            logger.exception("Failed to persist detailed notes progress: {}", task_id)
 
     write_notes_progress(0, chapter_count)
 

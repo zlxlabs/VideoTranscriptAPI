@@ -762,7 +762,7 @@ async def add_task_by_web(request: Request):
                 status_code=404,
             )
     except Exception as exc:
-        logger.exception("访问Web任务添加页面异常: %s", exc)
+        logger.exception("访问Web任务添加页面异常: {}", exc)
         raise HTTPException(status_code=500, detail="访问页面失败，请稍后重试")
 
 
@@ -870,7 +870,7 @@ async def export_content(view_token: str, export_type: str, request: Request):
         )
 
     except Exception as exc:
-        logger.exception("导出文件异常: %s", exc)
+        logger.exception("导出文件异常: {}", exc)
         return Response(
             content="❌ 导出失败，请稍后重试",
             media_type="text/plain; charset=utf-8",
@@ -1482,7 +1482,7 @@ async def view_transcript(
         )
 
     except Exception as exc:
-        logger.exception("查看转录页面异常: %s", exc)
+        logger.exception("查看转录页面异常: {}", exc)
         return templates.TemplateResponse(
             "error.html",
             {

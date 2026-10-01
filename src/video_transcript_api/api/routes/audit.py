@@ -166,7 +166,7 @@ async def get_audit_stats(days: int = 30, user_info: dict = Depends(verify_token
             },
         )
     except Exception as exc:
-        logger.exception("获取审计统计异常: %s", exc)
+        logger.exception("获取审计统计异常: {}", exc)
         raise HTTPException(status_code=500, detail=f"获取统计信息失败: {exc}")
 
 
@@ -207,7 +207,7 @@ async def get_summary_ratio_stats(
             data=data,
         )
     except Exception as exc:
-        logger.exception("获取总结比例统计异常: %s", exc)
+        logger.exception("获取总结比例统计异常: {}", exc)
         raise HTTPException(status_code=500, detail=f"获取总结比例统计失败: {exc}")
 
 
@@ -237,7 +237,7 @@ async def get_audit_calls(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("获取审计调用记录异常: %s", exc)
+        logger.exception("获取审计调用记录异常: {}", exc)
         raise HTTPException(status_code=500, detail=f"获取调用记录失败: {exc}")
 
 
@@ -473,10 +473,10 @@ async def get_history(
                 logger.error("history query: database still locked after retry: {}", e2)
                 raise HTTPException(status_code=503, detail="服务暂时不可用，请稍后重试")
         else:
-            logger.exception("history query failed: %s", e)
+            logger.exception("history query failed: {}", e)
             raise HTTPException(status_code=500, detail=f"查询失败: {e}")
     except Exception as exc:
-        logger.exception("history query unexpected error: %s", exc)
+        logger.exception("history query unexpected error: {}", exc)
         raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
 
     return TranscribeResponse(
@@ -569,10 +569,10 @@ async def get_filter_options(user_info: dict = Depends(verify_token)):
                 logger.error("filter-options: database still locked: {}", e2)
                 raise HTTPException(status_code=503, detail="服务暂时不可用，请稍后重试")
         else:
-            logger.exception("filter-options query failed: %s", e)
+            logger.exception("filter-options query failed: {}", e)
             raise HTTPException(status_code=500, detail=f"查询失败: {e}")
     except Exception as exc:
-        logger.exception("filter-options unexpected error: %s", exc)
+        logger.exception("filter-options unexpected error: {}", exc)
         raise HTTPException(status_code=500, detail=f"查询失败: {exc}")
 
     return TranscribeResponse(
@@ -858,5 +858,5 @@ async def get_task_summary(
             },
         )
     except Exception as exc:
-        logger.exception("get summary failed for view_token=%s: %s", view_token, exc)
+        logger.exception("get summary failed for view_token={}: {}", view_token, exc)
         raise HTTPException(status_code=500, detail=f"获取摘要失败: {exc}")
