@@ -141,7 +141,7 @@ class FunASRSpeakerClient:
                     else None
                 )
                 if await self._supports_terms(ws_capabilities):
-                    self._connection_terms = self._requested_terms
+                    self._connection_terms = list(self._requested_terms)
 
             logger.info("FunASR 服务器连接成功")
             return True
@@ -177,7 +177,8 @@ class FunASRSpeakerClient:
         scheme = {"ws": "http", "wss": "https"}.get(parsed.scheme)
         if scheme is None:
             raise ValueError("unsupported FunASR WebSocket URL scheme")
-        return urlunsplit((scheme, parsed.netloc, "/capabilities", "", ""))
+        base_path = parsed.path.rstrip("/")
+        return urlunsplit((scheme, parsed.netloc, f"{base_path}/capabilities", "", ""))
 
     @staticmethod
     def _capability_error(capabilities):
@@ -634,8 +635,10 @@ class FunASRSpeakerClient:
         start_time = time.time()
         deadline = start_time + self.total_timeout
 
-        self._requested_terms = self._prepare_terms(
-            get_terminology_db().export_correct_terms()
+        self._requested_terms = (
+            self._prepare_terms(get_terminology_db().export_correct_terms())
+            if self.server_config.get("send_terms", False)
+            else []
         )
         self._terms_count_sent = 0
 

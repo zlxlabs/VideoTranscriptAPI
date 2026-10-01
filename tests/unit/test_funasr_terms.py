@@ -1,6 +1,7 @@
 """FunASR terms capability gate and upload contract tests."""
 
 import asyncio
+import hashlib
 import json
 
 import pytest
@@ -108,12 +109,21 @@ def uploaded_session(events, task_id="t1", result=RESULT, welcome_message=None):
     ], events)
 
 
-def make_client(monkeypatch, tmp_path, terms, sessions, http_responses=None, events=None):
+def make_client(
+    monkeypatch,
+    tmp_path,
+    terms,
+    sessions,
+    send_terms,
+    http_responses=None,
+    events=None,
+):
     clock = FakeClock()
     events = events if events is not None else []
     http_calls = []
+    export_calls = []
     responses = list(http_responses or [FakeHTTPResponse(CAPS)])
-    monkeypatch.setattr(fc, "load_config", lambda: {
+    config = {
         "funasr_spk_server": {
             "server_url": "ws://fake:8767",
             "max_retries": 3,
@@ -123,11 +133,18 @@ def make_client(monkeypatch, tmp_path, terms, sessions, http_responses=None, eve
             "total_timeout": 3600,
             "first_delay_fallback": 1,
         }
-    })
+    }
+    if send_terms is not None:
+        config["funasr_spk_server"]["send_terms"] = send_terms
+    monkeypatch.setattr(fc, "load_config", lambda: config)
+
+    class Terms:
+        def export_correct_terms(self):
+            export_calls.append(True)
+            return terms
+
     monkeypatch.setattr(
-        fc,
-        "get_terminology_db",
-        lambda: type("Terms", (), {"export_correct_terms": lambda self: terms})(),
+        fc, "get_terminology_db", lambda: Terms()
     )
     session_queue = list(sessions)
 
@@ -149,6 +166,7 @@ def make_client(monkeypatch, tmp_path, terms, sessions, http_responses=None, eve
     monkeypatch.setattr(fc.requests, "get", fake_get)
     client = FunASRSpeakerClient()
     client._test_http_calls = http_calls
+    client._test_export_calls = export_calls
     return client
 
 
@@ -175,6 +193,7 @@ def test_supported_terms_are_sent_as_correct_spellings_with_metadata(monkeypatch
         tmp_path,
         ["Ａlpha   Beta", "Alpha Beta", "Gamma"],
         [ws],
+        send_terms=True,
         events=events,
     )
 
@@ -184,6 +203,76 @@ def test_supported_terms_are_sent_as_correct_spellings_with_metadata(monkeypatch
     assert request["data"]["terms"] == ["Alpha Beta", "Gamma"]
     assert client._test_http_calls == [("http://fake:8767/capabilities", 5)]
     assert output["metadata"] == {"context_applied": True, "terms_count": 2}
+    client._requested_terms.append("MutatedAfterAssignment")
+    assert client._connection_terms == ["Alpha Beta", "Gamma"]
+
+
+@pytest.mark.parametrize(
+    "server_url,expected",
+    [
+        ("ws://host:8767", "http://host:8767/capabilities"),
+        ("ws://host:8767/asr", "http://host:8767/asr/capabilities"),
+    ],
+)
+def test_capabilities_url_preserves_server_path(server_url, expected):
+    assert FunASRSpeakerClient._capabilities_url(server_url) == expected
+
+
+@pytest.mark.parametrize("send_terms", [None, False], ids=["unspecified", "disabled"])
+@pytest.mark.parametrize("file_size", [1024, 5 * 1024 * 1024 + 1], ids=["single", "chunked"])
+def test_disabled_terms_keep_upload_request_unchanged(
+    monkeypatch, tmp_path, send_terms, file_size
+):
+    events = []
+    result = {
+        "segments": [{"speaker": "A", "text": "done"}],
+        "speakers": ["A"],
+        "metadata": {"context_applied": False, "terms_count": 0},
+    }
+    if file_size == 1024:
+        ws = uploaded_session(events, result=result)
+    else:
+        chunk_acks = [
+            {"type": "chunk_received", "data": {"progress": (index + 1) * 100 / 6}}
+            for index in range(6)
+        ]
+        ws = FakeWS([
+            welcome(),
+            {"type": "upload_ready", "data": {"task_id": "t1"}},
+            *chunk_acks,
+            {"type": "upload_complete", "data": {}},
+            batch("t1", result),
+        ], events)
+    client = make_client(
+        monkeypatch,
+        tmp_path,
+        ["SecretTerm"],
+        [ws],
+        send_terms=send_terms,
+        events=events,
+    )
+    path = audio_file(tmp_path, file_size)
+
+    run(client, path)
+
+    request = next(message for message in ws.sent if message["type"] == "upload_request")
+    expected_data = {
+        "file_name": "audio.mp3",
+        "file_size": file_size,
+        "file_hash": hashlib.md5(b"a" * file_size).hexdigest(),
+        "output_format": "json",
+        "force_refresh": False,
+    }
+    if file_size > 1024 * 1024:
+        expected_data["chunk_size"] = 1024 * 1024
+        expected_data["total_chunks"] = 6
+        expected_data["upload_mode"] = "chunked"
+    assert request == {
+        "type": "upload_request",
+        "data": expected_data,
+    }
+    assert client._test_http_calls == []
+    assert client._test_export_calls == []
 
 
 @pytest.mark.parametrize(
@@ -251,6 +340,7 @@ def test_capability_failures_omit_terms_and_complete(
         tmp_path,
         ["SecretProperNoun"],
         [ws],
+        send_terms=True,
         http_responses=[response],
         events=events,
     )
@@ -282,7 +372,9 @@ def test_terms_are_clipped_before_upload_and_log_counts_only(
     }
     events = []
     ws = uploaded_session(events, result=result)
-    client = make_client(monkeypatch, tmp_path, raw_terms, [ws], events=events)
+    client = make_client(
+        monkeypatch, tmp_path, raw_terms, [ws], send_terms=True, events=events
+    )
 
     run(client, audio_file(tmp_path))
 
@@ -305,7 +397,9 @@ def test_terms_metadata_mismatch_logs_error_and_returns_result(monkeypatch, tmp_
         "metadata": {"context_applied": False, "terms_count": 0},
     }
     ws = uploaded_session([], result=bad_result)
-    client = make_client(monkeypatch, tmp_path, ["SecretTerm"], [ws])
+    client = make_client(
+        monkeypatch, tmp_path, ["SecretTerm"], [ws], send_terms=True
+    )
 
     output = run(client, audio_file(tmp_path))
 
@@ -334,7 +428,9 @@ def test_queue_full_chunk_finalize_keeps_terms_and_does_not_reupload_bytes(
             "metadata": {"context_applied": True, "terms_count": 1},
         }),
     ], events)
-    client = make_client(monkeypatch, tmp_path, ["SecretTerm"], [ws], events=events)
+    client = make_client(
+        monkeypatch, tmp_path, ["SecretTerm"], [ws], send_terms=True, events=events
+    )
 
     run(client, audio_file(tmp_path, 5 * 1024 * 1024 + 1))
 
@@ -357,6 +453,7 @@ def test_queue_full_resubmit_reprobes_before_resending_same_terms(monkeypatch, t
         tmp_path,
         ["SecretTerm"],
         [first, second],
+        send_terms=True,
         http_responses=[FakeHTTPResponse(CAPS), FakeHTTPResponse(CAPS)],
         events=events,
     )
@@ -401,6 +498,7 @@ def test_existing_task_reconnect_only_polls_without_reprobe_or_reupload(monkeypa
         tmp_path,
         ["SecretTerm"],
         [first, second],
+        send_terms=True,
         http_responses=[FakeHTTPResponse(CAPS)],
         events=events,
     )
