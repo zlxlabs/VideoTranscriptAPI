@@ -200,7 +200,7 @@ def _split_text_by_punctuation(text: str) -> List[Tuple[str, int]]:
 
 
 def _optimize_segment_lengths(
-    segments: List[Dict[str, Any]], min_len: int, max_len: int
+    segments: List[Dict[str, Any]], min_len: int, max_len: int, text: str = ""
 ) -> List[Dict[str, Any]]:
     """优化段落长度：合并短句、分割长句"""
     if not segments:
@@ -221,9 +221,10 @@ def _optimize_segment_lengths(
 
         if buffer_len < min_len:
             if combined_len <= max_len:
-                # 合并
+                # 合并：取区间并集后从原文重新切片，不做字符串拼接
                 buffer["end_time"] = seg["end_time"]
-                buffer["text"] = buffer["text"] + seg["text"]
+                buffer["char_end"] = seg["char_end"]
+                buffer["text"] = text[buffer["char_start"]:seg["char_end"]]
                 buffer["length"] = combined_len
             else:
                 optimized.append(buffer)
@@ -378,6 +379,10 @@ def _create_segments_from_capswriter(
     for idx, (sentence, char_offset) in enumerate(sentences):
         # 该句首 token：正文下标 -> token 下标
         start_token_idx = _find_token_idx(token_positions, char_offset)
+        # 该句在原文里的结束位置（下一句首；末句到正文末尾）
+        char_end = (
+            sentences[idx + 1][1] if idx + 1 < len(sentences) else len(body)
+        )
 
         if idx + 1 < len(sentences):
             end_token_idx = _find_token_idx(token_positions, sentences[idx + 1][1])
@@ -402,6 +407,11 @@ def _create_segments_from_capswriter(
                 "end_time": round(end_time, 2) if end_time is not None else None,
                 "text": sentence,
                 "length": len(sentence),
+                # 记录原文区间：合并时按区间重新切片而不是拼接字符串，
+                # 否则分句时 strip 掉的句间空格会永久丢失（Opus 发现 C），
+                # 侧车正文就不再等于 "".join(tokens)。
+                "char_start": char_offset,
+                "char_end": char_end,
             }
         )
 
@@ -413,7 +423,7 @@ def _create_segments_from_capswriter(
     logger.debug(f"初始分段完成: {len(segments)} 个 segments")
 
     # 长度优化
-    optimized = _optimize_segment_lengths(segments, min_len, max_len)
+    optimized = _optimize_segment_lengths(segments, min_len, max_len, body)
     logger.debug(f"长度优化完成: {len(optimized)} 个 segments")
 
     # 最终统计

@@ -379,3 +379,37 @@ def test_transcribe_raises_on_corrupt_funasr_sidecar(tmp_path):
 
     with pytest.raises(json.JSONDecodeError):
         transcriber.transcribe(str(audio))
+
+
+def test_merged_segments_keep_interword_whitespace(tmp_path):
+    """合并短段不得丢句间空格：侧车正文必须逐字等于 "".join(tokens)。
+
+    合并若用字符串拼接（buffer["text"] + seg["text"]），分句时 strip 掉的
+    句间空格会永久丢失，正文与时间轴同时被破坏且不报错。
+    """
+    client = _make_client(tmp_path)
+    tokens = ["Hello", " ", "world", "。", " ", "How", " ", "are", " ", "you", "?"]
+    text_accu = "".join(tokens)
+    timestamps = [1.0 + index * 0.5 for index in range(len(tokens))]
+
+    generated = asyncio.run(
+        client._save_results(
+            tmp_path / "audio.webm",
+            {
+                "task_id": "whitespace",
+                "text": text_accu,
+                "text_accu": text_accu,
+                "tokens": tokens,
+                "timestamps": timestamps,
+                "duration": 9.0,
+                "time_start": 1.0,
+                "time_complete": 2.0,
+            },
+        )
+    )
+
+    sidecar = next(p for p in generated if "funasr" in p.name)
+    segments = json.loads(sidecar.read_text(encoding="utf-8"))["segments"]
+    assert segments
+    joined = "".join(s["text"] for s in segments)
+    assert joined == text_accu, f"正文丢字符: {joined!r} != {text_accu!r}"
