@@ -276,9 +276,20 @@ def _create_segments_from_capswriter(
     if not text:
         return []
     del text, min_len, max_len
-    if not tokens or not timestamps or len(tokens) != len(timestamps):
+    if not tokens or not timestamps:
         logger.error("tokens 或 timestamps 为空，无法创建 segments")
         return []
+    if len(tokens) != len(timestamps):
+        # 上游文件任务契约要求两者等长。不等长时截断后继续会把不一致的
+        # 数据当成可交付结果（旧行为），或静默返回空（更早的旧行为）——
+        # 两者都会让调用方误以为成功。fail fast（#121）。
+        message = (
+            "CAPSWRITER_CONTRACT_FAILED "
+            "condition=tokens_timestamps_length_mismatch "
+            f"tokens_len={len(tokens)} timestamps_len={len(timestamps)}"
+        )
+        logger.warning(message)
+        raise ValueError(message)
 
     text = "".join(tokens)
     token_prefixes = _token_prefixes(tokens)

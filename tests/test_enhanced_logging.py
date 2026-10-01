@@ -92,19 +92,29 @@ def _run_enhanced_logging_cases():
     except Exception as e:
         raise AssertionError(f"空文本不应抛异常: {e}") from e
 
-    print('\n[TEST 3] Length mismatch - should handle gracefully')
+    print('\n[TEST 3] Length mismatch - must fail fast per upstream contract')
     print('-' * 80)
 
-    segments = _create_segments_from_capswriter(
-        text=text,
-        tokens=tokens[:max(1, len(tokens) // 2)],  # 故意不匹配
-        timestamps=timestamps,
-        min_len=2,
-        max_len=30
-    )
-
-    print(f'\nResult: {len(segments)} segments generated')
-    assert segments, "长度不匹配时截断后仍应产出 segment"
+    # 上游文件任务契约保证 len(tokens) == len(timestamps)，且明确要求
+    # "不需要自行清洗或模糊对齐"。旧实现在这里截断后继续产出 segment，
+    # 等于把不一致的输入当成可交付结果；改为 fail fast（#121）。
+    mismatched_tokens = tokens[:max(1, len(tokens) // 2)]  # 故意不匹配
+    try:
+        segments = _create_segments_from_capswriter(
+            text=text,
+            tokens=mismatched_tokens,
+            timestamps=timestamps,
+            min_len=2,
+            max_len=30
+        )
+        raise AssertionError(
+            f"长度不匹配时应当抛异常，却返回了 {len(segments)} 个 segment"
+        )
+    except ValueError as exc:
+        message = str(exc)
+        assert "CAPSWRITER_CONTRACT_FAILED" in message, message
+        assert "tokens_timestamps_length_mismatch" in message, message
+        print(f'\nCorrectly rejected: {message}')
 
     print('\n[TEST 4] Empty tokens - should fail gracefully')
     print('-' * 80)
