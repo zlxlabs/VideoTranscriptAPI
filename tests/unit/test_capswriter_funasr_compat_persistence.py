@@ -107,10 +107,13 @@ def test_funasr_compat_sidecar_written_despite_invalid_times(tmp_path, compat_co
     assert first["end_time"] >= first["start_time"]
     assert first["end_time"] == 1.5
 
-    # The final sentence falls back to duration when its last token time is
-    # unavailable.
+    # 超长句按次级标点切开（max_len=300），所以末段是切分后的最后一块，
+    # 而不是 segments[1]。
+    assert len(segments) > 2, "超长句应被切成多段"
     assert segments[1]["start_time"] == 1.5
-    assert segments[1]["end_time"] == 12.0
+
+    # 末块无有效 token 时间时回退到音频时长
+    assert segments[-1]["end_time"] == 12.0
 
     # The on-disk JSON must be strict: no NaN / Infinity tokens.
     assert "NaN" not in raw

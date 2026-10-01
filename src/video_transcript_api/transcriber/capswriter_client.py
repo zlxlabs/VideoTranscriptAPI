@@ -13,6 +13,7 @@ import hashlib
 import math
 import time
 import asyncio
+import json as _json
 import re
 import argparse
 from pathlib import Path
@@ -43,6 +44,7 @@ class Config:
     generate_lrc = False
     generate_json = False
     generate_funasr_compat = True  # 生成 FunASR 兼容格式的 JSON
+    max_segment_length = 300  # 超长段落切分上限（字符数）
     verbose = True
 
     @classmethod
@@ -166,6 +168,67 @@ def _validate_capswriter_contract(
     return "".join(tokens), list(tokens), list(timestamps)
 
 
+def _write_temp(target: Path, content: str) -> Path:
+    """Write content to ``<target>.tmp`` and return that path.
+
+    写临时文件再 rename 是为了让「本次产物」与「目录里已有产物」在失败时
+    互不干扰：失败只需删掉自己的 .tmp（#121）。
+    """
+    temporary = target.with_name(target.name + ".tmp")
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write(content)
+    return temporary
+
+
+def _split_oversized_segments(
+    segments: List[Dict[str, Any]],
+    text: str,
+    token_prefixes: List[int],
+    timestamps: List[Any],
+    duration: Any,
+    max_len: int,
+) -> List[Dict[str, Any]]:
+    """按次级标点切分超长段落，时间取自 token 起点（不做字符比例插值）。
+
+    只切分、不合并短段：合并需要拼接字符串，会丢掉句间空格并让区间与原文
+    脱节（Opus 发现 C），而按标点独立成段是更诚实的单位。
+    """
+    splitter = re.compile(r"(?<=[，,；;、])")
+    result: List[Dict[str, Any]] = []
+    for segment in segments:
+        if segment["length"] <= max_len:
+            result.append(segment)
+            continue
+        char_start = segment["char_start"]
+        pieces = [piece for piece in splitter.split(text[char_start:segment["char_end"]]) if piece]
+        if len(pieces) <= 1:
+            result.append(segment)
+            continue
+        offset = char_start
+        last_index = len(pieces) - 1
+        for piece_index, piece in enumerate(pieces):
+            piece_end = offset + len(piece)
+            start_token_idx = _find_token_idx(token_prefixes, offset)
+            end_token_idx = _find_token_idx(token_prefixes, max(offset, piece_end - 1))
+            end_time = _finite_time_or_none(timestamps[end_token_idx])
+            if end_time is None and piece_index == last_index:
+                # 末块无有效 token 时间时回退到音频时长（与整段切分口径一致）
+                end_time = _finite_time_or_none(duration)
+            result.append(
+                {
+                    "start_time": _finite_time_or_none(timestamps[start_token_idx]),
+                    "end_time": end_time,
+                    "text": piece,
+                    "length": len(piece),
+                    "char_start": offset,
+                    "char_end": piece_end,
+                    "start_token_idx": start_token_idx,
+                }
+            )
+            offset = piece_end
+    return result or segments
+
+
 def _token_prefixes(tokens: List[str]) -> List[int]:
     """Build exact half-open character boundaries for the raw token stream."""
     prefixes = [0]
@@ -273,6 +336,7 @@ def _create_segments_from_capswriter(
     text: str,
     tokens: List[str],
     timestamps: List[Any],
+    max_len: int = 300,
     duration: Any = None,
 ) -> List[Dict[str, Any]]:
     """
@@ -333,6 +397,11 @@ def _create_segments_from_capswriter(
                 "char_end": char_end,
                 "start_token_idx": start_token_idx,
             }
+        )
+
+    if max_len and max_len > 0:
+        segments = _split_oversized_segments(
+            segments, text, token_prefixes, timestamps, duration, max_len
         )
 
     logger.info(f"Segments 生成完成: {len(segments)} 个片段")
@@ -432,6 +501,7 @@ class CapsWriterClient:
                 text=text,
                 tokens=tokens,
                 timestamps=timestamps,
+                max_len=int(Config.max_segment_length),
                 duration=result.get("duration"),
             )
             if not segments:
@@ -488,43 +558,50 @@ class CapsWriterClient:
             generated_files.append(json_file)
             self.log(f"已生成详细信息文件: {json_file}")
 
+        # 原子落盘：全部先写 <目标>.tmp，全部成功后再 rename 就位。
+        # 失败只删除本次自己的 .tmp，绝不碰目录里已存在的产物——
+        # 否则同一 output_dir 下的上一次成功转录会被误删（真实数据丢失）。
+        pending: List[Tuple[Path, Path]] = []
         try:
             if Config.generate_txt:
-                with open(txt_file, "w", encoding="utf-8") as f:
-                    f.write(text)
+                pending.append((_write_temp(txt_file, text), txt_file))
                 generated_files.append(txt_file)
                 self.log(f"已生成文本文件: {txt_file}")
 
             if Config.generate_merge_txt:
-                with open(merge_txt_file, "w", encoding="utf-8") as f:
-                    f.write(text)
+                pending.append((_write_temp(merge_txt_file, text), merge_txt_file))
                 generated_files.append(merge_txt_file)
                 self.log(f"已生成合并文本文件: {merge_txt_file}")
 
             if funasr_data is not None:
-                with open(funasr_file, "w", encoding="utf-8") as f:
-                    json.dump(funasr_data, f, ensure_ascii=False, indent=2)
+                pending.append(
+                    (_write_temp(funasr_file, _json.dumps(funasr_data, ensure_ascii=False, indent=2)),
+                     funasr_file)
+                )
                 generated_files.append(funasr_file)
                 self.log(
                     f"已生成 FunASR 兼容文件: {funasr_file} "
                     f"({len(funasr_data['segments'])} 个片段)"
                 )
 
+            if Config.generate_json:
+                pending.append((_write_temp(json_file, _json.dumps(result, ensure_ascii=False, indent=2)), json_file))
+                generated_files.append(json_file)
+                self.log(f"已生成详细信息文件: {json_file}")
+
+            for temporary, target in pending:
+                temporary.replace(target)
+            pending = []
         except OSError as exc:
-            # 写盘中途失败：清理本次已写出的产物。全部产物已在内存构建完成，
-            # 所以失败只发生在写盘阶段；不清理就会留下半组文件，调用方可能
-            # 把它当成本次成功结果（与「侧车失败也算成功」同一类误读，#121）。
-            # 目标路径全量清理：open(w) 已经创建了文件但还没 append 进
-            # generated_files 的那一个也会残留（半写文件），只清
-            # generated_files 会漏掉它。
-            for path in (json_file, txt_file, merge_txt_file, funasr_file):
+            for temporary, _target in pending:
                 try:
-                    Path(path).unlink(missing_ok=True)
+                    temporary.unlink(missing_ok=True)
                 except OSError as cleanup_exc:
-                    logger.warning(f"清理残留产物失败: {path} ({cleanup_exc})")
+                    logger.warning(f"清理临时文件失败: {temporary} ({cleanup_exc})")
             raise OSError(
-                f"转录产物写盘失败，已清理残留产物: {exc}"
+                f"转录产物写盘失败，本次临时文件已清理（已有产物未受影响）: {exc}"
             ) from exc
+
         preview = text[:100] + "..." if len(text) > 100 else text
         self.log(f"转录结果预览: {preview}")
         return generated_files

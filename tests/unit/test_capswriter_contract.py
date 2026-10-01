@@ -3,6 +3,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from video_transcript_api.transcriber import capswriter_client as caps_mod
 from capswriter_asr import Transcript
 
 from video_transcript_api.transcriber.capswriter_client import (
@@ -159,25 +161,81 @@ def test_discards_partial_artifacts_when_writing_fails(tmp_path, monkeypatch):
     全部产物已在内存构建完成，失败只发生在写盘阶段。若不清理，输出目录会留下
     半组文件，调用方可能把它当成本次成功结果——与「侧车失败也算成功」同类（#121）。
     """
-    import json as _json
-
     client = _make_client(tmp_path)
     result = _valid_result()
-    real_dump = _json.dump
+    real_write = caps_mod._write_temp
     calls = {"n": 0}
 
-    def flaky_dump(payload, fh, **kwargs):
-        # Config.generate_json=False，故 json.dump 只被 funasr 侧车调用一次；
-        # 此时 txt 已先行落盘，正好制造「半组文件」场景。
+    def flaky_write(target: Path, content: str) -> Path:
+        # 第一个产物（txt）的临时文件写成功，第二个（funasr 侧车）失败
         calls["n"] += 1
-        raise OSError("disk full")
+        if calls["n"] >= 2:
+            raise OSError("disk full")
+        return real_write(target, content)
 
-    monkeypatch.setattr(
-        "video_transcript_api.transcriber.capswriter_client.json.dump", flaky_dump
-    )
+    monkeypatch.setattr(caps_mod, "_write_temp", flaky_write)
 
     with pytest.raises(OSError):
         asyncio.run(client._save_results(tmp_path / "audio.webm", result))
 
     leftovers = sorted(p.name for p in tmp_path.iterdir())
     assert leftovers == [], f"写盘失败后残留产物: {leftovers}"
+
+
+def test_oversized_segments_are_split_without_string_concatenation():
+    """超长段落必须被切开，且不得靠拼接字符串实现（会丢句间空格）。"""
+    from video_transcript_api.transcriber.capswriter_client import (
+        Config,
+        _create_segments_from_capswriter,
+    )
+
+    sentence = "这是一个很长的句子用来测试超长段落是否会被切开"
+    long_text = "。".join([sentence] * 8) + "。"
+    tokens = list(long_text)
+    timestamps = [index * 0.1 for index in range(len(tokens))]
+
+    previous = Config.max_segment_length
+    try:
+        Config.max_segment_length = 40
+        segments = _create_segments_from_capswriter(
+            text=long_text, tokens=tokens, timestamps=timestamps
+        )
+    finally:
+        Config.max_segment_length = previous
+
+    assert len(segments) > 1, "超长段落未被切开"
+    assert max(s["length"] for s in segments) <= 40, [s["length"] for s in segments]
+    # 切分不得丢文本（若用字符串拼接会出现分隔符丢失）
+    assert "".join(s["text"] for s in segments) == long_text
+    for earlier, later in zip(segments, segments[1:]):
+        assert earlier["end_time"] <= later["start_time"], "切分后时间轴出现空洞"
+
+
+def test_failed_write_preserves_previous_successful_artifacts(tmp_path, monkeypatch):
+    """写盘失败绝不能删除上一次成功转录的产物（真实数据丢失）。"""
+    client = _make_client(tmp_path)
+    result = _valid_result()
+    asyncio.run(client._save_results(tmp_path / "audio.webm", result))
+
+    before = {p.name: p.read_text() for p in tmp_path.iterdir()}
+    assert before, "第一次转录应当产出文件"
+
+    real_write = caps_mod._write_temp
+    calls = {"n": 0}
+
+    def flaky_write(target: Path, content: str) -> Path:
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise OSError("disk full")
+        return real_write(target, content)
+
+    monkeypatch.setattr(caps_mod, "_write_temp", flaky_write)
+
+    with pytest.raises(OSError):
+        asyncio.run(client._save_results(tmp_path / "audio.webm", result))
+
+    after = {p.name: p.read_text() for p in tmp_path.iterdir()}
+    assert set(before) <= set(after), f"已有产物被删除: {set(before) - set(after)}"
+    for name, content in before.items():
+        assert after[name] == content, f"已有产物被破坏: {name}"
+    assert not [k for k in after if k.endswith(".tmp")], f"残留临时文件: {after.keys()}"
