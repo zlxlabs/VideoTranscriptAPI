@@ -23,3 +23,12 @@
 - 取证：重复时间戳直播流 fixture 的 `ffprobe format.duration=4.806522`，原始 `ffmpeg -ar 16000 -ac 1 -f f32le` 解码样本数为 `241859`；规范化 FLAC 的 `ffprobe duration=15.116188`，解码样本数仍为 `241859`。
 - 清理：规范化文件在清理前出现在临时目录，清理后目录只剩原始 fixture。
 - 后续：执行反向红验、ASCII 字符串检查、相关测试和 `make test`。
+
+## 2026-10-01 21:38
+
+- 里程碑：完成收尾验证。
+- 反向红验：一致时零转码、偏差时规范化两条测试均在最小判据注入后以 `AssertionError` 失败，随后只还原注入行。
+- 相关测试：卡面列出的 9 个测试文件共 `41 passed`。
+- 全量门禁：`make test` 退出码 0；pytest 进度核对为 `3379 passed, 0 skipped in 78.439s`。
+- 静态检查：相关 Python 文件 `compileall` 通过；新增源文件与测试文件 ASCII-only。
+- 预算：相对基线 `565 insertions(+), 50 deletions(-)`，低于 800 行硬上限，高于 400 行目标；超出来自新增体检单测与清理/失败分支覆盖。
