@@ -9,10 +9,15 @@ PRINTF_PLACEHOLDER = re.compile(r"%[sdfdr]")
 def test_loguru_calls_do_not_use_printf_placeholders():
     assert PRINTF_PLACEHOLDER.search("%s %d %f %r")
     source_root = Path(__file__).resolve().parents[2] / "src"
-    # Known boundaries, not omissions: only constant strings are scanned.
-    # Dynamic logger.info("x %s" % v) calls and ast.JoinedStr f-strings are out of scope.
-    # Direct logging.getLogger names use stdlib printf formatting.
-    # Call-shaped receivers such as setup_logger(...).info are outside this scan.
+    # Match a Name or Attribute receiver when its final identifier contains "logger".
+    # For a Call receiver, match only when a Name or Attribute on its func side
+    # contains "logger"; this includes setup_logger(...).info and skips
+    # datetime.now().strftime(...).
+    # Known boundaries: only string-constant first arguments are scanned, so
+    # dynamic/binary-formatted strings and ast.JoinedStr f-strings are skipped.
+    # Names bound from logging.getLogger are skipped because stdlib logging uses
+    # printf formatting. Factories/aliases with no "logger" in the func chain
+    # can still leak past this rule (as can dynamic or f-string arguments).
     violations = []
     for source_path in sorted(source_root.rglob("*.py")):
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
@@ -28,9 +33,20 @@ def test_loguru_calls_do_not_use_printf_placeholders():
             ):
                 continue
             receiver = node.func.value
-            receiver_name = getattr(receiver, "id", getattr(receiver, "attr", ""))
-            if "logger" not in receiver_name or (
-                isinstance(receiver, ast.Name) and receiver_name in stdlib_logger_names
+            if isinstance(receiver, ast.Name):
+                receiver_names = {receiver.id}
+            elif isinstance(receiver, ast.Attribute):
+                receiver_names = {receiver.attr}
+            elif isinstance(receiver, ast.Call):
+                receiver_names = {
+                    child.id if isinstance(child, ast.Name) else child.attr
+                    for child in ast.walk(receiver.func)
+                    if isinstance(child, (ast.Name, ast.Attribute))
+                }
+            else:
+                continue
+            if not any("logger" in name for name in receiver_names) or (
+                isinstance(receiver, ast.Name) and receiver.id in stdlib_logger_names
             ):
                 continue
             first_arg = node.args[0]

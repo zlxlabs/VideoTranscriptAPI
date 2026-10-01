@@ -13,6 +13,6 @@ def start_server():
     host = config.get("api", {}).get("host", "0.0.0.0")
     port = config.get("api", {}).get("port", 8000)
     setup_logger("api_server", config=config, bootstrap=False).info(
-        "启动API服务器: %s:%s", host, port
+        "启动API服务器: {}:{}", host, port
     )
     uvicorn.run(runtime_app, host=host, port=port)
