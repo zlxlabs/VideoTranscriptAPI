@@ -205,7 +205,7 @@ docs/
 - [配置示例](../config/config.example.jsonc) - 配置文件模板
 
 ### 测试
-- [运行测试](../scripts/run_tests.py) - 测试运行脚本
+- [运行测试](../Makefile) - 本地门禁 `make test`（`tests/unit` 与 `tests/cache`）
 - [单元测试](../tests/unit/) - 单元测试目录
 - [集成测试](../tests/integration/) - 集成测试目录
 
