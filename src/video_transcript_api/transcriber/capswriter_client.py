@@ -38,6 +38,7 @@ from .token_timeline import (
 # 运行时守卫阈值：低于即标记 degraded（文本没坏，时间轴质量差，不判任务失败）
 TIMELINE_COVERAGE_THRESHOLD = 0.96
 TIMELINE_ALIGNED_RATIO_THRESHOLD = 0.90
+TIMELINE_UNMATCHED_CHARS_THRESHOLD = 0
 
 
 class Config:
@@ -448,8 +449,12 @@ def _create_segments_from_capswriter(
         # None（与 _split_long_segment 的诚实降级同一口径）——文本永不丢失，
         # 时间宁可为 None 也不能让 round(None)/round(nan) 之类的异常或
         # NaN/Inf 字面量污染整个 FunASR 兼容侧车的生成。
-        start_time, _start_anchored = timeline.start_of(span)
-        end_time, _end_anchored = timeline.end_of(span)
+        start_time, start_anchored = timeline.start_of(span)
+        end_time, end_anchored = timeline.end_of(span)
+        if not start_anchored:
+            start_time = None
+        if not end_anchored:
+            end_time = None
 
         segments.append(
             {
@@ -661,11 +666,13 @@ class CapsWriterClient:
                         input_mismatch is not None
                         or coverage < TIMELINE_COVERAGE_THRESHOLD
                         or quality.aligned_ratio < TIMELINE_ALIGNED_RATIO_THRESHOLD
+                        or quality.unmatched_chars > TIMELINE_UNMATCHED_CHARS_THRESHOLD
                     )
                     timeline_quality = {
                         "coverage": coverage,
                         "aligned_ratio": quality.aligned_ratio,
                         "unmatched_chars": quality.unmatched_chars,
+                        "unmatched_chars_threshold": TIMELINE_UNMATCHED_CHARS_THRESHOLD,
                         "coverage_threshold": TIMELINE_COVERAGE_THRESHOLD,
                         "aligned_ratio_threshold": TIMELINE_ALIGNED_RATIO_THRESHOLD,
                         "input_mismatch": input_mismatch,
@@ -678,6 +685,7 @@ class CapsWriterClient:
                             f"task_id={result.get('task_id', '')} "
                             f"coverage={coverage:.4f} aligned_ratio={quality.aligned_ratio:.4f} "
                             f"unmatched_chars={quality.unmatched_chars} "
+                            f"unmatched_chars_threshold={TIMELINE_UNMATCHED_CHARS_THRESHOLD} "
                             f"coverage_threshold={TIMELINE_COVERAGE_THRESHOLD} "
                             f"aligned_ratio_threshold={TIMELINE_ALIGNED_RATIO_THRESHOLD}"
                         )

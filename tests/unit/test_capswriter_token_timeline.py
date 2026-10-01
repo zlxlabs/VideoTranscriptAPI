@@ -702,8 +702,10 @@ def test_length_mismatch_forces_degraded_even_when_thresholds_pass(tmp_path, mon
     assert "timestamps_len=3" in mismatches[0]
 
 
-def test_matching_lengths_report_no_mismatch(tmp_path, monkeypatch):
-    text, tokens, timestamps = _build("sentencepiece", ENGLISH_SENTENCES)
+@pytest.mark.parametrize("style", ["sentencepiece", "punctuation_model"])
+def test_matching_lengths_report_no_mismatch(tmp_path, monkeypatch, style):
+    text, tokens, timestamps = _build(style, ENGLISH_SENTENCES)
+    assert canonical_projection(text) == canonical_projection("".join(tokens))
     payload, _records = _run_sidecar(
         tmp_path,
         monkeypatch,
@@ -720,6 +722,81 @@ def test_matching_lengths_report_no_mismatch(tmp_path, monkeypatch):
     quality = payload["timeline_quality"]
     assert quality["input_mismatch"] is None
     assert quality["degraded"] is False
+
+
+def _unanchored_edge_case():
+    tail = "abcdefghijklmnopqrstuvwxyz0123456789"
+    text = "abcd" + tail
+    tokens = ["abcd", *tail]
+    timestamps = [0.0, *[float(index) for index in range(1, len(tokens))]]
+    return text, tokens, timestamps
+
+
+def test_opening_unmatched_token_forces_degraded_even_when_product_thresholds_pass(
+    tmp_path, monkeypatch
+):
+    text, tokens, timestamps = _unanchored_edge_case()
+    tokens = tokens[1:]
+    timestamps = timestamps[1:]
+    timeline = TokenTimeline.align(text, tokens, timestamps)
+    first_span = _split_text_by_punctuation(text)[0]
+    inferred_start, is_anchored = timeline.start_of(first_span)
+
+    assert is_anchored is False
+    assert inferred_start == pytest.approx(timestamps[0])
+
+    payload, records = _run_sidecar(
+        tmp_path,
+        monkeypatch,
+        {
+            "task_id": "task-opening-unmatched",
+            "text": text,
+            "tokens": tokens,
+            "timestamps": timestamps,
+            "duration": timestamps[-1],
+            "time_complete": 1.0,
+            "time_start": 0.0,
+        },
+    )
+
+    quality = payload["timeline_quality"]
+    assert quality["aligned_ratio"] >= TIMELINE_ALIGNED_RATIO_THRESHOLD
+    assert quality["coverage"] >= TIMELINE_COVERAGE_THRESHOLD
+    assert quality["unmatched_chars"] == 4
+    assert quality["degraded"] is True
+    assert payload["segments"][0]["start_time"] is None
+    assert payload["segments"][0]["end_time"] == pytest.approx(timestamps[-1])
+    degraded_lines = [line for line in records if "capswriter timeline degraded:" in line]
+    assert degraded_lines
+    assert "unmatched_chars_threshold=0" in degraded_lines[0]
+
+
+def test_trailing_unmatched_token_forces_degraded(tmp_path, monkeypatch):
+    text, tokens, timestamps = _unanchored_edge_case()
+    timestamps[-1] = 50.0
+    tokens = tokens[:-1]
+    timestamps = timestamps[:-1]
+
+    payload, records = _run_sidecar(
+        tmp_path,
+        monkeypatch,
+        {
+            "task_id": "task-trailing-unmatched",
+            "text": text,
+            "tokens": tokens,
+            "timestamps": timestamps,
+            "duration": 50.0,
+            "time_complete": 1.0,
+            "time_start": 0.0,
+        },
+    )
+
+    quality = payload["timeline_quality"]
+    assert quality["unmatched_chars"] > 0
+    assert quality["coverage"] < TIMELINE_COVERAGE_THRESHOLD
+    assert quality["degraded"] is True
+    assert payload["segments"][0]["end_time"] is None
+    assert any("capswriter timeline degraded:" in line for line in records)
 
 
 # ---------------------------------------------------------------------------

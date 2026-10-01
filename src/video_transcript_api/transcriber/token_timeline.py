@@ -150,7 +150,11 @@ class TokenTimeline:
         self._token_offsets = token_offsets
         canonical_tokens = "".join(token_parts)
 
-        self._canonical_to_token, anchored = self._align(
+        (
+            self._canonical_to_token,
+            self._canonical_anchored,
+            anchored,
+        ) = self._align(
             self._canonical_text, canonical_tokens, token_offsets
         )
 
@@ -195,10 +199,10 @@ class TokenTimeline:
         canonical_text: str,
         canonical_tokens: str,
         token_offsets: Sequence[int],
-    ) -> Tuple[List[int], int]:
+    ) -> Tuple[List[int], List[bool], int]:
         """canonical text 下标 -> token 下标（-1 表示未锚定）。
 
-        返回 (映射, 被**锚点证据**覆盖的字符数)。锚点之间的空隙按最近的锚点顺延
+        返回 (映射, 锚点掩码, 被**锚点证据**覆盖的字符数)。锚点之间的空隙按最近的锚点顺延
         （映射单调不减，保证时间轴无空洞），但这些字符**不计入** aligned_chars——
         质量画像只认证据，不认推断。
 
@@ -210,24 +214,25 @@ class TokenTimeline:
         """
         mapping = [-1] * len(canonical_text)
         if not canonical_text:
-            return mapping, 0
+            return mapping, [False] * len(canonical_text), 0
 
         if canonical_text == canonical_tokens:
             # 恒等映射快速路径：两侧投影后逐字相同。
             for position in range(len(canonical_text)):
                 mapping[position] = self._token_index_at(position)
-            return mapping, len(canonical_text)
+            return mapping, [True] * len(canonical_text), len(canonical_text)
 
         anchors = self._find_anchors(canonical_text, canonical_tokens)
         if not anchors:
-            return mapping, 0
+            return mapping, [False] * len(canonical_text), 0
 
         k = ANCHOR_SIZE
         for text_start, token_start in anchors:
             for offset in range(k):
                 mapping[text_start + offset] = self._token_index_at(token_start + offset)
-        anchored = sum(1 for value in mapping if value >= 0)
-        return self._carry_forward(mapping), anchored
+        anchored_positions = [value >= 0 for value in mapping]
+        anchored = sum(anchored_positions)
+        return self._carry_forward(mapping), anchored_positions, anchored
 
     @staticmethod
     def _find_anchors(canonical_text: str, canonical_tokens: str) -> List[Tuple[int, int]]:
@@ -308,15 +313,15 @@ class TokenTimeline:
         value = _finite_or_none(self._timestamps[token_index])
         if value is None:
             return None, False
-        return value, True
+        return value, self._canonical_anchored[canonical_index]
 
     def start_of(self, span: TextSpan) -> Tuple[Optional[float], bool]:
-        """span 起点的 ``(时间, 是否锚定)``。"""
+        """span 起点的 ``(时间, 是否有锚点证据)``；推断时间的标志为 False。"""
         start_index, _ = self._canonical_bounds(span)
         return self._time_at(start_index)
 
     def end_of(self, span: TextSpan) -> Tuple[Optional[float], bool]:
-        """span 终点的 ``(时间, 是否锚定)``。
+        """span 终点的 ``(时间, 是否有锚点证据)``；推断时间的标志为 False。
 
         句尾标点/空白 token 的 canonical 投影为空，落在句界之后。它们属于本句（而
         不是下一句），因此终点向前吸收这些空投影 token —— 否则末段终点会停在最后一个
@@ -341,7 +346,7 @@ class TokenTimeline:
         value = _finite_or_none(self._timestamps[cursor])
         if value is None:
             return None, False
-        return value, True
+        return value, self._canonical_anchored[end_index]
 
     def _next_canonical_after(self, text_index: int) -> int:
         """text 下标 ``text_index`` 之后的第一个 canonical 下标（没有则取总数）。"""
