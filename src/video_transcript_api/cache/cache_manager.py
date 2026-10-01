@@ -2091,7 +2091,7 @@ class CacheManager:
                                 except Exception:
                                     connection.rollback()
                                     logger.exception(
-                                        "Failed to restore audit snapshot for retained task %s",
+                                        "Failed to restore audit snapshot for retained task {}",
                                         task_id,
                                     )
                             raise
@@ -2495,7 +2495,7 @@ class CacheManager:
                         try:
                             self.audit_logger.archive_task_snapshot(task)
                         except Exception:
-                            logger.exception("终态任务审计快照归档失败，将由修复任务重试: %s", task_id)
+                            logger.exception("终态任务审计快照归档失败，将由修复任务重试: {}", task_id)
             return updated
 
         except Exception as e:
@@ -3043,17 +3043,17 @@ class CacheManager:
                             try:
                                 task[field] = json.loads(task[field])
                             except (TypeError, json.JSONDecodeError):
-                                logger.warning("Invalid %s JSON for task %s", field, task_id)
+                                logger.warning("Invalid {} JSON for task {}", field, task_id)
                                 task[field] = None
                     if task.get("progress") is not None:
                         try:
                             progress = json.loads(task["progress"])
                         except (TypeError, json.JSONDecodeError):
-                            logger.warning("Invalid progress JSON for task %s", task_id)
+                            logger.warning("Invalid progress JSON for task {}", task_id)
                             progress = None
                         if not isinstance(progress, dict):
                             logger.warning(
-                                "Progress JSON is not an object for task %s", task_id
+                                "Progress JSON is not an object for task {}", task_id
                             )
                             progress = None
                         task["progress"] = progress
@@ -3109,7 +3109,7 @@ class CacheManager:
                         if snapshot and snapshot.get("content_expired"):
                             logger.warning(
                                 "跳过已撤销的候选任务，继续查找同 view_token 下的有效任务: "
-                                "task_id=%s", task["task_id"]
+                                "task_id={}", task["task_id"]
                             )
                             continue
                     return task
@@ -3177,7 +3177,7 @@ class CacheManager:
                     if snapshot and snapshot.get("content_expired"):
                         logger.warning(
                             "跳过已撤销的候选任务，不作为 view_token 归属证据: "
-                            "task_id=%s", task_id
+                            "task_id={}", task_id
                         )
                         continue
                 results.append({"task_id": task_id, "submitted_by": submitted_by})
