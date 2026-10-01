@@ -4,7 +4,6 @@ from pathlib import Path
 
 
 PRINTF_PLACEHOLDER = re.compile(r"%[sdfdr]")
-LOGGER_LEVELS = {"debug", "info", "warning", "error", "critical"}
 
 
 def test_loguru_calls_do_not_use_printf_placeholders():
@@ -18,9 +17,9 @@ def test_loguru_calls_do_not_use_printf_placeholders():
             if not isinstance(node, ast.Call) or not node.args:
                 continue
             function = node.func
+            # Check every direct logger method; loguru methods are not limited to levels.
             if not (
                 isinstance(function, ast.Attribute)
-                and function.attr in LOGGER_LEVELS
                 and isinstance(function.value, ast.Name)
                 and function.value.id == "logger"
             ):
