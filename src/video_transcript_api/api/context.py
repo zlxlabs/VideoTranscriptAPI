@@ -1269,7 +1269,7 @@ class RuntimeContext:
             if pending:
                 background_tasks_settled = False
                 self.logger.error(
-                    "%d 个后台任务未能在关闭预算内响应取消，继续走后续关闭"
+                    "{} 个后台任务未能在关闭预算内响应取消，继续走后续关闭"
                     "步骤，本次关闭结果如实标记为不安全",
                     len(pending),
                 )
