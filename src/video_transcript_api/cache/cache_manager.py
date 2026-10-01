@@ -2091,7 +2091,7 @@ class CacheManager:
                                 except Exception:
                                     connection.rollback()
                                     logger.exception(
-                                        "Failed to restore audit snapshot for retained task %s",
+                                        "Failed to restore audit snapshot for retained task {}",
                                         task_id,
                                     )
                             raise
