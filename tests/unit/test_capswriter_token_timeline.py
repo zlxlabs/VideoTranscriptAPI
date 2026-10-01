@@ -368,6 +368,38 @@ def test_span_union_covers_text_exactly(style):
     assert text[spans[0].start:spans[-1].end] == text
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "!!!???...",
+        "Hello world.   ",
+        "   Hello world.",
+        "   ",
+        "。。。",
+        "你好，世界。  ",
+        "Straße ist groß. Fi ligatur hier.",
+        "Hi. Next one.",
+        "?!  ",
+        "Mixed 中文 and English. 第二句。",
+    ],
+)
+def test_span_union_covers_boundary_inputs(text):
+    """#111：原判据的输入全是「干净」文本（恒真）。此处覆盖尾空白/全标点/纯空白。"""
+    spans = _split_text_by_punctuation(text)
+
+    if not text:
+        assert spans == []
+        return
+
+    cursor = 0
+    for span in spans:
+        assert span.start == cursor
+        assert span.end > span.start
+        cursor = span.end
+    assert cursor == len(text), "span union must cover every character, whitespace included"
+    assert "".join(text[span.start:span.end] for span in spans) == text
+
+
 def test_span_text_round_trips_without_stripping():
     text = "Hello there.  Second sentence follows here!  Third one."
     spans = _split_text_by_punctuation(text)
@@ -527,3 +559,164 @@ def test_production_scale_alignment_is_fast_even_when_streams_diverge():
 
     assert elapsed < 5.0, f"alignment too slow: {elapsed:.3f}s"
     assert timeline.quality.aligned_ratio > 0.9
+
+
+# ---------------------------------------------------------------------------
+# #111 修复 1：canonical 为空的 span 不得静默跳过（文本永不丢失）
+# ---------------------------------------------------------------------------
+
+# 覆盖主脑实测失败的两个输入，以及同类边界：全标点、纯空白、首尾空白、
+# 中英混排、含 casefold 扩展字符。
+TEXT_CONSERVATION_CASES = [
+    "!!!???...",
+    "Hello world.   ",
+    "   Hello world.",
+    "   ",
+    "。。。",
+    "你好，世界。  ",
+    "Straße ist groß. Fi ligatur hier.",
+    "Hi. Next one.",
+    "?!  ",
+    "Mixed 中文 and English. 第二句。",
+]
+
+
+@pytest.mark.parametrize("text", TEXT_CONSERVATION_CASES)
+def test_pipeline_never_loses_text_for_any_input(text):
+    """属性式判据：对任意输入，拼回全部段落文本必须逐字等于原文。"""
+    tokens = list(text)
+    timestamps = [round(index * 0.1, 2) for index in range(len(tokens))]
+
+    segments = _create_segments_from_capswriter(
+        text=text, tokens=tokens, timestamps=timestamps
+    )
+
+    joined = "".join(seg["text"] for seg in segments)
+    assert joined == text, "no character of the transcript may be dropped"
+    assert all(seg["text"] for seg in segments), "no empty-text segment"
+    # 逐 span 校验：每个分句区间的原文必须原样出现在某个段落里
+    for span in _split_text_by_punctuation(text):
+        chunk = text[span.start:span.end]
+        assert chunk in joined, f"span text[{span.start}:{span.end}] vanished"
+
+
+def test_punctuation_only_input_still_produces_a_segment():
+    """全标点输入曾整段消失（段数=0）：现在必须成段，时间诚实降级为 None。"""
+    text = "!!!???..."
+    segments = _create_segments_from_capswriter(
+        text=text, tokens=list(text), timestamps=[0.1] * len(text)
+    )
+    assert len(segments) == 1
+    assert segments[0]["text"] == text
+    assert segments[0]["start_time"] is None and segments[0]["end_time"] is None
+
+
+def test_trailing_whitespace_survives_merging():
+    text = "Hello world.   "
+    segments = _create_segments_from_capswriter(
+        text=text, tokens=list(text), timestamps=[0.1] * len(text)
+    )
+    assert "".join(seg["text"] for seg in segments) == text
+    assert segments[-1]["text"].endswith("   ")
+
+
+def test_zero_length_span_is_skipped_but_punctuation_only_span_is_not():
+    """"min_len == 0 的空文本 span 仍可跳过" 与 "纯标点 span 必须保留" 的区分。"""
+    text = "Hi.  ..."
+    spans = _split_text_by_punctuation(text)
+    assert all(span.end > span.start for span in spans), "no zero-length spans emitted"
+    segments = _create_segments_from_capswriter(
+        text=text, tokens=list(text), timestamps=[0.1] * len(text)
+    )
+    assert "".join(seg["text"] for seg in segments) == text
+
+
+# ---------------------------------------------------------------------------
+# #111 修复 2：tokens/timestamps 不等长 -> 强制 degraded + 结构化日志
+# ---------------------------------------------------------------------------
+
+
+def _run_sidecar(tmp_path, monkeypatch, result):
+    """跑真实落盘路径（_save_results），返回 (侧车 JSON, 采集到的 warning 行)。"""
+    import asyncio
+    import json as _json
+    from unittest.mock import MagicMock, patch
+
+    from video_transcript_api.transcriber.capswriter_client import CapsWriterClient, Config
+
+    monkeypatch.setattr(Config, "generate_funasr_compat", True)
+    monkeypatch.setattr(Config, "generate_txt", False)
+    monkeypatch.setattr(Config, "generate_merge_txt", False)
+    monkeypatch.setattr(Config, "generate_json", False)
+
+    records = []
+    monkeypatch.setattr(
+        "video_transcript_api.transcriber.capswriter_client.logger.warning",
+        lambda message, *a, **k: records.append(message),
+    )
+    with patch.object(CapsWriterClient, "__init__", lambda self: None):
+        client = CapsWriterClient()
+    client.output_dir = str(tmp_path)
+    client.log = MagicMock()
+
+    asyncio.run(client._save_results(tmp_path / "audio.mp3", result))
+    payload = _json.loads((tmp_path / "audio_funasr.json").read_text(encoding="utf-8"))
+    return payload, records
+
+
+def test_length_mismatch_forces_degraded_even_when_thresholds_pass(tmp_path, monkeypatch):
+    """两个阈值都达标时，**只有**不等长本身能把 degraded 拉高——否则本断言恒真。"""
+    # tokens 比 timestamps 多一个（服务端多吐了 token），截断后时间轴完全对齐
+    text = " Hello there."
+    tokens = [" Hello", " there", " .", "!"]
+    timestamps = [0.0, 0.5, 1.0]
+
+    payload, records = _run_sidecar(
+        tmp_path,
+        monkeypatch,
+        {
+            "task_id": "task-mismatch",
+            "text": text,
+            "tokens": tokens,
+            "timestamps": timestamps,
+            "duration": timestamps[-1],
+            "time_complete": 1.0,
+            "time_start": 0.0,
+        },
+    )
+
+    quality = payload["timeline_quality"]
+    assert quality["input_mismatch"] == {
+        "tokens_len": 4,
+        "timestamps_len": 3,
+        "truncated_to": 3,
+    }
+    # 前置条件：两个阈值都达标 —— degraded 若为 False，只可能是不等长判定失效
+    assert quality["coverage"] >= TIMELINE_COVERAGE_THRESHOLD
+    assert quality["aligned_ratio"] >= TIMELINE_ALIGNED_RATIO_THRESHOLD
+    assert quality["degraded"] is True
+
+    mismatches = [line for line in records if "capswriter timeline input_mismatch:" in line]
+    assert mismatches, "length mismatch must leave a greppable structured warning"
+    assert "tokens_len=4" in mismatches[0]
+    assert "timestamps_len=3" in mismatches[0]
+
+
+def test_matching_lengths_report_no_mismatch(tmp_path, monkeypatch):
+    text, tokens, timestamps = _build("sentencepiece", ENGLISH_SENTENCES)
+    payload, _records = _run_sidecar(
+        tmp_path,
+        monkeypatch,
+        {
+            "task_id": "task-ok",
+            "text": text,
+            "tokens": tokens,
+            "timestamps": timestamps,
+            "duration": timestamps[-1],
+            "time_complete": 1.0,
+            "time_start": 0.0,
+        },
+    )
+    quality = payload["timeline_quality"]
+    assert quality["input_mismatch"] is None
+    assert quality["degraded"] is False

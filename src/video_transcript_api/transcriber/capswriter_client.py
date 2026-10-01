@@ -125,17 +125,38 @@ def _split_text_by_punctuation(text: str) -> List[TextSpan]:
       偏离 ``transcript_capswriter.txt``。
     - 英文句号 ``.`` 也切：历史实现只在 ``。！？!?`` 切，英文陈述句从来就没按句断过
       （issue #109 附带修复的独立文本质量缺陷）。
+    - **不丢弃纯空白/纯标点的区间**：它们是原文的一部分。丢一段等于丢文本
+      （#111 finding：全标点输入曾整段消失、尾部空白曾被吃掉）。只有真正为空的区间
+      （零长度）才跳过——那不是文本。
     """
     spans: List[TextSpan] = []
     cursor = 0
     for match in re.finditer(r"[。！？!?]+|\.(?=\s|$)", text):
         end = match.end()
-        if text[cursor:end].strip():
+        if end > cursor:
             spans.append(TextSpan(start=cursor, end=end))
         cursor = end
-    if text[cursor:].strip():
+    if len(text) > cursor:
         spans.append(TextSpan(start=cursor, end=len(text)))
     return spans
+
+
+def _input_mismatch(tokens: Any, timestamps: Any) -> Optional[Dict[str, int]]:
+    """tokens 与 timestamps 不等长时返回详情（两侧长度 + 截断后长度），否则 None。
+
+    这类输入的可对齐部分仍可能正确，因此**不抛异常**（抛错会把可读文本一起丢掉），
+    但必须强制 degraded 并留下可 grep 的结构化日志——静默截断会让产物看起来完全正常，
+    只有产物级覆盖率才暴露，而覆盖率可能被其他因素掩盖。
+    """
+    tokens_len = len(tokens)
+    timestamps_len = len(timestamps)
+    if tokens_len == timestamps_len:
+        return None
+    return {
+        "tokens_len": tokens_len,
+        "timestamps_len": timestamps_len,
+        "truncated_to": min(tokens_len, timestamps_len),
+    }
 
 
 def _optimize_segment_lengths(
@@ -318,15 +339,16 @@ def _create_segments_from_capswriter(
         f"开始创建 segments: text={len(text)}, tokens={len(tokens)}, timestamps={len(timestamps)}"
     )
 
-    # 检查长度是否匹配
-    if len(tokens) != len(timestamps):
+    # 检查长度是否匹配：不静默（结构化日志 + 强制 degraded，见 _input_mismatch）
+    mismatch = _input_mismatch(tokens, timestamps)
+    if mismatch is not None:
         logger.warning(
-            f"长度不匹配: tokens={len(tokens)}, timestamps={len(timestamps)}"
+            f"capswriter timeline input_mismatch: tokens_len={mismatch['tokens_len']} "
+            f"timestamps_len={mismatch['timestamps_len']} "
+            f"truncated_to={mismatch['truncated_to']}"
         )
-        min_len_val = min(len(tokens), len(timestamps))
-        tokens = tokens[:min_len_val]
-        timestamps = timestamps[:min_len_val]
-        logger.info(f"已截断至相同长度: {min_len_val}")
+        tokens = tokens[: mismatch["truncated_to"]]
+        timestamps = timestamps[: mismatch["truncated_to"]]
 
     if not tokens or not timestamps:
         logger.error("tokens 或 timestamps 为空，无法创建 segments")
@@ -350,9 +372,14 @@ def _create_segments_from_capswriter(
 
     for idx, span in enumerate(spans):
         sentence = text[span.start:span.end]
-        if not canonical_projection(sentence):
-            logger.debug(f"句子 {idx + 1} 规范化后为空，跳过")
+        if not sentence:
+            # 零长度区间不是文本（分句器不会产出，这里只是显式兜底）
+            logger.debug(f"句子 {idx + 1} 为空，跳过")
             continue
+        if not canonical_projection(sentence):
+            # 纯标点/纯空白片段：文本照常输出，时间诚实降级为 None
+            #（#111 finding：这里曾 continue 跳过，导致全标点输入整段消失、尾部空白丢失）
+            logger.debug(f"句子 {idx + 1} 规范化后为空，保留文本并降级时间为 None")
 
         # 时间：NaN/Inf/缺失（None）等无效值经唯一权威解析统一降级为
         # None（与 _split_long_segment 的诚实降级同一口径）——文本永不丢失，
@@ -564,8 +591,12 @@ class CapsWriterClient:
                     # 字符串长度差当检测器（旧 alignment_diff 就是用 bug 的症状当
                     # bug 的检测器，修好坐标系后必然变小、阈值 5 对英文恒触发）。
                     coverage = _timeline_coverage(segments, duration)
+                    # 长度不一致强制 degraded，且独立于两个阈值：即使覆盖率碰巧达标
+                    # 也不得放行（#111 finding：静默截断的产物看起来完全正常）
+                    input_mismatch = _input_mismatch(tokens, timestamps)
                     degraded = (
-                        coverage < TIMELINE_COVERAGE_THRESHOLD
+                        input_mismatch is not None
+                        or coverage < TIMELINE_COVERAGE_THRESHOLD
                         or quality.aligned_ratio < TIMELINE_ALIGNED_RATIO_THRESHOLD
                     )
                     timeline_quality = {
@@ -574,6 +605,7 @@ class CapsWriterClient:
                         "unmatched_chars": quality.unmatched_chars,
                         "coverage_threshold": TIMELINE_COVERAGE_THRESHOLD,
                         "aligned_ratio_threshold": TIMELINE_ALIGNED_RATIO_THRESHOLD,
+                        "input_mismatch": input_mismatch,
                         "degraded": degraded,
                     }
                     if degraded:
