@@ -241,8 +241,13 @@ def test_failed_write_preserves_previous_successful_artifacts(tmp_path, monkeypa
     assert not [k for k in after if k.endswith(".tmp")], f"残留临时文件: {after.keys()}"
 
 
-def test_commit_stage_failure_rolls_back_to_previous_artifacts(tmp_path, monkeypatch):
-    """就位阶段中途失败必须回滚，不能留下「新 txt + 旧侧车」的混合版本。"""
+def test_commit_stage_failure_never_deletes_existing_artifacts(tmp_path, monkeypatch):
+    """就位阶段失败绝不能删除已存在的产物（数据丢失红线）。
+
+    刻意不做跨文件回滚：备份+回滚在备份阶段中途失败时会把「尚未备份」的
+    上一次成功产物删掉——风险大于跨文件一致性的收益。因此这里断言的是
+    「不删除」，而不是「回滚到旧版本」。
+    """
     client = _make_client(tmp_path)
     result = _valid_result()
     asyncio.run(client._save_results(tmp_path / "audio.webm", result))
@@ -253,8 +258,6 @@ def test_commit_stage_failure_rolls_back_to_previous_artifacts(tmp_path, monkeyp
     calls = {"n": 0}
 
     def flaky_replace(self, target):
-        # 只在「临时文件就位」阶段失败；备份阶段（target → .bak）必须正常，
-        # 否则测到的不是混合版本场景
         if self.name.endswith(".tmp"):
             calls["n"] += 1
             if calls["n"] >= 2:
@@ -267,10 +270,33 @@ def test_commit_stage_failure_rolls_back_to_previous_artifacts(tmp_path, monkeyp
         asyncio.run(client._save_results(tmp_path / "audio.webm", result))
 
     after = {p.name: p.read_text() for p in tmp_path.iterdir()}
-    assert set(before) <= set(after), f"回滚丢失产物: {set(before) - set(after)}"
-    for name, content in before.items():
-        assert after[name] == content, f"回滚后产物被破坏: {name}"
+    assert set(before) <= set(after), f"已存在产物被删除: {set(before) - set(after)}"
     assert not [k for k in after if k.endswith((".tmp", ".bak"))], sorted(after)
+
+
+def test_half_written_temp_file_is_cleaned_immediately(tmp_path, monkeypatch):
+    """写 .tmp 过程中失败必须就地清理（它不会进入 pending 列表）。"""
+    import builtins as _builtins
+
+    client = _make_client(tmp_path)
+    real_open = _builtins.open
+
+    def flaky_open(file, mode="r", *args, **kwargs):
+        handle = real_open(file, mode, *args, **kwargs)
+        if str(file).endswith(".tmp") and "w" in mode:
+            handle.write("半截")
+            handle.flush()
+            handle.close()
+            raise OSError("disk full during temp write")
+        return handle
+
+    monkeypatch.setattr(_builtins, "open", flaky_open)
+
+    with pytest.raises(OSError):
+        asyncio.run(client._save_results(tmp_path / "audio.webm", _valid_result()))
+
+    leftovers = sorted(p.name for p in tmp_path.iterdir())
+    assert leftovers == [], f"写盘失败后残留: {leftovers}"
 
 
 def test_oversized_segment_without_secondary_punctuation_is_still_split():
@@ -309,3 +335,29 @@ def test_each_artifact_is_reported_exactly_once(tmp_path, monkeypatch):
     assert len(names) == len(set(names)), f"产物列表重复: {names}"
     for name in names:
         assert list(tmp_path.iterdir()).count(tmp_path / name) == 1
+
+
+def test_segment_with_multiple_secondary_punct_is_further_split():
+    """逗号间隔本身超过 max_len 时，仍必须切到上限以内。"""
+    from video_transcript_api.transcriber.capswriter_client import (
+        Config,
+        _create_segments_from_capswriter,
+    )
+
+    body = ("词" * 500 + ",") * 3
+    tokens = list(body)
+    timestamps = [index * 0.1 for index in range(len(tokens))]
+
+    previous = Config.max_segment_length
+    try:
+        Config.max_segment_length = 300
+        segments = _create_segments_from_capswriter(
+            text=body, tokens=tokens, timestamps=timestamps
+        )
+    finally:
+        Config.max_segment_length = previous
+
+    assert max(s["length"] for s in segments) <= 300, max(
+        s["length"] for s in segments
+    )
+    assert "".join(s["text"] for s in segments) == body

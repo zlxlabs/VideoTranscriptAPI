@@ -175,8 +175,17 @@ def _write_temp(target: Path, content: str) -> Path:
     互不干扰：失败只需删掉自己的 .tmp（#121）。
     """
     temporary = target.with_name(target.name + ".tmp")
-    with open(temporary, "w", encoding="utf-8") as handle:
-        handle.write(content)
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(content)
+    except OSError:
+        # 半写的 .tmp 不会进入 pending（append 在返回之后），必须就地清理，
+        # 否则会在输出目录留下被误认为产物的残片。
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return temporary
 
 
@@ -201,17 +210,22 @@ def _split_oversized_segments(
             continue
         char_start = segment["char_start"]
         body = text[char_start:segment["char_end"]]
-        pieces = [piece for piece in splitter.split(body) if piece]
-        if len(pieces) <= 1:
-            # 没有任何次级标点可切：按上限硬切，且切点落在字符边界上
-            # （否则会截断出半个词）。无标点长段同样必须受 max_len 约束。
-            if len(body) > max_len:
-                pieces = [
-                    body[offset:offset + max_len] for offset in range(0, len(body), max_len)
-                ]
-            else:
-                result.append(segment)
+        if len(body) <= max_len:
+            result.append(segment)
+            continue
+        # 先按次级标点切，再把仍然超长的块按上限硬切。
+        # 只做前一步会漏掉「逗号间隔本身就超过 max_len」的输入。
+        pieces = []
+        for piece in splitter.split(body):
+            if not piece:
                 continue
+            pieces.extend(
+                piece[offset:offset + max_len]
+                for offset in range(0, len(piece), max_len)
+            )
+        if len(pieces) <= 1:
+            result.append(segment)
+            continue
         offset = char_start
         last_index = len(pieces) - 1
         for piece_index, piece in enumerate(pieces):
@@ -590,24 +604,12 @@ class CapsWriterClient:
             # 就位阶段：先把已存在的目标挪到 .bak，再逐个 rename。
             # 若中途失败则回滚，避免留下「新的 txt + 旧的侧车」这种混合版本
             # 产物——调用方收到失败状态，但目录里的产物已被换掉一半。
-            backups: List[Tuple[Path, Path]] = []
-            try:
-                for _temporary, target in pending:
-                    if target.exists():
-                        backup = target.with_name(target.name + ".bak")
-                        target.replace(backup)
-                        backups.append((backup, target))
-                for temporary, target in pending:
-                    temporary.replace(target)
-            except OSError as exc:
-                for _temporary, target in pending:
-                    target.unlink(missing_ok=True)
-                for backup, target in backups:
-                    backup.replace(target)
-                raise
-            else:
-                for backup, _target in backups:
-                    backup.unlink(missing_ok=True)
+            # 逐个就位。刻意不做跨文件回滚：备份+回滚在备份阶段中途失败时
+            # 会把未备份的上一次成功产物删掉（真实数据丢失），风险大于收益。
+            # 单文件原子性已由 tmp+rename 保证；失败时已就位的是新版本、
+            # 未就位的是旧版本，不删除任何已存在的产物。
+            for temporary, target in pending:
+                temporary.replace(target)
             pending = []
         except OSError as exc:
             for temporary, _target in pending:
