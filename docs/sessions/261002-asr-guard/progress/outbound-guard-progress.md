@@ -20,3 +20,10 @@
 - 本段结论：`make test` 首轮与反向红验后的恢复轮均退出 0；临时非 loopback 连接用例按预期被守卫以断言失败拦截，随后已删除。手动 webhook 测试在未设置凭据时 6 项跳过，编译检查通过。
 - 关键决策与已否决方案：未使用 `--no-verify`、测试过滤、外网白名单或门禁基线修改；没有把真实手动网络测试纳入默认守卫。
 - 下一步唯一动作：提交并推送当前分支，获取 PR gate 的真实 `SUCCESS` 结论与守卫安装证据。
+
+## 里程碑四：CI 取证
+
+- 当前阶段：等待主脑开 PR 取证
+- 本段结论：最终分支已推送到 `origin/card/vta-128-outboundguard`，远端 ref 指向 `701a54fc96e9695d08bbe21a8f3e97c53a8c18e3`。当前没有该分支的 PR，因此尚未产生可核验的 gate run；执行器未越过仅授权 commit+push 的边界创建 PR。
+- 关键决策与已否决方案：不把本地 `make test` 结果冒充 CI `SUCCESS`，不等待或伪造外部 gate 结论。
+- 下一步唯一动作：主脑开 PR 后，用 `gh pr checks <N>` 核实 gate `conclusion == SUCCESS`，并保存守卫安装标记行。
