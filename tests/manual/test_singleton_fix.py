@@ -123,7 +123,15 @@ def test_cleanup():
 
 
 def run_all_tests():
-    """Run all tests"""
+    """Run all tests.
+
+    Raises RuntimeError if WECHAT_WEBHOOK is unset: run_all_tests() is
+    importable, so a direct call with an empty webhook would fall back to the
+    config.jsonc webhook instead of refusing.
+    """
+    if not WECHAT_WEBHOOK:
+        raise RuntimeError("WECHAT_WEBHOOK is not set; refusing to run real-webhook tests")
+
     logger.info("\n" + "=" * 60)
     logger.info("Singleton Fix Verification Tests")
     logger.info("=" * 60 + "\n")

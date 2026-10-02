@@ -126,7 +126,15 @@ def test_cleanup():
 
 
 def run_all_tests():
-    """Run all tests"""
+    """Run all tests.
+
+    Raises RuntimeError if WECHAT_WEBHOOK is unset: run_all_tests() is
+    importable, so the __main__ guard misses a direct call, and an empty
+    webhook makes WechatNotifier fall back to config.jsonc (production).
+    """
+    if not WECHAT_WEBHOOK:
+        raise RuntimeError("WECHAT_WEBHOOK is not set; refusing to run real-webhook tests")
+
     logger.info("\n" + "=" * 60)
     logger.info("Global Singleton Pattern Tests")
     logger.info("=" * 60 + "\n")
@@ -197,7 +205,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # webhook="" would fall back to the production webhook in config.jsonc.
-    if args.test in ("all", "shared", "ordering") and not WECHAT_WEBHOOK:
+    if not WECHAT_WEBHOOK:
         logger.error("WECHAT_WEBHOOK is not set; refusing to run real-webhook tests")
         sys.exit(2)
 
@@ -217,3 +225,36 @@ if __name__ == "__main__":
         success = test_cleanup()
 
     sys.exit(0 if success else 1)
+
+
+# Obvious fake: proves a config.jsonc webhook is never used, never a real one.
+PLACEHOLDER_WEBHOOK = "https://placeholder.invalid/cgi-bin/webhook/send?key=CONFIG-FALLBACK"
+
+
+def test_run_all_tests_refuses_without_webhook(monkeypatch):
+    """A direct run_all_tests() call must self-guard, not fall back to config.jsonc.
+
+    WechatNotifier does `webhook or config[...].get("webhook")`, so passing ""
+    would silently target the production bot while run_all_tests() reports PASS.
+    """
+    from video_transcript_api.utils.notifications import wechat as wechat_mod
+
+    # Force the unset case: with a real WECHAT_WEBHOOK this test would otherwise
+    # call run_all_tests() for real and send actual messages.
+    monkeypatch.setattr(sys.modules[__name__], "WECHAT_WEBHOOK", "")
+    monkeypatch.setattr(
+        wechat_mod, "load_config", lambda *a, **k: {"wechat": {"webhook": PLACEHOLDER_WEBHOOK}}
+    )
+    used = []
+    monkeypatch.setattr(WechatNotifier, "__init__", lambda self, webhook=None: used.append(webhook))
+
+    refused = None
+    try:
+        run_all_tests()
+    except RuntimeError as exc:
+        refused = exc
+
+    # Asserted first on purpose: this is the invariant that turns red when the
+    # self-guard is removed. Checking the refusal first would short-circuit it.
+    assert used == [], f"run_all_tests() reached the config.jsonc webhook: {used}"
+    assert refused is not None and "WECHAT_WEBHOOK is not set" in str(refused)
