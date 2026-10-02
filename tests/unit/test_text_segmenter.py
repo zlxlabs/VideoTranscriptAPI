@@ -129,16 +129,35 @@ def _run_in_subprocess(script: str, timeout: float = 10.0) -> subprocess.Complet
         ) from exc
 
 
-def _guard_probe(max_segment_size: int, body: str) -> str:
-    """Build a child script: build a real config, run ``body``, print the outcome."""
+def _guard_probe(max_segment_size, body: str) -> str:
+    """Build a child script: build a real config, run ``body``, print the outcome.
+
+    ``max_segment_size`` is interpolated with ``repr`` so every invalid form the
+    guard has to reject survives the trip into the child's source: ``0``, ``-1``,
+    ``'3000'``, ``3000.5``, ``None``, ``True``.
+    """
     return (
         "from video_transcript_api.llm.core.config import LLMConfig\n"
         "from video_transcript_api.llm.segmenters.text_segmenter import TextSegmenter\n"
         "config = LLMConfig(api_key='k', base_url='u', calibrate_model='m',\n"
         "    summary_model='m', segment_size=100,\n"
-        f"    max_segment_size={max_segment_size})\n"
+        f"    max_segment_size={max_segment_size!r})\n"
         f"{body}\n"
     )
+
+
+#: Every form the guard must reject, and the ``condition`` it must report.
+#: ``bool`` is in this table on purpose: it is an ``int`` subclass, so dropping the
+#: explicit bool check lets ``True`` through as ``max_segment_size=1`` and the
+#: segmenter then emits one character per segment without a word of warning.
+INVALID_MAX_SEGMENT_SIZE_CASES = [
+    ("zero", 0, "max_len_not_positive"),
+    ("negative", -1, "max_len_not_positive"),
+    ("str", "3000", "max_len_not_an_int"),
+    ("float", 3000.5, "max_len_not_an_int"),
+    ("none", None, "max_len_not_an_int"),
+    ("bool", True, "max_len_not_an_int"),
+]
 
 
 class TestMaxSegmentSizeFailFast:
@@ -146,10 +165,20 @@ class TestMaxSegmentSizeFailFast:
 
     The old code clamped nothing and checked nothing, so ``while fragment:`` never
     shortened ``fragment`` and the worker hung with an unbounded ``segments`` list.
+    Comparing the size alone was not enough either: a ``float`` slipped through and
+    died later inside ``fragment[:3000.5]``, a ``bool`` slipped through and quietly
+    cut one character per segment, and a ``str`` / ``None`` died with a ``TypeError``
+    that says nothing about configuration.
     """
 
-    @pytest.mark.parametrize("bad_max_segment_size", [0, -1])
-    def test_non_positive_max_segment_size_fails_fast(self, bad_max_segment_size):
+    @pytest.mark.parametrize(
+        ("bad_max_segment_size", "expected_condition"),
+        [(value, condition) for _, value, condition in INVALID_MAX_SEGMENT_SIZE_CASES],
+        ids=[label for label, _, _ in INVALID_MAX_SEGMENT_SIZE_CASES],
+    )
+    def test_invalid_max_segment_size_fails_fast(
+        self, bad_max_segment_size, expected_condition
+    ):
         script = _guard_probe(
             bad_max_segment_size,
             "try:\n"
@@ -164,7 +193,52 @@ class TestMaxSegmentSizeFailFast:
 
         assert result.returncode == 0, result.stderr
         assert "RAISED:TEXT_SEGMENT_INVALID_MAX_SIZE" in result.stdout, result.stdout
-        assert "condition=max_len_not_positive" in result.stdout, result.stdout
+        assert f"condition={expected_condition}" in result.stdout, result.stdout
+        assert "NO_RAISE" not in result.stdout, result.stdout
+
+    def test_guard_rejects_every_invalid_form_with_expected_condition(self):
+        """Permanent negative control for the whole guard, one child process.
+
+        Locks the label -> value -> ``condition`` mapping as a table: deleting the
+        ``bool`` exclusion, or swapping the two condition names, turns this red
+        instead of silently widening what the guard accepts.
+        """
+        script = (
+            "from video_transcript_api.llm.core.config import LLMConfig\n"
+            "from video_transcript_api.llm.segmenters.text_segmenter import TextSegmenter\n"
+            "cases = [\n"
+        )
+        for label, value, _ in INVALID_MAX_SEGMENT_SIZE_CASES:
+            script += f"    ({label!r}, {value!r}),\n"
+        script += (
+            "]\n"
+            "for label, value in cases:\n"
+            "    config = LLMConfig(api_key='k', base_url='u', calibrate_model='m',\n"
+            "        summary_model='m', segment_size=100, max_segment_size=value)\n"
+            "    try:\n"
+            "        TextSegmenter(config)\n"
+            "    except ValueError as exc:\n"
+            "        print('CASE|' + label + '|ValueError|' + str(exc))\n"
+            "    except BaseException as exc:\n"
+            "        print('CASE|' + label + '|' + type(exc).__name__ + '|' + str(exc))\n"
+            "    else:\n"
+            "        print('CASE|' + label + '|NO_RAISE|')\n"
+        )
+
+        result = _run_in_subprocess(script)
+
+        assert result.returncode == 0, result.stderr
+        observed = {}
+        for line in result.stdout.splitlines():
+            if line.startswith("CASE|"):
+                _, label, kind, message = line.split("|", 3)
+                observed[label] = (kind, message)
+        assert set(observed) == {label for label, _, _ in INVALID_MAX_SEGMENT_SIZE_CASES}
+        for label, _, condition in INVALID_MAX_SEGMENT_SIZE_CASES:
+            kind, message = observed[label]
+            assert kind == "ValueError", f"{label} raised {kind}: {message}"
+            assert "TEXT_SEGMENT_INVALID_MAX_SIZE" in message, message
+            assert f"condition={condition}" in message, message
 
     @pytest.mark.parametrize("bad_max_segment_size", [0, -1])
     def test_non_positive_max_segment_size_never_segments(self, bad_max_segment_size):
@@ -191,7 +265,7 @@ class TestMaxSegmentSizeFailFast:
             "from video_transcript_api.llm.core.config import LLMConfig\n"
             "config = LLMConfig(api_key='k', base_url='u', calibrate_model='m',\n"
             "    summary_model='m', max_segment_size=200,\n"
-            f"    segment_size={segment_size})\n"
+            f"    segment_size={segment_size!r})\n"
             "print('JOINED:' + repr(''.join(TextSegmenter(config).segment('hello world。'))))",
         )
 

@@ -29,17 +29,36 @@ class TextSegmenter:
             config: LLM 配置
 
         Raises:
-            ValueError: ``max_segment_size`` 不是正数。必须响亮失败而不是 clamp——
-                clamp 会把配置错误静默纠正成另一个宽度，正是「静默出错」那一档；
-                而 ``_append_fragment`` 的 ``while fragment:`` 在上限 <= 0 时
-                ``take = min(len(fragment), available)`` 恒为 0，循环变量不单调，
-                进程会挂死且 ``segments`` 无界增长。
+            ValueError: ``max_segment_size`` 不是「正的非布尔 int」。必须响亮失败而不是
+                clamp——clamp 会把配置错误静默纠正成另一个宽度，正是「静默出错」那一档。
+
+                拒绝面分两类，``condition`` 具名区分：
+
+                - ``max_len_not_an_int``：不是 ``int``（``str`` / ``float`` / ``None`` /
+                  任何其它类型），或是 ``bool``。``bool`` 是 ``int`` 子类，不显式排除的
+                  话 ``True`` 会以 ``max_segment_size=1`` 的身份通过——``available = True - 0``
+                  得 1，于是每段只切出 1 个字符：不报错、不告警，分段静默退化到极致。
+                  ``float`` 同理穿过「只比大小」的守卫，随后死在更远处的
+                  ``fragment[:3000.5]``（slice indices must be integers），栈更远更难定位。
+                - ``max_len_not_positive``：是 ``int`` 但 ``<= 0``。
+                  ``_append_fragment`` 的 ``while fragment:`` 在上限 <= 0 时
+                  ``take = min(len(fragment), available)`` 恒为 0，循环变量不单调，
+                  进程会挂死且 ``segments`` 无界增长。
         """
         max_segment_size = config.max_segment_size
+        # 先判类型再比大小：非 int 会带着自己的比较语义（抛 TypeError、或静默通过）
+        # 进入 ``_append_fragment``，两种都比在这里报错更贵。
+        if isinstance(max_segment_size, bool) or not isinstance(max_segment_size, int):
+            raise ValueError(
+                "TEXT_SEGMENT_INVALID_MAX_SIZE condition=max_len_not_an_int "
+                f"func=TextSegmenter.__init__ max_segment_size={max_segment_size!r} "
+                f"type={type(max_segment_size).__name__}"
+            )
         if max_segment_size <= 0:
             raise ValueError(
                 "TEXT_SEGMENT_INVALID_MAX_SIZE condition=max_len_not_positive "
-                f"func=TextSegmenter.__init__ max_segment_size={max_segment_size}"
+                f"func=TextSegmenter.__init__ max_segment_size={max_segment_size!r} "
+                f"type={type(max_segment_size).__name__}"
             )
 
         self.config = config
@@ -47,6 +66,9 @@ class TextSegmenter:
         # 注意：``segment_size`` 故意不做取值校验。它只参与
         # ``if len(current_segment) >= self.segment_size`` 的落盘判断，
         # 不参与任何循环的终止条件，因此 <= 0 只会让落盘更频繁，不会挂死。
+        # 它不校验的前提是「类型同样由配置层校验卡兜住」，那张卡尚未落地
+        # （#146/#147 的 P2 部分）；在此之前 ``segment_size`` 写成非数字仍会在
+        # 落盘判断处抛 TypeError，那属于配置层的责任边界，不是本模块承诺过的行为。
         self.max_segment_size = max_segment_size
 
     def segment(self, content: str) -> List[str]:
