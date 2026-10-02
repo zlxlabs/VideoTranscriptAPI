@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -27,6 +28,7 @@ from video_transcript_api.transcriber.capswriter_client import (
     _split_long_segment,
 )
 from video_transcript_api.transcriber.segments import load_segments, normalize_segments
+from video_transcript_api.utils.text_split import split_oversized_text
 
 
 # ---------------------------------------------------------------------------
@@ -493,9 +495,69 @@ class TestSplitLongSegmentInvertedTimes:
 
 
 # ---------------------------------------------------------------------------
-# G: _split_long_segment fallback when no secondary punctuation is available
+# G: length-cap fallback when no secondary punctuation is available
 #    (issue #142: the cap must stay enforceable on punctuation-free long text)
 # ---------------------------------------------------------------------------
+
+
+def _call_with_watchdog(func, *args, timeout=10.0):
+    """Call ``func`` in a daemon thread and turn a hang into a failed assertion.
+
+    The shared fallback helper loops while the remainder exceeds the cap, so a
+    missing ``max_len > 0`` guard means an infinite loop rather than a slow
+    call. Without this wrapper a red run would hang the whole test process
+    instead of reporting a failure.
+    """
+    box = {}
+
+    def _run():
+        try:
+            box["value"] = func(*args)
+        except BaseException as exc:  # re-raised on the calling thread
+            box["error"] = exc
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    assert not thread.is_alive(), (
+        f"{getattr(func, '__name__', func)} did not return within {timeout}s "
+        f"(infinite loop?) args={args[1:]!r}"
+    )
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+class TestSharedOversizedTextFallback:
+    """The single shared implementation both producers call (#142): it cuts on
+    whitespace when there is one, hard-cuts at the cap when there is not, never
+    drops or reorders characters, and refuses a non-positive cap instead of
+    spinning forever."""
+
+    def test_whitespace_is_preferred_when_available(self):
+        text = " ".join(["word"] * 400)
+
+        pieces, whitespace_cuts, hard_cuts = split_oversized_text(text, 300)
+
+        assert all(len(piece) <= 300 for piece in pieces)
+        assert "".join(pieces) == text
+        assert whitespace_cuts == len(pieces) - 1
+        assert hard_cuts == 0
+
+    def test_hard_cut_when_no_whitespace_and_no_punctuation(self):
+        text = "词" * 800
+
+        pieces, whitespace_cuts, hard_cuts = split_oversized_text(text, 300)
+
+        assert [len(piece) for piece in pieces] == [300, 300, 200]
+        assert "".join(pieces) == text
+        assert whitespace_cuts == 0
+        assert hard_cuts == 2
+
+    @pytest.mark.parametrize("bad_max_len", [0, -1])
+    def test_non_positive_max_len_fails_fast(self, bad_max_len):
+        with pytest.raises(ValueError):
+            _call_with_watchdog(split_oversized_text, "词" * 100, bad_max_len)
 
 
 class TestSplitLongSegmentHardCap:
