@@ -150,5 +150,10 @@ class TestServiceCheck:
         """Monitor should start and stop cleanly."""
         monitor.start()
         assert monitor._running is True
+        monitor_thread = monitor._thread
         monitor.stop()
         assert monitor._running is False
+        monitor_thread.join(timeout=10)
+        assert not monitor_thread.is_alive(), (
+            "ASR monitor thread failed to exit during teardown"
+        )
