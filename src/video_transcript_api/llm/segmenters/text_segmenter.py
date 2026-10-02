@@ -75,6 +75,10 @@ class TextSegmenter:
             is_capswriter_format = False
 
         if is_capswriter_format:
+            # 行式分支按行重建文本：行内 strip、行间丢掉换行，因此**不满足**
+            # ``_segment_by_sentences`` 的逐字守恒不变式（CapsWriter 输出是一行一句，
+            # 行即语义边界）。这条分支的空白处理不在本卡的判定范围内，本卡只保证
+            # 句式分支逐字守恒；两者不要互相引用对方的断言。
             logger.info("Detected CapsWriter format, segmenting by lines")
             lines = [line.strip() for line in content.split('\n') if line.strip()]
 
@@ -99,22 +103,36 @@ class TextSegmenter:
         return segments
 
     def _segment_by_sentences(self, content: str) -> List[str]:
-        """按标点符号分段：只切不换，正文逐字守恒。
+        """按标点符号分段：只切不换，**逐字（含空白）守恒**。
 
-        split 用带捕获组的正则，断点字符原样跟随上一片段，**不丢弃也不注入**任何标点
-        （此前会丢掉全部原标点并给每片补一个 `。`，把 ``3.14`` 改成 ``3。14``、
-        ``https://a.b/c`` 改成 ``https。//a。b/c``）。长度上限由 ``_append_fragment``
-        逐字符拼装保证，不依赖句号。
+        不变式：``"".join(self._segment_by_sentences(content)) == content``，
+        对任意输入成立。每个输出段都是入参的一段连续切片，不 strip、不丢弃、不注入。
+
+        历史形态（均为静默出错，会原样进入交付文本）：
+
+        - 无捕获组的 split 丢掉全部原标点 + 每片注入 ``。``，把 ``3.14`` 改成
+          ``3。14``、``https://a.b/c`` 改成 ``https。//a。b/c``。
+        - 对每片 ``.strip()`` 会吃掉标点后的空白，把 ``Hello! World?`` 粘成
+          ``Hello!World?``——与上一条同类的正文改写，只是发生在空白上。
+
+        段边界空白：本实现连段首尾的空白也原样保留。下游
+        ``plain_text_processor.py`` 的 ``"\n\n".join(calibrated_segments)``
+        （文件里 ``_process_plain_text`` 的合并步）会用 ``\n\n`` 覆盖段边界，
+        所以边界空白在用户可见文本里不可见；但它仍然被保留，避免「哪一刀切在空白上」
+        变成一个只有实现者知道的隐式约束。行式分支（``segment()`` 的 CapsWriter
+        格式分支）不在本不变式范围内：它按行重建文本，见 ``segment()`` 里的说明。
+
+        长度上限仍由 ``_append_fragment`` 逐字符拼装保证，不依赖句号。
         """
         segments = []
         # re.split 带一个捕获组时，切片形态是 [文本, 断点, 文本, 断点, ..., 文本]。
         parts = _SENTENCE_BREAK_RE.split(content)
 
         # 先把「文本 + 其后的断点」拼成整片：连续断点（空文本 + 非空断点）挂回上一片，
-        # 否则句末的 ``！`` / ``？`` 会被当成孤立断点丢掉。
+        # 否则句末的 ``！`` / ``？`` 会被当成孤立断点丢掉。整片不做 strip。
         fragments = []
         for index in range(0, len(parts), 2):
-            sentence = parts[index].strip()
+            sentence = parts[index]
             tail = parts[index + 1] if index + 1 < len(parts) else ""
             if sentence:
                 fragments.append(sentence + tail)
@@ -128,22 +146,30 @@ class TextSegmenter:
         for fragment in fragments:
             current_segment = self._append_fragment(fragment, segments, current_segment)
 
-        if current_segment.strip():
-            segments.append(current_segment.strip())
+        if current_segment:
+            segments.append(current_segment)
 
         return segments
 
     def _append_fragment(self, fragment: str, segments: List[str], current_segment: str) -> str:
-        """确保单个片段不会超过 max_segment_size，并根据 segment_size 及时落盘"""
-        fragment = fragment.strip()
+        """把 fragment 逐字符并入 current_segment，按上限切段并及时落盘。
+
+        不变式：``fragment`` 的每个字符恰好进入一个输出段或返回的余料，
+        ``"".join(segments) + current_segment`` 恒等于进入时的内容。**任何 strip
+        都会破坏它**——被 strip 掉的空白若落在两段之间就是词粘连
+        （``Hello! World?`` -> ``Hello!World?``），交付给用户的转录文本会静默变形。
+
+        段首尾空白照原样留在段里：下游 ``"\n\n".join(calibrated_segments)``
+        会用段落分隔覆盖段边界，但保留比丢弃更安全——这样「不变式成立」不依赖
+        「哪一刀恰好切在空白上」这种隐式条件。
+        """
         if not fragment:
             return current_segment
 
         while fragment:
             available = self.max_segment_size - len(current_segment)
             if available <= 0:
-                if current_segment.strip():
-                    segments.append(current_segment.strip())
+                segments.append(current_segment)
                 current_segment = ""
                 available = self.max_segment_size
 
@@ -152,11 +178,11 @@ class TextSegmenter:
             fragment = fragment[take:]
 
             if len(current_segment) >= self.max_segment_size:
-                segments.append(current_segment.strip())
+                segments.append(current_segment)
                 current_segment = ""
 
         if len(current_segment) >= self.segment_size:
-            segments.append(current_segment.strip())
+            segments.append(current_segment)
             current_segment = ""
 
         return current_segment

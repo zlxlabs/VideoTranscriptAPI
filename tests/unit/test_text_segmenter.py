@@ -112,10 +112,6 @@ def _call_with_watchdog(func, *args, timeout=10.0):
     return box["value"]
 
 
-def _non_whitespace(text):
-    return "".join(text.split())
-
-
 class TestMaxSegmentSizeFailFast:
     """P1-A: a non-positive ``max_segment_size`` must be rejected at construction.
 
@@ -152,59 +148,135 @@ class TestMaxSegmentSizeFailFast:
 
         result = _call_with_watchdog(segmenter.segment, "hello world。")
 
-        assert _non_whitespace("".join(result)) == "helloworld。"
+        assert "".join(result) == "hello world。"
 
 
 class TestBodyTextConservation:
     """P1-B: segmentation must cut, never rewrite the transcript body.
 
-    The old implementation dropped every original punctuation mark and injected a
-    ``。`` after each piece, so ``3.14`` became ``3。14`` and
-    ``https://a.b/c`` became ``https。//a。b/c``. The proofediting fallback path
-    returns this rewritten text verbatim, so any loss or injection here reaches
-    the delivered transcript.
+    Two rounds of the same defect, both silent and both reaching the delivered
+    transcript (the proofediting fallback returns the segment verbatim):
+
+    1. punctuation: every original break mark was dropped and a ``。`` injected,
+       so ``3.14`` became ``3。14`` and ``https://a.b/c`` became ``https。//a。b/c``;
+    2. whitespace: each piece was ``strip()``-ed, so ``Hello! World?`` became
+       ``Hello!World?`` -- two words glued together, same harm, invisible to a
+       criterion that compares non-whitespace sequences only.
+
+    The criterion here is therefore verbatim equality: the pieces must
+    concatenate back to the input, whitespace included. The previous
+    ``_non_whitespace()`` helper stripped whitespace on both sides before
+    comparing, so by construction it could never see defect 2 -- a comparison
+    that cannot fail is not a lock, it is decoration.
     """
+
+    #: Samples the sentence branch must reproduce character for character.
+    SAMPLES = [
+        # --- the four samples from the gate finding (codex-sub, run 37034223853) ---
+        "Hello! World?",
+        "你好。 世界。",
+        "see item 3。 then item 4。",
+        "A； B， C",
+        # --- punctuation forms from the first round ---
+        "圆周率是3.14！见 https://a.b/c 与 Mr. Smith 的 e.g. 例子。真的吗？！",
+        "真的吗？！开头。结尾？！",
+        "Mr. Smith says e.g. this。",
+        # --- whitespace shapes ---
+        "  前后空白保留 \n 换行与连续空格  ",
+        "tab\tseparated\tfields with spaces。",
+        "single-spaced words without any break char " * 30,
+        "double  spaced  words  inside。",
+        # --- length pressure: forces the max_segment_size hard cuts ---
+        "这是一个没有任何句末标点的纯中文长句子用来测试长度兜底切分" * 20,
+        "word " * 120,
+        "长" * 600,
+        "混合 mixed 内容 content " * 60,
+    ]
+
+    @pytest.mark.parametrize(
+        "text",
+        SAMPLES,
+        ids=[
+            "finding_ascii_bangs_space",
+            "finding_cjk_space",
+            "finding_sentence_space",
+            "finding_cjk_semicolon_comma_space",
+            "punctuation_mixed",
+            "consecutive_break_chars",
+            "dot_abbreviation",
+            "leading_trailing_whitespace",
+            "tabs",
+            "single_spaces_no_break",
+            "double_spaces",
+            "long_cjk_no_punctuation",
+            "long_english_no_punctuation",
+            "long_over_max_segment_size",
+            "long_mixed_over_max",
+        ],
+    )
+    def test_sentence_split_is_verbatim(self, segmenter, text):
+        """``''.join(_segment_by_sentences(text)) == text``, whitespace included."""
+        result = segmenter._segment_by_sentences(text)
+
+        assert result
+        assert "".join(result) == text
+        assert all(len(piece) <= segmenter.max_segment_size for piece in result)
 
     @pytest.mark.parametrize(
         "text",
         [
-            "今天天气不错，我们去公园走走。",
-            "这是 mixed text 内容 with some English words inside。",
-            "圆周率是3.14，这个数很常见。",
-            "见 https://a.b/c 获取更多细节说明。",
-            "Mr. Smith 说 e.g. 这个例子很清楚。",
-            "真的吗？！太好了！Really? Yes!",
-            "这是一个没有任何句末标点的纯中文长句子用来测试长度兜底切分" * 20,
+            # Single-line inputs reach the sentence branch through the
+            # CapsWriter fallback in segment(), so the pipeline is verbatim too.
+            "Hello! World?",
+            "你好。 世界。",
+            "圆周率是3.14！见 https://a.b/c。",
             "word " * 120,
             "长" * 600,
-            "开头没有标点，结尾也没有。中间有 3.14 和 https://a.b/c 两个样本。",
         ],
         ids=[
-            "chinese_only",
-            "mixed_cn_en",
-            "decimal",
-            "url",
-            "dot_abbreviation",
-            "ascii_and_cjk_bangs",
-            "long_cjk_no_punctuation",
+            "finding_ascii_bangs_space",
+            "finding_cjk_space",
+            "punctuation_mixed",
             "long_english_no_punctuation",
             "long_over_max_segment_size",
-            "no_leading_or_trailing_punctuation",
         ],
     )
-    def test_segment_body_is_conserved(self, segmenter, text):
+    def test_segment_pipeline_is_verbatim(self, segmenter, text):
         result = segmenter.segment(text)
 
         assert result
-        assert _non_whitespace("".join(result)) == _non_whitespace(text)
+        assert "".join(result) == text
         assert all(len(piece) <= segmenter.max_segment_size for piece in result)
 
-    def test_sentence_split_body_is_conserved(self, segmenter):
-        text = "圆周率是3.14！见 https://a.b/c 与 Mr. Smith 的 e.g. 例子。真的吗？！"
+    def test_verbatim_criterion_rejects_word_gluing(self):
+        """Negative control: the criterion must fail on the lossy output.
 
-        result = segmenter._segment_by_sentences(text)
+        This is the shape the previous implementation returned for
+        ``"Hello! World?"`` and the reason the gate flagged it as a major
+        finding. A criterion that cannot reject this pair cannot lock the fix,
+        so the pair is pinned here explicitly instead of being trusted to the
+        property tests above.
+        """
+        original = "Hello! World?"
+        lossy_output = ["Hello!World?"]  # what the stripping implementation returned
 
-        assert _non_whitespace("".join(result)) == _non_whitespace(text)
+        assert "".join(lossy_output) != original
+
+    def test_verbatim_criterion_rejects_whitespace_runs_and_gluing(self):
+        """More known-wrong outputs the criterion has to reject."""
+        cases = [
+            ("Hello! World?", ["Hello!World?"]),          # word gluing
+            ("你好。 世界。", ["你好。世界。"]),  # space after a break char
+            ("a  b", ["a b"]),                        # collapsed interior run
+            ("end with space ", ["end with space"]),     # dropped trailing space
+            ("  leading", ["leading"]),               # dropped leading space
+            ("3.14", ["3。14"]),                       # punctuation injection
+        ]
+
+        for original, lossy_output in cases:
+            assert "".join(lossy_output) != original, (
+                f"criterion cannot detect {lossy_output!r} for {original!r}"
+            )
 
     def test_original_punctuation_is_kept_verbatim(self, segmenter):
         text = "圆周率是3.14！见 https://a.b/c 与 Mr. Smith 的 e.g. 例子。真的吗？！"
