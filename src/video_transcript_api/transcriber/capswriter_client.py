@@ -279,7 +279,7 @@ def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str,
 
     兜底的原因：逗号级切分对「无次级标点」的长文本（整篇英文最常见）完全
     无能为力，若在此放弃，max_len 就退化成尽力而为的软目标。兜底形态见
-    :func:`_split_oversized_text`，只移动切点，正文逐字不丢。
+    :func:`video_transcript_api.utils.text_split.split_oversized_text`，只移动切点，正文逐字不丢。
 
     时间插值必须拒绝非有限值：start_time / duration 任一非有限时，诚实
     降级为 start_time=end_time=None，文本照常切分、永不丢字。
