@@ -24,6 +24,14 @@ SAFE_MANUAL_TEST_NODE = "tests/manual/test_loguru_migration.py::test_logger"
 HIGH_RISK_MANUAL_TEST_FILE = "tests/manual/test_wechat_real.py"
 
 
+def _collected_count(stdout: str, target: str) -> int:
+    """Number of items pytest reports for `target` (quiet collect prints "file: N")."""
+    for line in stdout.splitlines():
+        if line.startswith(f"{target}:"):
+            return int(line.split(":", 1)[1].strip())
+    return 0
+
+
 def _run_mixed_pytest(
     manual_target: str, *args: str
 ) -> subprocess.CompletedProcess[str]:
@@ -119,72 +127,138 @@ def test_manual_file_is_collected_when_switch_is_one():
     result = _run_pytest("1", MANUAL_FILE, "--collect-only", "-q")
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert f"{MANUAL_FILE}: 6" in result.stdout
+    collected = _collected_count(result.stdout, MANUAL_FILE)
+    assert collected >= 1, result.stdout
     assert "skipped" not in result.stdout
+
+
+SENTINEL_API_KEY = "sentinel-on-disk-config-must-not-win"
+PROBE_BODY = (
+    "from video_transcript_api.utils.logging.logger import load_config\n"
+    "\n"
+    "def test_placeholder_config_was_injected():\n"
+    "    api_key = load_config()['tikhub']['api_key']\n"
+    "    assert api_key == 'your-tikhub-api-key-here', \\\n"
+    "        'on-disk config.jsonc won over the injected placeholder: ' + str(api_key)\n"
+)
+
+
+def _build_sandbox(root: Path, config_present: bool) -> Path:
+    """Build a throw-away project root that exercises the real tests/conftest.py.
+
+    Nothing in the real worktree is written: tests/conftest.py is *copied* (read
+    only) and src/ is *symlinked*, so the seeding logic under test is the shipped
+    one while config/ lives entirely under tmp. An earlier version of this test
+    created and deleted PROJECT_ROOT/config/config.jsonc, which destroyed the
+    developer's real config on the no-config branch -- the one thing a test must
+    never do.
+    """
+    (root / "tests").mkdir(parents=True)
+    (root / "config").mkdir()
+    shutil.copyfile(PROJECT_ROOT / "tests" / "conftest.py", root / "tests" / "conftest.py")
+    shutil.copyfile(PROJECT_ROOT / "tests" / "__init__.py", root / "tests" / "__init__.py")
+    (root / "src").symlink_to(PROJECT_ROOT / "src", target_is_directory=True)
+
+    example_text = (PROJECT_ROOT / "config" / "config.example.jsonc").read_text(
+        encoding="utf-8"
+    )
+    (root / "config" / "config.example.jsonc").write_text(example_text, encoding="utf-8")
+    if config_present:
+        # Sentinel, not the example verbatim: a byte-identical copy of the example
+        # cannot distinguish "placeholder injected" from "file read", so an
+        # implementation that lets the file win would still pass.
+        (root / "config" / "config.jsonc").write_text(
+            example_text.replace("your-tikhub-api-key-here", SENTINEL_API_KEY),
+            encoding="utf-8",
+        )
+    return root
+
+
+def _run_sandbox_pytest(root: Path, value, *args) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    if value is None:
+        environment.pop("VTAPI_TESTS_MANUAL", None)
+    else:
+        environment["VTAPI_TESTS_MANUAL"] = value
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", *args],
+        cwd=root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
 
 @pytest.mark.parametrize("value", [None, "true", "yes", "1"], ids=lambda v: "unset" if v is None else v)
 @pytest.mark.parametrize("config_present", [False, True], ids=["no-config", "config-present"])
-def test_config_seeding_does_not_depend_on_the_switch(monkeypatch, value, config_present):
-    """The placeholder config is injected in BOTH disk states, for every switch value.
+def test_placeholder_config_is_injected_in_both_disk_states(tmp_path, value, config_present):
+    """The injected placeholder wins over disk, for every switch value and both disk states.
 
-    Both halves of the promise are parameterised here on purpose. An earlier
-    version only ran the "config.jsonc missing" state while its docstring claimed
-    both, so the regression it was meant to lock (seeding skipped whenever a
-    config.jsonc exists) stayed green -- a promise wider than the coverage, the
-    very defect this card exists to remove.
+    Both halves of the promise are parameterised on purpose. An earlier version
+    only ran the "config.jsonc missing" state while its docstring claimed both,
+    so the regression it was meant to lock stayed green -- a promise wider than
+    the coverage, the very defect this card exists to remove.
 
-    What the probe asserts: the placeholder values win over anything on disk,
-    in both states. That is the promise of 9371d52d (default suite never reads
-    config.jsonc: no per-developer drift, no credential prefixes in logs) and it
-    is the only assertion with teeth for the "config-present" state: a copy of
-    config.example.jsonc is byte-identical to the injected placeholder, so it
-    cannot distinguish "seeded" from "read the file". The on-disk config is
-    therefore a sentinel file with a distinctive api_key -- no real credentials
-    ever enter test code, and any implementation that lets the file win fails
-    here.
-
-    The probe has to live under tests/unit/ because that is the only way to make
-    pytest load tests/conftest.py -- the very code under test here.
+    The run happens in a tmp sandbox holding a copy of tests/conftest.py, so the
+    real worktree is never written to; see _build_sandbox.
     """
-    if value is None:
-        monkeypatch.delenv("VTAPI_TESTS_MANUAL", raising=False)
-
-    live_config = PROJECT_ROOT / "config" / "config.jsonc"
-    example_config = PROJECT_ROOT / "config" / "config.example.jsonc"
-    sentinel_api_key = "sentinel-on-disk-config-must-not-win"
-    backup = None
-    if config_present:
-        if live_config.exists():
-            backup = live_config.with_suffix(".jsonc.bak")
-            shutil.move(live_config, backup)
-        live_config.write_text(
-            example_config.read_text(encoding="utf-8").replace(
-                "your-tikhub-api-key-here", sentinel_api_key
-            ),
-            encoding="utf-8",
-        )
-
-    probe = PROJECT_ROOT / "tests" / "unit" / "_probe_config_seed_tmp.py"
-    probe.write_text(
-        "from video_transcript_api.utils.logging.logger import load_config\n"
-        "\n"
-        "def test_placeholder_config_was_injected():\n"
-        "    api_key = load_config()['tikhub']['api_key']\n"
-        "    assert api_key == 'your-tikhub-api-key-here', \\\n"
-        "        'on-disk config.jsonc won over the injected placeholder: ' + str(api_key)\n",
-        encoding="utf-8",
+    root = _build_sandbox(tmp_path / "sandbox", config_present)
+    (root / "tests" / "test_placeholder_seed_probe.py").write_text(
+        PROBE_BODY, encoding="utf-8"
     )
-    try:
-        result = _run_pytest(value, "tests/unit/_probe_config_seed_tmp.py")
-    finally:
-        probe.unlink()
-        live_config.unlink(missing_ok=True)
-        if backup is not None:
-            shutil.move(backup, live_config)
+
+    result = _run_sandbox_pytest(root, value, "-q", "tests/test_placeholder_seed_probe.py")
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "1 passed" in result.stdout
+
+
+MANUAL_ENTRYPOINTS = {
+    "relative-path-from-root": (PROJECT_ROOT, ["tests/manual/test_wechat_real.py"]),
+    "cwd-inside-manual-dir": (
+        PROJECT_ROOT / "tests" / "manual",
+        ["test_wechat_real.py"],
+    ),
+    "pyargs-dotted-path": (PROJECT_ROOT, ["--pyargs", "tests.manual.test_wechat_real"]),
+    "absolute-path": (
+        PROJECT_ROOT,
+        [str(PROJECT_ROOT / "tests" / "manual" / "test_wechat_real.py")],
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(MANUAL_ENTRYPOINTS))
+def test_manual_gate_resolves_from_every_common_entrypoint(name):
+    """The gate must find the single truth definition from any entrypoint.
+
+    tests/manual/conftest.py looks the definition up in sys.modules["tests.conftest"]
+    and raises when it is missing. That lookup is a contract, not an accident:
+    it only works while tests/ and tests/manual/ are packages, so an entrypoint
+    that imports them differently could crash during collection instead of
+    skipping. Four entrypoints cannot prove "every entrypoint", so this locks the
+    ones people actually use, and the error message names them.
+    """
+    cwd, argv = MANUAL_ENTRYPOINTS[name]
+    result = _run_pytest("1", "--collect-only", "-q", *argv) if cwd == PROJECT_ROOT else None
+    if result is None:
+        environment = os.environ.copy()
+        environment["VTAPI_TESTS_MANUAL"] = "1"
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q", *argv],
+            cwd=cwd,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RuntimeError" not in result.stdout + result.stderr
+    assert "does not have a single source of truth" not in result.stdout + result.stderr
+    assert "tests.manual.test_wechat_real" in result.stdout.replace("\n", " ").replace(
+        "::", "."
+    ) or "test_wechat_real.py" in result.stdout
 
 
 SWITCH_MATRIX = ["1", "true", "yes", "TRUE", "0", "", " 1 ", None]

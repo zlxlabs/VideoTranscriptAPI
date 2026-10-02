@@ -9,6 +9,10 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 MANUAL_FILE="tests/manual/test_wechat_real.py"
+# Snapshot of config/ taken before anything runs, so section 5 can prove this
+# script changed nothing -- a pre-existing real config.jsonc must not be
+# reported as "left behind", and must never be deleted by this script.
+config_listing_before="$(ls -A config)"
 failures=0
 
 run() {
@@ -50,7 +54,8 @@ done
 
 out="$(VTAPI_TESTS_MANUAL=1 uv run --frozen pytest "$MANUAL_FILE" --collect-only -q 2>&1)"
 rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qE 'test_wechat_real\.py: [1-9]' && ! printf '%s' "$out" | grep -qi 'skipped'; then
+collected="$(printf '%s' "$out" | awk -v f="$MANUAL_FILE" '$0 ~ "^" f ": [0-9]+$" {split($0, a, ": "); print a[2]; exit}')"
+if [ "$rc" -eq 0 ] && [ -n "$collected" ] && [ "$collected" -ge 1 ] && ! printf '%s' "$out" | grep -qi 'skipped'; then
   report "manual tests collected with VTAPI_TESTS_MANUAL=1" 0
 else
   report "manual tests collected with VTAPI_TESTS_MANUAL=1 (rc=${rc})" 1
@@ -65,7 +70,8 @@ echo
 echo "== 4. suite is green in BOTH config environments =="
 # (a) no config/config.jsonc (CI norm)
 if [ -e config/config.jsonc ]; then
-  echo "SKIP  (a) config/config.jsonc already present"
+  echo "FAIL  (a) cannot run the no-config case: config/config.jsonc exists (move it aside first)"
+  failures=$((failures + 1))
 else
   uv run --frozen pytest tests -q --tb=short >/dev/null 2>&1
   report "(a) pytest tests with no config/config.jsonc" "$?"
@@ -77,13 +83,23 @@ fi
 # example would be indistinguishable from the placeholder, the sentinel is not.
 CONFIG_PATH="config/config.jsonc"
 if [ -e "$CONFIG_PATH" ]; then
-  echo "SKIP  (b) $CONFIG_PATH already present; remove it to run this check"
+  echo "FAIL  (b) cannot create $CONFIG_PATH: a file is already there (refusing to touch it)"
+  failures=$((failures + 1))
 else
   sed 's/your-tikhub-api-key-here/sentinel-on-disk-config-must-not-win/' \
     config/config.example.jsonc > "$CONFIG_PATH"
   uv run --frozen pytest tests -q --tb=short >/dev/null 2>&1
   report "(b) pytest tests with a config/config.jsonc on disk" "$?"
   rm -f "$CONFIG_PATH"
+fi
+
+echo
+echo "== 5. the script must not have changed config/ =="
+after_listing="$(ls -A config)"
+if [ "$after_listing" = "$config_listing_before" ]; then
+  report "config/ listing unchanged by this script" 0
+else
+  report "config/ listing changed by this script (before: ${config_listing_before} | after: ${after_listing})" 1
 fi
 
 echo
