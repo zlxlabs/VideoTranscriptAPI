@@ -5,10 +5,15 @@ This test verifies that:
 1. All WechatNotifier instances share the same global WeComNotifier
 2. Only one WebhookManager is created per webhook
 3. Messages are processed in order by the same manager
+
+The real webhook is NOT stored in this repository. Export WECHAT_WEBHOOK to
+run the tests that need it; without it those tests are skipped.
 """
 
 import sys
 import os
+
+import pytest
 
 # Add project root to path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -25,8 +30,15 @@ from video_transcript_api.utils.logging import setup_logger
 # Setup logger
 logger = setup_logger("test_global_singleton")
 
-# Real webhook URL
-WEBHOOK_URL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=01ae2f25-ec29-4256-9fc1-22450f88add7"
+# Real webhook URL, read from the environment (never committed to the repo)
+WECHAT_WEBHOOK = os.environ.get("WECHAT_WEBHOOK", "")
+
+
+@pytest.fixture(scope="module")
+def webhook():
+    if not WECHAT_WEBHOOK:
+        pytest.skip("WECHAT_WEBHOOK is not set; skipping real-webhook tests")
+    return WECHAT_WEBHOOK
 
 
 def test_singleton_initialization():
@@ -49,16 +61,16 @@ def test_singleton_initialization():
     return True
 
 
-def test_shared_global_instance():
+def test_shared_global_instance(webhook):
     """Test 2: Multiple WechatNotifier instances share same global WeComNotifier"""
     logger.info("=" * 60)
     logger.info("Test 2: WechatNotifier instances share global WeComNotifier")
     logger.info("=" * 60)
 
     # Create multiple WechatNotifier instances
-    wechat1 = WechatNotifier(webhook=WEBHOOK_URL)
-    wechat2 = WechatNotifier(webhook=WEBHOOK_URL)
-    wechat3 = WechatNotifier(webhook=WEBHOOK_URL)
+    wechat1 = WechatNotifier(webhook=webhook)
+    wechat2 = WechatNotifier(webhook=webhook)
+    wechat3 = WechatNotifier(webhook=webhook)
 
     # Verify they all use the same global WeComNotifier
     assert wechat1.notifier is wechat2.notifier, "Should share same WeComNotifier"
@@ -69,14 +81,14 @@ def test_shared_global_instance():
     return True
 
 
-def test_message_ordering():
+def test_message_ordering(webhook):
     """Test 3: Send multiple messages and verify they are queued"""
     logger.info("=" * 60)
     logger.info("Test 3: Message ordering with global singleton")
     logger.info("=" * 60)
 
     # Create WechatNotifier
-    notifier = WechatNotifier(webhook=WEBHOOK_URL)
+    notifier = WechatNotifier(webhook=webhook)
 
     # Send multiple short messages in quick succession
     messages = [
@@ -120,17 +132,17 @@ def run_all_tests():
     logger.info("=" * 60 + "\n")
 
     tests = [
-        ("Singleton Initialization", test_singleton_initialization),
-        ("Shared Global Instance", test_shared_global_instance),
-        ("Message Ordering", test_message_ordering),
-        ("Cleanup", test_cleanup),
+        ("Singleton Initialization", test_singleton_initialization, False),
+        ("Shared Global Instance", test_shared_global_instance, True),
+        ("Message Ordering", test_message_ordering, True),
+        ("Cleanup", test_cleanup, False),
     ]
 
     results = []
 
-    for test_name, test_func in tests:
+    for test_name, test_func, needs_webhook in tests:
         try:
-            result = test_func()
+            result = test_func(WECHAT_WEBHOOK) if needs_webhook else test_func()
             results.append((test_name, result))
         except Exception as e:
             logger.exception(f"Test '{test_name}' raised exception: {e}")
@@ -184,6 +196,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # webhook="" would fall back to the production webhook in config.jsonc.
+    if args.test in ("all", "shared", "ordering") and not WECHAT_WEBHOOK:
+        logger.error("WECHAT_WEBHOOK is not set; refusing to run real-webhook tests")
+        sys.exit(2)
+
     if args.test == "all":
         success = run_all_tests()
     elif args.test == "init":
@@ -191,11 +208,11 @@ if __name__ == "__main__":
     elif args.test == "shared":
         # Need to init first
         init_global_notifier()
-        success = test_shared_global_instance()
+        success = test_shared_global_instance(WECHAT_WEBHOOK)
     elif args.test == "ordering":
         # Need to init first
         init_global_notifier()
-        success = test_message_ordering()
+        success = test_message_ordering(WECHAT_WEBHOOK)
     elif args.test == "cleanup":
         success = test_cleanup()
 

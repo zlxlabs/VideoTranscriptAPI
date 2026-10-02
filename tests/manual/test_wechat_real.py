@@ -8,10 +8,15 @@ This test demonstrates:
 
 Note: Since messages are sent asynchronously, we add delays between tests
       to allow background processing to complete.
+
+The real webhook is NOT stored in this repository. Export WECHAT_WEBHOOK to
+run the tests that need it; without it those tests are skipped.
 """
 
 import sys
 import os
+
+import pytest
 
 # Add project root to path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -26,17 +31,24 @@ from video_transcript_api.utils.logging import setup_logger
 # Setup logger
 logger = setup_logger("test_wechat_real")
 
-# Real webhook URL
-WEBHOOK_URL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=01ae2f25-ec29-4256-9fc1-22450f88add7"
+# Real webhook URL, read from the environment (never committed to the repo)
+WECHAT_WEBHOOK = os.environ.get("WECHAT_WEBHOOK", "")
 
 
-def test_short_message():
+@pytest.fixture(scope="module")
+def webhook():
+    if not WECHAT_WEBHOOK:
+        pytest.skip("WECHAT_WEBHOOK is not set; skipping real-webhook tests")
+    return WECHAT_WEBHOOK
+
+
+def test_short_message(webhook):
     """Test 1: Short message (basic test)"""
     logger.info("=" * 60)
     logger.info("Test 1: Short message")
     logger.info("=" * 60)
 
-    notifier = WechatNotifier(webhook=WEBHOOK_URL)
+    notifier = WechatNotifier(webhook=webhook)
 
     message = """# Wechat Migration Test - Short Message
 
@@ -63,7 +75,7 @@ Test timestamp: 2025-10-19 20:15:00
     return success
 
 
-def test_medium_message():
+def test_medium_message(webhook):
     """Test 2: Medium message (~2KB)"""
     logger.info("=" * 60)
     logger.info("Test 2: Medium message (~2KB)")
@@ -89,14 +101,14 @@ def test_medium_message():
 - Expected: Single segment
 """
 
-    notifier = WechatNotifier(webhook=WEBHOOK_URL)
+    notifier = WechatNotifier(webhook=webhook)
     success = notifier.send_markdown_v2(message)
 
     logger.info(f"Medium message ({len(content)} chars): {'PASS' if success else 'FAIL'}")
     return success
 
 
-def test_large_message():
+def test_large_message(webhook):
     """Test 3: Large message (~10KB, should auto-segment)"""
     logger.info("=" * 60)
     logger.info("Test 3: Large message (~10KB)")
@@ -136,14 +148,14 @@ The wecom-notifier package handled everything automatically.
 
     logger.info(f"Sending large message: {total_chars} chars, {total_bytes} bytes")
 
-    notifier = WechatNotifier(webhook=WEBHOOK_URL)
+    notifier = WechatNotifier(webhook=webhook)
     success = notifier.send_markdown_v2(message)
 
     logger.info(f"Large message test: {'PASS' if success else 'FAIL'}")
     return success
 
 
-def test_very_large_message():
+def test_very_large_message(webhook):
     """Test 4: Very large message (~40KB, multiple segments)"""
     logger.info("=" * 60)
     logger.info("Test 4: Very large message (~40KB)")
@@ -191,14 +203,14 @@ Test completed successfully!
 
     logger.info(f"Sending very large message: {total_chars} chars, {total_bytes} bytes")
 
-    notifier = WechatNotifier(webhook=WEBHOOK_URL)
+    notifier = WechatNotifier(webhook=webhook)
     success = notifier.send_markdown_v2(message)
 
     logger.info(f"Very large message test: {'PASS' if success else 'FAIL'}")
     return success
 
 
-def test_long_text_function():
+def test_long_text_function(webhook):
     """Test 5: Using send_long_text_wechat function"""
     logger.info("=" * 60)
     logger.info("Test 5: send_long_text_wechat function")
@@ -225,7 +237,7 @@ def test_long_text_function():
         url="https://www.youtube.com/watch?v=test_long_function",
         text=content,
         is_summary=False,
-        webhook=WEBHOOK_URL,
+        webhook=webhook,
         has_speaker_recognition=True
     )
 
@@ -233,7 +245,7 @@ def test_long_text_function():
     return success
 
 
-def test_with_urls_and_risk_control():
+def test_with_urls_and_risk_control(webhook):
     """Test 6: Message with multiple URLs and risk control"""
     logger.info("=" * 60)
     logger.info("Test 6: URLs and risk control")
@@ -267,7 +279,7 @@ The risk control system should:
 Test completed!
 """
 
-    notifier = WechatNotifier(webhook=WEBHOOK_URL)
+    notifier = WechatNotifier(webhook=webhook)
     success = notifier.send_markdown_v2(message)
 
     logger.info(f"URL protection test: {'PASS' if success else 'FAIL'}")
@@ -280,6 +292,10 @@ def run_all_tests():
     logger.info("Real-World WeChat Notification Tests")
     logger.info("Testing with actual webhook URL")
     logger.info("=" * 60 + "\n")
+
+    if not WECHAT_WEBHOOK:
+        logger.error("WECHAT_WEBHOOK is not set; refusing to run real-webhook tests")
+        return False
 
     tests = [
         ("Short Message (~1KB)", test_short_message),
@@ -294,7 +310,7 @@ def run_all_tests():
 
     for test_name, test_func in tests:
         try:
-            result = test_func()
+            result = test_func(WECHAT_WEBHOOK)
             results.append((test_name, result))
         except Exception as e:
             logger.exception(f"Test '{test_name}' raised exception: {e}")
@@ -356,19 +372,24 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # webhook="" would fall back to the production webhook in config.jsonc.
+    if not WECHAT_WEBHOOK:
+        logger.error("WECHAT_WEBHOOK is not set; refusing to run real-webhook tests")
+        sys.exit(2)
+
     if args.test == "all":
         success = run_all_tests()
     elif args.test == "short":
-        success = test_short_message()
+        success = test_short_message(WECHAT_WEBHOOK)
     elif args.test == "medium":
-        success = test_medium_message()
+        success = test_medium_message(WECHAT_WEBHOOK)
     elif args.test == "large":
-        success = test_large_message()
+        success = test_large_message(WECHAT_WEBHOOK)
     elif args.test == "very_large":
-        success = test_very_large_message()
+        success = test_very_large_message(WECHAT_WEBHOOK)
     elif args.test == "function":
-        success = test_long_text_function()
+        success = test_long_text_function(WECHAT_WEBHOOK)
     elif args.test == "url":
-        success = test_with_urls_and_risk_control()
+        success = test_with_urls_and_risk_control(WECHAT_WEBHOOK)
 
     sys.exit(0 if success else 1)
