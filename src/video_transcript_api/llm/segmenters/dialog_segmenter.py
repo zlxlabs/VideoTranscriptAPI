@@ -13,6 +13,42 @@ from ..core.config import LLMConfig
 
 logger = setup_logger(__name__)
 
+_WHITESPACE_RUN = re.compile(r"\s+")
+
+
+def _split_oversized_text(text: str, max_len: int) -> Tuple[List[str], int, int]:
+    """把仍超 max_len 的文本兜底切成每片 <= max_len：空白优先，无空白硬切。
+
+    返回 (片段列表, 空白切点数, 硬切点数)。切分只移动切点、不删不改任何
+    字符，"".join(片段) 与入参逐字一致；调用方不要再 strip。
+
+    max_len 必须是正整数（生产值来自 LLMConfig，plain 路径另有覆盖值）。
+    """
+    pieces: List[str] = []
+    remaining = text
+    whitespace_cuts = 0
+    hard_cuts = 0
+
+    while len(remaining) > max_len:
+        # 只在 [0, max_len] 内找切点：空白串结尾 <= max_len 才可用，
+        # 跨过边界的空白串只能硬切，否则片段会超限。
+        cut = 0
+        for match in _WHITESPACE_RUN.finditer(remaining[: max_len + 1]):
+            if match.end() <= max_len:
+                cut = match.end()
+        if cut:
+            whitespace_cuts += 1
+        else:
+            cut = max_len
+            hard_cuts += 1
+        pieces.append(remaining[:cut])
+        remaining = remaining[cut:]
+
+    if remaining:
+        pieces.append(remaining)
+
+    return pieces, whitespace_cuts, hard_cuts
+
 
 class DialogSegmenter:
     """有说话人文本分段器"""
@@ -140,6 +176,40 @@ class DialogSegmenter:
             sub_dialog = dialog.copy()
             sub_dialog["text"] = current_text.strip()
             sub_dialogs.append(sub_dialog)
+
+        # 兜底（issue #142）：句末切分对「无句末标点」的长文本（整篇英文独白最常见）
+        # 完全无能为力，超长「句」会整条进一个子 dialog，max_chunk_length 就退化成
+        # 软目标。形态固定为空白优先 / 无空白按上限硬切，只移动切点。
+        # 碎片沿用 dialog.copy() 的既有做法：不改 id（校准阶段按 id 锚点回填，
+        # 碎片靠 chunk 内位置区分），时间仍由 _interpolate_dialog_times 插值。
+        whitespace_cuts = 0
+        hard_cuts = 0
+        capped_dialogs: List[Dict[str, Any]] = []
+        for sub_dialog in sub_dialogs:
+            sub_text = sub_dialog.get("text", "")
+            if len(sub_text) <= self.max_chunk_length:
+                capped_dialogs.append(sub_dialog)
+                continue
+            pieces, item_whitespace_cuts, item_hard_cuts = _split_oversized_text(
+                sub_text, self.max_chunk_length
+            )
+            whitespace_cuts += item_whitespace_cuts
+            hard_cuts += item_hard_cuts
+            for piece in pieces:
+                fragment = dialog.copy()
+                fragment["text"] = piece
+                capped_dialogs.append(fragment)
+        sub_dialogs = capped_dialogs
+
+        if whitespace_cuts or hard_cuts:
+            # 越上限是可观测的质量降级（正文不丢、不崩），因此记 warning 而不是
+            # fail fast：后者会把一次质量问题升级成整任务失败。
+            logger.warning(
+                "Long dialog exceeds max_chunk_length, fallback split applied: "
+                f"text_length={len(text)} parts={len(sub_dialogs)} "
+                f"max_chunk_length={self.max_chunk_length} "
+                f"whitespace_cuts={whitespace_cuts} hard_cuts={hard_cuts}"
+            )
 
         logger.debug(f"Long dialog split: length {len(text)} -> {len(sub_dialogs)} fragments")
         if len(sub_dialogs) > 1:

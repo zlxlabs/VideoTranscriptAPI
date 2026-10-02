@@ -32,4 +32,20 @@
     时间；这是超长空白段这一病理形态下的既有插值口径，不单开特例。
 - **下一步唯一动作**：实现 `_split_long_dialog` 的同形兜底并新建 `tests/unit/test_dialog_segmenter_caps.py`。
 
+## ③ `_split_long_dialog` 兜底 + 测试
+
+- **当前阶段**：repairing（第 3/4 段完成）
+- **本段结论**：`_split_long_dialog` 在句末切分后对仍超 `max_chunk_length` 的子 dialog 追加同形兜底
+  （空白优先 / 无空白硬切），碎片沿用 `dialog.copy()` 且不改 id，时间仍交给
+  `_interpolate_dialog_times`；复现命令 2 从 `2159 False` 翻转为 `1494 True` + `665 True`。
+  新用例放在新建的 `tests/unit/test_dialog_segmenter_caps.py`（含形态②英文无标点、形态③无空白硬切、
+  id 与时间轴、非有限时间降级、标点路径不变共 6 条）。
+- **关键决策与已否决方案**：
+  - 兜底不额外 strip：分片可能以空白开头/结尾，既有 `.strip()` 语义保持不动（去空白后一致即通过）。
+  - warning 措辞用英文（模块内既有 debug 日志是英文），logger 为本模块 `setup_logger(__name__)`。
+  - 两处 helper 在各自生产者内各写一份（不跨包共用）：`transcriber/segments.py` 不在本卡
+    Scope-Globs，且上限语义不同，不需要合并。
+- **下一步唯一动作**：两条链各做一次反向红验（只关兜底判据），随后改两处「硬上限」文案并跑
+  `make test`。
+
 
