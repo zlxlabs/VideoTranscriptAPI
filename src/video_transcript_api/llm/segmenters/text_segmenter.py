@@ -12,6 +12,12 @@ from ..core.config import LLMConfig
 logger = setup_logger(__name__)
 
 
+# 断点字符集合与 design.md 3.1 的锁定决策一致：不认 ASCII `.`。
+# 理由：小数（3.14）、版本号（v1.2.3）、缩写（e.g.）、URL 在 `.` 处断开会撕裂正文；
+# 且本仓另外三处（capswriter_client / dialog_segmenter / paragraphize）都不认 `.`。
+_SENTENCE_BREAK_RE = re.compile(r"([。！？!?…，,；;：:\n])")
+
+
 class TextSegmenter:
     """无说话人文本分段器"""
 
@@ -20,10 +26,27 @@ class TextSegmenter:
 
         Args:
             config: LLM 配置
+
+        Raises:
+            ValueError: ``max_segment_size`` 不是正数。必须响亮失败而不是 clamp——
+                clamp 会把配置错误静默纠正成另一个宽度，正是「静默出错」那一档；
+                而 ``_append_fragment`` 的 ``while fragment:`` 在上限 <= 0 时
+                ``take = min(len(fragment), available)`` 恒为 0，循环变量不单调，
+                进程会挂死且 ``segments`` 无界增长。
         """
+        max_segment_size = config.max_segment_size
+        if max_segment_size <= 0:
+            raise ValueError(
+                "TEXT_SEGMENT_INVALID_MAX_SIZE condition=max_len_not_positive "
+                f"func=TextSegmenter.__init__ max_segment_size={max_segment_size}"
+            )
+
         self.config = config
         self.segment_size = config.segment_size
-        self.max_segment_size = config.max_segment_size
+        # 注意：``segment_size`` 故意不做取值校验。它只参与
+        # ``if len(current_segment) >= self.segment_size`` 的落盘判断，
+        # 不参与任何循环的终止条件，因此 <= 0 只会让落盘更频繁，不会挂死。
+        self.max_segment_size = max_segment_size
 
     def segment(self, content: str) -> List[str]:
         """对纯文本内容进行分段
@@ -76,16 +99,33 @@ class TextSegmenter:
         return segments
 
     def _segment_by_sentences(self, content: str) -> List[str]:
-        """按标点符号分段"""
+        """按标点符号分段：只切不换，正文逐字守恒。
+
+        split 用带捕获组的正则，断点字符原样跟随上一片段，**不丢弃也不注入**任何标点
+        （此前会丢掉全部原标点并给每片补一个 `。`，把 ``3.14`` 改成 ``3。14``、
+        ``https://a.b/c`` 改成 ``https。//a。b/c``）。长度上限由 ``_append_fragment``
+        逐字符拼装保证，不依赖句号。
+        """
         segments = []
-        sentences = re.split(r'[。！？!?\.…，,；;：:\n]', content)
+        # re.split 带一个捕获组时，切片形态是 [文本, 断点, 文本, 断点, ..., 文本]。
+        parts = _SENTENCE_BREAK_RE.split(content)
+
+        # 先把「文本 + 其后的断点」拼成整片：连续断点（空文本 + 非空断点）挂回上一片，
+        # 否则句末的 ``！`` / ``？`` 会被当成孤立断点丢掉。
+        fragments = []
+        for index in range(0, len(parts), 2):
+            sentence = parts[index].strip()
+            tail = parts[index + 1] if index + 1 < len(parts) else ""
+            if sentence:
+                fragments.append(sentence + tail)
+            elif tail:
+                if fragments:
+                    fragments[-1] += tail
+                else:
+                    fragments.append(tail)
 
         current_segment = ""
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-            fragment = sentence + "。"
+        for fragment in fragments:
             current_segment = self._append_fragment(fragment, segments, current_segment)
 
         if current_segment.strip():

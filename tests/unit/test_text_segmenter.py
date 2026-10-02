@@ -11,6 +11,7 @@ All console output must be in English only (no emoji, no Chinese).
 """
 
 import re
+import threading
 
 import pytest
 from unittest.mock import Mock
@@ -81,6 +82,146 @@ class TestTextSegmenter:
         text = "这是第一句话。这是第二句话！这是第三句话？" * 5
         result = segmenter.segment(text)
         assert len(result) >= 1
+
+
+def _call_with_watchdog(func, *args, timeout=10.0):
+    """Run ``func`` in a daemon thread and turn a hang into a failed assertion.
+
+    ``_append_fragment`` loops while the remainder is non-empty; without the
+    ``max_segment_size > 0`` guard that loop never terminates and the segments
+    list grows without bound. A bare call under ``pytest.raises`` would hang the
+    whole test process instead of reporting a failure.
+    """
+    box = {}
+
+    def _run():
+        try:
+            box["value"] = func(*args)
+        except BaseException as exc:  # re-raised on the calling thread
+            box["error"] = exc
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    assert not thread.is_alive(), (
+        f"{getattr(func, '__name__', func)} did not return within {timeout}s "
+        f"(infinite loop?) args={args[1:]!r}"
+    )
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+def _non_whitespace(text):
+    return "".join(text.split())
+
+
+class TestMaxSegmentSizeFailFast:
+    """P1-A: a non-positive ``max_segment_size`` must be rejected at construction.
+
+    The old code clamped nothing and checked nothing, so ``while fragment:`` never
+    shortened ``fragment`` and the worker hung with an unbounded ``segments`` list.
+    """
+
+    @pytest.mark.parametrize("bad_max_segment_size", [0, -1])
+    def test_non_positive_max_segment_size_fails_fast(self, bad_max_segment_size):
+        config = Mock(spec=LLMConfig, segment_size=100, max_segment_size=bad_max_segment_size)
+
+        with pytest.raises(ValueError) as excinfo:
+            _call_with_watchdog(TextSegmenter, config)
+
+        assert "TEXT_SEGMENT_INVALID_MAX_SIZE" in str(excinfo.value)
+        assert "condition=max_len_not_positive" in str(excinfo.value)
+
+    @pytest.mark.parametrize("bad_max_segment_size", [0, -1])
+    def test_non_positive_max_segment_size_never_segments(self, bad_max_segment_size):
+        """The whole pipeline (constructor + segment) must refuse to spin."""
+        config = Mock(spec=LLMConfig, segment_size=100, max_segment_size=bad_max_segment_size)
+
+        def build_and_run():
+            return TextSegmenter(config).segment("hello world。")
+
+        with pytest.raises(ValueError):
+            _call_with_watchdog(build_and_run)
+
+    @pytest.mark.parametrize("segment_size", [0, -1])
+    def test_non_positive_segment_size_still_works(self, segment_size):
+        """segment_size only drives flush decisions, so it is not validated."""
+        config = Mock(spec=LLMConfig, segment_size=segment_size, max_segment_size=200)
+        segmenter = TextSegmenter(config)
+
+        result = _call_with_watchdog(segmenter.segment, "hello world。")
+
+        assert _non_whitespace("".join(result)) == "helloworld。"
+
+
+class TestBodyTextConservation:
+    """P1-B: segmentation must cut, never rewrite the transcript body.
+
+    The old implementation dropped every original punctuation mark and injected a
+    ``。`` after each piece, so ``3.14`` became ``3。14`` and
+    ``https://a.b/c`` became ``https。//a。b/c``. The proofediting fallback path
+    returns this rewritten text verbatim, so any loss or injection here reaches
+    the delivered transcript.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "今天天气不错，我们去公园走走。",
+            "这是 mixed text 内容 with some English words inside。",
+            "圆周率是3.14，这个数很常见。",
+            "见 https://a.b/c 获取更多细节说明。",
+            "Mr. Smith 说 e.g. 这个例子很清楚。",
+            "真的吗？！太好了！Really? Yes!",
+            "这是一个没有任何句末标点的纯中文长句子用来测试长度兜底切分" * 20,
+            "word " * 120,
+            "长" * 600,
+            "开头没有标点，结尾也没有。中间有 3.14 和 https://a.b/c 两个样本。",
+        ],
+        ids=[
+            "chinese_only",
+            "mixed_cn_en",
+            "decimal",
+            "url",
+            "dot_abbreviation",
+            "ascii_and_cjk_bangs",
+            "long_cjk_no_punctuation",
+            "long_english_no_punctuation",
+            "long_over_max_segment_size",
+            "no_leading_or_trailing_punctuation",
+        ],
+    )
+    def test_segment_body_is_conserved(self, segmenter, text):
+        result = segmenter.segment(text)
+
+        assert result
+        assert _non_whitespace("".join(result)) == _non_whitespace(text)
+        assert all(len(piece) <= segmenter.max_segment_size for piece in result)
+
+    def test_sentence_split_body_is_conserved(self, segmenter):
+        text = "圆周率是3.14！见 https://a.b/c 与 Mr. Smith 的 e.g. 例子。真的吗？！"
+
+        result = segmenter._segment_by_sentences(text)
+
+        assert _non_whitespace("".join(result)) == _non_whitespace(text)
+
+    def test_original_punctuation_is_kept_verbatim(self, segmenter):
+        text = "圆周率是3.14！见 https://a.b/c 与 Mr. Smith 的 e.g. 例子。真的吗？！"
+
+        joined = "".join(segmenter._segment_by_sentences(text))
+
+        for literal in ("3.14", "https://a.b/c", "Mr. Smith", "e.g."):
+            assert literal in joined, f"literal {literal!r} was rewritten"
+        assert "3。14" not in joined
+        assert "https。//" not in joined
+
+    def test_no_punctuation_is_injected(self, segmenter):
+        text = "这里没有句号也没有感叹号"
+
+        result = segmenter._segment_by_sentences(text)
+
+        assert "。" not in "".join(result)
 
 
 class TestDialogSegmenter:
