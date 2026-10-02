@@ -36,7 +36,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src
 # 默认套件的行为随开发机是否有真实配置而漂移（覆盖不同代码分支、结果不可
 # 复现），且真实凭据路径下个别测试打印的 API key 前缀等信息存在通过
 # `pytest -s` 或失败日志泄露的风险。真正需要读取真实配置的场景，只保留给
-# `tests/manual/` 下显式手动运行的测试（见下方 _tests_manual_env_enabled）。
+# `tests/manual/` 下显式手动运行的测试（见 tests/manual/conftest.py）。
+#
+# 预热已与 VTAPI_TESTS_MANUAL 完全解耦（issue #116）：该开关只控制
+# tests/manual 的收集，不参与这里的调用决策。函数名 `_seed_config_cache_for_
+# missing_config_jsonc` 是历史遗留，行为以上面这段注释为准。
 #
 # 注意：部分测试文件用 `from src.video_transcript_api...` 而不是
 # `from video_transcript_api...` 导入（两种写法在 sys.path 上都能解析到，
@@ -93,18 +97,26 @@ def _seed_config_cache_for_missing_config_jsonc() -> None:
 # 做什么，让其显式设置 `VTAPI_TESTS_MANUAL=1`（已在下方各手动测试文件的
 # 运行示例中体现）即可，不存在任何猜测和边角案例——命令行里出现多少次
 # "tests/manual" 字样、以什么形式出现，都不影响判断结果。
+#
+# 该开关只认 "1"（见 _tests_manual_env_enabled），且只控制 tests/manual 的
+# 收集与否，绝不影响占位配置预热——预热由 config.jsonc 是否缺失决定。
 # ---------------------------------------------------------------------------
 def _tests_manual_env_enabled() -> bool:
-    """判断环境变量 VTAPI_TESTS_MANUAL 是否被显式设置为真值。
+    """VTAPI_TESTS_MANUAL 开关的唯一判定定义（tests/manual/conftest.py 复用）。
 
-    宽容大小写和常见写法（"1"/"true"/"True"/"yes"），未设置或设置为其他
-    值一律视为假，走默认套件的占位配置预热路径。
+    只认 "1"。手动测试会发真实企业微信 webhook、连真实网络、用真实凭据，
+    危险操作的开关应当保守：只认最明确的那一种拼写，true/yes 一律不生效。
     """
-    return os.environ.get("VTAPI_TESTS_MANUAL", "").strip() in ("1", "true", "True", "yes")
+    return os.environ.get("VTAPI_TESTS_MANUAL", "").strip() == "1"
 
 
-if not _tests_manual_env_enabled():
-    _seed_config_cache_for_missing_config_jsonc()
+# 无条件预热。原先这里挂过一个与预热毫无关系的环境变量
+# （`if not _tests_manual_env_enabled()`），后果是设成 VTAPI_TESTS_MANUAL=true
+# 会被判为"手动模式开启"从而跳过预热：手动测试一个没跑，反而把主门禁弄红。
+# 一个开关的失败后果应该是"少跑一些"，不该是"主门禁红"。也从未改成
+# "config.jsonc 缺失才注入"——那会让开发机（有真实配置）与 CI（无配置）走不同
+# 代码分支，实测导致本分支在有真实 config.jsonc 的环境下 5 failed。
+_seed_config_cache_for_missing_config_jsonc()
 
 from video_transcript_api.utils.notifications import (
     init_all_notifiers,
