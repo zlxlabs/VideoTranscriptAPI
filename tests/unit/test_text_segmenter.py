@@ -6,18 +6,26 @@ Covers:
 - CapsWriter format detection (low punctuation density)
 - Segment size limits (segment_size, max_segment_size)
 - Empty/short text handling
+- Verbatim (whitespace included) conservation of the sentence branch
+- Fail-fast on a non-positive max_segment_size, run in a child process
 
 All console output must be in English only (no emoji, no Chinese).
 """
 
+import os
 import re
-import threading
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 from unittest.mock import Mock
 from video_transcript_api.llm.segmenters.text_segmenter import TextSegmenter
 from video_transcript_api.llm.core.config import LLMConfig
 from video_transcript_api.transcriber.segments import parse_time_to_seconds
+
+# tests/unit/test_text_segmenter.py -> repository root, no machine path baked in.
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
@@ -84,32 +92,53 @@ class TestTextSegmenter:
         assert len(result) >= 1
 
 
-def _call_with_watchdog(func, *args, timeout=10.0):
-    """Run ``func`` in a daemon thread and turn a hang into a failed assertion.
+def _run_in_subprocess(script: str, timeout: float = 10.0) -> subprocess.CompletedProcess:
+    """Run ``script`` in a child interpreter that can actually be killed.
 
-    ``_append_fragment`` loops while the remainder is non-empty; without the
-    ``max_segment_size > 0`` guard that loop never terminates and the segments
-    list grows without bound. A bare call under ``pytest.raises`` would hang the
-    whole test process instead of reporting a failure.
+    Isolation, not decoration. ``_append_fragment`` loops while the remainder is
+    non-empty, so a missing ``max_segment_size > 0`` guard means an infinite loop
+    with an unbounded ``segments`` list. A daemon thread can only be *observed*
+    (``join(timeout)``), never stopped: it keeps burning a core and growing that
+    list for the rest of the session, turning one regression into a slow or
+    OOM-killed CI run. ``subprocess.run`` kills the child when the timeout
+    fires, so a hung regression costs 10 seconds and leaves nothing behind.
+
+    The child imports the package under test from ``<repo>/src`` via PYTHONPATH
+    and reports through stdout; nothing crosses the exception boundary.
     """
-    box = {}
-
-    def _run():
-        try:
-            box["value"] = func(*args)
-        except BaseException as exc:  # re-raised on the calling thread
-            box["error"] = exc
-
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
-    thread.join(timeout)
-    assert not thread.is_alive(), (
-        f"{getattr(func, '__name__', func)} did not return within {timeout}s "
-        f"(infinite loop?) args={args[1:]!r}"
+    env = dict(os.environ)
+    src = str(REPO_ROOT / "src")
+    env["PYTHONPATH"] = (
+        src + os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else src
     )
-    if "error" in box:
-        raise box["error"]
-    return box["value"]
+    try:
+        return subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=str(REPO_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # subprocess.run has already killed and reaped the child at this point,
+        # so this branch is a plain assertion failure with nothing left running.
+        raise AssertionError(
+            f"child interpreter exceeded {timeout}s (infinite loop?): {exc.stderr!r}"
+        ) from exc
+
+
+def _guard_probe(max_segment_size: int, body: str) -> str:
+    """Build a child script: build a real config, run ``body``, print the outcome."""
+    return (
+        "from video_transcript_api.llm.core.config import LLMConfig\n"
+        "from video_transcript_api.llm.segmenters.text_segmenter import TextSegmenter\n"
+        "config = LLMConfig(api_key='k', base_url='u', calibrate_model='m',\n"
+        "    summary_model='m', segment_size=100,\n"
+        f"    max_segment_size={max_segment_size})\n"
+        f"{body}\n"
+    )
 
 
 class TestMaxSegmentSizeFailFast:
@@ -121,34 +150,55 @@ class TestMaxSegmentSizeFailFast:
 
     @pytest.mark.parametrize("bad_max_segment_size", [0, -1])
     def test_non_positive_max_segment_size_fails_fast(self, bad_max_segment_size):
-        config = Mock(spec=LLMConfig, segment_size=100, max_segment_size=bad_max_segment_size)
+        script = _guard_probe(
+            bad_max_segment_size,
+            "try:\n"
+            "    TextSegmenter(config)\n"
+            "except ValueError as exc:\n"
+            "    print('RAISED:' + str(exc))\n"
+            "else:\n"
+            "    print('NO_RAISE')",
+        )
 
-        with pytest.raises(ValueError) as excinfo:
-            _call_with_watchdog(TextSegmenter, config)
+        result = _run_in_subprocess(script)
 
-        assert "TEXT_SEGMENT_INVALID_MAX_SIZE" in str(excinfo.value)
-        assert "condition=max_len_not_positive" in str(excinfo.value)
+        assert result.returncode == 0, result.stderr
+        assert "RAISED:TEXT_SEGMENT_INVALID_MAX_SIZE" in result.stdout, result.stdout
+        assert "condition=max_len_not_positive" in result.stdout, result.stdout
 
     @pytest.mark.parametrize("bad_max_segment_size", [0, -1])
     def test_non_positive_max_segment_size_never_segments(self, bad_max_segment_size):
         """The whole pipeline (constructor + segment) must refuse to spin."""
-        config = Mock(spec=LLMConfig, segment_size=100, max_segment_size=bad_max_segment_size)
+        script = _guard_probe(
+            bad_max_segment_size,
+            "try:\n"
+            "    print('SEGMENTS:' + repr(TextSegmenter(config).segment('hello world。')))\n"
+            "except ValueError as exc:\n"
+            "    print('RAISED:' + str(exc))",
+        )
 
-        def build_and_run():
-            return TextSegmenter(config).segment("hello world。")
+        result = _run_in_subprocess(script)
 
-        with pytest.raises(ValueError):
-            _call_with_watchdog(build_and_run)
+        assert result.returncode == 0, result.stderr
+        assert "RAISED:TEXT_SEGMENT_INVALID_MAX_SIZE" in result.stdout, result.stdout
+        assert "SEGMENTS:" not in result.stdout, result.stdout
 
     @pytest.mark.parametrize("segment_size", [0, -1])
     def test_non_positive_segment_size_still_works(self, segment_size):
         """segment_size only drives flush decisions, so it is not validated."""
-        config = Mock(spec=LLMConfig, segment_size=segment_size, max_segment_size=200)
-        segmenter = TextSegmenter(config)
+        script = _guard_probe(
+            200,
+            "from video_transcript_api.llm.core.config import LLMConfig\n"
+            "config = LLMConfig(api_key='k', base_url='u', calibrate_model='m',\n"
+            "    summary_model='m', max_segment_size=200,\n"
+            f"    segment_size={segment_size})\n"
+            "print('JOINED:' + repr(''.join(TextSegmenter(config).segment('hello world。'))))",
+        )
 
-        result = _call_with_watchdog(segmenter.segment, "hello world。")
+        result = _run_in_subprocess(script)
 
-        assert "".join(result) == "hello world。"
+        assert result.returncode == 0, result.stderr
+        assert "JOINED:'hello world。'" in result.stdout, result.stdout
 
 
 class TestBodyTextConservation:

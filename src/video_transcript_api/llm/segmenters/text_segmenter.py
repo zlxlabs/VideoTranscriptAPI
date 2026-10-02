@@ -12,9 +12,10 @@ from ..core.config import LLMConfig
 logger = setup_logger(__name__)
 
 
-# 断点字符集合与 design.md 3.1 的锁定决策一致：不认 ASCII `.`。
+# 断点字符集合见 #146：不认 ASCII `.`。
 # 理由：小数（3.14）、版本号（v1.2.3）、缩写（e.g.）、URL 在 `.` 处断开会撕裂正文；
 # 且本仓另外三处（capswriter_client / dialog_segmenter / paragraphize）都不认 `.`。
+# ASCII 句号是否要单独识别仍是待产品决策项，本模块只保证「不撕裂正文」。
 _SENTENCE_BREAK_RE = re.compile(r"([。！？!?…，,；;：:\n])")
 
 
@@ -75,10 +76,11 @@ class TextSegmenter:
             is_capswriter_format = False
 
         if is_capswriter_format:
-            # 行式分支按行重建文本：行内 strip、行间丢掉换行，因此**不满足**
-            # ``_segment_by_sentences`` 的逐字守恒不变式（CapsWriter 输出是一行一句，
-            # 行即语义边界）。这条分支的空白处理不在本卡的判定范围内，本卡只保证
-            # 句式分支逐字守恒；两者不要互相引用对方的断言。
+            # 行式分支按行重建文本：行内 strip、行间丢掉换行。它**连分段器内部的守恒
+            # 都不满足**（"".join(segments) != content，丢的是行与行之间的换行），
+            # 更谈不上交付文本守恒。这里只如实标注，不改行为：CapsWriter 输出一行一句，
+            # 行即语义边界，是否要逐字保留换行是排版决策，另行跟进。测试里两条分支的
+            # 断言互不引用，别用句式分支的判据去套这条分支。
             logger.info("Detected CapsWriter format, segmenting by lines")
             lines = [line.strip() for line in content.split('\n') if line.strip()]
 
@@ -105,8 +107,16 @@ class TextSegmenter:
     def _segment_by_sentences(self, content: str) -> List[str]:
         """按标点符号分段：只切不换，**逐字（含空白）守恒**。
 
-        不变式：``"".join(self._segment_by_sentences(content)) == content``，
-        对任意输入成立。每个输出段都是入参的一段连续切片，不 strip、不丢弃、不注入。
+        不变式（**只覆盖本函数的返回值**）：
+        ``"".join(self._segment_by_sentences(content)) == content``，
+        对任意输入成立，空白也算。每个输出段都是入参的一段连续切片，不 strip、不丢弃、不注入。
+
+        边界：**这条不变式不覆盖最终交付文本的逐字守恒。** 消费端
+        ``plain_text_processor`` 会用 ``"\n\n".join(calibrated_segments)`` 把各段
+        无条件拼成段落，因此段与段之间一定出现 ``\n\n``——即便原文那里没有任何句读边界
+        （纯长度硬切点也会变成用户可见的空行）。那属于既有的交付排版语义，
+        由另一张单跟进，本模块既不改它、也不在这里承诺它。谁要把「交付文本逐字守恒」
+        写成这个函数的验收条件，会得到一个假承诺。
 
         历史形态（均为静默出错，会原样进入交付文本）：
 
@@ -115,12 +125,11 @@ class TextSegmenter:
         - 对每片 ``.strip()`` 会吃掉标点后的空白，把 ``Hello! World?`` 粘成
           ``Hello!World?``——与上一条同类的正文改写，只是发生在空白上。
 
-        段边界空白：本实现连段首尾的空白也原样保留。下游
-        ``plain_text_processor.py`` 的 ``"\n\n".join(calibrated_segments)``
-        （文件里 ``_process_plain_text`` 的合并步）会用 ``\n\n`` 覆盖段边界，
-        所以边界空白在用户可见文本里不可见；但它仍然被保留，避免「哪一刀切在空白上」
-        变成一个只有实现者知道的隐式约束。行式分支（``segment()`` 的 CapsWriter
-        格式分支）不在本不变式范围内：它按行重建文本，见 ``segment()`` 里的说明。
+        段边界空白：本实现连段首尾的空白也原样保留，这样「不变式成立」不依赖
+        「哪一刀恰好切在空白上」这种只有实现者知道的隐式条件。消费端随后用 ``\n\n``
+        覆盖段边界（见上面的边界说明），所以这些空白在交付文本里不可见。
+        行式分支（``segment()`` 的 CapsWriter 格式分支）不在本不变式范围内：
+        它按行重建文本，见 ``segment()`` 里的说明。
 
         长度上限仍由 ``_append_fragment`` 逐字符拼装保证，不依赖句号。
         """
@@ -154,14 +163,14 @@ class TextSegmenter:
     def _append_fragment(self, fragment: str, segments: List[str], current_segment: str) -> str:
         """把 fragment 逐字符并入 current_segment，按上限切段并及时落盘。
 
-        不变式：``fragment`` 的每个字符恰好进入一个输出段或返回的余料，
-        ``"".join(segments) + current_segment`` 恒等于进入时的内容。**任何 strip
-        都会破坏它**——被 strip 掉的空白若落在两段之间就是词粘连
-        （``Hello! World?`` -> ``Hello!World?``），交付给用户的转录文本会静默变形。
+        不变式（**只覆盖本函数产出的分段列表**）：``fragment`` 的每个字符恰好进入
+        一个输出段或返回的余料，``"".join(segments) + current_segment`` 恒等于进入时的
+        内容，空白也算。**任何 strip 都会破坏它**——被 strip 掉的空白若落在两段之间
+        就是词粘连（``Hello! World?`` -> ``Hello!World?``），转录正文会静默变形。
 
-        段首尾空白照原样留在段里：下游 ``"\n\n".join(calibrated_segments)``
-        会用段落分隔覆盖段边界，但保留比丢弃更安全——这样「不变式成立」不依赖
-        「哪一刀恰好切在空白上」这种隐式条件。
+        边界：与 ``_segment_by_sentences`` 一样，这条不变式止于分段列表。消费端
+        ``plain_text_processor`` 用 ``"\n\n"`` 合并各段，所以最终交付文本不是
+        本函数的逐字输出，段边界一律变成段落分隔。
         """
         if not fragment:
             return current_segment
