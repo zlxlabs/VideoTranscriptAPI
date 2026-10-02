@@ -27,3 +27,10 @@
 - 本段结论：最终分支已推送到 `origin/card/vta-128-outboundguard`，远端 ref 指向 `701a54fc96e9695d08bbe21a8f3e97c53a8c18e3`。当前没有该分支的 PR，因此尚未产生可核验的 gate run；执行器未越过仅授权 commit+push 的边界创建 PR。
 - 关键决策与已否决方案：不把本地 `make test` 结果冒充 CI `SUCCESS`，不等待或伪造外部 gate 结论。
 - 下一步唯一动作：主脑开 PR 后，用 `gh pr checks <N>` 核实 gate `conclusion == SUCCESS`，并保存守卫安装标记行。
+
+## 里程碑五：按 family 收窄守卫
+
+- 当前阶段：修复轮 1/1
+- 本段结论：守卫只对 AF_INET/AF_INET6 做 loopback 判定与阻断；AF_UNIX 直达真实实现且不记入 blocked/allowed。新增 Unix 域套接字回归测试，并补回守卫文件 PEP8 空行。
+- 关键决策与已否决方案：修法是减法，不新增状态或白名单；未用掩码剥离 IPv6 附加位，先按 `family in (AF_INET, AF_INET6)` 落地。
+- 下一步唯一动作：提交并推送同一分支，由主脑负责 CI 取证。

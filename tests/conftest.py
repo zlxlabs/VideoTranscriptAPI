@@ -173,10 +173,12 @@ class _NetworkGuard:
 
 @pytest.fixture(autouse=True)
 def no_outbound_network(request, monkeypatch):
-    """Block non-loopback ``connect`` and ``connect_ex`` for every auto test.
+    """Block non-loopback AF_INET/AF_INET6 ``connect`` and ``connect_ex``.
 
-    DNS resolution and the explicitly opted-in ``tests/manual/`` suite remain
-    outside this guard. Tests that exercise the blocking behavior must call
+    Only Internet sockets are in scope: Unix-domain sockets are local IPC
+    and pass through to the real implementation unrecorded. DNS resolution
+    and the explicitly opted-in ``tests/manual/`` suite also remain outside
+    this guard. Tests that exercise blocking must call
     ``guard.expect_blocks(n)`` so deliberate attempts stay explicit.
     """
     if _is_manual_test_item(request.node):
@@ -194,11 +196,14 @@ def no_outbound_network(request, monkeypatch):
         request.config._outbound_guard_announced = True
         terminal_reporter.write_line(
             "outbound network guard installed: "
-            "socket.connect/socket.connect_ex block non-loopback targets; "
-            "DNS and loopback are allowed"
+            "socket.connect/socket.connect_ex block non-loopback "
+            "AF_INET/AF_INET6 targets; DNS, loopback, and Unix-domain "
+            "sockets are allowed"
         )
 
     def fake_connect(self, address, *args, **kwargs):
+        if self.family not in (socket.AF_INET, socket.AF_INET6):
+            return real_connect(self, address, *args, **kwargs)
         host = address[0] if isinstance(address, tuple) and address else address
         if not _is_loopback(host):
             guard.blocked.append(f"connect:{host}")
@@ -207,6 +212,8 @@ def no_outbound_network(request, monkeypatch):
         return real_connect(self, address, *args, **kwargs)
 
     def fake_connect_ex(self, address, *args, **kwargs):
+        if self.family not in (socket.AF_INET, socket.AF_INET6):
+            return real_connect_ex(self, address, *args, **kwargs)
         host = address[0] if isinstance(address, tuple) and address else address
         if not _is_loopback(host):
             guard.blocked.append(f"connect_ex:{host}")

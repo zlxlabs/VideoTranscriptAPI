@@ -43,8 +43,8 @@ uv run pytest tests/deployment
 `uv run --frozen pytest -q tests`。pytest 配置会排除 `tests/manual/`；根目录的
 `tests/test_*.py` 和各自动测试目录都会被发现。
 
-默认门禁会阻断指向非 loopback 地址的 socket 出站连接；DNS 解析与 loopback
-连接放行，真实外网测试仍应放在 `tests/manual/`。
+默认门禁会阻断指向非 loopback 地址的 AF_INET/AF_INET6 出站连接；DNS 解析、
+loopback 与 Unix 域套接字放行，真实外网测试仍应放在 `tests/manual/`。
 
 任务观测回归：`tests/unit/test_task_observability_report.py` 覆盖只读 CLI、旧 schema、
 UTC 窗口、去重、缺字段与失败判据；`tests/integration/test_task_observability.py`

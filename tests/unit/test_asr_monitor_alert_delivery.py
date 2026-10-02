@@ -16,12 +16,15 @@ ASR 告警是全仓唯一不走 per-user webhook 的通知路径：
    目标依赖这一点，模块级绑定会让 patch 静默失效）。
 
 全程零真实网络请求：底层企微 sender 被换成记录器；仓库级 autouse fixture 在
-socket 层**阻断**指向非 loopback 的连接（``socket.socket.connect`` 与
-``socket.socket.connect_ex`` 均直接抛异常），同时放行 DNS 与 loopback。
+socket 层**阻断**指向非 loopback 的 AF_INET/AF_INET6 连接（``connect`` 与
+``connect_ex`` 均直接抛异常），同时放行 DNS、loopback 与 Unix 域套接字。
 """
 
 import inspect
+import os
+import shutil
 import socket
+import tempfile
 from unittest.mock import patch
 
 import pytest
@@ -116,6 +119,25 @@ class TestNetworkGuard:
             accepted.close()
 
         assert guard.connected_to("::1") is True
+
+    def test_unix_domain_socket_is_not_blocked(self, no_outbound_network):
+        """Unix-domain sockets are local IPC, not outbound network."""
+        guard = no_outbound_network
+        tmpdir = tempfile.mkdtemp(prefix="og-")
+        sock_path = os.path.join(tmpdir, "s")
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                server.bind(sock_path)
+                server.listen(1)
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.connect(sock_path)
+                accepted, _ = server.accept()
+                accepted.close()
+            assert guard.blocked == []
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 @pytest.fixture
 def global_alert_env():
     """真实 NotificationRouter（只含全局企微通道），底层 sender 换成记录器。
