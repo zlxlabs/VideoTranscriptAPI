@@ -75,19 +75,12 @@ filterwarnings = [
 
 [tool.coverage.run]
 source = ["src/video_transcript_api"]
-omit = [
-    "*/tests/*",
-    "*/manual/*",
-    "*/__pycache__/*",
-]
 
 [tool.coverage.report]
 show_missing = true
 skip_empty = true
-exclude_lines = [
-    "pragma: no cover",
+exclude_also = [
     "if __name__ == .__main__.",
-    "pass",
 ]
 
 [tool.uv.sources]
