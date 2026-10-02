@@ -1,6 +1,6 @@
 # DESIGN-note：段长上限的根治边界（#142 的根因收束）
 
-配套 issue #142。顾问报告与其出题原文同目录：`consults/142-root-cause-claude-opus.md`、`consults/142-root-cause-payload.md`。
+配套 issue #142。顾问报告原文归档在**私有中心仓 agent-config** 的 `retro/consult/20261002-191833-claude-opus-09e2bb.md`——本仓是公开仓，`.gitignore:139-141` 明确「顾问咨询记录不随仓分发（含 payload/report 的本机绝对路径）」，所以本仓只留这份方案对齐单，不留 payload 与报告原文。
 
 ## 目标
 
