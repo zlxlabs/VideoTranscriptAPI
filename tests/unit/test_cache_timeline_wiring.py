@@ -22,7 +22,10 @@ import pytest
 from video_transcript_api.cache.cache_manager import CacheManager
 from video_transcript_api.downloaders.subtitle_types import SubtitleResult
 from video_transcript_api.downloaders.youtube import YoutubeDownloader
-from video_transcript_api.transcriber.capswriter_client import _split_long_segment
+from video_transcript_api.transcriber.capswriter_client import (
+    _create_segments_from_capswriter,
+    _split_long_segment,
+)
 from video_transcript_api.transcriber.segments import load_segments, normalize_segments
 
 
@@ -487,3 +490,102 @@ class TestSplitLongSegmentInvertedTimes:
         assert len({part["start_time"] for part in parts}) == 1
         assert len({part["end_time"] for part in parts}) == 1
         assert "".join(part["text"] for part in parts) == text
+
+
+# ---------------------------------------------------------------------------
+# G: _split_long_segment fallback when no secondary punctuation is available
+#    (issue #142: the cap must stay enforceable on punctuation-free long text)
+# ---------------------------------------------------------------------------
+
+
+class TestSplitLongSegmentHardCap:
+    """max_len is a producer-side cap, not a best-effort hint: when the comma
+    level cannot cut (no CJK/ASCII comma at all, or a single part longer than
+    the cap), the segment must still come back fully split, text intact and
+    the timeline monotonic."""
+
+    def test_no_secondary_punct_with_whitespace_splits_on_whitespace(self):
+        text = " ".join(["word"] * 400)  # 1999 chars, single spaces, no comma
+        segment = {
+            "start_time": 0.0,
+            "end_time": 200.0,
+            "text": text,
+            "length": len(text),
+        }
+
+        parts = _split_long_segment(segment, max_len=300)
+
+        assert len(parts) > 1
+        assert all(len(part["text"]) <= 300 for part in parts)
+        assert "".join(part["text"] for part in parts) == text
+        for part in parts:
+            assert part["length"] == len(part["text"])
+        starts = [part["start_time"] for part in parts]
+        ends = [part["end_time"] for part in parts]
+        assert starts == sorted(starts)
+        assert all(end >= start for start, end in zip(starts, ends))
+        assert starts[0] == 0.0
+        assert ends[-1] == 200.0
+
+    def test_no_punct_no_whitespace_hard_cuts_without_losing_characters(self):
+        text = "词" * 800
+        segment = {
+            "start_time": 0.0,
+            "end_time": 80.0,
+            "text": text,
+            "length": len(text),
+        }
+
+        parts = _split_long_segment(segment, max_len=300)
+
+        assert [len(part["text"]) for part in parts] == [300, 300, 200]
+        assert "".join(part["text"] for part in parts) == text
+        for part in parts:
+            assert part["start_time"] <= part["end_time"]
+        for previous, current in zip(parts, parts[1:]):
+            assert current["start_time"] == previous["end_time"]
+
+    def test_single_overlong_part_between_commas_is_capped(self):
+        text = "开头，" + "x" * 500 + "，结尾"
+        segment = {
+            "start_time": 1.0,
+            "end_time": 9.0,
+            "text": text,
+            "length": len(text),
+        }
+
+        parts = _split_long_segment(segment, max_len=300)
+
+        assert all(len(part["text"]) <= 300 for part in parts)
+        assert "".join(part["text"] for part in parts) == text
+        assert all(part["start_time"] <= part["end_time"] for part in parts)
+
+    def test_hard_cap_keeps_existing_punctuation_split_behaviour(self):
+        text = "aaaa，" + "b" * 50 + "，" + "c" * 50
+        segment = {
+            "start_time": 0.0,
+            "end_time": 10.0,
+            "text": text,
+            "length": len(text),
+        }
+
+        parts = _split_long_segment(segment, max_len=60)
+
+        # Punctuation split already satisfies the cap: no fallback reshaping.
+        assert [part["text"] for part in parts] == ["aaaa，" + "b" * 50 + "，", "c" * 50]
+
+    def test_create_segments_from_capswriter_caps_punctuation_free_input(self):
+        body = "词" * 800
+        segments = _create_segments_from_capswriter(
+            tokens=list(body),
+            timestamps=[index * 0.1 for index in range(len(body))],
+            min_len=80,
+            max_len=300,
+        )
+
+        assert len(segments) > 1
+        assert all(len(segment["text"]) <= 300 for segment in segments)
+        assert "".join(segment["text"] for segment in segments) == body
+        assert all(
+            segment["start_time"] <= segment["end_time"] for segment in segments
+        )

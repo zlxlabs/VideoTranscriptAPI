@@ -272,8 +272,50 @@ def _finite_time_or_none(value: Any) -> Optional[float]:
     return parsed if math.isfinite(parsed) else None
 
 
+_WHITESPACE_RUN = re.compile(r"\s+")
+
+
+def _split_oversized_text(text: str, max_len: int) -> Tuple[List[str], int, int]:
+    """把仍超 max_len 的文本兜底切成每片 <= max_len：空白优先，无空白硬切。
+
+    返回 (片段列表, 空白切点数, 硬切点数)。切分只移动切点、不删不改任何
+    字符，"".join(片段) 与入参逐字一致。切口允许落在空白中间（可能让某片
+    以空白开头/结尾）——既有 .strip() 语义不在这里补救。
+
+    max_len 必须是正整数（生产常量 max_len=300）；这是切分宽度，不是可调阈值。
+    """
+    pieces: List[str] = []
+    remaining = text
+    whitespace_cuts = 0
+    hard_cuts = 0
+
+    while len(remaining) > max_len:
+        # 只在 [0, max_len] 内找切点：空白串结尾 <= max_len 才可用，
+        # 跨过边界的空白串只能硬切，否则片段会超限。
+        cut = 0
+        for match in _WHITESPACE_RUN.finditer(remaining[: max_len + 1]):
+            if match.end() <= max_len:
+                cut = match.end()
+        if cut:
+            whitespace_cuts += 1
+        else:
+            cut = max_len
+            hard_cuts += 1
+        pieces.append(remaining[:cut])
+        remaining = remaining[cut:]
+
+    if remaining:
+        pieces.append(remaining)
+
+    return pieces, whitespace_cuts, hard_cuts
+
+
 def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str, Any]]:
-    """在次级标点处分割超长句子。
+    """在次级标点处分割超长句子；标点切不开时兜底（空白优先 / 硬切）不可放弃。
+
+    兜底的原因：逗号级切分对「无次级标点」的长文本（整篇英文最常见）完全
+    无能为力，若在此放弃，max_len 就退化成尽力而为的软目标。兜底形态见
+    :func:`_split_oversized_text`，只移动切点，正文逐字不丢。
 
     时间插值必须拒绝非有限值：start_time / duration 任一非有限时，诚实
     降级为 start_time=end_time=None，文本照常切分、永不丢字。
@@ -281,9 +323,6 @@ def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str,
     text = segment["text"]
     secondary_punct = r"([，,；;])"
     parts = re.split(secondary_punct, text)
-
-    if len(parts) <= 1:
-        return [segment]
 
     split_segments = []
     current = ""
@@ -316,6 +355,32 @@ def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str,
 
     if not split_segments:
         return [segment]
+
+    # 兜底（issue #142）：逗号级切完之后仍有超 max_len 的片段——要么整段没有
+    # 次级标点（parts 只有一个元素），要么某个 part 本身就超长。此处收束，
+    # 上限才不是软目标；时间仍在下面的插值器里按切完的片段统一算，不改取值口径。
+    if any(item["length"] > max_len for item in split_segments):
+        capped: List[Dict[str, Any]] = []
+        whitespace_cuts = 0
+        hard_cuts = 0
+        for item in split_segments:
+            if item["length"] <= max_len:
+                capped.append(item)
+                continue
+            pieces, item_whitespace_cuts, item_hard_cuts = _split_oversized_text(
+                item["text"], max_len
+            )
+            whitespace_cuts += item_whitespace_cuts
+            hard_cuts += item_hard_cuts
+            capped.extend({"text": piece, "length": len(piece)} for piece in pieces)
+        split_segments = capped
+        # 越上限本身是可观测的质量降级（不是丢数据），按 decision 记 warning
+        # 而非 fail fast：硬切保证正文与长度，时间由插值器给。
+        logger.warning(
+            "长段超过 max_len，已启用兜底切分: "
+            f"orig_length={len(text)} parts={len(split_segments)} max_len={max_len} "
+            f"whitespace_cuts={whitespace_cuts} hard_cuts={hard_cuts}"
+        )
 
     time_pairs = interpolate_segment_times(
         orig_start,

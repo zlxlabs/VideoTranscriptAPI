@@ -15,4 +15,21 @@
     改 `paragraphize` 行为、改 `LLMConfig` 默认值、改 `.strip()` 语义。
   - 共享 helper 不落在 `transcriber/segments.py`：该文件不在本卡 Scope-Globs 内，兜底在两个生产者里
     各写一份小函数（重复约 12 行，换取改动不越界）。
-- **下一步唯一动作**：实现 `_split_long_segment` 的兜底并在 `test_cache_timeline_wiring.py` 追加形态②③用例。
+## ② `_split_long_segment` 兜底 + 测试
+
+- **当前阶段**：repairing（第 2/4 段完成）
+- **本段结论**：删掉 `len(parts) <= 1: return [segment]` 的放弃路径，改为逗号切完后对仍超
+  `max_len` 的片段走兜底（`_split_oversized_text`：窗口内空白串结尾优先、否则按 `max_len` 硬切），
+  超上限时打 warning（orig_length / parts / max_len / whitespace_cuts / hard_cuts）。复现命令 1
+  从 `1 800 True` 翻转为 `3 300 True`，正文逐字一致、时间不倒挂。
+- **关键决策与已否决方案**：
+  - warning 在「兜底触发」时打（不只在硬切时），因为形态②的英文长段同样意味着上限不是靠标点
+    兑现的；消息里用 `whitespace_cuts` / `hard_cuts` 区分形态。
+  - 兜底 helper 放在 `capswriter_client.py` 模块内而不是 `transcriber/segments.py`：后者不在本卡
+    Scope-Globs。
+  - 未新增配置项/开关/阈值调整；`max_len=300` 与 `min_len=80` 原值不动。
+  - 现状（不新增分支）：超长纯空白段此前因「无标点放弃」而保留 None 时间，兜底后会走插值器拿到
+    时间；这是超长空白段这一病理形态下的既有插值口径，不单开特例。
+- **下一步唯一动作**：实现 `_split_long_dialog` 的同形兜底并新建 `tests/unit/test_dialog_segmenter_caps.py`。
+
+
