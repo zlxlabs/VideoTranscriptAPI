@@ -24,6 +24,8 @@ from loguru import logger
 # 添加项目根目录到系统路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ..utils.logging import load_config
+# 长度兜底的唯一实现（issue #142）：上限不可放弃这条不变式只靠一份代码成立
+from ..utils.text_split import split_oversized_text
 # 时间解析唯一权威：禁止在本模块另起一套 isfinite/parse 逻辑
 from .segments import interpolate_segment_times, parse_time_to_seconds
 
@@ -273,7 +275,11 @@ def _finite_time_or_none(value: Any) -> Optional[float]:
 
 
 def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str, Any]]:
-    """在次级标点处分割超长句子。
+    """在次级标点处分割超长句子；标点切不开时兜底（空白优先 / 硬切）不可放弃。
+
+    兜底的原因：逗号级切分对「无次级标点」的长文本（整篇英文最常见）完全
+    无能为力，若在此放弃，max_len 就退化成尽力而为的软目标。兜底形态见
+    :func:`video_transcript_api.utils.text_split.split_oversized_text`，只移动切点，正文逐字不丢。
 
     时间插值必须拒绝非有限值：start_time / duration 任一非有限时，诚实
     降级为 start_time=end_time=None，文本照常切分、永不丢字。
@@ -281,9 +287,6 @@ def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str,
     text = segment["text"]
     secondary_punct = r"([，,；;])"
     parts = re.split(secondary_punct, text)
-
-    if len(parts) <= 1:
-        return [segment]
 
     split_segments = []
     current = ""
@@ -316,6 +319,37 @@ def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str,
 
     if not split_segments:
         return [segment]
+
+    # 兜底（issue #142）：逗号级切完之后仍有超 max_len 的片段——要么整段没有
+    # 次级标点（parts 只有一个元素），要么某个 part 本身就超长。此处收束，
+    # 上限才不是软目标；时间仍在下面的插值器里按切完的片段统一算，不改取值口径。
+    # 上限来源：本模块的 max_len 是硬编码常量（_create_segments_from_capswriter
+    # 传 300），恒为正；共享实现在 max_len <= 0 时 fail fast。
+    # 另注：本仓句末/切分定义有 4 套互不一致的实现（capswriter `。！？!?` /
+    # paragraphize `。！？….!?` / DialogSegmenter `。！？` / TextSegmenter 另一套），
+    # 本批明确不统一，见 issue #146；本兜底只管长度，不改句末定义。
+    if any(item["length"] > max_len for item in split_segments):
+        capped: List[Dict[str, Any]] = []
+        whitespace_cuts = 0
+        hard_cuts = 0
+        for item in split_segments:
+            if item["length"] <= max_len:
+                capped.append(item)
+                continue
+            pieces, item_whitespace_cuts, item_hard_cuts = split_oversized_text(
+                item["text"], max_len
+            )
+            whitespace_cuts += item_whitespace_cuts
+            hard_cuts += item_hard_cuts
+            capped.extend({"text": piece, "length": len(piece)} for piece in pieces)
+        split_segments = capped
+        # 越上限本身是可观测的质量降级（不是丢数据），按 decision 记 warning
+        # 而非 fail fast：硬切保证正文与长度，时间由插值器给。
+        logger.warning(
+            "长段超过 max_len，已启用兜底切分: "
+            f"orig_length={len(text)} parts={len(split_segments)} max_len={max_len} "
+            f"whitespace_cuts={whitespace_cuts} hard_cuts={hard_cuts}"
+        )
 
     time_pairs = interpolate_segment_times(
         orig_start,
