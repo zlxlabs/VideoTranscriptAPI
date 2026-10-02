@@ -5,10 +5,15 @@ This test verifies that:
 1. Global notifier is ONLY initialized once in startup_event
 2. No automatic initialization happens during module import
 3. All messages use the same WebhookManager
+
+The real webhook is NOT stored in this repository. Export WECHAT_WEBHOOK to
+run the tests that need it; without it those tests are skipped.
 """
 
 import sys
 import os
+
+import pytest
 
 # Add project root to path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -25,8 +30,15 @@ from video_transcript_api.utils.logging import setup_logger
 # Setup logger
 logger = setup_logger("test_singleton_fix")
 
-# Real webhook URL
-WEBHOOK_URL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=01ae2f25-ec29-4256-9fc1-22450f88add7"
+# Real webhook URL, read from the environment (never committed to the repo)
+WECHAT_WEBHOOK = os.environ.get("WECHAT_WEBHOOK", "")
+
+
+@pytest.fixture(scope="module")
+def webhook():
+    if not WECHAT_WEBHOOK:
+        pytest.skip("WECHAT_WEBHOOK is not set; skipping real-webhook tests")
+    return WECHAT_WEBHOOK
 
 
 def test_no_auto_init():
@@ -59,16 +71,16 @@ def test_explicit_init():
     return True
 
 
-def test_single_webhook_manager():
+def test_single_webhook_manager(webhook):
     """Test 3: Verify only one WebhookManager per webhook"""
     logger.info("=" * 60)
     logger.info("Test 3: Single WebhookManager per webhook")
     logger.info("=" * 60)
 
     # Create multiple WechatNotifier instances
-    notifier1 = WechatNotifier(webhook=WEBHOOK_URL)
-    notifier2 = WechatNotifier(webhook=WEBHOOK_URL)
-    notifier3 = WechatNotifier(webhook=WEBHOOK_URL)
+    notifier1 = WechatNotifier(webhook=webhook)
+    notifier2 = WechatNotifier(webhook=webhook)
+    notifier3 = WechatNotifier(webhook=webhook)
 
     # Send messages
     messages = [
@@ -111,23 +123,31 @@ def test_cleanup():
 
 
 def run_all_tests():
-    """Run all tests"""
+    """Run all tests.
+
+    Raises RuntimeError if WECHAT_WEBHOOK is unset: run_all_tests() is
+    importable, so a direct call with an empty webhook would fall back to the
+    config.jsonc webhook instead of refusing.
+    """
+    if not WECHAT_WEBHOOK:
+        raise RuntimeError("WECHAT_WEBHOOK is not set; refusing to run real-webhook tests")
+
     logger.info("\n" + "=" * 60)
     logger.info("Singleton Fix Verification Tests")
     logger.info("=" * 60 + "\n")
 
     tests = [
-        ("No Auto-Initialization", test_no_auto_init),
-        ("Explicit Initialization", test_explicit_init),
-        ("Single WebhookManager", test_single_webhook_manager),
-        ("Cleanup", test_cleanup),
+        ("No Auto-Initialization", test_no_auto_init, False),
+        ("Explicit Initialization", test_explicit_init, False),
+        ("Single WebhookManager", test_single_webhook_manager, True),
+        ("Cleanup", test_cleanup, False),
     ]
 
     results = []
 
-    for test_name, test_func in tests:
+    for test_name, test_func, needs_webhook in tests:
         try:
-            result = test_func()
+            result = test_func(WECHAT_WEBHOOK) if needs_webhook else test_func()
             results.append((test_name, result))
         except Exception as e:
             logger.exception(f"Test '{test_name}' raised exception: {e}")
@@ -173,5 +193,10 @@ def run_all_tests():
 
 
 if __name__ == "__main__":
+    # webhook="" would fall back to the production webhook in config.jsonc.
+    if not WECHAT_WEBHOOK:
+        logger.error("WECHAT_WEBHOOK is not set; refusing to run real-webhook tests")
+        sys.exit(2)
+
     success = run_all_tests()
     sys.exit(0 if success else 1)
