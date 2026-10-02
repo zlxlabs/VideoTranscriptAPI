@@ -26,6 +26,11 @@ class TestPlainTextFormatting:
         config.enable_threshold = 5000
         config.min_calibrate_ratio = 0.8
         config.concurrent_workers = 10
+        # PlainTextProcessor builds a TextSegmenter, which now refuses a
+        # non-positive max_segment_size instead of spinning forever; a bare
+        # Mock attribute is not comparable to 0, so pin real values here.
+        config.segment_size = 2000
+        config.max_segment_size = 3000
         return config
 
     @pytest.fixture
