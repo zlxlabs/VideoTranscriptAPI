@@ -12,16 +12,22 @@ ASR 告警是全仓唯一不走 per-user webhook 的通知路径：
 2. 恢复通知同样落到全局企微通道；
 3. 去抖窗口内的重复失败不再发送（注入时钟，不 sleep）。
 
-全程零真实网络请求：底层企微 sender 被换成记录器，另有 autouse fixture
-记录 ``socket.socket.connect`` / ``socket.getaddrinfo`` 的目标，测试结束
-断言不存在非 loopback 连接。
+4. ``asr_monitor`` 保持延迟导入 ``get_notification_router``（本文件的 patch
+   目标依赖这一点，模块级绑定会让 patch 静默失效）。
+
+全程零真实网络请求：底层企微 sender 被换成记录器；另有 autouse fixture 在
+socket 层**阻断**指向非 loopback 的连接（``socket.socket.connect`` 与
+``socket.getaddrinfo`` 均直接抛异常），保证「零外网」不只停留在事后断言。
 """
 
+import inspect
+import ipaddress
 import socket
 from unittest.mock import patch
 
 import pytest
 
+import video_transcript_api.utils.asr_monitor as asr_monitor_module
 from video_transcript_api.utils.asr_monitor import ASRMonitor
 from video_transcript_api.utils.notifications.router import NotificationRouter
 
@@ -47,39 +53,99 @@ class _RecordingSender:
         return True
 
 
+def _is_loopback(host) -> bool:
+    """判断出站目标是否属于 loopback（字面 IP 或 localhost）。"""
+    if isinstance(host, tuple) and host:
+        host = host[0]
+    host = str(host)
+    if host in ("localhost", "", "0.0.0.0", "::"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+class _NetworkGuard:
+    """出站网络守卫：记录阻断事件，并允许测试显式声明预期阻断次数。"""
+
+    def __init__(self):
+        self.blocked = []
+        self.allowed = []
+        self.expected_blocks = 0
+
+    def expect_blocks(self, count: int) -> None:
+        self.expected_blocks += count
+
+
 @pytest.fixture(autouse=True)
 def no_outbound_network(monkeypatch):
-    """记录出站连接目标，测试结束断言没有指向非 loopback 的连接。"""
-    targets = []
+    """在 socket 层阻断一切非 loopback 出站（DNS 解析与 connect 都拦）。
+
+    yield ``_NetworkGuard``；测试若故意触发出站（如锁死阻断行为的那条），
+    需用 ``guard.expect_blocks(n)`` 登记预期，否则 teardown 判红。
+    """
+    guard = _NetworkGuard()
     real_connect = socket.socket.connect
     real_getaddrinfo = socket.getaddrinfo
 
-    def _record(address):
-        if isinstance(address, tuple) and address:
-            targets.append(str(address[0]))
-        else:
-            targets.append(str(address))
-
     def fake_connect(self, address, *args, **kwargs):
-        _record(address)
+        host = address[0] if isinstance(address, tuple) and address else address
+        if not _is_loopback(host):
+            guard.blocked.append(f"connect:{host}")
+            raise AssertionError(f"outbound connect blocked by test guard: {host}")
+        guard.allowed.append(f"connect:{host}")
         return real_connect(self, address, *args, **kwargs)
 
     def fake_getaddrinfo(host, *args, **kwargs):
-        targets.append(str(host))
+        if not _is_loopback(host):
+            guard.blocked.append(f"getaddrinfo:{host}")
+            raise AssertionError(f"outbound DNS blocked by test guard: {host}")
         return real_getaddrinfo(host, *args, **kwargs)
 
     monkeypatch.setattr(socket.socket, "connect", fake_connect)
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
     try:
-        yield
+        yield guard
     finally:
         monkeypatch.undo()
-        offenders = [
-            t
-            for t in targets
-            if t not in ("127.0.0.1", "::1", "localhost", "0.0.0.0", "::", "")
-        ]
-        assert offenders == [], f"test made outbound network calls: {offenders}"
+        assert len(guard.blocked) == guard.expected_blocks, (
+            f"unexpected outbound attempts: {guard.blocked} "
+            f"(expected {guard.expected_blocks})"
+        )
+
+
+class TestNetworkGuard:
+    """守卫本身的行为：非 loopback 出站必须在 socket 层被阻断。"""
+
+    def test_dns_to_non_loopback_host_is_blocked(self, no_outbound_network):
+        guard = no_outbound_network
+        guard.expect_blocks(1)
+        with pytest.raises(AssertionError, match="outbound DNS blocked"):
+            socket.getaddrinfo("qyapi.weixin.qq.com", 443)
+        assert guard.blocked == ["getaddrinfo:qyapi.weixin.qq.com"]
+
+    def test_connect_to_non_loopback_ip_is_blocked_before_socket_connects(
+        self, no_outbound_network
+    ):
+        guard = no_outbound_network
+        guard.expect_blocks(1)
+
+        with pytest.raises(AssertionError, match="outbound connect blocked"):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect(("183.47.100.66", 80))
+        assert guard.blocked == ["connect:183.47.100.66"]
+        # 守卫在真实 connect 之前抛错：没有任何 connect 被放过
+        assert guard.allowed == []
+
+        # 反向对照（已知会走到真实 connect 的输入）：loopback 放行，
+        # 报的是内核层 ECONNREFUSED 而不是守卫的 AssertionError，
+        # 证明上面那条确实是被守卫拦下、而不是别的原因失败。
+        with pytest.raises(OSError) as excinfo:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect(("127.0.0.1", 1))
+        assert "outbound connect blocked" not in str(excinfo.value)
+        assert guard.allowed == ["connect:127.0.0.1"]
 
 
 @pytest.fixture
@@ -158,6 +224,26 @@ class TestAlertDeliveryTarget:
         assert args == ()
         assert kwargs.get("webhook") is None
         assert kwargs.get("webhooks") is None
+
+
+class TestPatchTargetReliability:
+    """本文件的 patch 目标依赖 asr_monitor 的延迟导入。
+
+    ``_send_notification`` 在函数体内 ``from .notifications import
+    get_notification_router``，所以 patch
+    ``video_transcript_api.utils.notifications.get_notification_router``
+    能生效。若有人改成模块级绑定，本文件的 patch 会静默失效退化为假绿，
+    这条测试负责把它变红。
+    """
+
+    def test_no_module_level_get_notification_router_binding(self):
+        assert "get_notification_router" not in vars(asr_monitor_module)
+
+    def test_delayed_import_is_what_makes_the_patch_effective(self):
+        # 延迟导入的函数源码里能看到实际取 router 的那一行
+        src = inspect.getsource(ASRMonitor._send_notification)
+        assert "from .notifications import get_notification_router" in src
+        assert "self.notifier.send_text(message)" in src
 
 
 class TestDebounce:
