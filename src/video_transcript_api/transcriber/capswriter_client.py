@@ -24,6 +24,8 @@ from loguru import logger
 # 添加项目根目录到系统路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ..utils.logging import load_config
+# 长度兜底的唯一实现（issue #142）：上限不可放弃这条不变式只靠一份代码成立
+from ..utils.text_split import split_oversized_text
 # 时间解析唯一权威：禁止在本模块另起一套 isfinite/parse 逻辑
 from .segments import interpolate_segment_times, parse_time_to_seconds
 
@@ -272,48 +274,6 @@ def _finite_time_or_none(value: Any) -> Optional[float]:
     return parsed if math.isfinite(parsed) else None
 
 
-_WHITESPACE_RUN = re.compile(r"\s+")
-
-
-def _split_oversized_text(text: str, max_len: int) -> Tuple[List[str], int, int]:
-    """把仍超 max_len 的文本兜底切成每片 <= max_len：空白优先，无空白硬切。
-
-    返回 (片段列表, 空白切点数, 硬切点数)。切分只移动切点、不删不改任何
-    字符，"".join(片段) 与入参逐字一致。切口允许落在空白中间（可能让某片
-    以空白开头/结尾）——既有 .strip() 语义不在这里补救。
-
-    max_len 必须是正整数（生产常量 max_len=300）；这是切分宽度，不是可调阈值。
-
-    注意：本仓句末/切分定义有 4 套互不一致的实现（capswriter `。！？!?` /
-    paragraphize `。！？….!?` / DialogSegmenter `。！？` / TextSegmenter 另一套），
-    本批明确不统一，见 issue #146；本函数只做长度兜底，不改句末定义。
-    """
-    pieces: List[str] = []
-    remaining = text
-    whitespace_cuts = 0
-    hard_cuts = 0
-
-    while len(remaining) > max_len:
-        # 只在 [0, max_len] 内找切点：空白串结尾 <= max_len 才可用，
-        # 跨过边界的空白串只能硬切，否则片段会超限。
-        cut = 0
-        for match in _WHITESPACE_RUN.finditer(remaining[: max_len + 1]):
-            if match.end() <= max_len:
-                cut = match.end()
-        if cut:
-            whitespace_cuts += 1
-        else:
-            cut = max_len
-            hard_cuts += 1
-        pieces.append(remaining[:cut])
-        remaining = remaining[cut:]
-
-    if remaining:
-        pieces.append(remaining)
-
-    return pieces, whitespace_cuts, hard_cuts
-
-
 def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str, Any]]:
     """在次级标点处分割超长句子；标点切不开时兜底（空白优先 / 硬切）不可放弃。
 
@@ -363,6 +323,11 @@ def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str,
     # 兜底（issue #142）：逗号级切完之后仍有超 max_len 的片段——要么整段没有
     # 次级标点（parts 只有一个元素），要么某个 part 本身就超长。此处收束，
     # 上限才不是软目标；时间仍在下面的插值器里按切完的片段统一算，不改取值口径。
+    # 上限来源：本模块的 max_len 是硬编码常量（_create_segments_from_capswriter
+    # 传 300），恒为正；共享实现在 max_len <= 0 时 fail fast。
+    # 另注：本仓句末/切分定义有 4 套互不一致的实现（capswriter `。！？!?` /
+    # paragraphize `。！？….!?` / DialogSegmenter `。！？` / TextSegmenter 另一套），
+    # 本批明确不统一，见 issue #146；本兜底只管长度，不改句末定义。
     if any(item["length"] > max_len for item in split_segments):
         capped: List[Dict[str, Any]] = []
         whitespace_cuts = 0
@@ -371,7 +336,7 @@ def _split_long_segment(segment: Dict[str, Any], max_len: int) -> List[Dict[str,
             if item["length"] <= max_len:
                 capped.append(item)
                 continue
-            pieces, item_whitespace_cuts, item_hard_cuts = _split_oversized_text(
+            pieces, item_whitespace_cuts, item_hard_cuts = split_oversized_text(
                 item["text"], max_len
             )
             whitespace_cuts += item_whitespace_cuts
