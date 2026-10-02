@@ -219,7 +219,6 @@ def no_outbound_network(request, monkeypatch):
     try:
         yield guard
     finally:
-        monkeypatch.undo()
         assert len(guard.blocked) == guard.expected_blocks, (
             f"unexpected outbound attempts: {guard.blocked} "
             f"(expected {guard.expected_blocks})"
