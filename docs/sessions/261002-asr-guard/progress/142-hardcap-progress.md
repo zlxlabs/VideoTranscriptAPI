@@ -64,3 +64,21 @@
 - **下一步唯一动作**：交主脑验收（PR 由主脑开与合并）。
 
 
+
+## ⑤ 修复轮 1/2：P1 死循环 guard + P2 共享 helper
+
+- **当前阶段**：verifying（review 提的 P1/P2 已修，全量已跑）
+- **本段结论**：P1 —— `max_len <= 0` 时 `while len(remaining) > max_len` 恒真且 `cut = max_len` 为 0，
+  兜底会永久挂死（worker 不释放、无异常无日志）；现已在共享 helper 入口 `raise ValueError`
+  （消息带 `max_len` 值与函数名，形如 `TEXT_SPLIT_INVALID_MAX_LEN ... max_len=0`），不 clamp。
+  P2 —— 两个模块的逐字副本已删，实现收进 `src/video_transcript_api/utils/text_split.py`
+  （叶子模块，不 import 仓内其它模块），两个调用点各留一行 import + 各自的上限来源注释。
+- **关键决策与已否决方案**：
+  - guard 放在**共享 helper 入口**而不是各调用点：两条链自动覆盖，且只有一份实现。
+  - 不 clamp（`max(1, max_len)`）：clamp 会把配置错误静默纠正成另一个宽度，属「静默出错」一档。
+  - 不在配置加载处校验 `max_chunk_length`（不在本卡范围，主脑另开单，与 #147 一并处理）。
+  - 已有用例不搬家，只改 import 路径；给共享 helper 新增 4 条直接用例（形态②、形态③、
+    `max_len=0` / `max_len=-1` 抛 ValueError）。
+  - 「不挂住测试进程」的做法：用守护线程 + 10s watchdog 把死循环转成断言失败
+    （`_call_with_watchdog`），否则反向红验会挂住整个 pytest 而不是报错。
+- **下一步唯一动作**：交主脑复跑复现命令 + 取 CI；合并后手工部署 n305（本卡改了两个运行时函数）。
