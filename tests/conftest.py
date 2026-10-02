@@ -6,8 +6,11 @@ pytest 全局配置文件
 用于管理测试环境的全局资源，包括企业微信通知器的单例实例。
 """
 
+import ipaddress
 import os
+import socket
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -117,6 +120,116 @@ def _tests_manual_env_enabled() -> bool:
 # "config.jsonc 缺失才注入"——那会让开发机（有真实配置）与 CI（无配置）走不同
 # 代码分支，实测导致本分支在有真实 config.jsonc 的环境下 5 failed。
 _seed_config_cache_for_missing_config_jsonc()
+
+
+def _is_manual_test_item(item) -> bool:
+    """Return whether a pytest item belongs to the explicitly manual suite."""
+    item_path = getattr(item, "path", getattr(item, "fspath", None))
+    if item_path is None:
+        return False
+
+    try:
+        candidate = Path(os.fspath(item_path)).resolve()
+    except TypeError:
+        candidate = Path(str(item_path)).resolve()
+
+    manual_dir = Path(__file__).resolve().parent / "manual"
+    try:
+        candidate.relative_to(manual_dir)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_loopback(host) -> bool:
+    """Return whether a socket destination is an allowed loopback target."""
+    if isinstance(host, tuple) and host:
+        host = host[0]
+    host = str(host)
+    if host in ("localhost", "", "0.0.0.0", "::"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+class _NetworkGuard:
+    """Record and block non-loopback socket connections for one test."""
+
+    def __init__(self):
+        self.blocked = []
+        self.allowed = []
+        self.expected_blocks = 0
+
+    def expect_blocks(self, count: int) -> None:
+        """Register the number of deliberate blocked attempts in the test."""
+        self.expected_blocks += count
+
+    def connected_to(self, host: str) -> bool:
+        """Return whether ``connect`` reached the real socket implementation."""
+        return f"connect:{host}" in self.allowed
+
+
+@pytest.fixture(autouse=True)
+def no_outbound_network(request, monkeypatch):
+    """Block non-loopback AF_INET/AF_INET6 ``connect`` and ``connect_ex``.
+
+    Only Internet sockets are in scope: Unix-domain sockets are local IPC
+    and pass through to the real implementation unrecorded. DNS resolution
+    and the explicitly opted-in ``tests/manual/`` suite also remain outside
+    this guard. Tests that exercise blocking must call
+    ``guard.expect_blocks(n)`` so deliberate attempts stay explicit.
+    """
+    if _is_manual_test_item(request.node):
+        yield None
+        return
+
+    guard = _NetworkGuard()
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+
+    terminal_reporter = request.config.pluginmanager.get_plugin("terminalreporter")
+    if terminal_reporter is not None and not getattr(
+        request.config, "_outbound_guard_announced", False
+    ):
+        request.config._outbound_guard_announced = True
+        terminal_reporter.write_line(
+            "outbound network guard installed: "
+            "socket.connect/socket.connect_ex block non-loopback "
+            "AF_INET/AF_INET6 targets; DNS, loopback, and Unix-domain "
+            "sockets are allowed"
+        )
+
+    def fake_connect(self, address, *args, **kwargs):
+        if self.family not in (socket.AF_INET, socket.AF_INET6):
+            return real_connect(self, address, *args, **kwargs)
+        host = address[0] if isinstance(address, tuple) and address else address
+        if not _is_loopback(host):
+            guard.blocked.append(f"connect:{host}")
+            raise AssertionError(f"outbound connect blocked by test guard: {host}")
+        guard.allowed.append(f"connect:{host}")
+        return real_connect(self, address, *args, **kwargs)
+
+    def fake_connect_ex(self, address, *args, **kwargs):
+        if self.family not in (socket.AF_INET, socket.AF_INET6):
+            return real_connect_ex(self, address, *args, **kwargs)
+        host = address[0] if isinstance(address, tuple) and address else address
+        if not _is_loopback(host):
+            guard.blocked.append(f"connect_ex:{host}")
+            raise AssertionError(f"outbound connect_ex blocked by test guard: {host}")
+        guard.allowed.append(f"connect_ex:{host}")
+        return real_connect_ex(self, address, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "connect", fake_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", fake_connect_ex)
+    try:
+        yield guard
+    finally:
+        assert len(guard.blocked) == guard.expected_blocks, (
+            f"unexpected outbound attempts: {guard.blocked} "
+            f"(expected {guard.expected_blocks})"
+        )
 
 from video_transcript_api.utils.notifications import (
     init_all_notifiers,

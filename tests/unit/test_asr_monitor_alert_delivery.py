@@ -15,18 +15,21 @@ ASR 告警是全仓唯一不走 per-user webhook 的通知路径：
 4. ``asr_monitor`` 保持延迟导入 ``get_notification_router``（本文件的 patch
    目标依赖这一点，模块级绑定会让 patch 静默失效）。
 
-全程零真实网络请求：底层企微 sender 被换成记录器；另有 autouse fixture 在
-socket 层**阻断**指向非 loopback 的连接（``socket.socket.connect`` 与
-``socket.getaddrinfo`` 均直接抛异常），保证「零外网」不只停留在事后断言。
+全程零真实网络请求：底层企微 sender 被换成记录器；仓库级 autouse fixture 在
+socket 层**阻断**指向非 loopback 的 AF_INET/AF_INET6 连接（``connect`` 与
+``connect_ex`` 均直接抛异常），同时放行 DNS、loopback 与 Unix 域套接字。
 """
 
 import inspect
-import ipaddress
+import os
+import shutil
 import socket
+import tempfile
 from unittest.mock import patch
 
 import pytest
 
+from tests.conftest import _is_loopback
 import video_transcript_api.utils.asr_monitor as asr_monitor_module
 from video_transcript_api.utils.asr_monitor import ASRMonitor
 from video_transcript_api.utils.notifications.router import NotificationRouter
@@ -53,87 +56,19 @@ class _RecordingSender:
         return True
 
 
-def _is_loopback(host) -> bool:
-    """判断出站目标是否属于 loopback（字面 IP 或 localhost）。"""
-    if isinstance(host, tuple) and host:
-        host = host[0]
-    host = str(host)
-    if host in ("localhost", "", "0.0.0.0", "::"):
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
-class _NetworkGuard:
-    """出站网络守卫：记录阻断事件，并允许测试显式声明预期阻断次数。"""
-
-    def __init__(self):
-        self.blocked = []
-        self.allowed = []
-        self.expected_blocks = 0
-
-    def expect_blocks(self, count: int) -> None:
-        self.expected_blocks += count
-
-    def connected_to(self, host: str) -> bool:
-        """记录里是否存在指向 ``host`` 的 connect（无论来自哪个线程）。
-
-        守卫是进程级的 monkeypatch，``allowed``/``blocked`` 里混有本进程
-        其它用例的流量（例如 ``test_asr_monitor_ws_probe.py`` 的 monitor
-        线程连本地临时 WS server 时留下的 loopback 连接）。因此查询必须
-        按目标限定，不要对整个列表做相等断言。
-        """
-        return f"connect:{host}" in self.allowed
-
-
-@pytest.fixture(autouse=True)
-def no_outbound_network(monkeypatch):
-    """在 socket 层阻断一切非 loopback 出站（DNS 解析与 connect 都拦）。
-
-    yield ``_NetworkGuard``；测试若故意触发出站（如锁死阻断行为的那条），
-    需用 ``guard.expect_blocks(n)`` 登记预期，否则 teardown 判红。
-    """
-    guard = _NetworkGuard()
-    real_connect = socket.socket.connect
-    real_getaddrinfo = socket.getaddrinfo
-
-    def fake_connect(self, address, *args, **kwargs):
-        host = address[0] if isinstance(address, tuple) and address else address
-        if not _is_loopback(host):
-            guard.blocked.append(f"connect:{host}")
-            raise AssertionError(f"outbound connect blocked by test guard: {host}")
-        guard.allowed.append(f"connect:{host}")
-        return real_connect(self, address, *args, **kwargs)
-
-    def fake_getaddrinfo(host, *args, **kwargs):
-        if not _is_loopback(host):
-            guard.blocked.append(f"getaddrinfo:{host}")
-            raise AssertionError(f"outbound DNS blocked by test guard: {host}")
-        return real_getaddrinfo(host, *args, **kwargs)
-
-    monkeypatch.setattr(socket.socket, "connect", fake_connect)
-    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
-    try:
-        yield guard
-    finally:
-        monkeypatch.undo()
-        assert len(guard.blocked) == guard.expected_blocks, (
-            f"unexpected outbound attempts: {guard.blocked} "
-            f"(expected {guard.expected_blocks})"
-        )
-
-
 class TestNetworkGuard:
     """守卫本身的行为：非 loopback 出站必须在 socket 层被阻断。"""
 
-    def test_dns_to_non_loopback_host_is_blocked(self, no_outbound_network):
+    def test_dns_to_non_loopback_host_is_allowed(self, no_outbound_network):
         guard = no_outbound_network
-        guard.expect_blocks(1)
-        with pytest.raises(AssertionError, match="outbound DNS blocked"):
-            socket.getaddrinfo("qyapi.weixin.qq.com", 443)
-        assert guard.blocked == ["getaddrinfo:qyapi.weixin.qq.com"]
+        with pytest.raises(socket.gaierror) as excinfo:
+            socket.getaddrinfo("outbound-guard.invalid", 443)
+        assert not isinstance(excinfo.value, AssertionError)
+        assert guard.blocked == []
+
+    @pytest.mark.parametrize("host", ["localhost", "", "0.0.0.0", "::"])
+    def test_loopback_aliases_are_allowed(self, host, no_outbound_network):
+        assert _is_loopback(host) is True
 
     def test_connect_to_non_loopback_ip_is_blocked_before_socket_connects(
         self, no_outbound_network
@@ -157,6 +92,50 @@ class TestNetworkGuard:
             sock.connect(("127.0.0.1", 1))
         assert "outbound connect blocked" not in str(excinfo.value)
         assert guard.connected_to("127.0.0.1") is True
+
+    def test_connect_ex_to_non_loopback_ip_is_blocked_before_socket_connects(
+        self, no_outbound_network
+    ):
+        guard = no_outbound_network
+        guard.expect_blocks(1)
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            with pytest.raises(AssertionError, match="outbound connect_ex blocked"):
+                sock.connect_ex(("183.47.100.66", 80))
+
+        assert guard.blocked == ["connect_ex:183.47.100.66"]
+
+    def test_ipv6_loopback_is_allowed(self, no_outbound_network):
+        guard = no_outbound_network
+        assert _is_loopback("::1") is True
+
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as server:
+            server.bind(("::1", 0))
+            server.listen(1)
+            port = server.getsockname()[1]
+            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as client:
+                client.connect(("::1", port))
+            accepted, _ = server.accept()
+            accepted.close()
+
+        assert guard.connected_to("::1") is True
+
+    def test_unix_domain_socket_is_not_blocked(self, no_outbound_network):
+        """Unix-domain sockets are local IPC, not outbound network."""
+        guard = no_outbound_network
+        tmpdir = tempfile.mkdtemp(prefix="og-")
+        sock_path = os.path.join(tmpdir, "s")
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                server.bind(sock_path)
+                server.listen(1)
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.connect(sock_path)
+                accepted, _ = server.accept()
+                accepted.close()
+            assert guard.blocked == []
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 @pytest.fixture
