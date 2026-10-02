@@ -283,6 +283,10 @@ def _split_oversized_text(text: str, max_len: int) -> Tuple[List[str], int, int]
     以空白开头/结尾）——既有 .strip() 语义不在这里补救。
 
     max_len 必须是正整数（生产常量 max_len=300）；这是切分宽度，不是可调阈值。
+
+    注意：本仓句末/切分定义有 4 套互不一致的实现（capswriter `。！？!?` /
+    paragraphize `。！？….!?` / DialogSegmenter `。！？` / TextSegmenter 另一套），
+    本批明确不统一，见 issue #146；本函数只做长度兜底，不改句末定义。
     """
     pieces: List[str] = []
     remaining = text

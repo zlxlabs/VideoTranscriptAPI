@@ -23,6 +23,10 @@ def _split_oversized_text(text: str, max_len: int) -> Tuple[List[str], int, int]
     字符，"".join(片段) 与入参逐字一致；调用方不要再 strip。
 
     max_len 必须是正整数（生产值来自 LLMConfig，plain 路径另有覆盖值）。
+
+    注意：本仓句末/切分定义有 4 套互不一致的实现（capswriter `。！？!?` /
+    paragraphize `。！？….!?` / DialogSegmenter `。！？` / TextSegmenter 另一套），
+    本批明确不统一，见 issue #146；本函数只做长度兜底，不改句末定义。
     """
     pieces: List[str] = []
     remaining = text

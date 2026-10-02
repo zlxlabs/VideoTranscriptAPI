@@ -82,6 +82,8 @@ class TestDialogSegmenterChunkCap:
         chunks = _chunks_for(segmenter, text)
         fragments = [dialog for chunk in chunks for dialog in chunk]
 
+        assert len(fragments) > 1
+
         # No id rewriting: calibration anchors on the id set, so hard-cut
         # fragments must reuse the source dialog id unchanged.
         assert {fragment["id"] for fragment in fragments} == {"1"}

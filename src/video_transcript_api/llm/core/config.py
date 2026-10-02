@@ -120,7 +120,7 @@ class LLMConfig:
     plain_structured_max_chunk_length: int = 4000
     # 确定性段落化参数（v1：长度只是预算不是闸刀，到预算找授权断点）
     paragraphization_target_chars: int = 300            # 段落长度预算（字符）
-    paragraphization_hard_max_chars: int = 600          # 段落硬上限，超出放宽到逗号级断点
+    paragraphization_hard_max_chars: int = 600          # 段落软上限：成员内不切，单成员超限会自成一段，组长 ≤ 2×
     paragraphization_pause_threshold_seconds: float = 2.0  # 停顿授权阈值（秒）
     # Semantic contradiction scan (Increment 2), enabled by default.
     contradiction_scan_enabled: bool = True

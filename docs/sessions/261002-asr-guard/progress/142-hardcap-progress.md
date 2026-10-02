@@ -48,4 +48,19 @@
 - **下一步唯一动作**：两条链各做一次反向红验（只关兜底判据），随后改两处「硬上限」文案并跑
   `make test`。
 
+## ④ 反向红验 + 文案对齐 + 全量
+
+- **当前阶段**：verifying（本卡实现完成，全量已跑）
+- **本段结论**：两条链的反向红验均转红且红的是断言失败（关掉 `if any(item["length"] > max_len ...)`
+  / `if len(sub_text) <= self.max_chunk_length` 两处判据后，对应 8 条用例转红，无 ImportError）；
+  `config.example.jsonc:337` 与 `llm/core/config.py:123` 的「硬上限」改为「软上限：成员内不切，
+  单成员超限会自成一段，组长 ≤ 2×」；`make test` 退出 0（3454 passed, 3 skipped）。
+- **关键决策与已否决方案**：
+  - 方案对齐单不变式 4 要求的「句末定义 4 套不一致」指向 issue #146 的注释，写在两个新增
+    `_split_oversized_text` 的 docstring 里（不碰 `capswriter_client.py:179` 与
+    `dialog_segmenter.py:_split_by_sentences` 的字符集，避开本卡禁止项）。
+  - 两个 helper 不合并到公共模块（`transcriber/segments.py` 不在 Scope-Globs）。
+  - 未新增配置项/开关；`max_len=300` / `min_chunk_length` / dataclass 默认值均未动。
+- **下一步唯一动作**：交主脑验收（PR 由主脑开与合并）。
+
 
