@@ -77,6 +77,16 @@ class _NetworkGuard:
     def expect_blocks(self, count: int) -> None:
         self.expected_blocks += count
 
+    def connected_to(self, host: str) -> bool:
+        """记录里是否存在指向 ``host`` 的 connect（无论来自哪个线程）。
+
+        守卫是进程级的 monkeypatch，``allowed``/``blocked`` 里混有本进程
+        其它用例的流量（例如 ``test_asr_monitor_ws_probe.py`` 的 monitor
+        线程连本地临时 WS server 时留下的 loopback 连接）。因此查询必须
+        按目标限定，不要对整个列表做相等断言。
+        """
+        return f"connect:{host}" in self.allowed
+
 
 @pytest.fixture(autouse=True)
 def no_outbound_network(monkeypatch):
@@ -135,8 +145,9 @@ class TestNetworkGuard:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect(("183.47.100.66", 80))
         assert guard.blocked == ["connect:183.47.100.66"]
-        # 守卫在真实 connect 之前抛错：没有任何 connect 被放过
-        assert guard.allowed == []
+        # 守卫在真实 connect 之前抛错：这个非 loopback 目标没有被放过。
+        # 按目标限定，不对 allowed 做整体相等断言（守卫是进程级的）。
+        assert guard.connected_to("183.47.100.66") is False
 
         # 反向对照（已知会走到真实 connect 的输入）：loopback 放行，
         # 报的是内核层 ECONNREFUSED 而不是守卫的 AssertionError，
@@ -145,7 +156,7 @@ class TestNetworkGuard:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect(("127.0.0.1", 1))
         assert "outbound connect blocked" not in str(excinfo.value)
-        assert guard.allowed == ["connect:127.0.0.1"]
+        assert guard.connected_to("127.0.0.1") is True
 
 
 @pytest.fixture
