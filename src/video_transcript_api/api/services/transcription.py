@@ -2354,7 +2354,7 @@ def process_transcription(
                                     "%y%m%d-%H%M%S"
                                 )
                                 # 没探测到时长时保持既有的两参调用形状：缺省与 None
-                                # 对下游完全等价（都按下限预算执行）。
+                                # 对下游完全等价（都不传 deadline_total）。
                                 extra = (
                                     {} if media_duration is None
                                     else {"media_duration": media_duration}

@@ -2,7 +2,8 @@
 
 SDK 的自动预算是 ``max(120, duration + 60)``，隐含「服务至少 1 倍实时」的假设；
 生产实测服务是 3.29 倍实时（93.09 秒音频耗时 306.3 秒），自动预算只给 153 秒，
-必然超时。本仓改为显式传 ``deadline_total = max(300, duration*4 + 120)``。
+必然超时。本仓在拿得到时长时显式传 ``deadline_total = duration*4 + 120``；
+拿不到时长时不传该键，保持 SDK 自动预算。
 
 每个用例都断言真正传给 ``transcribe_file_sync`` 的实参，不直接测辅助函数。
 """
@@ -18,7 +19,6 @@ from loguru import logger as loguru_logger
 
 from video_transcript_api.downloaders.base import BaseDownloader
 from video_transcript_api.transcriber.capswriter_client import (
-    DEADLINE_MIN_SECONDS,
     CapsWriterClient,
     Config,
 )
@@ -128,7 +128,7 @@ def test_probed_duration_reaches_sdk_deadline_kwarg(tmp_path, sdk_config, audio)
 
 
 def test_duration_flows_through_transcriber_layer(tmp_path, sdk_config, audio):
-    """时长穿过 Transcriber 层后实参仍按公式算出，不是恒等于下限。"""
+    """时长穿过 Transcriber 层后实参仍按公式算出，不是恒定值。"""
     out = tmp_path / "out"
     out.mkdir()
     transcriber = Transcriber.__new__(Transcriber)
@@ -144,11 +144,11 @@ def test_duration_flows_through_transcriber_layer(tmp_path, sdk_config, audio):
 @pytest.mark.parametrize(
     "duration,expected",
     [
-        (0.0, 300.0),
-        (1.0, 300.0),
-        (30.0, 300.0),          # 实测短音频：30*4+120=240，下限生效
-        (45.0, 300.0),          # 恰好等于下限
-        (45.1, 300.4),          # 刚越过下限
+        (0.0, 120.0),
+        (1.0, 124.0),
+        (30.0, 240.0),
+        (45.0, 300.0),
+        (45.1, 300.4),
         (93.08898, 492.35592),  # 生产实测那个 93 秒案例
         (600.0, 2520.0),
         (3600.0, 14520.0),      # 10 分钟：系数 4 若退回 1，这里就是 3720 的差距
@@ -166,24 +166,19 @@ def test_known_duration_formula(tmp_path, sdk_config, audio, duration, expected)
     [None, -1.0, float("nan"), float("inf")],
     ids=["none", "negative", "nan", "inf"],
 )
-def test_unknown_duration_uses_floor_and_still_passes_kwarg(
+def test_unknown_duration_omits_deadline_kwarg(
     tmp_path, sdk_config, audio, media_duration
 ):
-    """时长不可用时传下限 300.0，且 deadline_total **仍然出现在实参里**。
-
-    若哪天有人改成「拿不到时长就不传 deadline_total」，SDK 会退回自动预算，
-    这里立刻变红。
-    """
+    """时长不可用时 kwargs 不含 deadline_total 键（不是 300，也不是 None）。"""
     with _patch_sdk() as sdk_call:
         _make_client(tmp_path).transcribe_file(str(audio), media_duration=media_duration)
 
     keywords = sdk_call.call_args.kwargs
-    assert "deadline_total" in keywords, "不得退回 SDK 自动预算"
-    assert keywords["deadline_total"] == DEADLINE_MIN_SECONDS
+    assert "deadline_total" not in keywords
 
 
 def test_unknown_duration_emits_greppable_log(tmp_path, sdk_config, audio):
-    """缺失路径必须留一行可 grep 的日志。"""
+    """缺失路径必须留一行可 grep 的日志，且不得写成 value=300。"""
     records = []
     sink_id = loguru_logger.add(lambda m: records.append(str(m)), level="WARNING")
     try:
@@ -194,7 +189,10 @@ def test_unknown_duration_emits_greppable_log(tmp_path, sdk_config, audio):
 
     hits = [line for line in records if "transcription_deadline" in line]
     assert hits, f"缺少 transcription_deadline 日志，实际记录: {records}"
-    assert any("duration=unknown" in line and "value=300" in line for line in hits), hits
+    assert any(
+        "duration=unknown" in line and "fallback=sdk_auto" in line for line in hits
+    ), hits
+    assert not any("value=300" in line for line in hits), hits
 
 
 def test_probe_state_is_not_fabricated_or_leaked(tmp_path):

@@ -95,8 +95,8 @@ class Transcriber:
             audio_path: 音频文件路径
             output_base: 输出文件基础名，如果为None则使用音频文件名
             media_duration: 媒体时长（秒），由下载阶段的探测给出，仅用于算
-                转录时限预算；为 None 时用下限预算（见 capswriter_client
-                ._transcription_deadline）
+                转录时限预算；为 None 时不传 deadline_total，保持 SDK
+                自动预算（见 capswriter_client._transcription_deadline）
 
         返回:
             dict: 包含转录结果的字典
@@ -122,7 +122,7 @@ class Transcriber:
             # 使用CapsWriter客户端进行转录（客户端内部已有重试逻辑）
             logger.info(f"调用CapsWriter客户端转录文件: {audio_path}")
             # 未探测到时长时不往下游多传一个必然为 None 的实参：缺省与 None 对下游
-            # 完全等价（都按下限预算执行，见 capswriter_client
+            # 完全等价（都不传 deadline_total，见 capswriter_client
             # ._transcription_deadline），而既有单参调用形状有外部 mock 锁着。
             extra = {} if media_duration is None else {"media_duration": media_duration}
             success, generated_files = self.capswriter_client.transcribe_file(
