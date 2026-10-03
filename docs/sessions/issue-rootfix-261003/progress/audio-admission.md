@@ -47,3 +47,55 @@ implementing → 自测完成，待主脑/独立审查（draft PR 已开，不�
 2. 独立Codex 审查：重点看 strict 归因区分、两个准入点的位置、scope 偏差三处替身。
 3. 本PR ready 前确认两个文档基线commit（`7f085867`、`3d27aa21`）以 merge commit
    进入 main，不许squash。
+---
+
+## 阶段（第二轮 · 修复卡）
+
+repairing → 测试不变式补齐完成，保持 draft，待新的独立增量 review。
+基线 `bf488aff`（运行时代码**一行未改**）。
+
+## 结论：上一轮的两条「已覆盖」是假阳性，本轮已纠正
+
+独立验收（`reviews/audio-verdict.md`，P2 only）指出我上一轮的覆盖声明不成立，现已实跑证实：
+
+* **YouTube API 分支从未被走到**。生产判定是精确类名
+  `metadata_downloader.__class__.__name__ == "YoutubeDownloader"`（`transcription.py:1883`）
+  且 `hasattr(use_api_server)` 且为真值；上一轮替身叫 `YoutubeApiServerDownloader`
+  → 类名不匹配 → 静默走常规下载路线，测的其实是**另一个**准入点。
+  RED 证据（先加断言后修 fixture）：
+  `AssertionError: assert 'YoutubeApiServerDownloader' == 'YoutubeDownloader'`。
+* **YouTube 优先下载分支从未被走到**。生产条件是
+  `hasattr(download_video_with_priority)` 且 URL 含 youtube.com
+  （`transcription.py:2384`）；上一轮 `RouteDownloader` 根本没有这个方法，
+  `route="youtube"` 只是把普通 `download_file` 跑了一遍。
+* **修复后移除 API 分支那一行准入 → 4 条转红**（原先的假阳性全部暴露）：
+  `test_no_audio_track_is_rejected_at_youtube_api_entry`（首红断言就是 engine-zero：
+  `AssertionError: assert ['/tmp/.../task_t-noaudio-youtube-api/api_audio.m4a'] == []`）、
+  `test_youtube_api_audio_only_reaches_engine`、
+  `test_probe_failure_at_youtube_api_entry_is_check_failure`、
+  `test_mixed_media_bytes_are_unchanged_across_admission`。
+  精确恢复后源码 SHA-256 = `72180f32419e79e47c0b48bf0f1abe8a74540e9b182fb03a0adea6b15f4a3b7e`
+  （与独立验收记录的 H0 一致），`git diff HEAD -- src/` 为空。
+* 另测：移除**常规**那一行准入 → 22 条转红，含 3 条优先下载用例 → 两个闸都有约束力。
+* **补上媒体字节不变断言**：mixed 实际 task 入口路径 + API 分支 + 优先分支，
+  准入前（下载落地那一刻）与引擎入口的 sha256 由真实文件字节分别现算，必须相等，
+  并用 lavfi 样本源文件哈希作第三个独立锥点；`EVENTS` 断言取样顺序
+  `["download", "engine"]`，排除「两次都在准入之后」。
+
+## 决定与否决（本轮）
+
+* **替身用生产真实类 + 实例级桩**（`YoutubeDownloader.__new__(YoutubeDownloader)`），
+  **否决继承子类**：子类会让 `__class__.__name__` 判定静默失效，正是上一轮假阳性的根因。
+* `use_api_server` 是生产只读 property（`_youtube_api_client is not None`），
+  因此设的是它真正的后端，不是替身另开的同名属性。
+* **新增**：优先下载分支 3 条用例（无音轨拒 / 探测失败归因 / 含音轨放行对照 + 字节不变）。
+* **否决（不做）**：不改任何 src（P2-2 畸形 `codec_type`、P2-3 其它 OSError、
+  P2-4 stderr 原文日志一律登记不修，主脑在 PR 正文明示接受）；不新增接口/开关/fixture 框架。
+* **保留**：上一轮 3 处清单外 fixture 最小 19 行 —— 主脑亲读增量后**显式批准纳入本卡范围**
+  （此前偏差作为事实保留记账，不说成先前已授权）；原有 foreign 文件/缓存产物清理断言不动。
+
+## 下一步
+
+1. 新的独立增量 review（不复用上一轮 reviewer）。
+2. 全量 `make test` 与正式 CI 由主脑接续；ready 之后主审才会真跑（draft 期primary 是 SKIPPED）。
+3. 合并仍须 merge commit 保留 `3d27aa21`、`7f085867`。

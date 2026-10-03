@@ -21,6 +21,7 @@ mock（真实 ffprobe 无法被构造成超时/缺失二进制）。
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -34,6 +35,7 @@ from loguru import logger as loguru_logger
 
 import video_transcript_api.api.services.transcription as transcription
 from video_transcript_api.downloaders.models import DownloadInfo, VideoMetadata
+from video_transcript_api.downloaders.youtube import YoutubeDownloader
 from video_transcript_api.utils.tempfile_manager import TempFileManager
 
 FFMPEG = shutil.which("ffmpeg")
@@ -171,28 +173,36 @@ class FakeCacheManager:
 
 
 class RecordingTranscriber:
-    """CapsWriter 侧引擎替身：记录是否被调用。"""
+    """CapsWriter 侧引擎替身：记录是否被调用，以及它**实际收到的文件字节**哈希。"""
 
     calls: list = []
+    digests: list = []
 
     def __init__(self, *a, **k):
         pass
 
     def transcribe(self, local_file, output_base=None, **kwargs):
+        digest = file_digest(local_file)
         RecordingTranscriber.calls.append((local_file, output_base, kwargs))
+        RecordingTranscriber.digests.append((local_file, digest))
+        EVENTS.append(("engine", local_file, digest))
         return {"transcript": "capswriter text"}
 
 
 class RecordingFunASR:
-    """FunASR 侧引擎替身：记录是否被调用。"""
+    """FunASR 侧引擎替身：记录是否被调用，以及它**实际收到的文件字节**哈希。"""
 
     calls: list = []
+    digests: list = []
 
     def __init__(self, *a, **k):
         pass
 
     def transcribe_sync(self, local_file):
+        digest = file_digest(local_file)
         RecordingFunASR.calls.append(local_file)
+        RecordingFunASR.digests.append((local_file, digest))
+        EVENTS.append(("engine", local_file, digest))
         return {
             "formatted_text": "funasr text",
             "transcription_result": [{"speaker": "spk_0", "text": "hello"}],
@@ -229,14 +239,26 @@ def _materialize(sample, path: Path) -> Path:
     return path
 
 
+def file_digest(path) -> str:
+    """真实文件字节的 sha256（不给默认值：文件读不到就直接炸）。"""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+# 全局事件序列：证明「准入前的哈希」确实取自下载落地那一刻，而不是准入之后。
+EVENTS: list[tuple] = []
+
+
 class RouteDownloader:
-    """覆盖三条真实下载分支的下载器替身。
+    """覆盖两条真实常规下载分支的下载器替身。
 
     route:
       * ``generic``   —— 常规下载：``download_file`` 落到当前任务目录
       * ``predownloaded`` —— 预下载就绪分支：``DownloadInfo.downloaded`` +
         ``local_file``（文件同样落在当前任务目录，归属可被清理断言覆盖）
-      * ``youtube``   —— YouTube 选择路径（yt-dlp 主链路的 download_file 分支）
+
+    YouTube 优先下载分支**不归这里**：生产条件是
+    ``hasattr(download_video_with_priority)`` 且 URL 含 youtube.com，见
+    ``make_youtube_priority_downloader``。
     """
 
     use_api_server = False
@@ -263,6 +285,7 @@ class RouteDownloader:
             target = Path(self._tm.get_current_task_dir()) / "predownloaded.mp4"
             _materialize(self._sample, target)
             self.written_paths.append(target)
+            EVENTS.append(("download", str(target), file_digest(target)))
             return DownloadInfo(
                 download_url=None, file_ext="mp4", filename="predownloaded.mp4",
                 downloaded=True, local_file=str(target),
@@ -280,32 +303,107 @@ class RouteDownloader:
         target = Path(self._tm.get_current_task_dir()) / filename
         _materialize(self._sample, target)
         self.written_paths.append(target)
+        EVENTS.append(("download", str(target), file_digest(target)))
         return str(target)
 
 
-class YoutubeApiServerDownloader(RouteDownloader):
-    """youtube-api 分支：音频由 API Server 下好后直调 ASR。"""
+class YoutubeRouteRecorder:
+    """记录真实分支上**到底调用了哪个 producer 方法**。
 
-    use_api_server = True
+    只看 fixture 自己的变量名不算证据：断言读的是生产代码在这条路径上真实
+    调用过的方法名。
+    """
 
-    def __init__(self, temp_manager, sample: Path, **kwargs):
-        super().__init__(temp_manager, sample, "youtube_api", "https://www.youtube.com/watch?v=vid159")
-        self.audio_paths = []
+    def __init__(self):
+        self.calls = []
+        self.media_paths = []
+        self.pre_admission_digests = {}
 
-    def get_metadata(self, url):
-        return VideoMetadata(
-            video_id="vid159", platform="youtube", title="api title",
-            author="api author", description="",
+    def record(self, method, *args):
+        self.calls.append((method, *args))
+
+    @property
+    def methods(self):
+        return [c[0] for c in self.calls]
+
+
+def _real_youtube_downloader(use_api_server: bool):
+    """生产 ``YoutubeDownloader`` 的真实实例（绕过 ``__init__``，避免真连网）。
+
+    用 ``__new__`` 而不是继承：生产分支判定的是**精确类名**
+    ``__class__.__name__ == "YoutubeDownloader"``，子类会让这个判定静默失效
+    （上一轮假阳性的根因）。用真实类 + 实例级桩，生产改类名时本测试会红，
+    而不是跟着漂移。
+
+    ``use_api_server`` 是生产类的只读 property（真值为 ``_youtube_api_client
+    is not None``），所以这里设的是它真正的后端，而不是在替身上另开一个同名
+    属性——否则判定的就不是生产形状了。
+    """
+    dl = YoutubeDownloader.__new__(YoutubeDownloader)
+    dl._youtube_api_client = object() if use_api_server else None
+    return dl
+
+
+def _attach_common_stubs(dl, rec, temp_manager, sample, platform="youtube",
+                         video_id="vid159"):
+    """两条 YouTube 分支共用的替身：元数据 + 落地媒体 + 方法调用记录。"""
+
+    def materialize(name):
+        target = Path(temp_manager.get_current_task_dir()) / name
+        _materialize(sample, target)
+        rec.media_paths.append(target)
+        rec.pre_admission_digests[str(target)] = file_digest(target)
+        # 时间点证据：下载落地那一刻的字节，准入还没跑
+        EVENTS.append(("download", str(target), rec.pre_admission_digests[str(target)]))
+        return target
+
+    dl.get_metadata = lambda url: VideoMetadata(
+        video_id=video_id, platform=platform, title="yt title",
+        author="yt author", description="",
+    )
+    dl.get_subtitle_result = lambda url: None
+    dl.get_subtitle = lambda url: None
+
+    def download_file(url, filename):
+        rec.record("download_file", url, filename)
+        return str(materialize(filename))
+
+    dl.download_file = download_file
+
+    def download_video_with_priority(url, video_info=None):
+        rec.record("download_video_with_priority", url, dict(video_info or {}))
+        return str(materialize("priority_download.mp4"))
+
+    dl.download_video_with_priority = download_video_with_priority
+
+    def get_download_info(url):
+        rec.record("get_download_info", url)
+        return DownloadInfo(
+            download_url="http://example.invalid/yt.mp4", file_ext="mp4",
+            filename="yt.mp4", downloaded=False, local_file=None,
         )
 
-    def fetch_for_transcription(self, url, use_speaker_recognition):
-        target = Path(self._tm.get_current_task_dir()) / "api_audio.m4a"
-        _materialize(self._sample, target)
-        self.audio_paths.append(target)
+    dl.get_download_info = get_download_info
+    return materialize
+
+
+def make_youtube_api_downloader(temp_manager, sample, filename="api_audio.m4a"):
+    """youtube-api 快速路径替身（真实 YoutubeDownloader 类 + ``use_api_server``）。
+
+    生产条件：``metadata_downloader.__class__.__name__ == "YoutubeDownloader"``
+    且 ``hasattr(use_api_server)`` 且为真值 —— 三者缺一就退回常规下载路线。
+    """
+    rec = YoutubeRouteRecorder()
+    dl = _real_youtube_downloader(use_api_server=True)
+    materialize = _attach_common_stubs(dl, rec, temp_manager, sample)
+
+    def fetch_for_transcription(url, use_speaker_recognition):
+        rec.record("fetch_for_transcription", url, use_speaker_recognition)
+        target = materialize(filename)
         return {
             "video_id": "vid159",
-            "video_title": "api title",
-            "author": "api author",
+            "video_title": "yt title",
+            "author": "yt author",
             "description": "",
             "platform": "youtube",
             "transcript": None,
@@ -313,6 +411,19 @@ class YoutubeApiServerDownloader(RouteDownloader):
             "audio_path": str(target),
             "need_transcription": True,
         }
+
+    dl.fetch_for_transcription = fetch_for_transcription
+    dl._admission_rec = rec
+    return dl, rec
+
+
+def make_youtube_priority_downloader(temp_manager, sample, url):
+    """YouTube 优先下载分支替身（真实 YoutubeDownloader 类 + 优先方法）。"""
+    rec = YoutubeRouteRecorder()
+    dl = _real_youtube_downloader(use_api_server=False)
+    _attach_common_stubs(dl, rec, temp_manager, sample)
+    dl._admission_rec = rec
+    return dl, rec
 
 
 class SubprocessSpy:
@@ -361,7 +472,10 @@ def wired(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "run", spy)
 
     RecordingTranscriber.calls = []
+    RecordingTranscriber.digests = []
     RecordingFunASR.calls = []
+    RecordingFunASR.digests = []
+    EVENTS.clear()
 
     return {
         "tm": tm,
@@ -384,22 +498,41 @@ def _terminal_failure(router, cache, task_id):
     return delivered[-1]["error"]
 
 
+def test_youtube_api_double_satisfies_production_trigger_condition(wired, tmp_path):
+    """RED-first：生产 youtube-api 分支判定的是**精确类名** `YoutubeDownloader` +
+    `use_api_server` 真值。替身不满足这两个条件就会静默退回常规下载路线，
+    准入点也跟着换人——这正是上一轮「移掉 API 分支准入仍全绿」的成因。
+    """
+    sample = build_audio_only(tmp_path / "api_trigger.m4a")
+    dl, _rec = make_youtube_api_downloader(wired["tm"], sample)
+    assert dl.__class__.__name__ == "YoutubeDownloader"
+    assert dl.use_api_server is True
+    assert dl._youtube_api_client is not None
+
+
+@requires_ffmpeg
+def test_youtube_priority_double_declares_priority_entrypoint(wired, tmp_path):
+    """RED-first：生产优先分支条件是 hasattr(download_video_with_priority) 且
+    URL 含 youtube.com。替身缺这个方法就永远走不到优先下载分支。"""
+    sample = build_audio_only(tmp_path / "priority_trigger.m4a")
+    url = "https://www.youtube.com/watch?v=vid159"
+    dl, _rec = make_youtube_priority_downloader(wired["tm"], sample, url)
+    assert hasattr(dl, "download_video_with_priority")
+    assert "youtube.com" in url
+
+
 # ---------------------------------------------------------------------------
 # 1. 无音轨 -> 两条共享入口都拒绝（终态 FAILED + 具名原因 + 引擎零调用）
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("route", ["generic", "predownloaded", "youtube"])
+@pytest.mark.parametrize("route", ["generic", "predownloaded"])
 @pytest.mark.parametrize("use_speaker_recognition", [True, False])
 @requires_ffmpeg
 def test_no_audio_track_is_rejected_at_regular_entry(
     tmp_path, monkeypatch, wired, route, use_speaker_recognition
 ):
     sample = build_video_only(tmp_path / "video_only.mp4")
-    url = (
-        "https://www.youtube.com/watch?v=vid159"
-        if route == "youtube"
-        else "https://example.invalid/clip"
-    )
+    url = "https://example.invalid/clip"
     downloader = RouteDownloader(wired["tm"], sample, route, url)
     monkeypatch.setattr(transcription, "create_downloader", lambda u: downloader)
 
@@ -445,25 +578,59 @@ def test_no_audio_track_is_rejected_at_regular_entry(
 
 @requires_ffmpeg
 def test_no_audio_track_is_rejected_at_youtube_api_entry(tmp_path, monkeypatch, wired):
+    """youtube-api 分支真实分支：断言 API producer 真的被调用、常规下载路线未被走。"""
     sample = build_video_only(tmp_path / "video_only_api.mp4")
-    downloader = YoutubeApiServerDownloader(wired["tm"], sample)
+    url = "https://www.youtube.com/watch?v=vid159"
+    downloader, rec = make_youtube_api_downloader(wired["tm"], sample)
     monkeypatch.setattr(transcription, "create_downloader", lambda u: downloader)
 
     task_id = "t-noaudio-youtube-api"
     result = transcription.process_transcription(
         task_id=task_id,
-        url="https://www.youtube.com/watch?v=vid159",
+        url=url,
         use_speaker_recognition=True,
     )
+
+    # 生产 API 分支真的被走（否则「移掉 API 准入仍全绿」的假阳性会复现）
+    assert rec.methods == ["fetch_for_transcription"], rec.calls
+    assert "download_file" not in rec.methods and "get_download_info" not in rec.methods
+    assert downloader.__class__.__name__ == "YoutubeDownloader"
+    assert downloader.use_api_server is True
+    # 引擎零调用是这条分支最硬的不变式，先于终态断言（移除 API 分支准入的
+    # 变异下，这一条最先转红）。
+    assert _engine_calls() == []
 
     assert result["status"] == "failed", result
     assert "no_audio_track" in result["message"]
     assert "不含音轨" in result["message"]
     error = _terminal_failure(wired["router"], wired["cache"], task_id)
     assert "no_audio_track" in error and "media_probe_failed" not in error
-    assert _engine_calls() == []
-    for path in downloader.audio_paths:
+    assert wired["cache"].saved == []
+    for path in rec.media_paths:
         assert not path.exists()
+    assert wired["tm"].get_task_dir(task_id) is None
+
+
+@requires_ffmpeg
+def test_youtube_api_audio_bearing_reaches_engine(tmp_path, monkeypatch, wired):
+    """API 分支放行对照：audio_path 真的到达 FunASR，字节未被改写。"""
+    sample = build_mixed(tmp_path / "api_mixed.mp4")
+    url = "https://www.youtube.com/watch?v=vid159"
+    downloader, rec = make_youtube_api_downloader(wired["tm"], sample)
+    monkeypatch.setattr(transcription, "create_downloader", lambda u: downloader)
+
+    result = transcription.process_transcription(
+        task_id="t-api-ok",
+        url=url,
+        use_speaker_recognition=True,
+    )
+    assert rec.methods == ["fetch_for_transcription"], rec.calls
+    assert result["status"] == "success", result
+    assert len(RecordingFunASR.calls) == 1
+    assert RecordingTranscriber.calls == []
+    assert wired["spy"].argvs_for("ffmpeg") == []
+    assert len(RecordingFunASR.digests) == 1
+    assert _assert_bytes_unchanged(rec, RecordingFunASR.digests, sample)
 
 
 # ---------------------------------------------------------------------------
@@ -513,10 +680,51 @@ def test_mixed_media_reaches_funasr_without_transcoding(tmp_path, monkeypatch, w
     assert transcodes == [], f"audio extraction is forbidden: {transcodes}"
 
 
+def _assert_bytes_unchanged(rec, engine_digests, sample):
+    """准入不得改写输入媒体字节：下载落地时的 sha256 == 引擎入口读到的 sha256。
+
+    两个值都来自**真实文件字节**（不是常量、不是同一个值自比）：
+      * 前者在下载落地那一刻写入 ``pre_admission_digests``，并同步追加到
+        ``EVENTS`` 的 ``download`` 事件（准入尚未执行）；
+      * 后者由引擎替身在真正被调用时现算。
+    另外用样本源文件的独立哈希做第三个锥点，并断言两次取样确实一前一后。
+    """
+    assert len(engine_digests) == 1, engine_digests
+    engine_path, engine_digest = engine_digests[0]
+    pre_digest = rec.pre_admission_digests[engine_path]
+
+    assert len(engine_digest) == 64 and int(engine_digest, 16) >= 0
+    assert pre_digest == engine_digest, "admission must not rewrite media bytes"
+    assert engine_digest == file_digest(sample), "bytes must still match the lavfi sample"
+
+    stages = [e[0] for e in EVENTS if e[1] == engine_path]
+    assert stages == ["download", "engine"], EVENTS
+    return engine_digest
+
+
+@requires_ffmpeg
+def test_mixed_media_bytes_are_unchanged_across_admission(tmp_path, monkeypatch, wired):
+    """mixed 实际 task 入口路径：准入前后 sha256 完全相等，且零转码调用。"""
+    sample = build_mixed(tmp_path / "mixed_hash.mp4")
+    url = "https://example.invalid/clip"
+    downloader, rec = make_youtube_api_downloader(wired["tm"], sample)
+    monkeypatch.setattr(transcription, "create_downloader", lambda u: downloader)
+
+    result = transcription.process_transcription(
+        task_id="t-mixed-hash",
+        url=url,
+        use_speaker_recognition=True,
+    )
+    assert result["status"] == "success", result
+    assert len(wired["spy"].argvs_for("ffprobe")) == 1
+    assert wired["spy"].argvs_for("ffmpeg") == []
+    _assert_bytes_unchanged(rec, RecordingFunASR.digests, sample)
+
+
 @requires_ffmpeg
 def test_youtube_api_audio_only_reaches_engine(tmp_path, monkeypatch, wired):
     sample = build_audio_only(tmp_path / "api_audio.m4a")
-    downloader = YoutubeApiServerDownloader(wired["tm"], sample)
+    downloader, rec = make_youtube_api_downloader(wired["tm"], sample)
     monkeypatch.setattr(transcription, "create_downloader", lambda u: downloader)
 
     result = transcription.process_transcription(
@@ -524,10 +732,94 @@ def test_youtube_api_audio_only_reaches_engine(tmp_path, monkeypatch, wired):
         url="https://www.youtube.com/watch?v=vid159",
         use_speaker_recognition=True,
     )
+    assert rec.methods == ["fetch_for_transcription"], rec.calls
     assert result["status"] == "success", result
     assert len(RecordingFunASR.calls) == 1
     probes = wired["spy"].argvs_for("ffprobe")
     assert len(probes) == 1, probes
+
+
+# ---------------------------------------------------------------------------
+# 2b. YouTube 优先下载分支（download_video_with_priority）
+# ---------------------------------------------------------------------------
+
+YT_PRIORITY_URL = "https://www.youtube.com/watch?v=vid159"
+
+
+@requires_ffmpeg
+def test_youtube_priority_no_audio_track_is_rejected(tmp_path, monkeypatch, wired):
+    """优先下载分支真实被走：无音轨 -> no_audio_track、引擎零调用。"""
+    sample = build_video_only(tmp_path / "priority_video_only.mp4")
+    downloader, rec = make_youtube_priority_downloader(wired["tm"], sample, YT_PRIORITY_URL)
+    monkeypatch.setattr(transcription, "create_downloader", lambda u: downloader)
+
+    task_id = "t-priority-noaudio"
+    result = transcription.process_transcription(
+        task_id=task_id,
+        url=YT_PRIORITY_URL,
+        use_speaker_recognition=True,
+    )
+
+    assert rec.methods == ["get_download_info", "download_video_with_priority"], rec.calls
+    assert "download_file" not in rec.methods, "priority route must not fall back"
+    assert downloader.use_api_server is False
+
+    assert result["status"] == "failed", result
+    assert "no_audio_track" in result["message"]
+    error = _terminal_failure(wired["router"], wired["cache"], task_id)
+    assert "no_audio_track" in error and "media_probe_failed" not in error
+    assert _engine_calls() == []
+    for path in rec.media_paths:
+        assert not path.exists()
+    assert wired["tm"].get_task_dir(task_id) is None
+
+
+@requires_ffmpeg
+def test_youtube_priority_probe_failure_is_check_failure(tmp_path, monkeypatch, wired):
+    """优先下载分支的探测失败归因：media_probe_failed，不得写成无音轨。"""
+    sample = build_video_only(tmp_path / "priority_probe_fail.mp4")
+    downloader, rec = make_youtube_priority_downloader(wired["tm"], sample, YT_PRIORITY_URL)
+    monkeypatch.setattr(transcription, "create_downloader", lambda u: downloader)
+    monkeypatch.setattr(subprocess, "run", _probe_raises(FileNotFoundError(
+        2, "No such file or directory", "ffprobe")))
+
+    task_id = "t-priority-probe-fail"
+    result = transcription.process_transcription(
+        task_id=task_id,
+        url=YT_PRIORITY_URL,
+        use_speaker_recognition=True,
+    )
+    assert rec.methods == ["get_download_info", "download_video_with_priority"], rec.calls
+    assert result["status"] == "failed", result
+    assert "media_probe_failed" in result["message"]
+    assert "不含音轨" not in result["message"]
+    error = _terminal_failure(wired["router"], wired["cache"], task_id)
+    assert "media_probe_failed" in error and "不含音轨" not in error
+    assert _engine_calls() == []
+
+
+@requires_ffmpeg
+def test_youtube_priority_mixed_media_is_admitted_with_intact_bytes(
+    tmp_path, monkeypatch, wired
+):
+    """含音轨对照：优先下载分支放行进 FunASR，真实 ffprobe 边界 + 字节不变。"""
+    sample = build_mixed(tmp_path / "priority_mixed.mp4")
+    downloader, rec = make_youtube_priority_downloader(wired["tm"], sample, YT_PRIORITY_URL)
+    monkeypatch.setattr(transcription, "create_downloader", lambda u: downloader)
+
+    result = transcription.process_transcription(
+        task_id="t-priority-ok",
+        url=YT_PRIORITY_URL,
+        use_speaker_recognition=True,
+    )
+    assert rec.methods == ["get_download_info", "download_video_with_priority"], rec.calls
+    assert result["status"] == "success", result
+    assert len(RecordingFunASR.calls) == 1
+    probes = wired["spy"].argvs_for("ffprobe")
+    assert len(probes) == 1, probes
+    assert probes[0][0] == "ffprobe" and probes[0][-1] == RecordingFunASR.calls[0]
+    assert wired["spy"].argvs_for("ffmpeg") == []
+    _assert_bytes_unchanged(rec, RecordingFunASR.digests, sample)
 
 
 # ---------------------------------------------------------------------------
@@ -710,21 +1002,19 @@ def test_missing_media_file_is_check_failure_not_no_audio(tmp_path, monkeypatch,
 
 def test_probe_failure_at_youtube_api_entry_is_check_failure(tmp_path, monkeypatch, wired):
     sample = build_audio_only(tmp_path / "audio.m4a")
-    downloader = YoutubeApiServerDownloader(wired["tm"], sample)
+    downloader, rec = make_youtube_api_downloader(wired["tm"], sample)
     monkeypatch.setattr(transcription, "create_downloader", lambda u: downloader)
-
-    def boom(cmd, *args, **kwargs):
-        if isinstance(cmd, list) and cmd[0].endswith("ffprobe"):
-            raise FileNotFoundError(2, "No such file or directory", "ffprobe")
-        return subprocess.run(cmd, *args, **kwargs)
-
-    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr(
+        subprocess, "run",
+        _probe_raises(FileNotFoundError(2, "No such file or directory", "ffprobe")),
+    )
 
     result = transcription.process_transcription(
         task_id="t-api-probe-fail",
         url="https://www.youtube.com/watch?v=vid159",
         use_speaker_recognition=True,
     )
+    assert rec.methods == ["fetch_for_transcription"], rec.calls
     assert result["status"] == "failed", result
     assert "media_probe_failed" in result["message"]
     assert "不含音轨" not in result["message"]
