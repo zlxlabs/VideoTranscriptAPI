@@ -2216,7 +2216,9 @@ def process_transcription(
 
                 # 下载文件
                 local_file = None
+                actual_downloader = None
                 if has_separate_download_url:
+                    actual_downloader = download_downloader
                     actual_download_url = download_url or url
                     logger.info(f"使用 GenericDownloader 下载文件: {actual_download_url}")
                     # 从 URL 提取文件名
@@ -2254,6 +2256,7 @@ def process_transcription(
                         filename = download_info_obj.filename if download_info_obj else None
 
                         original_downloader = download_downloader or create_downloader(url)
+                        actual_downloader = original_downloader
                         if hasattr(original_downloader, "download_video_with_priority") and (
                             "youtube.com" in url or "youtu.be" in url
                         ):
@@ -2287,6 +2290,10 @@ def process_transcription(
                     return _fail_task_and_notify(
                         error_msg, title=video_title, author_name=author,
                     )
+
+                # 时长载体的唯一读取点（issue #155）：从实际下载的实例读取探测时长。
+                # 已有本地文件分支未走下载（original_downloader 未赋），读出 None 回退 SDK 自动预算。
+                media_duration = getattr(actual_downloader, "last_media_duration", None)
 
                 try:
                     # 开始转录
@@ -2347,8 +2354,14 @@ def process_transcription(
                                 temp_output_base = datetime.datetime.now().strftime(
                                     "%y%m%d-%H%M%S"
                                 )
+                                # 没探测到时长时保持既有的两参调用形状：缺省与 None
+                                # 对下游完全等价（都不传 deadline_total）。
+                                extra = (
+                                    {} if media_duration is None
+                                    else {"media_duration": media_duration}
+                                )
                                 transcription_result = transcriber.transcribe(
-                                    local_file, temp_output_base
+                                    local_file, temp_output_base, **extra
                                 )
                                 transcript = transcription_result.get("transcript", "")
 
