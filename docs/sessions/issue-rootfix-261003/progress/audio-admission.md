@@ -99,3 +99,59 @@ repairing → 测试不变式补齐完成，保持 draft，待新的独立增量
 1. 新的独立增量 review（不复用上一轮 reviewer）。
 2. 全量 `make test` 与正式 CI 由主脑接续；ready 之后主审才会真跑（draft 期primary 是 SKIPPED）。
 3. 合并仍须 merge commit 保留 `3d27aa21`、`7f085867`。
+
+---
+
+## 阶段（第三轮 · 最后补齐原音轨验收测试）
+
+repairing → 三项验收缺口补齐，运行时代码保持 `27fc073f` 逐字节不变。
+基线 `27fc073f3828136471e35a9cfeac652aa900a6ec`；`src/` diff 为空，
+`transcription.py` SHA-256 仍为 `72180f32419e79e47c0b48bf0f1abe8a74540e9b182fb03a0adea6b15f4a3b7e`。
+
+## 结论（补的是「缺断言」，不是「缺行为」）
+
+独立增量评审（`reviews/audio-increment-verdict.md`，判定不通过）登记的三项缺口，
+本轮全部是**在已正确的运行时行为上补断言**——所以三条新断言加上去就直接绿，
+没有出现 TDD 红。这点如实记录：真正能红的只有「变异」层面，本轮用三类变异反证它们有约束力。
+
+1. **常规 `download_file` 路径的字节哈希**：既有 `test_mixed_media_reaches_funasr_without_transcoding`
+   现在也做 sha256 对照（before=下载落盘、after=引擎入口、第三方锥点=lavfi 样本源文件）。
+2. **真实 probe 采样时序**：`EVENTS` 在既有 `SubprocessSpy` 的**真实 ffprobe 调用处**记录 `probe`
+   事件（不替换 helper、不造假 probe），字节断言要求时序恰为 `["download", "probe", "engine"]`
+   ——两次哈希之间必须真的夹着一次真实探测。
+3. **API 探测失败的用户通道**：`test_probe_failure_at_youtube_api_entry_is_check_failure`
+   追加 `_terminal_failure` 断言（FAILED 终态写入 + 失败通知 payload 携带
+   `media_probe_failed`，且不含「不含音轨」/ `no_audio_track`）。
+4. **字幕直命中零调用**：`test_flow_subtitle_preferred`（常规字幕）追加零准入探测 +
+   零真实 ffprobe + 零引擎构造（引擎被构造即 AssertionError）；新增
+   `test_youtube_api_subtitle_hit_skips_asr_and_probe`（真实 `YoutubeDownloader` +
+   `use_api_server` 真值，producer 返回 `need_transcription=False` 的字幕结果、
+   **不落任何音频文件**）断言成功落缓存/文本、零 ffprobe、零 ASR。
+
+## 变异证据（本轮实跑，全部精确恢复）
+
+* **准入后改写媒体字节**（src 临时注入 `open(local,"ab")`，随后按备份逐字节恢复）：
+  3 条哈希断言同时红 —— 常规 `download_file`、API、YouTube 优先下载，
+  失败信息均为 `AssertionError: admission must not rewrite media bytes`。
+  恢复后 SHA 与 `72180f32…` 一致、`git diff HEAD -- src/` 为空、准入文件全绿。
+* **FAILED 终态 CAS 失败**（仅测试侧：让 cache double 返回 False，生产因此不发失败通知）：
+  API 探测失败用例红在 `AssertionError: no terminal failure notification`。
+* **让字幕用例走真实下载+转录路径**（仅测试侧）：红在引擎构造拦截，
+  即「字幕命中不得触碰 ASR」这条锁有约束力。
+
+## 决定与否决（本轮）
+
+* **否决**为了让字幕断言「先红」去改运行时或加开关：运行时冻结，缺口是断言覆盖。
+* **否决**新增 records/抽象：`EVENTS` 直接在既有 spy 的真实 ffprobe 处追加事件；
+  API 字幕复用既有 `make_youtube_api_downloader`（只加一个 `subtitle=` 关键字）。
+* **保留不动**：API/priority 真入口与两个 gate 的逆向红验、foreign/cache 清理边界断言、
+  以及首轮那 3 处经批准纳入范围的 19 行 fixture 隔离替身。
+* **继续登记未修**：P2-2（畸形 `codec_type`）、P2-3（其它 `OSError`）、P2-4（stderr 非白名单）
+  三项运行时代码问题按卡面接受不修，PR #164 正文「已知未修项」保持。
+* 首轮 382/40 超 target 250 的目标偏差按主脑口径接受（评审卡 hard 300 只约束 reviewer 产物）。
+
+## 下一步
+
+1. 新的独立增量复审（不复用 reviewer）。
+2. 全量 `make test` 与正式 CI 由主脑接续；PR 保持 draft（draft 期 primary 为 SKIPPED）。
+3. 合并仍须 merge commit 保留 `3d27aa21`、`7f085867`。

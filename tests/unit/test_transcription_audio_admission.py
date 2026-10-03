@@ -387,11 +387,14 @@ def _attach_common_stubs(dl, rec, temp_manager, sample, platform="youtube",
     return materialize
 
 
-def make_youtube_api_downloader(temp_manager, sample, filename="api_audio.m4a"):
+def make_youtube_api_downloader(temp_manager, sample, filename="api_audio.m4a",
+                              subtitle=None):
     """youtube-api 快速路径替身（真实 YoutubeDownloader 类 + ``use_api_server``）。
 
     生产条件：``metadata_downloader.__class__.__name__ == "YoutubeDownloader"``
     且 ``hasattr(use_api_server)`` 且为真值 —— 三者缺一就退回常规下载路线。
+    给了 ``subtitle`` 就走字幕直命中（``need_transcription=False``、``audio_path=None``、
+    **不落任何媒体文件**），对应生产 ``transcription.py:1913`` 起的字幕分支。
     """
     rec = YoutubeRouteRecorder()
     dl = _real_youtube_downloader(use_api_server=True)
@@ -399,8 +402,7 @@ def make_youtube_api_downloader(temp_manager, sample, filename="api_audio.m4a"):
 
     def fetch_for_transcription(url, use_speaker_recognition):
         rec.record("fetch_for_transcription", url, use_speaker_recognition)
-        target = materialize(filename)
-        return {
+        api_result = {
             "video_id": "vid159",
             "video_title": "yt title",
             "author": "yt author",
@@ -408,9 +410,21 @@ def make_youtube_api_downloader(temp_manager, sample, filename="api_audio.m4a"):
             "platform": "youtube",
             "transcript": None,
             "transcript_segments": None,
-            "audio_path": str(target),
+            "audio_path": None,
             "need_transcription": True,
         }
+        if subtitle is not None:
+            api_result.update({
+                "transcript": subtitle,
+                "transcript_segments": [
+                    {"start": 0.0, "end": 1.0, "text": subtitle},
+                ],
+                "audio_path": None,
+                "need_transcription": False,
+            })
+            return api_result
+        api_result["audio_path"] = str(materialize(filename))
+        return api_result
 
     dl.fetch_for_transcription = fetch_for_transcription
     dl._admission_rec = rec
@@ -445,6 +459,10 @@ class SubprocessSpy:
             "stdout": getattr(proc, "stdout", None),
             "returncode": getattr(proc, "returncode", None),
         })
+        # 真实 ffprobe 采样点直接进 EVENTS：字节不变断言需要用**实际发生的探测**
+        # 证明两次哈希取样之间确实夹着准入，而不是只靠源码顺序读。
+        if isinstance(cmd, list) and cmd and cmd[0].endswith("ffprobe"):
+            EVENTS.append(("probe", cmd[0], list(cmd)))
         return proc
 
     def argvs_for(self, binary: str) -> list[list[str]]:
@@ -630,7 +648,10 @@ def test_youtube_api_audio_bearing_reaches_engine(tmp_path, monkeypatch, wired):
     assert RecordingTranscriber.calls == []
     assert wired["spy"].argvs_for("ffmpeg") == []
     assert len(RecordingFunASR.digests) == 1
-    assert _assert_bytes_unchanged(rec, RecordingFunASR.digests, sample)
+    _assert_bytes_unchanged(
+        rec.pre_admission_digests[RecordingFunASR.calls[0]],
+        RecordingFunASR.digests, sample, RecordingFunASR.calls[0],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -679,27 +700,45 @@ def test_mixed_media_reaches_funasr_without_transcoding(tmp_path, monkeypatch, w
     assert len(probes) == 1, probes
     assert transcodes == [], f"audio extraction is forbidden: {transcodes}"
 
+    # 常规 download_file 入口的字节不变：下载落盘 vs 引擎入口，真实文件现算，
+    # 且真实 ffprobe 必须发生在两次取样之间。
+    media_path = RecordingFunASR.calls[0]
+    assert probes[0][-1] == media_path
+    _assert_bytes_unchanged(
+        _download_event(media_path), RecordingFunASR.digests, sample, media_path
+    )
 
-def _assert_bytes_unchanged(rec, engine_digests, sample):
-    """准入不得改写输入媒体字节：下载落地时的 sha256 == 引擎入口读到的 sha256。
+
+def _assert_bytes_unchanged(pre_digest, engine_digests, sample, media_path):
+    """准入不得改写输入媒体字节：下载落盘时的 sha256 == 引擎入口读到的 sha256。
 
     两个值都来自**真实文件字节**（不是常量、不是同一个值自比）：
-      * 前者在下载落地那一刻写入 ``pre_admission_digests``，并同步追加到
-        ``EVENTS`` 的 ``download`` 事件（准入尚未执行）；
-      * 后者由引擎替身在真正被调用时现算。
-    另外用样本源文件的独立哈希做第三个锥点，并断言两次取样确实一前一后。
+      * ``pre_digest`` 是下载器把媒体落到任务目录那一刻现算的；
+      * ``engine_digest`` 由引擎替身在真正被调用时现算。
+    另外用样本源文件的独立哈希做第三个锥点，并用 ``EVENTS`` 断言取样时序为
+    ``download -> probe -> engine``：实际发生的真实 ffprobe 必须夹在两次取样
+    之间，否则「没改字节」可能只是「压根没探测」。
     """
     assert len(engine_digests) == 1, engine_digests
     engine_path, engine_digest = engine_digests[0]
-    pre_digest = rec.pre_admission_digests[engine_path]
+    assert engine_path == media_path
 
     assert len(engine_digest) == 64 and int(engine_digest, 16) >= 0
     assert pre_digest == engine_digest, "admission must not rewrite media bytes"
     assert engine_digest == file_digest(sample), "bytes must still match the lavfi sample"
 
-    stages = [e[0] for e in EVENTS if e[1] == engine_path]
-    assert stages == ["download", "engine"], EVENTS
+    stages = [e[0] for e in EVENTS if e[1] == media_path or (e[0] == "probe" and e[2][-1] == media_path)]
+    assert stages == ["download", "probe", "engine"], stages
+    probe_events = [e for e in EVENTS if e[0] == "probe" and e[2][-1] == media_path]
+    assert len(probe_events) == 1, probe_events
     return engine_digest
+
+
+def _download_event(media_path):
+    """下载落盘那一刻的真实字节哈希（真实文件现算，不是常量）。"""
+    events = [e for e in EVENTS if e[0] == "download" and e[1] == media_path]
+    assert len(events) == 1, events
+    return events[0][2]
 
 
 @requires_ffmpeg
@@ -718,7 +757,10 @@ def test_mixed_media_bytes_are_unchanged_across_admission(tmp_path, monkeypatch,
     assert result["status"] == "success", result
     assert len(wired["spy"].argvs_for("ffprobe")) == 1
     assert wired["spy"].argvs_for("ffmpeg") == []
-    _assert_bytes_unchanged(rec, RecordingFunASR.digests, sample)
+    _assert_bytes_unchanged(
+        rec.pre_admission_digests[RecordingFunASR.calls[0]],
+        RecordingFunASR.digests, sample, RecordingFunASR.calls[0],
+    )
 
 
 @requires_ffmpeg
@@ -819,8 +861,45 @@ def test_youtube_priority_mixed_media_is_admitted_with_intact_bytes(
     assert len(probes) == 1, probes
     assert probes[0][0] == "ffprobe" and probes[0][-1] == RecordingFunASR.calls[0]
     assert wired["spy"].argvs_for("ffmpeg") == []
-    _assert_bytes_unchanged(rec, RecordingFunASR.digests, sample)
+    _assert_bytes_unchanged(
+        rec.pre_admission_digests[RecordingFunASR.calls[0]],
+        RecordingFunASR.digests, sample, RecordingFunASR.calls[0],
+    )
 
+
+@requires_ffmpeg
+def test_youtube_api_subtitle_hit_skips_asr_and_probe(tmp_path, monkeypatch, wired):
+    """API 字幕直命中：producer 返回字幕、不落音频路径 → 零准入探测、零 ASR 调用。
+
+    字幕分支在 ``transcription.py:1913`` 就收口，位置早于 API 准入点（:2027）与两处
+    ASR 调用；本用例把「不探测、不调引擎」钉成回归断言。
+    """
+    sample = build_audio_only(tmp_path / "unused_sample.m4a")  # 字幕路径根本不会碰它
+    url = "https://www.youtube.com/watch?v=vid159"
+    downloader, rec = make_youtube_api_downloader(wired["tm"], sample, subtitle="api subtitle text")
+    monkeypatch.setattr(transcription, "create_downloader", lambda u: downloader)
+
+    result = transcription.process_transcription(
+        task_id="t-api-subtitle",
+        url=url,
+        use_speaker_recognition=False,
+    )
+
+    # 生产 API 字幕快路径真的被走
+    assert rec.methods == ["fetch_for_transcription"], rec.calls
+    assert "download_file" not in rec.methods and "get_download_info" not in rec.methods
+    assert rec.media_paths == [], "subtitle hit must not materialize any media"
+    assert downloader.use_api_server is True
+
+    assert result["status"] == "success", result
+    assert result["data"]["transcript"] == "api subtitle text"
+    assert wired["cache"].saved, "subtitle hit must still save the transcript"
+    assert wired["cache"].saved[0]["transcript_data"] == "api subtitle text"
+
+    # 零探测 + 零引擎
+    assert wired["spy"].argvs_for("ffprobe") == []
+    assert wired["spy"].calls == []
+    assert _engine_calls() == []
 
 # ---------------------------------------------------------------------------
 # 3. 真实 ffprobe 边界：argv、真实 JSON 结构、探测次数、耗时
@@ -1018,6 +1097,12 @@ def test_probe_failure_at_youtube_api_entry_is_check_failure(tmp_path, monkeypat
     assert result["status"] == "failed", result
     assert "media_probe_failed" in result["message"]
     assert "不含音轨" not in result["message"]
+    # 失败通知与 FAILED 终态：探测失败也必须落到用户看得见的那条通道，
+    # 且归因是「检查失败」而不是「不含音轨」。
+    error = _terminal_failure(wired["router"], wired["cache"], "t-api-probe-fail")
+    assert "media_probe_failed" in error
+    assert "不含音轨" not in error and "no_audio_track" not in error
+    assert wired["cache"].saved == []
     assert _engine_calls() == []
 
 

@@ -469,11 +469,34 @@ def test_flow_cache_hit_with_full_calibration_has_no_disclaimer(monkeypatch, pat
 
 
 def test_flow_subtitle_preferred(monkeypatch, patch_runtime):
+    """平台字幕直接命中：不得触发音轨准入探测，也不得碰任何 ASR 引擎。
+
+    字幕分支在下载之前就收口，因此这里除了结果/缓存，还要钉死「零探测 + 零引擎」：
+    将来有人把准入或引擎调用提到字幕分支前，这些断言会直接转红。
+    """
+    import subprocess as real_subprocess
+
     cache_manager = DummyCacheManager(cache_data=None)
     monkeypatch.setattr(transcription, "cache_manager", cache_manager)
 
     downloader = YoutubeDownloader(subtitle="subtitle text")
     monkeypatch.setattr(transcription, "create_downloader", lambda url: downloader)
+
+    probe_argvs = []
+    real_run = real_subprocess.run
+
+    def spy_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and cmd and cmd[0].endswith("ffprobe"):
+            probe_argvs.append(list(cmd))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(real_subprocess, "run", spy_run)
+
+    def _engine_must_not_be_built(*args, **kwargs):
+        raise AssertionError("ASR engine must not be constructed on a subtitle hit")
+
+    monkeypatch.setattr(transcription, "Transcriber", _engine_must_not_be_built)
+    monkeypatch.setattr(transcription, "FunASRSpeakerClient", _engine_must_not_be_built)
 
     result = transcription.process_transcription(
         task_id="task_subtitle",
@@ -490,6 +513,10 @@ def test_flow_subtitle_preferred(monkeypatch, patch_runtime):
     saved = cache_manager.saved[0]
     assert saved["transcript_type"] == "capswriter"
     assert saved["transcript_data"] == "subtitle text"
+
+    # 零音轨准入探测（patch_runtime 里的隔离替身未被调用）、零真实 ffprobe、零引擎
+    assert AUDIO_ADMISSION_CALLS == []
+    assert probe_argvs == []
 
 
 def test_audio_admission_runs_once_before_asr(monkeypatch, patch_runtime):
