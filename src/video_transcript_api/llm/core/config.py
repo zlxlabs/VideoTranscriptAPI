@@ -60,6 +60,11 @@ class LLMConfig:
     )
 
     # 分段配置
+    # 注意：下面三个阈值存在**第三套取值**——2026-10-03 在 n305 只读核对生产
+    # /app/config/config.jsonc 实测为 enable_threshold=3000 / segment_size=1500 /
+    # max_segment_size=3000，与这里的 dataclass 默认（5000/2000/3000）和
+    # config/config.example.jsonc 的推荐值（20000/8000/12000）都不同。
+    # 本仓库不对齐它们（生产取值是否合理是独立的产品问题），详见 #147。
     enable_threshold: int = 5000
     segment_size: int = 2000
     max_segment_size: int = 3000
@@ -84,7 +89,9 @@ class LLMConfig:
     enable_validation: bool = False  # 是否启用分段质量验证（每个chunk独立打分，不再进行整体验证）
     # 结构化校对质量验证配置（对话流）
     structured_validation_enabled: bool = False
-    structured_fallback_strategy: str = "best_quality"
+    # 默认值必须与 from_dict 缺键时的派生结果一致（生产走 from_dict，见 #147）。
+    # tests/unit/test_llm_config_defaults.py 逐字段锁住这一致性，派生字段走显式豁免清单。
+    structured_fallback_strategy: str = "formatted_original"
 
     # 质量阈值
     overall_score_threshold: float = 8.0
