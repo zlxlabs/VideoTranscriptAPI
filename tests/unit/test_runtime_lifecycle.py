@@ -90,6 +90,71 @@ def test_check_config_is_side_effect_free(tmp_path):
     assert not (tmp_path / "workspace").exists()
 
 
+# --- --check-config also prints the effective LLM values (#147) -------------
+#
+# Neighbouring check for test_check_config_is_side_effect_free: the success
+# path keeps its original "Configuration OK" line and appends exactly one
+# machine-readable JSON line after it. The run happens in a deliberately
+# identity-free environment (no PI_LEAD_SESSION / no inherited proxy vars)
+# so the output cannot depend on who invoked it, and VTAPI_USERS_JSON points
+# at a missing tmp file so the real <project_root>/config/users.json is never
+# read by a test. The per-field / per-source matrix lives in
+# tests/unit/test_check_config_effective_values.py; this test only pins the
+# stdout shape next to the existing side-effect-free check.
+
+EFFECTIVE_WHITELIST_KEYS = {
+    "enable_threshold",
+    "segment_size",
+    "max_segment_size",
+    "min_chunk_length",
+    "max_chunk_length",
+    "preferred_chunk_length",
+    "calibration_concurrent_limit",
+    "structured_calibration_for_plain",
+    "structured_fallback_strategy",
+}
+
+
+def test_check_config_appends_one_effective_values_json_line(tmp_path):
+    config_path = tmp_path / "config.jsonc"
+    config_path.write_text(json.dumps(_minimal_config(tmp_path)), encoding="utf-8")
+    missing_users = tmp_path / "isolated_users.json"
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "VTAPI_USERS_JSON": str(missing_users),
+    }
+    assert "PI_LEAD_SESSION" not in env
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "main.py"),
+            "--check-config",
+            "--config",
+            str(config_path),
+        ],
+        cwd=PROJECT_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert "Configuration OK" in lines
+
+    payload = json.loads(lines[-1])
+    assert set(payload) == {"llm_effective"}
+    effective = payload["llm_effective"]
+    assert set(effective) == EFFECTIVE_WHITELIST_KEYS
+    for field, entry in effective.items():
+        assert set(entry) == {"value", "source"}, field
+        assert entry["source"] in {"config", "default", "derived"}, field
+    # Still side-effect free with the extra print.
+    assert not (tmp_path / "cache").exists()
+    assert not (tmp_path / "workspace").exists()
+
+
 def test_start_server_passes_one_validated_config_to_app(monkeypatch, tmp_path):
     from video_transcript_api.api import server
 

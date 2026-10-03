@@ -270,7 +270,11 @@
 
         // ------------------------------------------------------
         // 分段处理配置
-        // 【触发条件】文本长度 >= enable_threshold 且 use_speaker_recognition=false
+        // 【触发条件】文本长度 > enable_threshold（严格大于；等于阈值不分段，
+        //   见 llm/processors/plain_text_processor.py 的 len(text) > config.enable_threshold）
+        //   且 use_speaker_recognition=false，即无说话人标识的 plain 源
+        // 【plain 源兜底路由】分段之后怎么校对，看 llm.structured_calibration_for_plain：
+        //   true 走结构化逐段校对，false 回退旧的整段纯文本路径。
         // 【适用场景】
         //   - CapsWriter 转录的长文本（use_speaker_recognition=false）
         //   - YouTube 直接获取的长字幕

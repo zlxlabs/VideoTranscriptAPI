@@ -50,6 +50,13 @@ loopback 与 Unix 域套接字放行，真实外网测试仍应放在 `tests/man
 UTC 窗口、去重、缺字段与失败判据；`tests/integration/test_task_observability.py`
 贯通 notes worker、cache/audit SQLite 与 CLI 子进程，验证归档修复、缓存清理和迁移。
 
+配置生效值回归：`tests/unit/test_check_config_effective_values.py` 以真实 subprocess
+跑 `main.py --check-config`，断言末行 JSON 含且仅含 9 个白名单 LLM 键、各带
+`value` + `source`，且 `value` 与 `LLMConfig.from_dict` 逐字段相等、凭据 sentinel
+不泄漏；`tests/unit/test_runtime_lifecycle.py` 邻侧只锁 stdout 形态与无副作用。
+显式 `null` / `False`、缺失键、`fallback_to_original=False` 与空串
+`fallback_strategy` 的来源标签各自独立覆盖。
+
 ## 手动测试门禁
 
 `tests/manual/` 默认自动发现时被排除；即使显式传入某个手动测试文件，未设置
