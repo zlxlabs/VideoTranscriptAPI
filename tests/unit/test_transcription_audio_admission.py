@@ -403,6 +403,16 @@ def test_no_audio_track_is_rejected_at_regular_entry(
     downloader = RouteDownloader(wired["tm"], sample, route, url)
     monkeypatch.setattr(transcription, "create_downloader", lambda u: downloader)
 
+    # 清理边界按文件所有权而不是「有 local_file 就删」：另一个并发任务的在途
+    # 文件与既有缓存产物都必须原样存活。
+    foreign_dir = wired["tm"].create_task_dir("other-task")
+    foreign_file = Path(foreign_dir) / "in-flight.mp4"
+    foreign_file.write_bytes(b"other task bytes")
+    wired["tm"].mark_active("other-task")
+    cache_artifact = tmp_path / "cache" / "already-transcribed.mp3"
+    cache_artifact.parent.mkdir(parents=True, exist_ok=True)
+    cache_artifact.write_bytes(b"existing cache bytes")
+
     task_id = f"t-noaudio-{route}-{int(use_speaker_recognition)}"
     result = transcription.process_transcription(
         task_id=task_id,
@@ -428,6 +438,9 @@ def test_no_audio_track_is_rejected_at_regular_entry(
     assert not wired["tm"].is_active(task_id)
     for path in downloader.written_paths:
         assert not path.exists()
+    assert foreign_file.exists(), "cleanup must not touch another task's files"
+    assert wired["tm"].is_active("other-task")
+    assert cache_artifact.exists(), "cleanup must not touch existing cache artifacts"
 
 
 @requires_ffmpeg
