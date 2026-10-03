@@ -334,8 +334,14 @@ class DialogSegmenter:
 
     def _split_by_sentences(self, text: str) -> List[str]:
         """按句子分割文本"""
-        # 按中文句号、问号、感叹号分割，保留标点
-        sentences = re.split(r'([。！？])', text)
+        # 句末字符集（issue #156）：本仓另有 3 套互不一致的定义（capswriter
+        # `。！？!?` / paragraphize `。！？….!?` / TextSegmenter 另一套），本批不统一，
+        # 见 issue #146。这里补 ASCII `!?` 的理由是纯英文长对话只靠 `。！？` 完全
+        # 切不开，会整条退化到 #142 的空白兜底；ASCII `.` 仍然不在集合内（英文句点
+        # 密度高，纳入会把块切得过碎），中文结果逐项不变。
+        # 重组时靠「偶数位是正文、奇数位是标点」配对，连续标点（如 `?!`）的第二
+        # 个会自成一「句」，这与中文 `？！` 的既有行为一致（见测试锁定），不是新语义。
+        sentences = re.split(r'([。！？?!])', text)
 
         # 重组句子（将标点符号合并回前一个句子）
         result = []
