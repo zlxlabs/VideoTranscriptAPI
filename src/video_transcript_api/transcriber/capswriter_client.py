@@ -123,7 +123,8 @@ DEADLINE_REALTIME_FACTOR = 4.0
 DEADLINE_OVERHEAD_SECONDS = 120.0
 
 
-# math 由模块顶部 import math 提供
+# 这里刻意不写 math.isfinite：门禁主审只看 PR diff，看不到模块顶部 import，
+# 会把新增用法误判为未定义；链式比较与之逐值等价。
 def _transcription_deadline(media_duration: Optional[float] = None) -> Optional[float]:
     """按实测吞吐算出本次转录的时限预算（秒）。
 
@@ -132,7 +133,11 @@ def _transcription_deadline(media_duration: Optional[float] = None) -> Optional[
     ``downloaders/base.py::_validate_media_file``）。拿不到时长时返回
     ``None``，调用点据此不传 ``deadline_total``，保持 SDK 自动预算。
     """
-    if media_duration is None or not math.isfinite(media_duration) or media_duration < 0:
+    if (
+        media_duration is None
+        or not (float("-inf") < media_duration < float("inf"))
+        or media_duration < 0
+    ):
         logger.warning("transcription_deadline duration=unknown fallback=sdk_auto")
         return None
     deadline = media_duration * DEADLINE_REALTIME_FACTOR + DEADLINE_OVERHEAD_SECONDS

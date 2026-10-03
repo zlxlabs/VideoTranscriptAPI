@@ -2216,7 +2216,9 @@ def process_transcription(
 
                 # 下载文件
                 local_file = None
+                actual_downloader = None
                 if has_separate_download_url:
+                    actual_downloader = download_downloader
                     actual_download_url = download_url or url
                     logger.info(f"使用 GenericDownloader 下载文件: {actual_download_url}")
                     # 从 URL 提取文件名
@@ -2254,6 +2256,7 @@ def process_transcription(
                         filename = download_info_obj.filename if download_info_obj else None
 
                         original_downloader = download_downloader or create_downloader(url)
+                        actual_downloader = original_downloader
                         if hasattr(original_downloader, "download_video_with_priority") and (
                             "youtube.com" in url or "youtu.be" in url
                         ):
@@ -2288,11 +2291,9 @@ def process_transcription(
                         error_msg, title=video_title, author_name=author,
                     )
 
-                # 时长载体的唯一读取点（issue #155）：下载阶段
-                # _validate_media_file 探测时已把 format.duration 记在下载器实例的
-                # last_media_duration 上，这里只读取、不新增探测。上面三个分支用的都是
-                # download_downloader 这一个实例；探测没跑到时为 None。
-                media_duration = getattr(download_downloader, "last_media_duration", None)
+                # 时长载体的唯一读取点（issue #155）：从实际下载的实例读取探测时长。
+                # 已有本地文件分支未走下载（original_downloader 未赋），读出 None 回退 SDK 自动预算。
+                media_duration = getattr(actual_downloader, "last_media_duration", None)
 
                 try:
                     # 开始转录
