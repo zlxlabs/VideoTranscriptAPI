@@ -203,6 +203,14 @@ class OrderedNotificationRouter:
         pass
 
 
+# #159 音轨准入：本文件的下载器 fixture 用假路径当媒体（"C:/tmp/test.mp3"），
+# 真实准入会因文件不存在判 media_probe_failed，测的就变成准入了。因此这里
+# **显式**换成隔离的探测替身（不是关掉检查，也不放行无音轨）：准入的真值
+# 边界由 tests/unit/test_transcription_audio_admission.py 用真实媒体 +
+# 真实 ffprobe 覆盖；本文件关心的是下载/转录/通知的顺序与接线。
+AUDIO_ADMISSION_CALLS = []
+
+
 @pytest.fixture
 def patch_runtime(monkeypatch):
     queue = DummyQueue()
@@ -212,6 +220,10 @@ def patch_runtime(monkeypatch):
     monkeypatch.setattr(transcription, "Transcriber", DummyTranscriber)
     monkeypatch.setattr(transcription, "FunASRSpeakerClient", DummyFunASR)
     monkeypatch.setattr(transcription, "get_base_url", lambda: "http://test")
+    AUDIO_ADMISSION_CALLS.clear()
+    monkeypatch.setattr(
+        transcription, "_ensure_audio_track", AUDIO_ADMISSION_CALLS.append
+    )
     return queue
 
 
@@ -478,6 +490,44 @@ def test_flow_subtitle_preferred(monkeypatch, patch_runtime):
     saved = cache_manager.saved[0]
     assert saved["transcript_type"] == "capswriter"
     assert saved["transcript_data"] == "subtitle text"
+
+
+def test_audio_admission_runs_once_before_asr(monkeypatch, patch_runtime):
+    """常规下载分支的接线回归：准入恰好跑一次，且发生在引擎调用之前。
+
+    准入的「放行/拒绝」真值由 tests/unit/test_transcription_audio_admission.py
+    锁死（真实媒体 + 真实 ffprobe）；这里只锁接线位置与次数，防止将来有人把
+    准入挪到引擎之后，或在一个任务里跑两次。
+    """
+    cache_manager = DummyCacheManager(cache_data=None)
+    monkeypatch.setattr(transcription, "cache_manager", cache_manager)
+    downloader = YoutubeDownloader(
+        subtitle=None, download_url="http://example.com/audio.mp3", filename="audio.mp3",
+    )
+    monkeypatch.setattr(transcription, "create_downloader", lambda url: downloader)
+
+    order = []
+    monkeypatch.setattr(
+        transcription, "_ensure_audio_track",
+        lambda path: order.append(("admission", path)),
+    )
+    monkeypatch.setattr(
+        transcription, "Transcriber",
+        lambda: type("T", (), {
+            "__init__": lambda self, *a, **k: None,
+            "transcribe": lambda self, path, base=None, **k: order.append(("asr", path)) or {"transcript": "t"},
+        })(),
+    )
+
+    result = transcription.process_transcription(
+        task_id="task_admission_order",
+        url="https://www.youtube.com/watch?v=abc123",
+        use_speaker_recognition=False,
+    )
+
+    assert result["status"] == "success"
+    assert [step for step, _ in order] == ["admission", "asr"]
+    assert order[0][1] == "C:/tmp/test.mp3"
 
 
 def test_flow_download_capswriter(monkeypatch, patch_runtime):

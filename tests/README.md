@@ -88,6 +88,17 @@ VTAPI_TESTS_MANUAL=1 uv run pytest tests/manual/test_wechat_real.py --collect-on
 uv run pytest tests/manual -m "not network" --collect-only
 ```
 
+## 需要 ffmpeg / ffprobe 的测试
+
+`tests/unit/test_transcription_audio_admission.py`（#159 音轨准入）在真实共享
+准入边界上验证行为：样本由 `ffmpeg -f lavfi` **现场生成**（video-only /
+audio-only / mixed），准入探测跑仓库自己启动的**真实 ffprobe**，并把真实 argv、
+真实 JSON、样本大小与探测耗时写成验证产物到 `data/temp/audio_admission_probe/`。
+因此该文件依赖 PATH 上的 `ffmpeg` 与 `ffprobe`；缺任一者时相关用例会带明确原因
+skip（`-rs` 可见），此时**不能**认为准入已被验证。其它用 mock 媒体路径的测试
+（下载/缓存/临时文件等）显式注入隔离的探测替身 `_ensure_audio_track`，不复用这批
+真实 CLI 断言。
+
 ## 并发压测
 
 `scripts/perf/concurrent_load.py` 会提交本地 API 任务，并使用真实抖音和 B 站

@@ -147,6 +147,12 @@ def wired(tmp_path, monkeypatch):
     tm = TempFileManager(str(tmp_path / "temp"), retention_hours=24)
     downloader = FakeDownloader(tm)
 
+    # #159: FakeDownloader writes placeholder bytes, not real media, so real
+    # audio-track admission would (correctly) reject the file. This file owns
+    # the temp-file lifecycle only, so declare an isolated probe stand-in
+    # explicitly; the admission truth boundary lives in
+    # tests/unit/test_transcription_audio_admission.py.
+    monkeypatch.setattr(tx, "_ensure_audio_track", lambda path: None)
     monkeypatch.setattr(tx, "get_temp_manager", lambda: tm)
     monkeypatch.setattr(tx, "create_downloader", lambda url: downloader)
     monkeypatch.setattr(tx, "Transcriber", FakeTranscriber)

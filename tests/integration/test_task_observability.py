@@ -181,6 +181,14 @@ def _run_transcription(cache_manager, task_id, *, use_speaker_recognition=False,
         patch.object(transcription, "get_inflight_registry", lambda: MagicMock()),
         patch.object(transcription, "get_temp_manager", lambda: MagicMock()),
         patch.object(transcription, "get_notification_router", lambda: MagicMock()),
+        # #159: this file drives the observability snapshot, and its downloader
+        # double hands over a placeholder path ("fixture.mp4") instead of a real
+        # media file. Real admission would (correctly) reject that as
+        # media_probe_failed, so swap in an explicitly isolated probe stand-in
+        # here. The admission truth boundary (reject / allow / probe failure) is
+        # locked in tests/unit/test_transcription_audio_admission.py against real
+        # media and the real ffprobe.
+        patch.object(transcription, "_ensure_audio_track", lambda path: None),
     ):
         return transcription.process_transcription(
             task_id,

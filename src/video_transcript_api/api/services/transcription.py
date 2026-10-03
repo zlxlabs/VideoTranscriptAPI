@@ -26,6 +26,7 @@ from ..context import (
 )
 from ...downloaders import create_downloader
 from ...errors import (
+    InvalidMediaError,
     NonVideoContentError,
     ResolverAuthError,
     InvalidURLError,
@@ -42,6 +43,119 @@ _TERMINAL_RESOLVER_ERRORS = (
     ResolverResolveError,
     ResolverResponseError,
 )
+
+
+_AUDIO_ADMISSION_PROBE_TIMEOUT = 30
+_AUDIO_ADMISSION_NO_TRACK_MSG = (
+    "该媒体不含音轨，无法转录（no_audio_track）"
+)
+_AUDIO_ADMISSION_PROBE_FAILED_MSG = (
+    "无法校验媒体音轨（检查失败 media_probe_failed），请重试或换源"
+)
+
+
+def _bounded_stderr_head(stderr_bytes: Optional[bytes]) -> str:
+    """把 ffprobe stderr 压成一行可 grep 的 ASCII 摘要（不整段回显原始输出）。"""
+    if not stderr_bytes:
+        return ""
+    first_line = stderr_bytes.decode("utf-8", errors="replace").strip().splitlines()
+    head = first_line[0] if first_line else ""
+    return head.encode("ascii", "backslashreplace").decode("ascii")[:160]
+
+
+def _ensure_audio_track(local_file: str) -> None:
+    """音轨准入：确认媒体至少含一条 audio 流，否则终止任务（issue #159）。
+
+    这是本仓 ASR 入口唯一的共享准入判定，无状态、不依赖 downloader 实例
+    （「已有本地文件」分支下 ``actual_downloader`` 是 None）。只有成功确认
+    ≥1 条 audio 流才返回；其余情形一律抛既有 ``InvalidMediaError``，且两种
+    失败归因严格区分：
+
+    * ``no_audio_track``：成功探测到 0 条 audio 流 —— 输入本身的问题；
+    * ``media_probe_failed``：文件不存在 / ffprobe 缺失 / 超时 / 非零退出 /
+      JSON 非法 / 缺 streams / streams 畸形 —— **检查**本身失败，不得谎称
+      输入无音轨（否则用户会去换源，而真正需要重试的是服务侧检查）。
+
+    strict 准入：探测失败不放行。放行等于把无法证伪的输入当合格输入，正是
+    本 issue 要消灭的那类假成功。
+    """
+    import json
+    import subprocess
+
+    if not local_file or not os.path.isfile(local_file):
+        logger.error(
+            f"[audio_track_admission] reject file={local_file} "
+            f"reason=media_probe_failed detail=file_not_found"
+        )
+        raise InvalidMediaError(_AUDIO_ADMISSION_PROBE_FAILED_MSG)
+
+    cmd = [
+        "ffprobe",
+        "-v", "quiet",
+        "-print_format", "json",
+        "-show_format", "-show_streams",
+        local_file,
+    ]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, timeout=_AUDIO_ADMISSION_PROBE_TIMEOUT
+        )
+    except FileNotFoundError:
+        logger.error(
+            f"[audio_track_admission] reject file={local_file} "
+            f"reason=media_probe_failed detail=ffprobe_binary_missing"
+        )
+        raise InvalidMediaError(_AUDIO_ADMISSION_PROBE_FAILED_MSG)
+    except subprocess.TimeoutExpired:
+        logger.error(
+            f"[audio_track_admission] reject file={local_file} "
+            f"reason=media_probe_failed "
+            f"detail=ffprobe_timeout timeout_s={_AUDIO_ADMISSION_PROBE_TIMEOUT}"
+        )
+        raise InvalidMediaError(_AUDIO_ADMISSION_PROBE_FAILED_MSG)
+
+    if result.returncode != 0:
+        logger.error(
+            f"[audio_track_admission] reject file={local_file} "
+            f"reason=media_probe_failed returncode={result.returncode} "
+            f"stderr_head={_bounded_stderr_head(result.stderr)!r}"
+        )
+        raise InvalidMediaError(_AUDIO_ADMISSION_PROBE_FAILED_MSG)
+
+    try:
+        probe_data = json.loads(result.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as parse_exc:
+        logger.error(
+            f"[audio_track_admission] reject file={local_file} "
+            f"reason=media_probe_failed detail=ffprobe_stdout_not_json "
+            f"error={type(parse_exc).__name__}"
+        )
+        raise InvalidMediaError(_AUDIO_ADMISSION_PROBE_FAILED_MSG)
+
+    # 结构校验：root 必须是对象、streams 必须是列表、stream 必须是对象。
+    # 畸形结构不是「无音轨」，是检查失败。
+    streams = probe_data.get("streams") if isinstance(probe_data, dict) else None
+    if not isinstance(probe_data, dict) or not isinstance(streams, list) or any(
+        not isinstance(stream, dict) for stream in streams
+    ):
+        logger.error(
+            f"[audio_track_admission] reject file={local_file} "
+            f"reason=media_probe_failed detail=ffprobe_streams_malformed"
+        )
+        raise InvalidMediaError(_AUDIO_ADMISSION_PROBE_FAILED_MSG)
+
+    audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+    if not audio_streams:
+        logger.error(
+            f"[audio_track_admission] reject file={local_file} "
+            f"reason=no_audio_track streams={len(streams)}"
+        )
+        raise InvalidMediaError(_AUDIO_ADMISSION_NO_TRACK_MSG)
+
+    logger.info(
+        f"[audio_track_admission] admit file={local_file} "
+        f"audio_streams={len(audio_streams)} streams={len(streams)}"
+    )
 
 
 def _rebuild_text_from_segments(segments) -> str:
@@ -1907,6 +2021,16 @@ def process_transcription(
                             f"[youtube-api] Audio downloaded, need transcription: {local_file}"
                         )
 
+                        # 音轨准入（#159）：youtube-api 分支直调 ASR 前的共享准入点。
+                        # 准入失败则整条 ASR 链路零调用，任务按具名原因失败。
+                        try:
+                            _ensure_audio_track(local_file)
+                        except InvalidMediaError as admission_exc:
+                            return _fail_task_and_notify(
+                                str(admission_exc),
+                                title=video_title, author_name=author,
+                            )
+
                         task_notifier.notify_task_status(
                             display_url,
                             f"正在转录音视频 - {engine_info}",
@@ -2289,6 +2413,16 @@ def process_transcription(
                     logger.error(error_msg)
                     return _fail_task_and_notify(
                         error_msg, title=video_title, author_name=author,
+                    )
+
+                # 音轨准入（#159）：local_file 就绪、即将进 ASR 的共享准入点，
+                # 覆盖 generic / 预下载 / base / YouTube 选择路径的全部落点。
+                # 失败文案区分「不含音轨」与「检查失败」，两分支都不继续 ASR。
+                try:
+                    _ensure_audio_track(local_file)
+                except InvalidMediaError as admission_exc:
+                    return _fail_task_and_notify(
+                        str(admission_exc), title=video_title, author_name=author,
                     )
 
                 # 时长载体的唯一读取点（issue #155）：从实际下载的实例读取探测时长。
