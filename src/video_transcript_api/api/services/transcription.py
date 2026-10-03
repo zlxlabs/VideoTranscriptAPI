@@ -2288,6 +2288,12 @@ def process_transcription(
                         error_msg, title=video_title, author_name=author,
                     )
 
+                # 时长载体的唯一读取点（issue #155）：下载阶段
+                # _validate_media_file 探测时已把 format.duration 记在下载器实例的
+                # last_media_duration 上，这里只读取、不新增探测。上面三个分支用的都是
+                # download_downloader 这一个实例；探测没跑到时为 None。
+                media_duration = getattr(download_downloader, "last_media_duration", None)
+
                 try:
                     # 开始转录
                     logger.info(f"开始转录音视频: {local_file}")
@@ -2347,8 +2353,14 @@ def process_transcription(
                                 temp_output_base = datetime.datetime.now().strftime(
                                     "%y%m%d-%H%M%S"
                                 )
+                                # 没探测到时长时保持既有的两参调用形状：缺省与 None
+                                # 对下游完全等价（都按下限预算执行）。
+                                extra = (
+                                    {} if media_duration is None
+                                    else {"media_duration": media_duration}
+                                )
                                 transcription_result = transcriber.transcribe(
-                                    local_file, temp_output_base
+                                    local_file, temp_output_base, **extra
                                 )
                                 transcript = transcription_result.get("transcript", "")
 

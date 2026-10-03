@@ -87,13 +87,16 @@ class Transcriber:
             logger.exception(f"设置CapsWriter客户端配置失败: {str(e)}")
             raise
 
-    def transcribe(self, audio_path, output_base=None):
+    def transcribe(self, audio_path, output_base=None, media_duration=None):
         """
         转录音频文件
 
         参数:
             audio_path: 音频文件路径
             output_base: 输出文件基础名，如果为None则使用音频文件名
+            media_duration: 媒体时长（秒），由下载阶段的探测给出，仅用于算
+                转录时限预算；为 None 时用下限预算（见 capswriter_client
+                ._transcription_deadline）
 
         返回:
             dict: 包含转录结果的字典
@@ -118,8 +121,12 @@ class Transcriber:
 
             # 使用CapsWriter客户端进行转录（客户端内部已有重试逻辑）
             logger.info(f"调用CapsWriter客户端转录文件: {audio_path}")
+            # 未探测到时长时不往下游多传一个必然为 None 的实参：缺省与 None 对下游
+            # 完全等价（都按下限预算执行，见 capswriter_client
+            # ._transcription_deadline），而既有单参调用形状有外部 mock 锁着。
+            extra = {} if media_duration is None else {"media_duration": media_duration}
             success, generated_files = self.capswriter_client.transcribe_file(
-                audio_path
+                audio_path, **extra
             )
 
             if success and generated_files:

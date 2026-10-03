@@ -41,6 +41,11 @@ class BaseDownloader(ABC):
         # 实例级缓存（任务生命周期内有效）
         self._metadata_cache: Dict[str, VideoMetadata] = {}
         self._download_info_cache: Dict[str, DownloadInfo] = {}
+        # 最近一次 _validate_media_file 探测到的媒体时长（秒）。该函数本来就把
+        # format.duration 解析出来了，但此前只用于打日志与「时长 < 1 秒」的拒绝
+        # 判断；issue #155 要用同一个值算转录时限预算，为它再跑一次 ffprobe 属于
+        # 重复探测，故就地记在实例上（探测失败或没跑到时为 None）。
+        self.last_media_duration: Optional[float] = None
 
     @abstractmethod
     def can_handle(self, url):
@@ -348,8 +353,11 @@ class BaseDownloader(ABC):
             file_path: 文件路径
 
         返回:
-            bool: 是否为有效的音视频文件
+            bool: 是否为有效的音视频文件。探测成功时写入 ``self.last_media_duration``。
         """
+        # 每次探测前先清零：上一次文件的时长绝不能泄漏到这一次（重试会连续
+        # 调用本函数，中间隔着一次完整的下载）。
+        self.last_media_duration = None
         try:
             import subprocess
 
@@ -414,6 +422,10 @@ class BaseDownloader(ABC):
                 if duration:
                     duration_float = float(duration)
                     logger.info(f"媒体文件时长: {duration_float:.2f}秒")
+                    # 时长已在此处解析出来，顺手留给转录时限预算用（issue #155），不新增探测
+                    # 调用。赋值点在拒绝判定之前：被判过短的文件会带着这个值返回
+                    # False，调用方此时根本不会走到转录。
+                    self.last_media_duration = duration_float
 
                     # 检查时长是否合理（至少1秒）
                     if duration_float < 1.0:

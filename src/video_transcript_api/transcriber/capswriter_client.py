@@ -106,6 +106,46 @@ COND_LENGTH_MISMATCH = "tokens_timestamps_length_mismatch"
 COND_JOIN_MISMATCH = "tokens_join_text_accu_mismatch"
 
 
+# ============================================================================
+# 转录时限预算（issue #155）
+# ============================================================================
+#
+# SDK 的自动预算是 max(120, duration + 60)，隐含「服务至少 1 倍实时」的假设。
+# 生产实测（2026-10-03，同一个失败案例、已抽成纯音轨的 93.08898 秒文件）：远端
+# 转录成功但耗时 306.3 秒，即服务是 3.29 倍实时；自动预算只给出 153 秒，只有实际
+# 需要的一半，必然超时。因此本仓显式传 deadline_total 关掉自动预算。三个数字来自
+# 这一次实测，本轮固定不变，刻意不做成配置项（多来源漂移，见 issue #147）：系数 =
+# 实测 3.29 倍向上取整并留约 20% 余量；下限覆盖短音频的固定开销（实测 30 秒音频约
+# 需 99 秒加上连接初始化开销，120 秒会顶死）；常数项覆盖下载完成到提交前的杂项开销。
+
+DEADLINE_MIN_SECONDS = 300.0
+DEADLINE_REALTIME_FACTOR = 4.0
+DEADLINE_OVERHEAD_SECONDS = 120.0
+
+
+def _transcription_deadline(media_duration: Optional[float] = None) -> float:
+    """按实测吞吐算出本次转录的时限预算（秒）。
+
+    这是全仓唯一计算 ``deadline_total`` 的地方，其余调用点只做透传。
+    ``media_duration`` 取自下载阶段 ffprobe 已解析出的时长（见
+    ``downloaders/base.py::_validate_media_file``）。拿不到时按「未知即最坏」
+    用下限：绝不因此退回 SDK 的自动预算——那正是本函数要消灭的行为。
+    """
+    if media_duration is None or not math.isfinite(media_duration) or media_duration < 0:
+        logger.warning(
+            f"transcription_deadline duration=unknown value={DEADLINE_MIN_SECONDS}"
+        )
+        return DEADLINE_MIN_SECONDS
+    deadline = max(
+        DEADLINE_MIN_SECONDS,
+        media_duration * DEADLINE_REALTIME_FACTOR + DEADLINE_OVERHEAD_SECONDS,
+    )
+    logger.info(
+        f"transcription_deadline duration={media_duration:.2f} value={deadline:.1f}"
+    )
+    return deadline
+
+
 class CapsWriterContractError(ValueError):
     """上游 CapsWriter 文件任务契约不成立。
 
@@ -737,12 +777,16 @@ class CapsWriterClient:
 
         return [path for path, _ in products]
 
-    def transcribe_file(self, file_path: str) -> Tuple[bool, List[Path]]:
+    def transcribe_file(
+        self, file_path: str, media_duration: Optional[float] = None
+    ) -> Tuple[bool, List[Path]]:
         """
         同步转录文件（官方 SDK 负责传输，按错误契约重试）
 
         参数:
             file_path: 要转录的文件路径
+            media_duration: 媒体时长（秒），由下载阶段的探测给出；为 None 时
+                按下限预算执行（见 :func:`_transcription_deadline`）
 
         返回:
             tuple: (bool成功状态, list生成的文件)
@@ -760,12 +804,14 @@ class CapsWriterClient:
                     f"开始转录文件: {file_path} (尝试 {attempts}/{self.max_retries})"
                 )
                 server_url = f"ws://{Config.server_addr}:{Config.server_port}"
+                deadline_total = _transcription_deadline(media_duration)
                 transcript = transcribe_file_sync(
                     file_path,
                     server_url,
                     encoding="flac",
                     seg_duration=Config.file_seg_duration,
                     seg_overlap=Config.file_seg_overlap,
+                    deadline_total=deadline_total,
                 )
 
                 result = dict(transcript.raw)
