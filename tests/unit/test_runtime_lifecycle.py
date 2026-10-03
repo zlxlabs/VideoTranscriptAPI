@@ -77,7 +77,6 @@ def test_import_server_does_not_require_config(tmp_path):
 def test_check_config_is_side_effect_free(tmp_path):
     config_path = tmp_path / "config.jsonc"
     config_path.write_text(json.dumps(_minimal_config(tmp_path)), encoding="utf-8")
-    before_threads = threading.active_count()
     result = subprocess.run(
         [sys.executable, "main.py", "--check-config", "--config", str(config_path)],
         cwd=PROJECT_ROOT,
@@ -89,7 +88,6 @@ def test_check_config_is_side_effect_free(tmp_path):
     assert "Configuration OK" in result.stdout
     assert not (tmp_path / "cache").exists()
     assert not (tmp_path / "workspace").exists()
-    assert threading.active_count() == before_threads
 
 
 def test_start_server_passes_one_validated_config_to_app(monkeypatch, tmp_path):
@@ -2802,18 +2800,22 @@ def test_check_config_rejects_invalid_permission_in_users_json(tmp_path):
 def test_check_config_users_json_validation_is_side_effect_free(tmp_path):
     """Same invariant as test_check_config_is_side_effect_free, specifically
     for the added users.json read: validating a valid users.json during
-    --check-config must not create a database, spawn a thread, or touch
-    cache/workspace directories."""
+    --check-config must not create a database, nor touch cache/workspace
+    directories.
+
+    It deliberately says nothing about threads: --check-config runs in a
+    subprocess, so this (pytest parent) process's thread count carries no
+    information about what the child did, and asserting on it only made the
+    test flaky (#153)."""
     valid = json.dumps(
         {"users": {"token-a": {"user_id": "a", "name": "A", "permissions": []}}}
     )
-    before_threads = threading.active_count()
     with _isolated_users_json(tmp_path, valid) as users_json_path:
         result = _run_check_config(tmp_path, users_json_path=users_json_path)
     assert result.returncode == 0, result.stderr
+    assert "Configuration OK" in result.stdout
     assert not (tmp_path / "cache").exists()
     assert not (tmp_path / "workspace").exists()
-    assert threading.active_count() == before_threads
 
 
 # --- _LazyResource must not shadow the proxied object's own methods --------
