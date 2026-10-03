@@ -1,11 +1,7 @@
 """转录时限预算按实测吞吐计算（issue #155）。
 
-SDK 的自动预算是 ``max(120, duration + 60)``，隐含「服务至少 1 倍实时」的假设；
-生产实测服务是 3.29 倍实时（93.09 秒音频耗时 306.3 秒），自动预算只给 153 秒，
-必然超时。本仓在拿得到时长时显式传 ``deadline_total = duration*4 + 120``；
-拿不到时长时不传该键，保持 SDK 自动预算。
-
-每个用例都断言真正传给 ``transcribe_file_sync`` 的实参，不直接测辅助函数。
+SDK 自动预算是 ``max(120, duration + 60)``，本仓在拿得到时长时显式传 ``deadline_total = duration*4 + 120``；
+拿不到时长时不传该键回退 SDK 自动预算。每个用例都断言真正传给 ``transcribe_file_sync`` 的实参。
 """
 
 import inspect
@@ -14,6 +10,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 from capswriter_asr import Transcript
 from loguru import logger as loguru_logger
 
@@ -60,17 +57,13 @@ def _make_client(output_dir: Path) -> CapsWriterClient:
 
 
 def _patch_sdk():
+    raw = {"task_id": "task-1", "time_start": 10.0, "time_complete": 12.5, "text_accu": "hello!"}
     transcript = Transcript(
         text="hallo",
         tokens=list("hello!"),
         timestamps=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
         duration=1.5,
-        raw={
-            "task_id": "task-1",
-            "time_start": 10.0,
-            "time_complete": 12.5,
-            "text_accu": "hello!",
-        },
+        raw=raw,
     )
     return patch(
         "video_transcript_api.transcriber.capswriter_client.transcribe_file_sync",
@@ -94,11 +87,7 @@ def audio(tmp_path):
 
 
 def test_probed_duration_reaches_sdk_deadline_kwarg(tmp_path, sdk_config, audio):
-    """真实链路：探测到的 600 秒 → SDK 收到 600*4+120=2520。
-
-    本卡最关键的一条——证明时长不是「碰巧」取到的，而是真的从
-    ``_validate_media_file`` 的探测结果一路串到了 SDK 调用点。
-    """
+    """真实链路：探测到的 600 秒 → SDK 收到 600*4+120=2520。"""
     out = tmp_path / "out"
     out.mkdir()
     downloader = _ProbeDownloader()
@@ -144,14 +133,8 @@ def test_duration_flows_through_transcriber_layer(tmp_path, sdk_config, audio):
 @pytest.mark.parametrize(
     "duration,expected",
     [
-        (0.0, 120.0),
-        (1.0, 124.0),
-        (30.0, 240.0),
-        (45.0, 300.0),
-        (45.1, 300.4),
-        (93.08898, 492.35592),  # 生产实测那个 93 秒案例
-        (600.0, 2520.0),
-        (3600.0, 14520.0),      # 10 分钟：系数 4 若退回 1，这里就是 3720 的差距
+        (0.0, 120.0), (1.0, 124.0), (30.0, 240.0), (45.0, 300.0),
+        (45.1, 300.4), (93.08898, 492.35592), (600.0, 2520.0), (3600.0, 14520.0),
     ],
 )
 def test_known_duration_formula(tmp_path, sdk_config, audio, duration, expected):
@@ -173,8 +156,7 @@ def test_unknown_duration_omits_deadline_kwarg(
     with _patch_sdk() as sdk_call:
         _make_client(tmp_path).transcribe_file(str(audio), media_duration=media_duration)
 
-    keywords = sdk_call.call_args.kwargs
-    assert "deadline_total" not in keywords
+    assert "deadline_total" not in sdk_call.call_args.kwargs
 
 
 def test_unknown_duration_emits_greppable_log(tmp_path, sdk_config, audio):
@@ -189,10 +171,8 @@ def test_unknown_duration_emits_greppable_log(tmp_path, sdk_config, audio):
 
     hits = [line for line in records if "transcription_deadline" in line]
     assert hits, f"缺少 transcription_deadline 日志，实际记录: {records}"
-    assert any(
-        "duration=unknown" in line and "fallback=sdk_auto" in line for line in hits
-    ), hits
-    assert not any("value=300" in line for line in hits), hits
+    assert any("duration=unknown" in l and "fallback=sdk_auto" in l for l in hits)
+    assert not any("value=300" in l for l in hits)
 
 
 def test_probe_state_is_not_fabricated_or_leaked(tmp_path):
@@ -215,6 +195,20 @@ def test_probe_state_is_not_fabricated_or_leaked(tmp_path):
     # 第三个文件探测成功但 format 里没有 duration，同样保持 None
     with patch("subprocess.run", side_effect=lambda *a, **k: _probe_ok(None)):
         assert downloader._validate_media_file(str(third)) is True
+    assert downloader.last_media_duration is None
+
+
+def test_unprobed_download_clears_stale_duration(audio):
+    """同一个实例先走探测拿到 duration，再走未探测的下载路径，必须被清零为 None。"""
+    downloader = _ProbeDownloader()
+    with patch("subprocess.run", return_value=_probe_ok(600)):
+        assert downloader._validate_media_file(str(audio)) is True
+    assert downloader.last_media_duration == 600.0
+
+    mock_resp = MagicMock(status_code=403)
+    mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(response=mock_resp)
+    with patch("requests.get", return_value=mock_resp):
+        assert downloader.download_file("https://example.com/v", "v.mp4") is None
     assert downloader.last_media_duration is None
 
 

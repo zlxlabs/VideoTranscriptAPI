@@ -123,6 +123,7 @@ DEADLINE_REALTIME_FACTOR = 4.0
 DEADLINE_OVERHEAD_SECONDS = 120.0
 
 
+# math 由模块顶部 import math 提供
 def _transcription_deadline(media_duration: Optional[float] = None) -> Optional[float]:
     """按实测吞吐算出本次转录的时限预算（秒）。
 

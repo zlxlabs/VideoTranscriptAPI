@@ -221,6 +221,8 @@ class BaseDownloader(ABC):
         Returns:
             str: Local file path on success, None on failure
         """
+        # 每次下载开始时先清零：声明当前任务尚未拿到有效时长信息（issue #155）
+        self.last_media_duration = None
         last_error = None
 
         for attempt in range(1, max_retries + 1):
