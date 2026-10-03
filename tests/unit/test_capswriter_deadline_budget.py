@@ -184,6 +184,11 @@ def test_transcription_reads_duration_from_actual_downloader(monkeypatch):
             captured.append(k.get("media_duration"))
             return {"transcript": "ok", "success": True}
 
+    # #159: this test owns the duration budget only and its downloader double
+    # returns a placeholder path ("/tmp/fake.mp4"). Declare an isolated probe
+    # stand-in so real admission does not hijack the assertion; the admission
+    # truth boundary lives in tests/unit/test_transcription_audio_admission.py.
+    monkeypatch.setattr(tx, "_ensure_audio_track", lambda path: None)
     monkeypatch.setattr(tx, "get_temp_manager", lambda: MagicMock())
     monkeypatch.setattr(tx, "create_downloader", lambda u: fake_dl)
     monkeypatch.setattr(tx, "Transcriber", _FakeTranscriber)
