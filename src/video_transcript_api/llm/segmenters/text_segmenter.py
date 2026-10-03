@@ -66,8 +66,8 @@ class TextSegmenter:
         # 注意：``segment_size`` 故意不做取值校验。它只参与
         # ``if len(current_segment) >= self.segment_size`` 的落盘判断，
         # 不参与任何循环的终止条件，因此 <= 0 只会让落盘更频繁，不会挂死。
-        # 它不校验的前提是「类型同样由配置层校验卡兜住」，那张卡尚未落地
-        # （#146/#147 的 P2 部分）；在此之前 ``segment_size`` 写成非数字仍会在
+        # 它不校验的前提是「类型同样由配置层校验卡兜住」，那张卡已排期但**尚未落地**
+        # （#147 的 P2 部分，2026-10-03 锁定为延后）；在此之前 ``segment_size`` 写成非数字仍会在
         # 落盘判断处抛 TypeError，那属于配置层的责任边界，不是本模块承诺过的行为。
         self.max_segment_size = max_segment_size
 
