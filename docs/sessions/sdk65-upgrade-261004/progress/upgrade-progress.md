@@ -24,4 +24,6 @@
       运行时 `client.py` SHA-256 = `eccec1a69b81c4a2360d33e15f0ddb8adffb85725dc93d41f8e3150a0863f6c7`。
 - [x] M6 绿且快：同一测试连续 5 次 EXIT=0（新 pin 下 `elapsed=0.116s`，final 于 `+0.082s` 送达）；
       capswriter 邻侧 7 个文件整跑 `66 passed, 3 skipped`；`make test` EXIT=0（3m10s，0 FAILED/ERROR）。
-- [ ] M7 提交、push、draft PR（Refs #166，禁止 ready/merge）。
+- [x] M7 提交、push、draft PR #168（Refs #166，未 ready/merge）：
+      https://github.com/zlxlabs/VideoTranscriptAPI/pull/168 ，
+      CI run 37195552335（`quality` SUCCESS、`primary` 因 draft SKIPPED）。
