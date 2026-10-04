@@ -84,5 +84,5 @@ exclude_also = [
 ]
 
 [tool.uv.sources]
-capswriter-asr = { git = "https://github.com/zlxlabs/CapsWriter-ASR-Server.git", rev = "858c6b975d8bdd2be0e47ac5a36483119894c529", subdirectory = "sdk" }
+capswriter-asr = { git = "https://github.com/zlxlabs/CapsWriter-ASR-Server.git", rev = "b0818dc7859d1d8100e42f5c70cb75d34da422f7", subdirectory = "sdk" }
 llm-compat = { git = "https://github.com/zlxlabs/llm-compat.git", tag = "v0.10.0" }

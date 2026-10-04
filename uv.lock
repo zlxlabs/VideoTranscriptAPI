@@ -193,7 +193,7 @@ wheels = [
 [[package]]
 name = "capswriter-asr"
 version = "0.1.0"
-source = { git = "https://github.com/zlxlabs/CapsWriter-ASR-Server.git?subdirectory=sdk&rev=858c6b975d8bdd2be0e47ac5a36483119894c529#858c6b975d8bdd2be0e47ac5a36483119894c529" }
+source = { git = "https://github.com/zlxlabs/CapsWriter-ASR-Server.git?subdirectory=sdk&rev=b0818dc7859d1d8100e42f5c70cb75d34da422f7#b0818dc7859d1d8100e42f5c70cb75d34da422f7" }
 dependencies = [
     { name = "httpx" },
     { name = "numpy" },
@@ -4508,7 +4508,7 @@ dev = [
 requires-dist = [
     { name = "aiohttp", marker = "extra == 'perf'", specifier = "==3.9.5" },
     { name = "beautifulsoup4", specifier = ">=4.9.0" },
-    { name = "capswriter-asr", git = "https://github.com/zlxlabs/CapsWriter-ASR-Server.git?subdirectory=sdk&rev=858c6b975d8bdd2be0e47ac5a36483119894c529" },
+    { name = "capswriter-asr", git = "https://github.com/zlxlabs/CapsWriter-ASR-Server.git?subdirectory=sdk&rev=b0818dc7859d1d8100e42f5c70cb75d34da422f7" },
     { name = "commentjson", specifier = ">=0.9.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "ffmpeg-python", specifier = ">=0.2.0" },

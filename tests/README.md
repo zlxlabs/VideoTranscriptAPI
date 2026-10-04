@@ -57,6 +57,15 @@ UTC 窗口、去重、缺字段与失败判据；`tests/integration/test_task_ob
 显式 `null` / `False`、缺失键、`fallback_to_original=False` 与空串
 `fallback_strategy` 的来源标签各自独立覆盖。
 
+CapsWriter final 返回回归（#166）：`tests/unit/test_capswriter_sdk_transport.py`
+里的 `test_final_result_returns_and_writes_products_on_python311` 跑真实子进程 ——
+进程内起真实 `websockets.serve`（随机 loopback 端口 + 真实 `/health`），按 SDK 实际
+序列化的 UUID 回 final 并**保持连接打开**，再走本仓同步适配入口
+`CapsWriterClient.transcribe_file`。它锁的是「final 已送达就必须返回 Transcript
+与非空产物」，不是耗时数字：成功预算硬边界 10s，子进程硬截止 45s（父进程 kill）。
+该缺陷只在 CPython ≤3.11 出现（3.12 重写了 `wait_for`），因此 ≥3.12 显式 skip；
+skip 不等于守住回归，见 `docs/sessions/sdk65-upgrade-261004/design.md` I6。
+
 ## 手动测试门禁
 
 `tests/manual/` 默认自动发现时被排除；即使显式传入某个手动测试文件，未设置
