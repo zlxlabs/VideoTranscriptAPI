@@ -16,7 +16,12 @@
 - [x] M2 设计落盘：`docs/sessions/sdk65-upgrade-261004/design.md`（不变式 / TDD / 部署验收）。
 - [x] M3 旧 pin 现场红证（未写测试，先用等价探针脚本确认红法可复现）：
       final 于 `+0.123s` 送达，同步入口 `+6.028s` 才以 `code=timeout` 结束，`success=False`、零产物。
-- [ ] M4 回归测试落盘（`tests/unit/test_capswriter_sdk_transport.py`），旧 pin 红。
-- [ ] M5 pin/lock 切到 `b0818dc`，`uv sync --frozen`，测试转绿。
-- [ ] M6 连续 ≥5 次 + capswriter 邻侧整文件 + `make test` 全量。
+- [x] M4 回归测试落盘（`tests/unit/test_capswriter_sdk_transport.py`），旧 pin 红：
+      `AssertionError: sync entry did not return a transcript even though final was delivered:
+      elapsed=6.029s logs=[... code=timeout ...]`（final 于 `+0.12s` 送达，零产物）。
+      红是断言失败，不是超时 kill / import 错误。
+- [x] M5 pin/lock 切到 `b0818dc`，`uv lock` 只改 rev 两处，`uv sync --frozen` 装成，
+      运行时 `client.py` SHA-256 = `eccec1a69b81c4a2360d33e15f0ddb8adffb85725dc93d41f8e3150a0863f6c7`。
+- [x] M6 绿且快：同一测试连续 5 次 EXIT=0（新 pin 下 `elapsed=0.116s`，final 于 `+0.082s` 送达）；
+      capswriter 邻侧 7 个文件整跑 `66 passed, 3 skipped`；`make test` EXIT=0（3m10s，0 FAILED/ERROR）。
 - [ ] M7 提交、push、draft PR（Refs #166，禁止 ready/merge）。
