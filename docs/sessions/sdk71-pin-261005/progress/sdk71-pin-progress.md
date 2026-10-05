@@ -80,3 +80,18 @@
   覆盖；改为 T1a（真被拒端口，锁错误码 + 秒级）与 T1b（同 tick 拒绝，锁 #67 回归）并存，
   design.md 与盲区段同步记下这一分工。
 - **下一步唯一动作**：概率性验收（T1/T1b 连续 5 轮全绿）+ 全量 `make test`。
+
+## 里程碑 6：概率性验收 + 全量验证 + 收尾
+
+- **当前阶段**：done（待验收）
+- **本段结论**：T1/T1b 连续 5 轮全绿（每轮 ~0.75s）；卡面相关 8 个文件窄测
+  `72 passed, 3 skipped in 3.84s`；全量 `make test` exit 0（5m17s），同套件另跑一次
+  `3612 passed, 3 skipped, 5064 warnings, 1 subtests passed in 290.74s`。
+  `git diff --check` 与 `uv lock --check` 均干净；`ps` 无遗留子进程；`data/temp` 已清空。
+- **关键决策与已否决方案**：为拿到 pytest 计数行先试 `PYTEST_ADDOPTS="-v" make test`——否决：
+  该环境变量会被 `test_manual_test_gate.py` 的嵌套 pytest 子进程继承，把嵌套 verbosity 从 -2
+  抬到 -1，导致它解析不到「file: N」行而红（`ValueError: invalid literal for int()`）。
+  这是本次唯一一次「新红」，且已证伪与本卡改动无关：单独跑该文件 `34 passed in 42.17s`。
+  改为保留一次原样 `make test` 作权威证据（exit 0），再补一次同套件 `uv run --frozen pytest tests`
+  取计数行；Makefile 多加的一个 `-q` 会让 pytest 落到 verbosity -2 而不打印计数行，这是仓现状。
+- **下一步唯一动作**：验收方复核 `git show --stat` 与三条用例的红/绿原文。
