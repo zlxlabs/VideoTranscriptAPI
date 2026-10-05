@@ -103,7 +103,7 @@ exit=0
 
 ## C1 默认预算路径连接拒绝
 
-调用行：`transcribe_file_sync(str(path), "ws://127.0.0.1:9")`，未传 `deadline_total`；探针文件为 [verify_sdk71_sdk_probe.py](../../../../scripts/verify_sdk71_sdk_probe.py)。
+调用行：`transcribe_file_sync(str(path), "ws://127.0.0.1:9")`，未传 `deadline_total`；探针文件为 [verify_sdk71_sdk_probe.py](../../../scripts/verify_sdk71_sdk_probe.py)。
 
 ```text
 $ ssh n305 'docker exec -i video-transcript-api /app/.venv/bin/python - c1 /tmp/sdk71-c2-90s.wav' < scripts/verify_sdk71_sdk_probe.py
@@ -113,3 +113,22 @@ exit=0
 ```
 
 此结果只确认升级后连接拒绝路径未坏。PR #172 既有红绿证据表明旧 pin 上的真实拒绝也会秒级返回；不得将 C1 归因成升级修复。
+
+## C2 真实 90 秒级音频默认路径
+
+调用行：`transcript = transcribe_file_sync(str(path), url)`，其中 `url="ws://192.168.31.222:6016"`；调用未传 `deadline_total`。音频是上节真实视频号直播录制的 91.557 秒 PCM 切片，SHA256 为 `36161dd2abc19f565036e23603630214230d772ae59f02000840e62a2f3cfd02`，该字节哈希在容器内复核相同。
+
+```text
+$ ssh n305 'docker exec -i video-transcript-api /app/.venv/bin/python - c2 /tmp/sdk71-c2-90s.wav' < scripts/verify_sdk71_sdk_probe.py
+CALL transcript = transcribe_file_sync(path, 'ws://192.168.31.222:6016'); deadline_total omitted
+RESULT code=done transcript_nonempty=True transcript_chars=395 elapsed_seconds=2.013 sdk_task_uuid=039f1190-a64d-4ebb-b461-cd312e7366a7
+exit=0
+
+$ ssh n305 'docker ps --filter name=video-transcript-api --format "{{.Status}} {{.Image}}"; docker exec video-transcript-api sh -lc "find / -name client.py -path \\"*capswriter_asr*\\" -not -path \\"*/git-v1/*\\" | head -1 | xargs sha256sum"; curl -s -o /dev/null -w "%{http_code}\\n" http://127.0.0.1:8200/livez'
+Up 4 minutes (healthy) ghcr.io/zj1123581321/video-transcript-api
+0490b5f877917e55f995e5ea9a81da226b47cda52e406bf361207c70550eb01b  /root/.cache/uv/archive-v0/GAEenvBIDYHdOc3T/capswriter_asr/client.py
+200
+exit=0
+```
+
+SDK 返回的 UUID 为 `039f1190-a64d-4ebb-b461-cd312e7366a7`，供 C4 服务端事件投影。此样本实际耗时 2.013 秒，远低于旧预算阈值；因此 C2 证明真实音频在新 pin 的默认路径成功、正文非空，但本次输入没有把旧预算推到超时边缘，不将它单独解释为旧 pin 会失败的对照。
