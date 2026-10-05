@@ -63,7 +63,25 @@ def _bounded_stderr_head(stderr_bytes: Optional[bytes]) -> str:
     return head.encode("ascii", "backslashreplace").decode("ascii")[:160]
 
 
-def _ensure_audio_track(local_file: str) -> None:
+def _probe_media_duration(probe_data: dict) -> Optional[float]:
+    """从**已解析的**准入探测结果里取容器时长（秒，float）。
+
+    准入探测的 argv 本来就带 ``-show_format``（issue #159 引入时即如此），
+    ``format.duration`` 早就在手边：把这份**已有**结果交出去，不新增任何
+    ffprobe / subprocess 调用。generic 下载器与 recorder:// 路径从不走
+    ``BaseDownloader._validate_media_file``，``last_media_duration`` 在那里
+    恒为 None，只读它会让这些路径永远拿不到转录时限预算。
+
+    判据复用 :func:`capswriter_client._finite_time_or_none`（负数 / 非有限 /
+    非数字一律 None）。容器没给 ``format.duration``（部分流式容器如此）时
+    诚实返回 None，由调用方回退既有来源——不填默认值、不猜。
+    """
+    format_info = probe_data.get("format")
+    raw_duration = format_info.get("duration") if isinstance(format_info, dict) else None
+    return _finite_time_or_none(raw_duration)
+
+
+def _ensure_audio_track(local_file: str) -> Optional[float]:
     """音轨准入：确认媒体至少含一条 audio 流，否则终止任务（issue #159）。
 
     这是本仓 ASR 入口唯一的共享准入判定，无状态、不依赖 downloader 实例
@@ -78,6 +96,10 @@ def _ensure_audio_track(local_file: str) -> None:
 
     strict 准入：探测失败不放行。放行等于把无法证伪的输入当合格输入，正是
     本 issue 要消灭的那类假成功。
+
+    返回：放行时一并交出本次探测到的容器时长（秒），供 issue #155 的转录时限
+    预算使用；容器未提供 ``format.duration`` 时为 ``None``。拒绝路径仍走异常，
+    消息与判级一个字未改。
     """
     import json
     import subprocess
@@ -152,10 +174,14 @@ def _ensure_audio_track(local_file: str) -> None:
         )
         raise InvalidMediaError(_AUDIO_ADMISSION_NO_TRACK_MSG)
 
+    # 时长复用同一次探测的输出（argv 里本来就有 -show_format），不额外探测。
+    media_duration = _probe_media_duration(probe_data)
+
     logger.info(
         f"[audio_track_admission] admit file={local_file} "
         f"audio_streams={len(audio_streams)} streams={len(streams)}"
     )
+    return media_duration
 
 
 def _rebuild_text_from_segments(segments) -> str:
@@ -197,6 +223,10 @@ def _extract_speaker_labels(dialogs) -> list[str]:
     from ...llm.core.speaker_inferencer import SpeakerInferencer
     return SpeakerInferencer.extract_speaker_labels(dialogs)
 from ...transcriber import FunASRSpeakerClient, Transcriber
+# 时长解析的**唯一权威**判据与转录时限预算同源（capswriter_client 侧同名函数）：
+# 非有限值 / 负数 / 非数字一律 None。准入探测解析出的 format.duration 走这条判据，
+# 保证「准入认为合法的时长」与「预算公式接受的时长」不可能分叉。
+from ...transcriber.capswriter_client import _finite_time_or_none
 from ...utils.notifications import (
     WechatNotifier,
     send_long_text_wechat,
@@ -2419,15 +2449,23 @@ def process_transcription(
                 # 覆盖 generic / 预下载 / base / YouTube 选择路径的全部落点。
                 # 失败文案区分「不含音轨」与「检查失败」，两分支都不继续 ASR。
                 try:
-                    _ensure_audio_track(local_file)
+                    probed_media_duration = _ensure_audio_track(local_file)
                 except InvalidMediaError as admission_exc:
                     return _fail_task_and_notify(
                         str(admission_exc), title=video_title, author_name=author,
                     )
 
-                # 时长载体的唯一读取点（issue #155）：从实际下载的实例读取探测时长。
-                # 已有本地文件分支未走下载（original_downloader 未赋），读出 None 回退 SDK 自动预算。
-                media_duration = getattr(actual_downloader, "last_media_duration", None)
+                # 时长载体（issue #155）：优先取本次准入探测解析出的容器时长。
+                # generic / recorder:// 走自实现的 download_file，从不调用
+                # base._validate_media_file，last_media_duration 在那条路径上恒为
+                # None —— 只读它会让这些任务永远落回 SDK 自动预算（日志里那条
+                # duration=unknown fallback=sdk_auto）。探测拿不到时长（容器无
+                # format.duration）时回退既有来源，非 generic 路径行为不变。
+                media_duration = (
+                    probed_media_duration
+                    if probed_media_duration is not None
+                    else getattr(actual_downloader, "last_media_duration", None)
+                )
 
                 try:
                     # 开始转录
