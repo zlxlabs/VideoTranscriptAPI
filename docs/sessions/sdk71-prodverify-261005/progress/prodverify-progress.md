@@ -17,3 +17,9 @@
 - 本段结论：在干净 detached worktree `sdk71-build-a21d9729-261005`、HEAD `a21d9729b15dac3df2cc0e595dea5426a2d1718f` 执行 `BUILDX_NO_DEFAULT_ATTESTATIONS=1 ./docker/push_to_ghcr.sh`，退出码 0。GHCR 远端 tag `a21d9729b15d` 实测 digest 为 `sha256:e1d6339d9dc3e8c391d1b5f61560a86f43dd02cacaaa90251694cb3ba283486d`；镜像 `GIT_SHA=a21d9729b15d`。n305 部署前 `.deploy-image` 和容器镜像仍为回滚点 `ghcr.io/zj1123581321/video-transcript-api@sha256:98681b3c05a82727fe5559e526c220db68047a14d9f55151105406e8ab3fb21a`，容器 `running healthy`，SDK 哈希仍为旧值 `eccec1a69b81c4a2360d33e15f0ddb8adffb85725dc93d41f8e3150a0863f6c7`；四个配置哈希与部署前基线相同。
 - 关键决策与已否决方案：已知健康检查为 `ssh n305 'docker ps --filter name=video-transcript-api'` 加 `/livez`；已知回滚命令为 `ssh n305 '/opt/media/VideoTranscriptAPI/docker/pull_and_deploy.sh ghcr.io/zj1123581321/video-transcript-api@sha256:98681b3c05a82727fe5559e526c220db68047a14d9f55151105406e8ab3fb21a'`。不手工运行 compose，不改生产配置。
 - 下一步唯一动作：运行卡面指定的 `ssh n305 '/opt/media/VideoTranscriptAPI/docker/pull_and_deploy.sh ghcr.io/zj1123581321/video-transcript-api:a21d9729b15d'`。
+
+## 2026-10-05 18:45 CST 部署完成检查点
+- 当前阶段：implementing，生产已切到候选镜像，开始判据验证。
+- 本段结论：`ssh n305 '/opt/media/VideoTranscriptAPI/docker/pull_and_deploy.sh ghcr.io/zj1123581321/video-transcript-api:a21d9729b15d'` 退出码 0（远端状态时间 2026-10-05T10:45:02Z）。`.deploy-image`、容器 Config.Image 与 GHCR tag 均指向 digest `sha256:e1d6339d9dc3e8c391d1b5f61560a86f43dd02cacaaa90251694cb3ba283486d`；容器 `running healthy`，StartedAt=`2026-10-05T10:44:40.019437247Z`。容器 SDK `client.py` 哈希已变为目标 `0490b5f877917e55f995e5ea9a81da226b47cda52e406bf361207c70550eb01b`，镜像 Config.Image 对应 image ID 与候选 tag 的 image ID 相同；公网 `https://sum.zlxlabs.com/livez` 返回 200。部署后 config.jsonc、users.json、.env、docker-compose.yml 四个哈希与部署前逐字节一致。
+- 关键决策与已否决方案：健康、哈希和配置不变均满足，不触发回滚；后续 C1/C2 仍直接在此生产容器运行。
+- 下一步唯一动作：准备真实录制的 90 秒音频切片并执行 C1 连接拒绝判据。
