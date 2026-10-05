@@ -220,3 +220,26 @@ db_exists=True row_present=True
 status=success created_at=2026-10-05 10:58:13 completed_at=2026-10-05 10:58:13 notified_at=2026-10-05 10:58:18 attempts=2
 ```
 
+## C4 镜像内 SDK 身份与 CapsWriter 服务端四事件
+
+生产镜像内 SDK 文件 SHA256 在 C2 后核实仍为目标值：
+
+```text
+0490b5f877917e55f995e5ea9a81da226b47cda52e406bf361207c70550eb01b  /root/.cache/uv/archive-v0/GAEenvBIDYHdOc3T/capswriter_asr/client.py
+```
+
+用上述生产容器 C2 调用得到的 SDK UUID `039f1190-a64d-4ebb-b461-cd312e7366a7` 查 Mac Studio 的 `server_latest.log`。日志格式是纯文本；总计 15 行命中。依据服务端接收路径源码投影四个事件，只打印事件名、行号和白名单字段：
+
+```text
+C2_sdk_uuid=039f1190-a64d-4ebb-b461-cd312e7366a7 total_log_lines=15
+receive_start_hits=1 lines=42665
+receive_complete_hits=1 lines=42682
+final_segment_hits=1 lines=42690
+final_status_hits=1 lines=42718
+receive_duration_values=91.56
+final_segment_bytes_values=631124
+final_status_values=done
+negative_uuid=545188c6-9063-4e5a-89b0-e3c2cc071137 hit_lines=0
+```
+
+四事件分别是开始接收音频、音频文件收完、提交最终片段、服务端终态 `done`。否 UUID 是本轮新生成的随机 UUID，在同一文件和同一字面 UUID 搜索规则下 0 命中；正 UUID 15 次命中，说明投影查询有区分力。C4 的四事件日志投影和否对照均已完成。

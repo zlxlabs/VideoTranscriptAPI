@@ -47,3 +47,10 @@
 - 本段结论：真实 `recorder://` 录制经生产 API 受理并进入 `success` 终态，非空正文 791 字；`capswriter_done` 日志显示 SDK 已处理 175.4 秒，关联 SDK UUID 为 `55802551-6c9e-4aab-b701-a952a3854a8e`。同一 task 的 39 条 app.log 白名单行没有 `decode_failed` 或 `samples_total` marker，且同一搜索式先命中已知正例。API 提交 probe 的 HTTP 状态断言错导致 exit 1，随后读任务状态而没有重提；还发现终态通知 dispatcher 将成功通知提交到了异步 notifier，送达回执不可见。
 - 关键决策与已否决方案：不重提已经被接受的任务；修正一次性探针的 HTTP 200 / 应用码 202 断言但不再执行 submit。`sdk71_silent` 只让创建/内容通知路由没有目标，不能压制终态 dispatcher；将此作为实际偏差披露，不改生产代码或配置。
 - 下一步唯一动作：以 C2 SDK UUID 在 CapsWriter 服务端日志投影四个事件，并对随机 UUID 验证零命中。
+
+
+## 2026-10-05 19:11 CST C4 完成
+- 当前阶段：implementing，C1–C4 判据均已收集证据，等待最终生产状态与工作树收尾。
+- 本段结论：镜像内 `client.py` SHA256 为目标值；C2 SDK UUID 在 CapsWriter 服务端日志命中 15 行，开始接收、接收完成、最终片段、终态 `done` 四事件各命中 1 行。随机否 UUID 同一日志查询为 0 命中。
+- 关键决策与已否决方案：四事件只取服务端白名单字段；不把 SDK 收到 final 代替服务端证据。C3 终态通知已提交给异步 notifier，但外部送达回执不可见，作为偏差如实保留。
+- 下一步唯一动作：复查生产容器、配置哈希和临时进程，删除本卡产生的临时音频副本并写最终报告。
