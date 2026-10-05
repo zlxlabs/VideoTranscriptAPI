@@ -2053,8 +2053,11 @@ def process_transcription(
 
                         # 音轨准入（#159）：youtube-api 分支直调 ASR 前的共享准入点。
                         # 准入失败则整条 ASR 链路零调用，任务按具名原因失败。
+                        # 准入那一次 ffprobe 已经解析出容器时长，一并接住供 #155 的
+                        # 转录时限预算用——不新增探测（该分支无 actual_downloader，
+                        # 没有 last_media_duration 可回退，拿不到就是 None）。
                         try:
-                            _ensure_audio_track(local_file)
+                            probed_media_duration = _ensure_audio_track(local_file)
                         except InvalidMediaError as admission_exc:
                             return _fail_task_and_notify(
                                 str(admission_exc),
@@ -2102,8 +2105,15 @@ def process_transcription(
                                 temp_output_base = datetime.datetime.now().strftime(
                                     "%y%m%d-%H%M%S"
                                 )
+                                # 没探测到时长时保持既有的两参调用形状：缺省与 None
+                                # 对下游完全等价（都不传 deadline_total），且既有
+                                # 调用形状有外部 mock 锁着，不得无条件传 None。
+                                extra = (
+                                    {} if probed_media_duration is None
+                                    else {"media_duration": probed_media_duration}
+                                )
                                 transcription_result = transcriber.transcribe(
-                                    local_file, temp_output_base
+                                    local_file, temp_output_base, **extra
                                 )
                                 transcript = transcription_result.get("transcript", "")
 
