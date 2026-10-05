@@ -123,6 +123,123 @@ DEADLINE_REALTIME_FACTOR = 4.0
 DEADLINE_OVERHEAD_SECONDS = 120.0
 
 
+# ============================================================================
+# 转录可观测性：上游 task_id / 进度 / 失败原因
+# ============================================================================
+#
+# 生产事故（2026-10-05，一个 4.9 小时直播录制判 failed）暴露三处缺口：
+#   1. 本仓既不记录上游 SDK 的 task_id，事后无法与服务端日志对账；
+#   2. 不传 on_progress，4.9 小时里日志对该任务零输出，卡在哪个子阶段无从判断；
+#   3. 失败详情（code= 与原因）只写日志即丢弃，通知里只剩一个本地路径。
+#
+# 下面几个字面量是日志与测试共用的检索锚点，勿随意改名。
+
+CAPSWRITER_TASK_ID_LOG_KEY = "capswriter_task_id="
+CAPSWRITER_PROGRESS_LOG_KEY = "capswriter_progress="
+CAPSWRITER_START_LOG_KEY = "capswriter_start"
+CAPSWRITER_DONE_LOG_KEY = "capswriter_done"
+CAPSWRITER_FAILED_LOG_KEY = "capswriter_failed"
+
+# 进度节流间隔（秒）。长任务里进度事件可达每秒多条，不节流会冲垮日志文件
+# （app.log 现网单文件已 7.2 MB，按大小滚动）。
+PROGRESS_LOG_INTERVAL_SECONDS = 30.0
+
+# 上游尚未回任何 result 帧时的取值。这不是自造 id：SDK 在客户端内部生成 UUID，
+# 调用方拿到首个部分帧之前无从得知；编一个只会污染对账，诚实的 unknown 才说明
+# 「本次尝试一个部分结果都没回来」。
+TASK_ID_UNKNOWN = "unknown"
+
+
+def _processed_seconds(payload: Dict[str, Any]) -> Optional[float]:
+    """从 SDK 的部分 result 帧取「已处理音频秒数」。
+
+    优先用帧自带的 ``duration``（服务端对已识别部分给出的时长口径），否则退到
+    最后一个 timestamp。两档都拿不到就返回 None——调用方据此不写秒数，绝不编。
+    """
+    duration = _finite_time_or_none(payload.get("duration"))
+    if duration is not None:
+        return duration
+    timestamps = payload.get("timestamps") or []
+    return _finite_time_or_none(timestamps[-1]) if timestamps else None
+
+
+class _TranscriptionObserver:
+    """单次转录尝试的观测收集器：上游 task_id + 节流后的进度。
+
+    只观测，不参与任何控制流：转录的成功/失败判定仍在 :meth:`transcribe_file`
+    的重试循环里。``log`` 传进来的是 client 的既有日志通道，便于既有测试用替身
+    捕获（不新增配置项、不引入新的日志 sink）。
+    """
+
+    def __init__(self, log, media_duration: Optional[float] = None):
+        self._log = log
+        self.media_duration = _finite_time_or_none(media_duration)
+        self.task_id: Optional[str] = None
+        self.events = 0
+        self.processed_seconds: Optional[float] = None
+        self.started_at = time.monotonic()
+        self.last_logged_at = self.started_at
+
+    @property
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started_at
+
+    def note_task_id(self, payload: Dict[str, Any]) -> None:
+        """记录上游给的 task_id；已有真实值时不被覆盖。"""
+        if self.task_id is None:
+            self.task_id = payload.get("task_id")
+
+    def on_progress(self, payload: Dict[str, Any]) -> None:
+        """SDK 传给 ``transcribe_file_sync`` 的进度回调。
+
+        SDK 只在 ``type == "result"`` 且非 final 的帧上调它；final 帧直接返回。
+        """
+        try:
+            self._record(payload)
+        except Exception as exc:
+            # 回调是第三方边界（SDK 传入），观测代码抛异常不得打断转录主流程。
+            logger.warning(f"capswriter_progress 回调异常(已忽略): {exc!r}")
+
+    def terminal_line(self, head: str) -> str:
+        """终态日志行：成功走 ``capswriter_done``，失败走 ``capswriter_failed``。"""
+        return " ".join(
+            [head, f"{CAPSWRITER_TASK_ID_LOG_KEY}{self.task_id or TASK_ID_UNKNOWN}"]
+            + self._progress_fields(self.processed_seconds)
+            + [f"events={self.events}", f"elapsed={self.elapsed:.1f}s"]
+        )
+
+    def _record(self, payload: Dict[str, Any]) -> None:
+        self.events += 1
+        self.note_task_id(payload)
+        processed = _processed_seconds(payload)
+        if processed is not None:
+            self.processed_seconds = processed
+        now = time.monotonic()
+        # 首个事件必打（它同时是这条尝试里第一行带真实 task_id 的日志），之后按间隔。
+        if self.events > 1 and now - self.last_logged_at < PROGRESS_LOG_INTERVAL_SECONDS:
+            return
+        self.last_logged_at = now
+        self._log(
+            " ".join(
+                [
+                    f"{CAPSWRITER_PROGRESS_LOG_KEY}{self.events}",
+                    f"{CAPSWRITER_TASK_ID_LOG_KEY}{self.task_id or TASK_ID_UNKNOWN}",
+                ]
+                + self._progress_fields(processed)
+                + [f"elapsed={self.elapsed:.1f}s"]
+            )
+        )
+
+    def _progress_fields(self, processed: Optional[float]) -> List[str]:
+        """已处理时长的日志字段；分母缺失就不写百分比（算不出不编）。"""
+        if processed is None:
+            return []
+        fields = [f"processed={processed:.1f}s"]
+        if self.media_duration:
+            fields.append(f"percent={processed / self.media_duration * 100:.1f}%")
+        return fields
+
+
 # 这里刻意不写 math.isfinite：门禁主审只看 PR diff，看不到模块顶部 import，
 # 会把新增用法误判为未定义；链式比较与之逐值等价。
 def _transcription_deadline(media_duration: Optional[float] = None) -> Optional[float]:
@@ -631,6 +748,10 @@ class CapsWriterClient:
         self.retry_delay = retry_delay or project_config.get("capswriter", {}).get(
             "retry_delay", 5
         )
+        # 最近一次失败尝试的原因细节（``code=..., 原因: ...``），由 transcribe_file
+        # 在返回 False 时写入、每次调用开头清空。转录层读它拼进 RuntimeError 消息，
+        # 让失败原因经既有异常通路进通知（不另开错误传递通道）。
+        self.last_failure_detail = ""
 
         # 确保临时目录存在
         os.makedirs(self.output_dir, exist_ok=True)
@@ -798,7 +919,14 @@ class CapsWriterClient:
         last_error = None
         last_error_code = None
         should_retry = True
+        # 失败细节（code= 与原因）经这条属性交给转录层，由它拼进 RuntimeError
+        # 消息 → 通知。返回 True 时必须为空，否则上一轮的细节会串到下一次调用上。
+        self.last_failure_detail = ""
 
+        # 观测器每次尝试新建（重试会让上游换新 UUID，task_id 与进度计数都按
+        # 尝试归属）。循环外先建一个，覆盖 max_retries<=0 时一次都没跑的退化配置，
+        # 免得循环后的终态日志引用未绑定名。
+        observer = _TranscriptionObserver(self.log, media_duration)
         while attempts < self.max_retries and should_retry:
             attempts += 1
             try:
@@ -808,10 +936,18 @@ class CapsWriterClient:
                 server_url = f"ws://{Config.server_addr}:{Config.server_port}"
                 # 全仓唯一计算点：拿不到时长时返回 None，下面据此不传该键。
                 deadline_total = _transcription_deadline(media_duration)
+                observer = _TranscriptionObserver(self.log, media_duration)
+                self.log(
+                    f"{CAPSWRITER_START_LOG_KEY} attempt={attempts}/{self.max_retries} "
+                    f"media={file_path} duration={media_duration} "
+                    f"deadline_total={deadline_total}"
+                )
                 sdk_kwargs = {
                     "encoding": "flac",
                     "seg_duration": Config.file_seg_duration,
                     "seg_overlap": Config.file_seg_overlap,
+                    # 进度观测：SDK 只在非 final 的 result 帧上调它，final 直接返回。
+                    "on_progress": observer.on_progress,
                 }
                 if deadline_total is not None:
                     sdk_kwargs["deadline_total"] = deadline_total
@@ -822,6 +958,7 @@ class CapsWriterClient:
                 )
 
                 result = dict(transcript.raw)
+                observer.note_task_id(result)
                 result.update(
                     {
                         "tokens": transcript.tokens,
@@ -833,6 +970,7 @@ class CapsWriterClient:
 
                 if generated_files:
                     self.log(f"转录完成，生成文件: {[str(f) for f in generated_files]}")
+                    self.log(observer.terminal_line(CAPSWRITER_DONE_LOG_KEY))
                     return True, generated_files
                 last_error = "未生成任何文件或转录失败"
                 should_retry = False
@@ -853,11 +991,15 @@ class CapsWriterClient:
                 self.log(f"等待 {self.retry_delay} 秒后重试...")
                 time.sleep(self.retry_delay)
 
-        error_msg = f"转录文件失败: {file_path}"
+        detail_parts = []
         if last_error_code is not None:
-            error_msg += f", code={last_error_code}"
-        error_msg += f", 原因: {last_error}"
+            detail_parts.append(f"code={last_error_code}")
+        detail_parts.append(f"原因: {last_error}")
+        detail = ", ".join(detail_parts)
+        error_msg = f"转录文件失败: {file_path}, {detail}"
+        self.log(observer.terminal_line(CAPSWRITER_FAILED_LOG_KEY), "error")
         self.log(error_msg, "error")
+        self.last_failure_detail = detail
         return False, []
 
 
