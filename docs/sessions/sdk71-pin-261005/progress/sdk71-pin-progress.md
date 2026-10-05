@@ -16,3 +16,13 @@
   无机器可查基线。按既有实测估：旧 pin 红验 1 轮（T1 需真挂满 120s 自动预算，≈2.5 分钟）、
   窄测 3 轮（≈3 分钟）、`make test` 全量 2 轮（按 #166 卡实测单轮 10-15 分钟估）。
   合计 > 30 分钟 → 分段跑 + 分段 commit 是硬要求。
+## 里程碑 1：pin 升到 492fe19 + uv.lock 重锁
+
+- **当前阶段**：implementing
+- **本段结论**：`pyproject.toml:87` 与 `uv.lock` 两处 rev 同步到 `492fe191...`，`uv lock`
+  只重写了 capswriter-asr 的 `source` 与 `requires-dist` 两行，无其它包版本/来源变动。
+  运行时 `client.py` 哈希 = `0490b5f877917e55f995e5ea9a81da226b47cda52e406bf361207c70550eb01b`，
+  与主脑预取的期望值一致；仓内已无 `b0818dc` 残留。
+- **关键决策与已否决方案**：只改 `[tool.uv.sources]` 一行后跑 `uv lock`（不手改 lock 文本，
+  不带 `--upgrade-package`）——否决议其它无关依赖一起升级。
+- **下一步唯一动作**：写 T1 连接被拒秒级失败用例。
