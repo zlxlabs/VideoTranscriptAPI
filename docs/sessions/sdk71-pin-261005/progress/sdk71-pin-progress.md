@@ -40,3 +40,16 @@
   `/health` 拿到空请求（首轮就踩到，`request_line` 为空串）。监听套接字改为
   `accept()` 之后、回包之前就关闭，消除「回包后、转码完成前」的竞争窗口。
 - **下一步唯一动作**：写 T2 自动预算公式用例。
+
+## 里程碑 3：T2 自动预算 = 时长 × 4 + 120
+
+- **当前阶段**：implementing
+- **本段结论**：`test_sdk_auto_budget_is_duration_times_four_plus_120` 与
+  `test_sdk_auto_budget_grows_with_duration_and_matches_repo_budget` 追加到
+  `test_capswriter_deadline_budget.py`，24 passed。断言是行为性质（`_auto_budget(0)==120`、
+  `≥ 时长×3.5`、`_auto_budget(93.1)==93.1*4+120`、随时长单调），不是抄实现。
+- **关键决策与已否决方案**：取符号一律走 `getattr(sdk_client, "_auto_budget", None)` +
+  `assert ... is not None` + `assert callable`——否决直接 `from ... import _auto_budget`
+  （旧 pin 下红在 ImportError，红验无效）。顺带修正文件头 docstring 里「SDK 自动预算是
+  max(120, duration+60)」这句已失效的描述（只改说明，未动任何既有断言）。
+- **下一步唯一动作**：写 T3 超时消息可定位用例。

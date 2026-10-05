@@ -1,7 +1,10 @@
 """转录时限预算按实测吞吐计算（issue #155）。
 
-SDK 自动预算是 ``max(120, duration + 60)``，本仓在拿得到时长时显式传 ``deadline_total = duration*4 + 120``；
-拿不到时长时不传该键回退 SDK 自动预算。每个用例都断言真正传给 ``transcribe_file_sync`` 的实参。
+拿得到时长时本仓显式传 ``deadline_total = duration*4 + 120``；拿不到时长时不传该键，
+回退 SDK 自动预算。SDK 的自动预算自 pin ``492fe19``（上游 PR #71）起是
+``_auto_budget(duration) = duration*4 + 120``，语义是 watchdog（挂死检测）而非识别时限
+SLA，由 ``test_sdk_auto_budget_*`` 单独锁住。每个用例都断言真正传给
+``transcribe_file_sync`` 的实参。
 """
 
 import inspect
@@ -12,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 from capswriter_asr import Transcript
+from capswriter_asr import client as sdk_client
 from loguru import logger as loguru_logger
 
 from video_transcript_api.downloaders.base import BaseDownloader
@@ -207,3 +211,40 @@ def test_base_download_file_does_not_add_probe_calls():
     assert src(BaseDownloader.download_file).count("_validate_media_file") == 1
     assert src(BaseDownloader._validate_media_file).count('"ffprobe"') == 1
     assert _ProbeDownloader().last_media_duration is None
+
+def _sdk_auto_budget():
+    """取上游自动预算函数；旧 pin 没有它，必须红在 AssertionError 而不是 ImportError。"""
+    auto_budget = getattr(sdk_client, "_auto_budget", None)
+    assert auto_budget is not None, (
+        "capswriter_asr.client has no _auto_budget: the SDK is still on a pin "
+        "whose auto budget is max(120, duration + 60) (issue #69)"
+    )
+    assert callable(auto_budget), f"_auto_budget is not callable: {auto_budget!r}"
+    return auto_budget
+
+
+def test_sdk_auto_budget_is_duration_times_four_plus_120():
+    """上游自动预算 = 时长 × 4 + 120：watchdog，不是识别时限 SLA（issue #69）。"""
+    auto_budget = _sdk_auto_budget()
+
+    # 旧公式 max(120, …) 的下限语义由 +120 覆盖，无需双分支。
+    assert auto_budget(0) == pytest.approx(120.0)
+    assert auto_budget(0) >= 120.0
+
+    # 93.09 秒样本实测远端 306.3 秒（3.29× 实时）；旧公式只给 153 秒，会在识别
+    # 仍在跑时误杀，所以预算必须站得住 3.5 倍实时。
+    assert auto_budget(93.1) >= 93.1 * 3.5
+    assert auto_budget(93.1) == pytest.approx(93.1 * 4 + 120)
+    assert auto_budget(600.0) >= 600.0 * 3.5
+    assert auto_budget(600.0) == pytest.approx(600.0 * 4 + 120)
+
+
+def test_sdk_auto_budget_grows_with_duration_and_matches_repo_budget():
+    """预算随素材长度线性放大（watchdog 语义），且与本仓显式预算逐字相等。"""
+    auto_budget = _sdk_auto_budget()
+
+    assert auto_budget(600.0) > auto_budget(93.1) > auto_budget(0)
+    # 显式路径没有被上游改动的部分：两者在拿得到时长时必须给同一个秒数，
+    # 这正是本卡保留显式 deadline_total 的前提。
+    for duration in (0.0, 93.08898, 600.0, 3600.0):
+        assert auto_budget(duration) == pytest.approx(_transcription_deadline(duration))
