@@ -26,3 +26,17 @@
 - **关键决策与已否决方案**：只改 `[tool.uv.sources]` 一行后跑 `uv lock`（不手改 lock 文本，
   不带 `--upgrade-package`）——否决议其它无关依赖一起升级。
 - **下一步唯一动作**：写 T1 连接被拒秒级失败用例。
+
+## 里程碑 2：T1 连接被拒秒级失败
+
+- **当前阶段**：implementing
+- **本段结论**：`test_connection_refused_fails_fast_with_connection_lost` 落在
+  `tests/unit/test_capswriter_sdk_transport.py`，真实子进程 + 真实裸 socket `/health` + 真 ffmpeg +
+  真 `transcribe_file_sync`。新 pin 实测 payload：`code="connection_lost"`、`elapsed=0.188s`、
+  消息「无法连接服务端 WebSocket: [Errno 111] Connect call failed」——错误码取自 WebSocket
+  连接阶段而非健康检查阶段，这正是上游 #67 的触发形态。
+- **关键决策与已否决方案**：端口自查（`port_is_closed`）放在 SDK 调用**之后**——放在之前时，
+  探测用的 `create_connection` 会占住 listen backlog，被健康检查线程 accept 掉，
+  `/health` 拿到空请求（首轮就踩到，`request_line` 为空串）。监听套接字改为
+  `accept()` 之后、回包之前就关闭，消除「回包后、转码完成前」的竞争窗口。
+- **下一步唯一动作**：写 T2 自动预算公式用例。
