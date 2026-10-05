@@ -1,5 +1,7 @@
 # SDK 492fe19 生产验证原始证据
 
+> **脚本已从仓内移除（2026-10-05，pi-lead）**：gate 主审 finding `reliability-api-probe-notification-side-effect` 指出，提交任务的探针脚本无法保证通知静默，运行它必然产生生产通知副作用。这类「唯一作用就是在生产上制造真实副作用」的一次性脚本留在仓里是 footgun，已删除 `scripts/verify_sdk71_api_task.py`；其内容与当次运行记录保留在本分支历史提交 `f1f8116` 及上文原始输出中。仓内只保留不产生生产副作用的 SDK 探针。
+
 > **脱敏声明（2026-10-05，pi-lead）**：本仓对外可见，pre-push public-scan 会拒绝内网地址。
 > 下列原始输出中的 ASR 服务端与 live-recorder 内网地址已替换为 `<capswriter-host>` / `<live-recorder-host>` 占位符，其余内容逐字未改。真实端点只存在于不入库的 `config/config.jsonc` 与 `.env`。
 
@@ -123,7 +125,8 @@ exit=0
 调用行：`transcript = transcribe_file_sync(str(path), url)`，其中 `url="ws://<capswriter-host>:6016"`（ASR 服务端地址取自 `config/config.jsonc`，该文件不入库；此处脱敏，运行时真实值见生产配置）；调用未传 `deadline_total`。音频是上节真实视频号直播录制的 91.557 秒 PCM 切片，SHA256 为 `36161dd2abc19f565036e23603630214230d772ae59f02000840e62a2f3cfd02`，该字节哈希在容器内复核相同。
 
 ```text
-$ ssh n305 'docker exec -i video-transcript-api /app/.venv/bin/python - c2 /tmp/sdk71-c2-90s.wav' < scripts/verify_sdk71_sdk_probe.py
+$ ASR_WS_URL=<取自 config/config.jsonc 的 asr 服务端 ws 地址，前置脱敏故此处不写内网值>
+$ ssh n305 "docker exec -i video-transcript-api /app/.venv/bin/python - c2 /tmp/sdk71-c2-90s.wav $ASR_WS_URL" < scripts/verify_sdk71_sdk_probe.py
 CALL transcript = transcribe_file_sync(path, 'ws://<capswriter-host>:6016'); deadline_total omitted  # 内网地址已脱敏
 RESULT code=done transcript_nonempty=True transcript_chars=395 elapsed_seconds=2.013 sdk_task_uuid=039f1190-a64d-4ebb-b461-cd312e7366a7
 exit=0
@@ -142,7 +145,7 @@ SDK 返回的 UUID 为 `039f1190-a64d-4ebb-b461-cd312e7366a7`，供 C4 服务端
 来源为既有视频号直播录制 `250f1810fba9422dbdee6f1a3c236763`，全长 `196.224s`（小于 900 秒）；本镜像此前没有该录制的 API 转录任务。请求用生产 API 原生 `recorder://` URL 和录制器文件直链，不退化为容器直调；文件令牌只报告长度，不记录值。
 
 ```text
-$ ssh n305 'python3 -u - submit' < scripts/verify_sdk71_api_task.py
+$ ssh n305 'python3 -u - submit' < <探针脚本，见下方「脚本已从仓内移除」说明>
 recording_source=recorder://wechat-channels-live/orig_2060970783849858363/250f1810fba9422dbdee6f1a3c236763
 recording_duration_seconds=196.224 limit_seconds=900
 file_token_length=32
@@ -156,7 +159,7 @@ exit=1
 非零是探针断言错误：原脚本把 HTTP 202 当成受理状态，生产 API 实际返回 HTTP 200、应用码 202。按“副作用后非零先读状态”的规则，没有重新 POST，立刻以任务 ID 轮询：
 
 ```text
-$ ssh n305 'python3 -u - poll task_3be6e44a085c4317962a58b631aa9906' < scripts/verify_sdk71_api_task.py
+$ ssh n305 'python3 -u - poll task_3be6e44a085c4317962a58b631aa9906' < <同上>
 poll_count=1 http_status=200 response_code=202 status=calibrating elapsed_seconds=0.0
 poll_count=2 http_status=200 response_code=200 status=success elapsed_seconds=10.0
 terminal=success api_code=200 transcript_nonempty=True transcript_chars=791 elapsed_seconds=10.0
@@ -215,7 +218,7 @@ line=46004 time=2026-10-05 18:58:13 level=INFO source=video_transcript_api.api.s
 
 ### C3 通知旁路结果
 
-原输出里的 `notifications=suppressed...` 是错误结论。创建/内容通知选择 `sdk71_silent`，而运行时注册通道名为 `wechat,feishu`；这两处路由无 target。但终态异步 dispatcher 不沿用所选 channel，`task_terminal_notifications` 只读状态为 `success`、`attempts=2`、`notified_at=2026-10-05 10:58:18`。代码约定 `notified_at` 表示已交给异步 notifier，不代表外部送达；因此确认至少有终态通知被提交给配置的 notifier，实际投递回执不可见。未重试 API，也未尝试撤回/清理通知记录。为避免复现误判，`verify_sdk71_api_task.py` 已将受理断言改为 HTTP 200 + 应用码 202，并将通知提示改成准确说明；此修订没有再次执行 submit。
+原输出里的 `notifications=suppressed...` 是错误结论。创建/内容通知选择 `sdk71_silent`，而运行时注册通道名为 `wechat,feishu`；这两处路由无 target。但终态异步 dispatcher 不沿用所选 channel，`task_terminal_notifications` 只读状态为 `success`、`attempts=2`、`notified_at=2026-10-05 10:58:18`。代码约定 `notified_at` 表示已交给异步 notifier，不代表外部送达；因此确认至少有终态通知被提交给配置的 notifier，实际投递回执不可见。未重试 API，也未尝试撤回/清理通知记录。为避免复现误判，受理断言已改为 HTTP 200 + 应用码 202，并将通知提示改成准确说明；此修订没有再次执行 submit。
 
 只读数据库判据原始输出：
 

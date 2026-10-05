@@ -40,6 +40,14 @@ def main() -> int:
         # The ASR endpoint is passed in: it lives in config/config.jsonc, which is
         # untracked, and this repo is publicly visible (pre-push public-scan rejects
         # private IPs). The production invocation passed ws://<capswriter-host>:6016.
+        if len(sys.argv) < 4:
+            print(
+                "usage: verify_sdk71_sdk_probe.py c2 <audio> <capswriter-ws-url>\n"
+                "  the endpoint comes from config/config.jsonc (untracked); "
+                "it is an argument so this repo stays free of private addresses",
+                file=sys.stderr,
+            )
+            return 2
         url = sys.argv[3]
         print(
             f"CALL transcript = transcribe_file_sync(path, '{url}'); "
