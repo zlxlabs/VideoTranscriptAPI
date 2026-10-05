@@ -23,3 +23,9 @@
 - 本段结论：`ssh n305 '/opt/media/VideoTranscriptAPI/docker/pull_and_deploy.sh ghcr.io/zj1123581321/video-transcript-api:a21d9729b15d'` 退出码 0（远端状态时间 2026-10-05T10:45:02Z）。`.deploy-image`、容器 Config.Image 与 GHCR tag 均指向 digest `sha256:e1d6339d9dc3e8c391d1b5f61560a86f43dd02cacaaa90251694cb3ba283486d`；容器 `running healthy`，StartedAt=`2026-10-05T10:44:40.019437247Z`。容器 SDK `client.py` 哈希已变为目标 `0490b5f877917e55f995e5ea9a81da226b47cda52e406bf361207c70550eb01b`，镜像 Config.Image 对应 image ID 与候选 tag 的 image ID 相同；公网 `https://sum.zlxlabs.com/livez` 返回 200。部署后 config.jsonc、users.json、.env、docker-compose.yml 四个哈希与部署前逐字节一致。
 - 关键决策与已否决方案：健康、哈希和配置不变均满足，不触发回滚；后续 C1/C2 仍直接在此生产容器运行。
 - 下一步唯一动作：准备真实录制的 90 秒音频切片并执行 C1 连接拒绝判据。
+
+## 2026-10-05 18:47 CST C1 完成
+- 当前阶段：implementing，生产 SDK 探针进行中。
+- 本段结论：生产容器内新 SDK 对拒绝连接按默认预算路径返回 `AsrError(code=connection_lost)`，实测 0.009 秒，命令退出码 0。C2 的 91.557 秒 WAV 来自真实视频号直播录制，producer 文件与容器内副本 SHA256 相同（`36161dd2…`）；容器仍 healthy、新 SDK 哈希正确。
+- 关键决策与已否决方案：C1 仅说明升级没有破坏连接拒绝路径；仓内既有证据说明旧 pin 也会秒级绿，不将其解释为升级修复。
+- 下一步唯一动作：使用生产容器里的同一 SDK 对真实 91.557 秒音频调用默认 `transcribe_file_sync`，全程不传 `deadline_total` 并等待终态返回。
