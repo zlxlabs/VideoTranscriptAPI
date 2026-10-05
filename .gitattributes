@@ -1,0 +1,13 @@
+# 全仓行尾归一：文本一律以 LF 入库，工作区也保持 LF。
+# 不带属性时 git 默认不做行尾转换，本仓历史上因此积累了 CRLF 与 mixed 文件，
+# 造成整文件假 diff、编辑工具与测试输出不一致。
+* text=auto eol=lf
+
+# 二进制文件：显式禁止行尾转换（内容必须逐字节保持不变）。
+# 注意只列二进制本体，不要用 `BBDown/*`，那会把同目录的 BBDown_README.md
+# 也标成二进制，导致它无法被归一。
+*.png  -text
+*.jpg  -text
+BBDown/BBDown  -text
+BBDown/BBDown.exe  -text
+BBDown/BBDown_Mac  -text
