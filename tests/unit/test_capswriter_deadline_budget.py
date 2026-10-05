@@ -212,6 +212,7 @@ def test_base_download_file_does_not_add_probe_calls():
     assert src(BaseDownloader._validate_media_file).count('"ffprobe"') == 1
     assert _ProbeDownloader().last_media_duration is None
 
+
 def _sdk_auto_budget():
     """取上游自动预算函数；旧 pin 没有它，必须红在 AssertionError 而不是 ImportError。"""
     auto_budget = getattr(sdk_client, "_auto_budget", None)
