@@ -35,3 +35,9 @@
 - 本段结论：生产容器内直接调用 `transcribe_file_sync(str(path), url)` 且不传 `deadline_total`，对真实 91.557 秒直播音频返回 `code=done`、正文非空（395 字），耗时 2.013 秒、退出码 0；SDK UUID 为 `039f1190-a64d-4ebb-b461-cd312e7366a7`。容器仍 healthy、哈希仍为目标值。
 - 关键决策与已否决方案：记录实际 2.013 秒耗时；此样本证明新 SDK 默认路径能完成真实音频，但没有触及旧预算阈值，不能据此断言旧 pin 会超时。
 - 下一步唯一动作：通过生产 `/api/transcribe` 提交短直播录制的 `recorder://` 源和对应文件直链，等待任务终态并核对该 task_id 的完整白名单日志行。
+
+## 2026-10-05 18:51 CST C3 提交前检查点
+- 当前阶段：implementing，C3 生产 API 请求尚未发送。
+- 本段结论：候选真实视频号录制为 196.224 秒，录制器 DB 中有对应完成任务与文件令牌；生产容器的下载地址校验已接受录制器 LAN 地址，容器到该地址的连通性探针收到预期的假令牌 404。API 凭据只由远端进程读取、不会输出或存档。
+- 关键决策与已否决方案：C3 采用 API 原生 `recorder://` + `download_url` 形态，未退化为容器内 SDK 直调。请求加入 `notification_config.channel=sdk71_silent`，其无匹配通知通道，避免生产 webhook 被触发；唯一的真实业务副作用是创建本次转录任务。
+- 下一步唯一动作：运行 `ssh n305 'python3 -u - submit' < scripts/verify_sdk71_api_task.py` 提交一次 C3 任务并记录返回的 task_id。
