@@ -41,3 +41,9 @@
 - 本段结论：候选真实视频号录制为 196.224 秒，录制器 DB 中有对应完成任务与文件令牌；生产容器的下载地址校验已接受录制器 LAN 地址，容器到该地址的连通性探针收到预期的假令牌 404。API 凭据只由远端进程读取、不会输出或存档。
 - 关键决策与已否决方案：C3 采用 API 原生 `recorder://` + `download_url` 形态，未退化为容器内 SDK 直调。请求加入 `notification_config.channel=sdk71_silent`，其无匹配通知通道，避免生产 webhook 被触发；唯一的真实业务副作用是创建本次转录任务。
 - 下一步唯一动作：运行 `ssh n305 'python3 -u - submit' < scripts/verify_sdk71_api_task.py` 提交一次 C3 任务并记录返回的 task_id。
+
+## 2026-10-05 18:58 CST C3 完成
+- 当前阶段：implementing，C3 生产 API 任务已终态成功，C4 服务端四事件投影待完成。
+- 本段结论：真实 `recorder://` 录制经生产 API 受理并进入 `success` 终态，非空正文 791 字；`capswriter_done` 日志显示 SDK 已处理 175.4 秒，关联 SDK UUID 为 `55802551-6c9e-4aab-b701-a952a3854a8e`。同一 task 的 39 条 app.log 白名单行没有 `decode_failed` 或 `samples_total` marker，且同一搜索式先命中已知正例。API 提交 probe 的 HTTP 状态断言错导致 exit 1，随后读任务状态而没有重提；还发现终态通知 dispatcher 将成功通知提交到了异步 notifier，送达回执不可见。
+- 关键决策与已否决方案：不重提已经被接受的任务；修正一次性探针的 HTTP 200 / 应用码 202 断言但不再执行 submit。`sdk71_silent` 只让创建/内容通知路由没有目标，不能压制终态 dispatcher；将此作为实际偏差披露，不改生产代码或配置。
+- 下一步唯一动作：以 C2 SDK UUID 在 CapsWriter 服务端日志投影四个事件，并对随机 UUID 验证零命中。

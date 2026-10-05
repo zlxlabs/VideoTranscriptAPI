@@ -89,7 +89,11 @@ def submit() -> int:
     print(f"file_token_length={len(rec['token'])}", flush=True)
     print(f"payload.download_url={base}/files/<redacted-file-token>/sdk71-short-recording.mp4", flush=True)
     print(f"payload_sha256={hashlib.sha256(body).hexdigest()}", flush=True)
-    print("notifications=suppressed via channel sdk71_silent (no registered target)", flush=True)
+    print(
+        "notification_channel=sdk71_silent; content/create routes have no target, "
+        "terminal dispatcher may still use account defaults",
+        flush=True,
+    )
     req = Request(
         f"{API_BASE}/api/transcribe", data=body,
         headers={"Authorization": f"Bearer {api_token()}", "Content-Type": "application/json"},
@@ -103,7 +107,9 @@ def submit() -> int:
         f"http_status={response.status} response_code={result.get('code')} task_id={task_id}",
         flush=True,
     )
-    return 0 if response.status == 202 and result.get("code") == 202 and task_id else 1
+    # FastAPI returns HTTP 200 for an accepted submission; the application-level
+    # code is 202. Keep those two statuses distinct in the assertion.
+    return 0 if response.status == 200 and result.get("code") == 202 and task_id else 1
 
 
 def poll(task_id: str) -> int:

@@ -132,3 +132,91 @@ exit=0
 ```
 
 SDK 返回的 UUID 为 `039f1190-a64d-4ebb-b461-cd312e7366a7`，供 C4 服务端事件投影。此样本实际耗时 2.013 秒，远低于旧预算阈值；因此 C2 证明真实音频在新 pin 的默认路径成功、正文非空，但本次输入没有把旧预算推到超时边缘，不将它单独解释为旧 pin 会失败的对照。
+
+## C3 真实 recorder:// 来源经生产 API
+
+来源为既有视频号直播录制 `250f1810fba9422dbdee6f1a3c236763`，全长 `196.224s`（小于 900 秒）；本镜像此前没有该录制的 API 转录任务。请求用生产 API 原生 `recorder://` URL 和录制器文件直链，不退化为容器直调；文件令牌只报告长度，不记录值。
+
+```text
+$ ssh n305 'python3 -u - submit' < scripts/verify_sdk71_api_task.py
+recording_source=recorder://wechat-channels-live/orig_2060970783849858363/250f1810fba9422dbdee6f1a3c236763
+recording_duration_seconds=196.224 limit_seconds=900
+file_token_length=32
+payload.download_url=http://192.168.31.219:8080/files/<redacted-file-token>/sdk71-short-recording.mp4
+payload_sha256=a9853824c363149ed7f5f216f7b8e01b04643dedb85c1bfb4f555c95a2d9626f
+notifications=suppressed via channel sdk71_silent (no registered target)
+submitted_at=2026-10-05T10:57:53+00:00 http_status=200 response_code=202 task_id=task_3be6e44a085c4317962a58b631aa9906
+exit=1
+```
+
+非零是探针断言错误：原脚本把 HTTP 202 当成受理状态，生产 API 实际返回 HTTP 200、应用码 202。按“副作用后非零先读状态”的规则，没有重新 POST，立刻以任务 ID 轮询：
+
+```text
+$ ssh n305 'python3 -u - poll task_3be6e44a085c4317962a58b631aa9906' < scripts/verify_sdk71_api_task.py
+poll_count=1 http_status=200 response_code=202 status=calibrating elapsed_seconds=0.0
+poll_count=2 http_status=200 response_code=200 status=success elapsed_seconds=10.0
+terminal=success api_code=200 transcript_nonempty=True transcript_chars=791 elapsed_seconds=10.0
+exit=0
+```
+
+同一请求对应的生产 `app.log` 转录相关行白名单投影（保留时间、来源、事件类别和安全状态/计时字段；不回显 URL 令牌、查看令牌、转录正文）：
+
+```text
+task_id=task_3be6e44a085c4317962a58b631aa9906 matching_lines=39
+decode_failed_lines=0 samples_total_lines=0 combined_marker_lines=0
+known_positive_line=23806 same_pattern_hit=True
+line=45880 time=2026-10-05 18:57:53 level=INFO source=video_transcript_api.cache.cache_manager:create_task:2318 event=task_created values=none
+line=45881 time=2026-10-05 18:57:53 level=INFO source=video_transcript_api.api.routes.tasks:transcribe_video:320 event=api_queued values=none
+line=45883 time=2026-10-05 18:57:53 level=INFO source=video_transcript_api.api.routes.tasks:transcribe_video:379 event=creation_notice_route values=none
+line=45884 time=2026-10-05 18:57:53 level=INFO source=video_transcript_api.cache.cache_manager:update_task_status:2470 event=status_update values=status=processing
+line=45885 time=2026-10-05 18:57:53 level=INFO source=video_transcript_api.api.services.transcription:process_task_queue:609 event=worker_submitted values=none
+line=45887 time=2026-10-05 18:57:53 level=INFO source=video_transcript_api.api.services.transcription:process_transcription:956 event=process_started values=none
+line=45891 time=2026-10-05 18:57:53 level=INFO source=video_transcript_api.utils.perf_tracker:track:68 event=performance values=stage=url_parse time=1ms (OK)
+line=45893 time=2026-10-05 18:57:53 level=INFO source=video_transcript_api.utils.perf_tracker:track:68 event=performance values=stage=cache_check time=2ms (OK)
+line=45905 time=2026-10-05 18:57:55 level=INFO source=video_transcript_api.downloaders.generic:download_file:717 event=download_complete values=none
+line=45906 time=2026-10-05 18:57:55 level=INFO source=video_transcript_api.utils.perf_tracker:track:68 event=performance values=stage=download time=1991ms (OK)
+line=45907 time=2026-10-05 18:57:55 level=INFO source=video_transcript_api.api.services.transcription:_ensure_audio_track:155 event=audio_admission values=audio_streams=1 streams=1
+line=45908 time=2026-10-05 18:57:55 level=INFO source=video_transcript_api.api.services.transcription:process_transcription:2434 event=media_transcription_start values=none
+line=45910 time=2026-10-05 18:57:55 level=INFO source=video_transcript_api.transcriber.transcriber:transcribe:107 event=audio_transcription_start values=none
+line=45911 time=2026-10-05 18:57:55 level=INFO source=video_transcript_api.transcriber.transcriber:transcribe:123 event=sdk_invoked values=none
+line=45912 time=2026-10-05 18:57:55 level=INFO source=video_transcript_api.transcriber.capswriter_client:log:763 event=sdk_file_start values=none
+line=45914 time=2026-10-05 18:57:55 level=INFO source=video_transcript_api.transcriber.capswriter_client:log:763 event=sdk_start values=attempt=1/5,duration=None,deadline_total=None
+line=45924 time=2026-10-05 18:57:59 level=INFO event=capswriter_done sdk_task_uuid=55802551-6c9e-4aab-b701-a952a3854a8e processed=175.4s events=6 elapsed=4.6s
+line=45930 time=2026-10-05 18:58:00 level=INFO source=video_transcript_api.utils.perf_tracker:track:68 event=performance values=stage=transcription time=4625ms (OK)
+line=45931 time=2026-10-05 18:58:00 level=INFO source=video_transcript_api.cache.cache_manager:update_task_status:2470 event=status_update values=status=calibrating
+line=45932 time=2026-10-05 18:58:00 level=INFO source=video_transcript_api.api.services.transcription:process_transcription:2586 event=llm_queued values=none
+line=45933 time=2026-10-05 18:58:00 level=INFO source=video_transcript_api.api.services.llm_ops:process_llm_queue:238 event=other values=none
+line=45934 time=2026-10-05 18:58:00 level=INFO source=video_transcript_api.api.services.llm_ops:_handle_llm_task:573 event=llm_started values=none
+line=45935 time=2026-10-05 18:58:00 level=INFO source=video_transcript_api.api.services.llm_ops:_handle_llm_task:630 event=llm_coordinator values=none
+line=45937 time=2026-10-05 18:58:00 level=INFO source=video_transcript_api.utils.tempfile_manager:clean_up_task:143 event=other values=(释放 3.15 MB)
+line=45938 time=2026-10-05 18:58:00 level=INFO source=video_transcript_api.api.services.transcription:run_and_finalize:586 event=other values=none
+line=45940 time=2026-10-05 18:58:00 level=INFO source=video_transcript_api.api.services.llm_ops:_handle_llm_task:720 event=other values=none
+line=45974 time=2026-10-05 18:58:13 level=INFO source=video_transcript_api.utils.perf_tracker:track:68 event=performance values=stage=llm_processing time=12983ms (OK)
+line=45975 time=2026-10-05 18:58:13 level=INFO source=video_transcript_api.api.services.llm_ops:_handle_llm_task:753 event=llm_complete values=none
+line=45976 time=2026-10-05 18:58:13 level=INFO source=video_transcript_api.cache.cache_manager:update_task_llm_config:3263 event=llm_saved values=none
+line=45977 time=2026-10-05 18:58:13 level=INFO source=video_transcript_api.api.services.llm_ops:_save_llm_results:2016 event=llm_saved values=none
+line=45980 time=2026-10-05 18:58:13 level=INFO source=video_transcript_api.api.services.llm_ops:_save_llm_results:2196 event=calibration_saved values=none
+line=45981 time=2026-10-05 18:58:13 level=INFO source=video_transcript_api.api.services.llm_ops:_save_llm_results:2230 event=summary_short values=none
+line=45987 time=2026-10-05 18:58:13 level=INFO source=video_transcript_api.api.services.llm_ops:_save_llm_results:2380 event=chapter_skipped values=none
+line=45993 time=2026-10-05 18:58:13 level=INFO source=video_transcript_api.api.services.llm_ops:_handle_llm_task:824 event=llm_task_complete values=none
+line=45994 time=2026-10-05 18:58:13 level=INFO source=video_transcript_api.utils.perf_tracker:log_summary:153 event=perf_summary values=total: 19602ms
+line=46000 time=2026-10-05 18:58:13 level=INFO source=video_transcript_api.cache.cache_manager:update_task_status:2470 event=status_update values=status=success
+line=46001 time=2026-10-05 18:58:13 level=INFO source=video_transcript_api.api.services.terminal_status:finalize_terminal_status_and_notify:101 event=terminal_cas values=status=success
+line=46002 time=2026-10-05 18:58:13 level=INFO source=video_transcript_api.api.services.llm_ops:_handle_llm_task:869 event=task_success values=none
+line=46003 time=2026-10-05 18:58:13 level=INFO source=video_transcript_api.api.services.llm_ops:_send_notification:2605 event=other values=none
+line=46004 time=2026-10-05 18:58:13 level=INFO source=video_transcript_api.api.services.llm_ops:_send_notification:2645 event=content_notice_route values=none
+```
+
+转录器成功终态行处于同一 task 的 SDK start (`45914`) 与 transcription perf (`45930`) 之间；结果为 `capswriter_done`，UUID `55802551-6c9e-4aab-b701-a952a3854a8e`，已处理 `175.4s`，6 个进度事件，4.6 秒。generic 路径仍将媒体时长记为 `None`，本次因 SDK 自动预算完成；这是 #170 观察项，不在本卡修复。`decode_failed` / `samples_total` 判据用同一 regex 先命中已知存在的 line 23806，再对该 task 的 39 行检查，得到 0 条 marker 行。
+
+### C3 通知旁路结果
+
+原输出里的 `notifications=suppressed...` 是错误结论。创建/内容通知选择 `sdk71_silent`，而运行时注册通道名为 `wechat,feishu`；这两处路由无 target。但终态异步 dispatcher 不沿用所选 channel，`task_terminal_notifications` 只读状态为 `success`、`attempts=2`、`notified_at=2026-10-05 10:58:18`。代码约定 `notified_at` 表示已交给异步 notifier，不代表外部送达；因此确认至少有终态通知被提交给配置的 notifier，实际投递回执不可见。未重试 API，也未尝试撤回/清理通知记录。为避免复现误判，`verify_sdk71_api_task.py` 已将受理断言改为 HTTP 200 + 应用码 202，并将通知提示改成准确说明；此修订没有再次执行 submit。
+
+只读数据库判据原始输出：
+
+```text
+db_exists=True row_present=True
+status=success created_at=2026-10-05 10:58:13 completed_at=2026-10-05 10:58:13 notified_at=2026-10-05 10:58:18 attempts=2
+```
+
