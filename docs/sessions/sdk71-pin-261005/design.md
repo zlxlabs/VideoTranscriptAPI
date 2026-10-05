@@ -52,6 +52,8 @@
 
 - T1/T3 只在 CPython ≤3.11 上是回归（`wait_for` 吞取消是 ≤3.11 特有）；≥3.12 上这两条用例
   恒绿。测试应显式记录解释器版本；主脑验收时若 CI 换到 ≥3.12，须在结论里写明 T1 不再守回归。
+- T1a（真被拒端口）在旧 pin 下也不红：它锁的是现场形态的结果（错误码 + 秒级），
+  真正的 #67 回归由 T1b 守。两者不可互相替代。
 - T2 锁的是「上游公式的数值性质」，不是本仓的识别时限预测能力；真实时长/实时因子分布
   仍只有 93.09 秒一个样本。
 
@@ -68,8 +70,20 @@
   - 为什么用「裸 socket /health + 关闭监听」而不是 `websockets.serve`：SDK 的 `_operation` 先
     `await _check_server(url, ...)`，再 `_transcode`，再 `connect`。若端口从一开始就关闭，
     连接异常发生在**健康检查**阶段，根本走不到 `deadline_watch` 的取消路径，锁不到 #67。
-    裸 socket 形态才能让「/health 通过 → WebSocket 连接被拒」这一组合成立，也就是上游
-    #67 的真实触发形态。
+    裸 socket 形态才能让「/health 通过 → WebSocket 连接被拒」这一组合成立。
+- **T1b `test_connection_refused_in_the_budget_reattach_tick_fails_fast`**（实施中补齐）：
+  实测发现 T1 的上述形态在旧 pin 下**也是秒级绿**——`loop.create_connection` 里的两次 executor
+  往返（getaddrinfo / connect）给事件循环足够多的批次，让 `deadline_watch` 在取消到达前就已重新
+  挂到新的一轮等待上，吞不掉任何取消（CPython 3.11.15 上连跑 5 次全为 0.13–0.15s）。
+  也就是说卡面「旧 pin 下真被拒端口会挂满 120s」这一前提在 3.11 上不成立：#67 的触发条件是
+  **连接失败与 `set_deadline()` 落在同一个 tick**。T1b 把 `websockets.connect` 换成一个
+  `__aenter__` 立即抛 `OSError(ECONNREFUSED)` 的对象（无任何 await）来复现该形态，
+  `/health` 仍走真实 TCP。实测旧 pin 下 120.203s、断言红在 `AssertionError`；
+  这与上游自己的验收路径一致（上游 `docs/sessions/261004-sdk-time-contract/design.md`
+  「验收路径」第 2 步：monkeypatch `websockets.connect` 立刻抛 `OSError("connection refused")`）。
+  T1a 与 T1b 并存：前者锁现场形态的「秒级 + connection_lost」，后者锁缺陷形态的回归。
+  T1b 不 mock SDK 的预算/超时逻辑（`deadline_watch`、`asyncio.wait_for`、消息构造全是真代码），
+  只让传输层失败不带 await。
 - **T2 `test_sdk_auto_budget_is_duration_times_four_plus_120`**：放在
   `tests/unit/test_capswriter_deadline_budget.py`（预算公式的家），取符号用
   `getattr(capswriter_asr.client, "_auto_budget", None)` + `assert ... is not None`，

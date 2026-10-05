@@ -67,3 +67,16 @@
   `final_seen=True`，否则「预算秒数」可能来自「本地准备」阶段，消息里就不会有音频时长，
   断言会名不副实。
 - **下一步唯一动作**：切回旧 pin 跑红验（T1 需真挂满 120s），逐条贴原文后还原。
+
+## 里程碑 5：红验（旧 pin b0818dc）+ 补齐 T1b
+
+- **当前阶段**：implementing
+- **本段结论**：切回旧 pin 逐条红验，三条全部红在 `AssertionError`（无 ImportError /
+  TimeoutExpired）：T2 `assert None is not None`；T3 `assert '1 秒' in '转录超过deadline_total：
+  远端转录阶段超时'`；**但 T1（真被拒端口）5/5 全绿**——卡面「旧 pin 下真被拒端口挂满 120s」
+  的前提在 CPython 3.11.15 上不成立。补 T1b 把连接失败压到与 `set_deadline()` 同一 tick 后，
+  旧 pin 实测 120.203s、断言红在耗时，新 pin 全绿。
+- **关键决策与已否决方案**：否决「把 T1 改成 stub 形态就算数」——单用 stub 会丢掉现场形态的
+  覆盖；改为 T1a（真被拒端口，锁错误码 + 秒级）与 T1b（同 tick 拒绝，锁 #67 回归）并存，
+  design.md 与盲区段同步记下这一分工。
+- **下一步唯一动作**：概率性验收（T1/T1b 连续 5 轮全绿）+ 全量 `make test`。

@@ -410,6 +410,121 @@ if __name__ == "__main__":
 '''
 
 
+#: T1b 子进程硬截止（秒）。旧 pin 的红要真等满 120s 自动预算，因此必须给到 120s 以上。
+_SAME_TICK_CHILD_HARD_DEADLINE_S = 200
+
+#: T1b 子进程：/health 真走 socket，但 WebSocket 连接在与预算重锚同一个 tick 内失败。
+#: 这是上游 #67 的真实触发形态（见上游 docs/sessions/261004-sdk-time-contract/design.md
+#: 「验收路径」第2 步）；真被拒端口反而因为 loop.create_connection 里的两次 executor
+#: 往返而错开该 tick，旧 pin 也能秒级返回——那一形态由 T1a 锁。
+_SAME_TICK_CHILD_SCRIPT = r'''
+"""默认预算路径 + 连接失败与预算重锚落在同一 tick（issue #169 / 上游 #67）。"""
+import errno, hashlib, json, os, socket, struct, sys, threading, time, wave
+from pathlib import Path
+
+
+def build_media(path):
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"".join(
+            struct.pack("<h", int(3000 * ((i % 200) / 100 - 1))) for i in range(3200)
+        ))
+
+
+def serve_health(host):
+    """/health 走真实 TCP，监听保持打开直到调用结束。"""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind((host, 0))
+    listener.listen(1)
+    listener.settimeout(20)
+    port = listener.getsockname()[1]
+    state = {"health_served": False, "request_line": "", "accept_error": None}
+
+    def run():
+        try:
+            conn, _ = listener.accept()
+        except OSError as exc:
+            state["accept_error"] = repr(exc)
+            listener.close()
+            return
+        with conn:
+            conn.settimeout(20)
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            body = json.dumps({"protocol_version": 2, "encodings": ["flac"]}).encode()
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                         b"Content-Length: " + str(len(body)).encode() +
+                         b"\r\nConnection: close\r\n\r\n" + body)
+            state["request_line"] = buf.split(b"\r\n", 1)[0].decode("latin-1")
+            state["health_served"] = True
+        listener.close()
+
+    threading.Thread(target=run, daemon=True).start()
+    return port, state
+
+
+class _RefusedConnect:
+    """__aenter__ 立即抛 ECONNREFUSED，不经过任何 await——连接失败与 set_deadline 同一个 tick。"""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        raise OSError(errno.ECONNREFUSED, "Connection refused")
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+def main():
+    import websockets
+    import websockets.exceptions  # noqa: F401 - 旧 pin 的 except 子句会取 websockets.exceptions
+    import capswriter_asr
+    from capswriter_asr import client as sdk_module
+
+    media_path = Path(sys.argv[1])
+    host = "127.0.0.1"
+    build_media(media_path)
+    port, health = serve_health(host)
+    websockets.connect = _RefusedConnect
+
+    started = time.monotonic()
+    payload = {"port": port}
+    try:
+        capswriter_asr.transcribe_file_sync(
+            str(media_path), f"ws://{host}:{port}", encoding="flac")
+        payload.update(returned=True, code=None, message=None)
+    except capswriter_asr.AsrError as exc:
+        payload.update(returned=True, code=exc.code, message=exc.message)
+    except BaseException as exc:  # noqa: BLE001 - surfaced as payload, not swallowed
+        payload.update(returned=False, code=None, message=repr(exc))
+    payload["elapsed"] = round(time.monotonic() - started, 3)
+    payload.update(health_served=health.get("health_served"),
+                   request_line=health.get("request_line"),
+                   accept_error=health.get("accept_error"))
+    payload["python"] = sys.version.split()[0]
+    payload["client_sha256"] = hashlib.sha256(
+        open(sdk_module.__file__, "rb").read()).hexdigest()
+    print("PROBE_JSON=" + json.dumps(payload, ensure_ascii=True), flush=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException as exc:  # noqa: BLE001 - surfaced as payload, not swallowed
+        print("PROBE_JSON=" + json.dumps({"returned": False, "error": repr(exc)}), flush=True)
+        os._exit(9)
+    os._exit(0)
+'''
+
+
 def _run_child(script: str, tmp_path: Path, argv: list[str], timeout: int) -> dict:
     """在真实解释器的子进程里跑一段探针脚本，返回其 PROBE_JSON 负载。"""
     child = tmp_path / "child_probe.py"
@@ -663,3 +778,48 @@ def test_timeout_message_names_the_budget_and_its_seconds(tmp_path):
     assert "deadline_total" in message, message
     assert f"{_TIMEOUT_BUDGET_S:.0f} 秒" in message, message
     assert f"音频 {_TIMEOUT_DURATION_S:.1f} 秒" in message, message
+
+
+@pytest.mark.skipif(
+    sys.version_info >= (3, 12),
+    reason=(
+        "upstream #67 (wait_for swallowing the cancel) is only observable on "
+        "CPython <=3.11; on 3.12 asyncio.wait_for no longer swallows it, so this "
+        "test cannot observe the regression (design.md blind spot)"
+    ),
+)
+def test_connection_refused_in_the_budget_reattach_tick_fails_fast(tmp_path):
+    """The #67 shape: a connect failure landing in the budget re-anchor tick must not hang.
+
+    A real refused loopback port escapes the defect (loop.create_connection does two
+    executor round-trips, which lets deadline_watch re-park first); T1a locks that
+    form. Here the refusal is synchronous, which is the tick upstream #67 is about.
+    """
+    assert shutil.which("ffmpeg") is not None, "ffmpeg drives the real SDK transcode"
+
+    payload = _run_child(
+        _SAME_TICK_CHILD_SCRIPT,
+        tmp_path,
+        [str(tmp_path / "tone.wav")],
+        _SAME_TICK_CHILD_HARD_DEADLINE_S,
+    )
+
+    assert payload["returned"] is True, payload.get("message")
+    assert payload["client_sha256"] == hashlib.sha256(
+        Path(sdk_client.__file__).read_bytes()
+    ).hexdigest(), "child tested a different capswriter_asr than the test session"
+    assert tuple(int(p) for p in payload["python"].split(".")) < (3, 12), payload["python"]
+
+    # The real /health round-trip happened, so the budget was re-anchored to the
+    # remote stage before the connect failed.
+    assert payload["health_served"] is True, payload
+    assert payload["request_line"].startswith("GET /health HTTP/1.1"), payload["request_line"]
+
+    assert payload["code"] == "connection_lost", (
+        f"refused connect ended as {payload['code']!r} after {payload['elapsed']}s: "
+        f"{payload['message']}"
+    )
+    assert payload["elapsed"] < _REFUSED_FAST_FAIL_S, (
+        f"connection_lost took {payload['elapsed']}s (>= {_REFUSED_FAST_FAIL_S}s); "
+        f"the call hung until the auto budget expired: {payload['message']}"
+    )
