@@ -170,6 +170,385 @@ if __name__ == "__main__":
 '''
 
 
+#: T1 子进程硬截止（秒）。旧 pin 的红要真等满 120s 自动预算才以 timeout 收场，
+#: 因此这里必须给到 120s 以上——提前 kill 会把红变成 subprocess.TimeoutExpired，
+#: 证明不了「旧 pin 挂到预算到点」这件事。
+_REFUSED_CHILD_HARD_DEADLINE_S = 200
+
+#: T1 的行为阈值：从调用到拿到错误码的上限（秒）。
+_REFUSED_FAST_FAIL_S = 5.0
+
+#: T1 子进程：/health 通过、随后端口关闭，让 WebSocket 连接真正被拒。
+_REFUSED_CHILD_SCRIPT = r'''
+"""默认预算路径 + 真实「/health 通过但 WS 连接被拒」场景（issue #169 / 上游 #67）。"""
+import hashlib, json, os, socket, struct, sys, threading, time, wave
+from pathlib import Path
+
+
+def build_media(path):
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"".join(
+            struct.pack("<h", int(3000 * ((i % 200) / 100 - 1))) for i in range(16000)
+        ))
+
+
+def serve_health_once(host):
+    """裸 socket 只回答一次 GET /health，随后关掉监听套接字 → 端口此后确定拒绝连接。
+
+    必须用裸 socket 而不是 websockets.serve：SDK 的 _operation 先 _check_server 再
+    转码再 connect，只有「/health 通过、WS 连接被拒」这一组合才会走进
+    deadline_watch 的取消路径（上游 #67 的真实触发形态）。
+    """
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind((host, 0))
+    listener.listen(1)
+    listener.settimeout(20)
+    port = listener.getsockname()[1]
+    state = {"health_served": False, "request_line": "", "accept_error": None}
+
+    def run():
+        try:
+            conn, _ = listener.accept()
+        except OSError as exc:
+            state["accept_error"] = repr(exc)
+            listener.close()
+            return
+        # 先关监听再回包：urllib 的连接已被 accept，关闭监听不影响它，
+        # 但后续任何 connect 立刻被拒——避免「回包后、转码完成前」那个窗口里的竞争。
+        listener.close()
+        with conn:
+            conn.settimeout(20)
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            body = json.dumps({"protocol_version": 2, "encodings": ["flac"]}).encode()
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                         b"Content-Length: " + str(len(body)).encode() +
+                         b"\r\nConnection: close\r\n\r\n" + body)
+            state["request_line"] = buf.split(b"\r\n", 1)[0].decode("latin-1")
+            state["health_served"] = True
+
+    threading.Thread(target=run, daemon=True).start()
+    return port, state
+
+
+def port_is_closed(host, port):
+    try:
+        probe = socket.create_connection((host, port), timeout=5)
+    except OSError as exc:
+        return True, type(exc).__name__
+    probe.close()
+    return False, "connected"
+
+
+def main():
+    import capswriter_asr
+    from capswriter_asr import client as sdk_module
+
+    media_path = Path(sys.argv[1])
+    host = "127.0.0.1"
+    build_media(media_path)
+
+    port, health = serve_health_once(host)
+
+    started = time.monotonic()
+    payload = {"port": port}
+    try:
+        capswriter_asr.transcribe_file_sync(
+            str(media_path), f"ws://{host}:{port}", encoding="flac")
+        payload.update(returned=True, code=None, message=None)
+    except capswriter_asr.AsrError as exc:
+        payload.update(returned=True, code=exc.code, message=exc.message)
+    except BaseException as exc:  # noqa: BLE001 - surfaced as payload, not swallowed
+        payload.update(returned=False, code=None, message=repr(exc))
+    payload["elapsed"] = round(time.monotonic() - started, 3)
+
+    # 端口已关闭的自查放在调用之后：监听套接字一旦关闭就再也不会 accept，
+    # 此刻的连接必然被内核拒绝，所以这里探多少次都不会污染 /health 的那次 accept。
+    closed, how = port_is_closed(host, port)
+    payload.update(port_closed=closed, refusal=how,
+                   health_served=health.get("health_served"),
+                   request_line=health.get("request_line"),
+                   accept_error=health.get("accept_error"))
+    payload["python"] = sys.version.split()[0]
+    payload["client_sha256"] = hashlib.sha256(
+        open(sdk_module.__file__, "rb").read()).hexdigest()
+    print("PROBE_JSON=" + json.dumps(payload, ensure_ascii=True), flush=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException as exc:  # noqa: BLE001 - surfaced as payload, not swallowed
+        print("PROBE_JSON=" + json.dumps({"returned": False, "error": repr(exc)}), flush=True)
+        os._exit(9)
+    os._exit(0)
+'''
+
+
+#: T3 子进程硬截止（秒）。用例本身应在秒级收场，这里只是防挂死的硬闸。
+_TIMEOUT_CHILD_HARD_DEADLINE_S = 60
+
+#: T3 的显式预算（秒）。必须小到能真触发超时，又大到本地准备（两次 ffmpeg）能走完。
+_TIMEOUT_BUDGET_S = 1.0
+
+#: T3 的音频时长（秒）。3200 samples / 16 kHz；SDK 在超时消息里回显的就是这个数。
+_TIMEOUT_DURATION_S = 0.2
+
+#: T3 子进程：连上、收帧、永不回 final。
+_TIMEOUT_CHILD_SCRIPT = r'''
+"""真实 websockets 服务端（连上但不回 final）+ 显式 deadline_total 触发真超时。"""
+import asyncio, hashlib, importlib.metadata as md, json, os, struct, sys, threading, time, wave
+from pathlib import Path
+
+
+def build_media(path, samples):
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"".join(
+            struct.pack("<h", int(3000 * ((i % 200) / 100 - 1))) for i in range(samples)
+        ))
+
+
+def main():
+    import capswriter_asr
+    from capswriter_asr import client as sdk_module
+
+    budget = float(sys.argv[2])
+    media_path = Path(sys.argv[1])
+    build_media(media_path, int(sys.argv[3]))
+    state = {"frames": 0, "final_seen": False, "connected": False}
+    ready = threading.Event()
+
+    async def health(connection, request):
+        if request.path != "/health":
+            return None
+        from websockets.datastructures import Headers
+        from websockets.http11 import Response
+        body = json.dumps({"protocol_version": 2, "encodings": ["flac"]}).encode()
+        return Response(200, "OK", Headers([
+            ("Content-Type", "application/json"), ("Content-Length", str(len(body)))]), body)
+
+    async def handler(ws):
+        state["connected"] = True
+        try:
+            while True:
+                message = await ws.recv()
+                raw = message.encode("utf-8") if isinstance(message, str) else bytes(message)
+                frame = json.loads(raw)
+                state["frames"] += 1
+                if frame.get("is_final"):
+                    state["final_seen"] = True
+                    # 收完最后一帧就是不回：让调用方只能被预算救回来。
+                    await ws.wait_closed()
+                    return
+        except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+            state["server_error"] = repr(exc)
+
+    def serve():
+        from websockets.asyncio.server import serve
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def start():
+            server = await serve(handler, "127.0.0.1", 0, process_request=health,
+                                 ping_interval=None, max_size=None)
+            return server, server.sockets[0].getsockname()[1]
+
+        server, port = loop.run_until_complete(start())
+        state.update(loop=loop, server=server, port=port)
+        ready.set()
+        loop.run_forever()
+
+    threading.Thread(target=serve, daemon=True).start()
+    ready.wait(20)
+    port = state["port"]
+
+    started = time.monotonic()
+    payload = {"port": port, "budget": budget}
+    try:
+        capswriter_asr.transcribe_file_sync(
+            str(media_path), f"ws://127.0.0.1:{port}", encoding="flac",
+            deadline_total=budget)
+        payload.update(returned=True, code=None, message=None)
+    except capswriter_asr.AsrError as exc:
+        payload.update(returned=True, code=exc.code, message=exc.message)
+    except BaseException as exc:  # noqa: BLE001 - surfaced as payload, not swallowed
+        payload.update(returned=False, code=None, message=repr(exc))
+    payload["elapsed"] = round(time.monotonic() - started, 3)
+    payload.update(frames=state["frames"], final_seen=state["final_seen"],
+                   connected=state["connected"], server_error=state.get("server_error"))
+    payload["python"] = sys.version.split()[0]
+    payload["websockets"] = md.version("websockets")
+    payload["client_sha256"] = hashlib.sha256(
+        open(sdk_module.__file__, "rb").read()).hexdigest()
+
+    state["server"].close()  # sync in websockets.asyncio.server
+    asyncio.run_coroutine_threadsafe(
+        state["server"].wait_closed(), state["loop"]).result(10)
+    state["loop"].call_soon_threadsafe(state["loop"].stop)
+
+    print("PROBE_JSON=" + json.dumps(payload, ensure_ascii=True), flush=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException as exc:  # noqa: BLE001 - surfaced as payload, not swallowed
+        print("PROBE_JSON=" + json.dumps({"returned": False, "error": repr(exc)}), flush=True)
+        os._exit(9)
+    os._exit(0)
+'''
+
+
+#: T1b 子进程硬截止（秒）。旧 pin 的红要真等满 120s 自动预算，因此必须给到 120s 以上。
+_SAME_TICK_CHILD_HARD_DEADLINE_S = 200
+
+#: T1b 子进程：/health 真走 socket，但 WebSocket 连接在与预算重锚同一个 tick 内失败。
+#: 这是上游 #67 的真实触发形态（见上游 docs/sessions/261004-sdk-time-contract/design.md
+#: 「验收路径」第2 步）；真被拒端口反而因为 loop.create_connection 里的两次 executor
+#: 往返而错开该 tick，旧 pin 也能秒级返回——那一形态由 T1a 锁。
+_SAME_TICK_CHILD_SCRIPT = r'''
+"""默认预算路径 + 连接失败与预算重锚落在同一 tick（issue #169 / 上游 #67）。"""
+import errno, hashlib, json, os, socket, struct, sys, threading, time, wave
+from pathlib import Path
+
+
+def build_media(path):
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"".join(
+            struct.pack("<h", int(3000 * ((i % 200) / 100 - 1))) for i in range(3200)
+        ))
+
+
+def serve_health(host):
+    """/health 走真实 TCP，监听保持打开直到调用结束。"""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind((host, 0))
+    listener.listen(1)
+    listener.settimeout(20)
+    port = listener.getsockname()[1]
+    state = {"health_served": False, "request_line": "", "accept_error": None}
+
+    def run():
+        try:
+            conn, _ = listener.accept()
+        except OSError as exc:
+            state["accept_error"] = repr(exc)
+            listener.close()
+            return
+        with conn:
+            conn.settimeout(20)
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            body = json.dumps({"protocol_version": 2, "encodings": ["flac"]}).encode()
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                         b"Content-Length: " + str(len(body)).encode() +
+                         b"\r\nConnection: close\r\n\r\n" + body)
+            state["request_line"] = buf.split(b"\r\n", 1)[0].decode("latin-1")
+            state["health_served"] = True
+        listener.close()
+
+    threading.Thread(target=run, daemon=True).start()
+    return port, state
+
+
+class _RefusedConnect:
+    """__aenter__ 立即抛 ECONNREFUSED，不经过任何 await——连接失败与 set_deadline 同一个 tick。"""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        raise OSError(errno.ECONNREFUSED, "Connection refused")
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+def main():
+    import websockets
+    import websockets.exceptions  # noqa: F401 - 旧 pin 的 except 子句会取 websockets.exceptions
+    import capswriter_asr
+    from capswriter_asr import client as sdk_module
+
+    media_path = Path(sys.argv[1])
+    host = "127.0.0.1"
+    build_media(media_path)
+    port, health = serve_health(host)
+    websockets.connect = _RefusedConnect
+
+    started = time.monotonic()
+    payload = {"port": port}
+    try:
+        capswriter_asr.transcribe_file_sync(
+            str(media_path), f"ws://{host}:{port}", encoding="flac")
+        payload.update(returned=True, code=None, message=None)
+    except capswriter_asr.AsrError as exc:
+        payload.update(returned=True, code=exc.code, message=exc.message)
+    except BaseException as exc:  # noqa: BLE001 - surfaced as payload, not swallowed
+        payload.update(returned=False, code=None, message=repr(exc))
+    payload["elapsed"] = round(time.monotonic() - started, 3)
+    payload.update(health_served=health.get("health_served"),
+                   request_line=health.get("request_line"),
+                   accept_error=health.get("accept_error"))
+    payload["python"] = sys.version.split()[0]
+    payload["client_sha256"] = hashlib.sha256(
+        open(sdk_module.__file__, "rb").read()).hexdigest()
+    print("PROBE_JSON=" + json.dumps(payload, ensure_ascii=True), flush=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException as exc:  # noqa: BLE001 - surfaced as payload, not swallowed
+        print("PROBE_JSON=" + json.dumps({"returned": False, "error": repr(exc)}), flush=True)
+        os._exit(9)
+    os._exit(0)
+'''
+
+
+def _run_child(script: str, tmp_path: Path, argv: list[str], timeout: int) -> dict:
+    """在真实解释器的子进程里跑一段探针脚本，返回其 PROBE_JSON 负载。"""
+    child = tmp_path / "child_probe.py"
+    child.write_text(script, encoding="utf-8")
+    child_env = dict(os.environ)
+    child_env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
+    child_env["PYTHONDONTWRITEBYTECODE"] = "1"
+
+    completed = subprocess.run(
+        [sys.executable, str(child), *argv],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=str(Path(__file__).resolve().parents[2]),
+        env=child_env,
+    )
+    assert completed.returncode == 0, (
+        f"child exit={completed.returncode} stderr={completed.stderr[-800:]}"
+    )
+    marker = "PROBE_JSON="
+    assert marker in completed.stdout, f"no probe payload: {completed.stdout[-800:]}"
+    return json.loads(completed.stdout.split(marker, 1)[1].splitlines()[0])
+
+
 def _make_client(output_dir: Path) -> CapsWriterClient:
     """Build a client without loading project configuration."""
     with patch.object(CapsWriterClient, "__init__", lambda self: None):
@@ -317,3 +696,130 @@ def test_final_result_returns_and_writes_products_on_python311(tmp_path):
     sidecar = json.loads(produced["tone_funasr.json"].read_text(encoding="utf-8"))
     assert sidecar["task_id"] == payload["task_id"]
     assert [segment["text"] for segment in sidecar["segments"]] == [_FINAL_TEXT]
+
+
+@pytest.mark.skipif(
+    sys.version_info >= (3, 12),
+    reason=(
+        "upstream #67 (wait_for swallowing the cancel) is only observable on "
+        "CPython <=3.11; on 3.12 asyncio.wait_for no longer swallows it, so this "
+        "test cannot observe the regression (design.md I1 / blind spot)"
+    ),
+)
+def test_connection_refused_fails_fast_with_connection_lost(tmp_path):
+    """A refused WebSocket must surface connection_lost in seconds, not at budget end (issue #169)."""
+    assert shutil.which("ffmpeg") is not None, "ffmpeg drives the real SDK transcode"
+
+    payload = _run_child(
+        _REFUSED_CHILD_SCRIPT,
+        tmp_path,
+        [str(tmp_path / "tone.wav")],
+        _REFUSED_CHILD_HARD_DEADLINE_S,
+    )
+
+    assert payload["returned"] is True, payload.get("message")
+    # The child ran the same installed SDK as this test session.
+    assert payload["client_sha256"] == hashlib.sha256(
+        Path(sdk_client.__file__).read_bytes()
+    ).hexdigest(), "child tested a different capswriter_asr than the test session"
+    assert tuple(int(p) for p in payload["python"].split(".")) < (3, 12), payload["python"]
+
+    # Precondition, self-checked inside the child: /health answered over real TCP,
+    # then the listening socket closed so the SDK's connect is genuinely refused.
+    assert payload["port_closed"] is True, payload
+    assert payload["refusal"] == "ConnectionRefusedError", payload
+    assert payload["health_served"] is True, payload
+    assert payload["request_line"].startswith("GET /health HTTP/1.1"), payload["request_line"]
+
+    assert payload["code"] == "connection_lost", (
+        f"refused connect ended as {payload['code']!r} after {payload['elapsed']}s: "
+        f"{payload['message']}"
+    )
+    assert payload["elapsed"] < _REFUSED_FAST_FAIL_S, (
+        f"connection_lost took {payload['elapsed']}s (>= {_REFUSED_FAST_FAIL_S}s); "
+        f"the call hung until the auto budget expired: {payload['message']}"
+    )
+
+
+def test_timeout_message_names_the_budget_and_its_seconds(tmp_path):
+    """A timeout must say which budget ran out, how many seconds it had, and how long the audio was."""
+    assert shutil.which("ffmpeg") is not None, "ffmpeg drives the real SDK transcode"
+
+    payload = _run_child(
+        _TIMEOUT_CHILD_SCRIPT,
+        tmp_path,
+        [
+            str(tmp_path / "tone.wav"),
+            str(_TIMEOUT_BUDGET_S),
+            str(int(_TIMEOUT_DURATION_S * 16_000)),
+        ],
+        _TIMEOUT_CHILD_HARD_DEADLINE_S,
+    )
+
+    assert payload["returned"] is True, payload.get("message")
+    assert payload["client_sha256"] == hashlib.sha256(
+        Path(sdk_client.__file__).read_bytes()
+    ).hexdigest(), "child tested a different capswriter_asr than the test session"
+
+    # The real server saw a real WebSocket upgrade and consumed the SDK's real
+    # final frame, then withheld the reply — that is what forces the budget out.
+    assert payload["connected"] is True, payload
+    assert payload["frames"] >= 1, payload
+    assert payload["final_seen"] is True, payload
+    assert payload["server_error"] is None, payload
+
+    assert payload["code"] == "timeout", (
+        f"silent server ended as {payload['code']!r}: {payload['message']}"
+    )
+    # It was the budget that ended the call, not some incidental hang.
+    assert payload["elapsed"] < 30.0, payload["elapsed"]
+
+    message = payload["message"]
+    assert "deadline_total" in message, message
+    assert f"{_TIMEOUT_BUDGET_S:.0f} 秒" in message, message
+    assert f"音频 {_TIMEOUT_DURATION_S:.1f} 秒" in message, message
+
+
+@pytest.mark.skipif(
+    sys.version_info >= (3, 12),
+    reason=(
+        "upstream #67 (wait_for swallowing the cancel) is only observable on "
+        "CPython <=3.11; on 3.12 asyncio.wait_for no longer swallows it, so this "
+        "test cannot observe the regression (design.md blind spot)"
+    ),
+)
+def test_connection_refused_in_the_budget_reattach_tick_fails_fast(tmp_path):
+    """The #67 shape: a connect failure landing in the budget re-anchor tick must not hang.
+
+    A real refused loopback port escapes the defect (loop.create_connection does two
+    executor round-trips, which lets deadline_watch re-park first); T1a locks that
+    form. Here the refusal is synchronous, which is the tick upstream #67 is about.
+    """
+    assert shutil.which("ffmpeg") is not None, "ffmpeg drives the real SDK transcode"
+
+    payload = _run_child(
+        _SAME_TICK_CHILD_SCRIPT,
+        tmp_path,
+        [str(tmp_path / "tone.wav")],
+        _SAME_TICK_CHILD_HARD_DEADLINE_S,
+    )
+
+    assert payload["returned"] is True, payload.get("message")
+    assert payload["client_sha256"] == hashlib.sha256(
+        Path(sdk_client.__file__).read_bytes()
+    ).hexdigest(), "child tested a different capswriter_asr than the test session"
+    assert tuple(int(p) for p in payload["python"].split(".")) < (3, 12), payload["python"]
+
+    # The real /health round-trip happened, so the budget was re-anchored to the
+    # remote stage before the connect failed.
+    assert payload["health_served"] is True, payload
+    assert payload["request_line"].startswith("GET /health HTTP/1.1"), payload["request_line"]
+
+    assert payload["code"] == "connection_lost", (
+        f"refused connect ended as {payload['code']!r} after {payload['elapsed']}s: "
+        f"{payload['message']}"
+    )
+    assert payload["elapsed"] < _REFUSED_FAST_FAIL_S, (
+        f"connection_lost took {payload['elapsed']}s (>= {_REFUSED_FAST_FAIL_S}s); "
+        f"the call hung until the auto budget expired: {payload['message']}"
+    )
