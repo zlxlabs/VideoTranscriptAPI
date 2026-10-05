@@ -176,7 +176,14 @@ class Transcriber:
 
                 return result
             else:
+                # 客户端已把失败细节（code= 与原因）记在 last_failure_detail；
+                # 不带进异常消息时通知里只剩一个本地路径，用户与运维都看不出
+                # 真因（生产 4.9 小时任务即如此，见 capswriter_client
+                # .last_failure_detail）。
                 error_msg = f"转录文件失败: {audio_path}"
+                detail = self.capswriter_client.last_failure_detail
+                if detail:
+                    error_msg += f", {detail}"
                 logger.error(error_msg)
                 raise RuntimeError(error_msg)
 
