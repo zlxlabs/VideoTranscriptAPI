@@ -52,7 +52,7 @@ sha256:61720ff7d2643685fdb2a00254ed2796c51d847b053f61bf72b082c9b4b064da ghcr.io/
 生产 API 公网入口（每个 URL 独立执行，显式丢弃响应体）：
 
 ```text
-$ curl -s -o /dev/null -w '%{http_code}\\n' https://sum.zlxlabs.com/livez
+$ curl -s -o /dev/null -w '%{http_code}\n' https://sum.zlxlabs.com/livez
 200
 exit=0
 ```
@@ -243,3 +243,51 @@ negative_uuid=545188c6-9063-4e5a-89b0-e3c2cc071137 hit_lines=0
 ```
 
 四事件分别是开始接收音频、音频文件收完、提交最终片段、服务端终态 `done`。否 UUID 是本轮新生成的随机 UUID，在同一文件和同一字面 UUID 搜索规则下 0 命中；正 UUID 15 次命中，说明投影查询有区分力。C4 的四事件日志投影和否对照均已完成。
+
+## 最终生产状态与临时文件清理
+
+清理前先逐份确认三个临时 WAV 的 SHA256 一致，然后只删除本卡创建的精确路径：
+
+```text
+$ sha256sum /tmp/sdk71-c2-90s.wav
+36161dd2abc19f565036e23603630214230d772ae59f02000840e62a2f3cfd02  /tmp/sdk71-c2-90s.wav
+$ ssh n305 'sha256sum /tmp/sdk71-c2-90s.wav'
+36161dd2abc19f565036e23603630214230d772ae59f02000840e62a2f3cfd02  /tmp/sdk71-c2-90s.wav
+$ ssh n305 'docker exec video-transcript-api sha256sum /tmp/sdk71-c2-90s.wav'
+36161dd2abc19f565036e23603630214230d772ae59f02000840e62a2f3cfd02  /tmp/sdk71-c2-90s.wav
+
+$ rm -- /tmp/sdk71-c2-90s.wav
+exit=0
+$ ssh n305 'rm -- /tmp/sdk71-c2-90s.wav'
+exit=0
+$ ssh n305 'docker exec video-transcript-api rm -- /tmp/sdk71-c2-90s.wav'
+exit=0
+$ rm -- /tmp/sdk71-prodverify-evidence-full.md
+exit=0
+```
+
+用同一路径检查缺失，结果为：
+
+```text
+local_media_exists=False
+local_projection_copy_exists=False
+n305_media_exists=False
+container_media_exists=False
+production_probe_script_count=0
+matching_sdk71_exec_processes=0
+```
+
+最终健康与发布指纹：
+
+```text
+$ ssh n305 'docker ps --filter name=video-transcript-api --format "{{.Status}} {{.Image}}"'
+Up 27 minutes (healthy) ghcr.io/zj1123581321/video-transcript-api
+$ ssh n305 'docker inspect -f "{{.State.Status}}/{{.State.Health.Status}}/{{.State.StartedAt}}/{{.Config.Image}}/{{.Image}}" video-transcript-api'
+running/healthy/2026-10-05T10:44:40.019437247Z/ghcr.io/zj1123581321/video-transcript-api@sha256:e1d6339d9dc3e8c391d1b5f61560a86f43dd02cacaaa90251694cb3ba283486d/sha256:61720ff7d2643685fdb2a00254ed2796c51d847b053f61bf72b082c9b4b064da
+$ ssh n305 'cat /opt/media/VideoTranscriptAPI/.deploy-image'
+ghcr.io/zj1123581321/video-transcript-api@sha256:e1d6339d9dc3e8c391d1b5f61560a86f43dd02cacaaa90251694cb3ba283486d
+$ curl -s -o /dev/null -w '%{http_code}\\n' https://sum.zlxlabs.com/livez
+200
+```
+
+容器 SDK 哈希再次读取仍为 `0490b5f877917e55f995e5ea9a81da226b47cda52e406bf361207c70550eb01b`；部署后四项 config/users/.env/compose 哈希也再次读取，与部署前四值完全相同（见本证据开头的前后对照）。容器未回滚，部署目录无本卡探针脚本，临时进程数为 0。
