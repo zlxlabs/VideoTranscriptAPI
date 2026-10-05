@@ -53,3 +53,17 @@
   （旧 pin 下红在 ImportError，红验无效）。顺带修正文件头 docstring 里「SDK 自动预算是
   max(120, duration+60)」这句已失效的描述（只改说明，未动任何既有断言）。
 - **下一步唯一动作**：写 T3 超时消息可定位用例。
+
+## 里程碑 4：T3 超时消息可定位
+
+- **当前阶段**：implementing
+- **本段结论**：`test_timeout_message_names_the_budget_and_its_seconds` 落在
+  `test_capswriter_sdk_transport.py`，真 websockets 服务端 upgrade 后收下 SDK 的真实 final 帧
+  并永不回，显式 `deadline_total=1.0` 触发真超时。实测 payload：
+  `code="timeout"`、消息「转录超过deadline_total 1 秒（音频 0.2 秒）：远端转录阶段超时」、
+  `elapsed=1.003s`、`frames=1`、`final_seen=True`。
+- **关键决策与已否决方案**：媒体压到 3200 samples（0.2 秒）而不是复用既有的 1.0 秒素材——
+  本地准备要跑两次 ffmpeg，1.0 秒预算下留不出稳定余量；断言同时要求 `frames>=1` 与
+  `final_seen=True`，否则「预算秒数」可能来自「本地准备」阶段，消息里就不会有音频时长，
+  断言会名不副实。
+- **下一步唯一动作**：切回旧 pin 跑红验（T1 需真挂满 120s），逐条贴原文后还原。

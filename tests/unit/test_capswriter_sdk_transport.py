@@ -293,6 +293,123 @@ if __name__ == "__main__":
 '''
 
 
+#: T3 子进程硬截止（秒）。用例本身应在秒级收场，这里只是防挂死的硬闸。
+_TIMEOUT_CHILD_HARD_DEADLINE_S = 60
+
+#: T3 的显式预算（秒）。必须小到能真触发超时，又大到本地准备（两次 ffmpeg）能走完。
+_TIMEOUT_BUDGET_S = 1.0
+
+#: T3 的音频时长（秒）。3200 samples / 16 kHz；SDK 在超时消息里回显的就是这个数。
+_TIMEOUT_DURATION_S = 0.2
+
+#: T3 子进程：连上、收帧、永不回 final。
+_TIMEOUT_CHILD_SCRIPT = r'''
+"""真实 websockets 服务端（连上但不回 final）+ 显式 deadline_total 触发真超时。"""
+import asyncio, hashlib, importlib.metadata as md, json, os, struct, sys, threading, time, wave
+from pathlib import Path
+
+
+def build_media(path, samples):
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"".join(
+            struct.pack("<h", int(3000 * ((i % 200) / 100 - 1))) for i in range(samples)
+        ))
+
+
+def main():
+    import capswriter_asr
+    from capswriter_asr import client as sdk_module
+
+    budget = float(sys.argv[2])
+    media_path = Path(sys.argv[1])
+    build_media(media_path, int(sys.argv[3]))
+    state = {"frames": 0, "final_seen": False, "connected": False}
+    ready = threading.Event()
+
+    async def health(connection, request):
+        if request.path != "/health":
+            return None
+        from websockets.datastructures import Headers
+        from websockets.http11 import Response
+        body = json.dumps({"protocol_version": 2, "encodings": ["flac"]}).encode()
+        return Response(200, "OK", Headers([
+            ("Content-Type", "application/json"), ("Content-Length", str(len(body)))]), body)
+
+    async def handler(ws):
+        state["connected"] = True
+        try:
+            while True:
+                message = await ws.recv()
+                raw = message.encode("utf-8") if isinstance(message, str) else bytes(message)
+                frame = json.loads(raw)
+                state["frames"] += 1
+                if frame.get("is_final"):
+                    state["final_seen"] = True
+                    # 收完最后一帧就是不回：让调用方只能被预算救回来。
+                    await ws.wait_closed()
+                    return
+        except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+            state["server_error"] = repr(exc)
+
+    def serve():
+        from websockets.asyncio.server import serve
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def start():
+            server = await serve(handler, "127.0.0.1", 0, process_request=health,
+                                 ping_interval=None, max_size=None)
+            return server, server.sockets[0].getsockname()[1]
+
+        server, port = loop.run_until_complete(start())
+        state.update(loop=loop, server=server, port=port)
+        ready.set()
+        loop.run_forever()
+
+    threading.Thread(target=serve, daemon=True).start()
+    ready.wait(20)
+    port = state["port"]
+
+    started = time.monotonic()
+    payload = {"port": port, "budget": budget}
+    try:
+        capswriter_asr.transcribe_file_sync(
+            str(media_path), f"ws://127.0.0.1:{port}", encoding="flac",
+            deadline_total=budget)
+        payload.update(returned=True, code=None, message=None)
+    except capswriter_asr.AsrError as exc:
+        payload.update(returned=True, code=exc.code, message=exc.message)
+    except BaseException as exc:  # noqa: BLE001 - surfaced as payload, not swallowed
+        payload.update(returned=False, code=None, message=repr(exc))
+    payload["elapsed"] = round(time.monotonic() - started, 3)
+    payload.update(frames=state["frames"], final_seen=state["final_seen"],
+                   connected=state["connected"], server_error=state.get("server_error"))
+    payload["python"] = sys.version.split()[0]
+    payload["websockets"] = md.version("websockets")
+    payload["client_sha256"] = hashlib.sha256(
+        open(sdk_module.__file__, "rb").read()).hexdigest()
+
+    state["server"].close()  # sync in websockets.asyncio.server
+    asyncio.run_coroutine_threadsafe(
+        state["server"].wait_closed(), state["loop"]).result(10)
+    state["loop"].call_soon_threadsafe(state["loop"].stop)
+
+    print("PROBE_JSON=" + json.dumps(payload, ensure_ascii=True), flush=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException as exc:  # noqa: BLE001 - surfaced as payload, not swallowed
+        print("PROBE_JSON=" + json.dumps({"returned": False, "error": repr(exc)}), flush=True)
+        os._exit(9)
+    os._exit(0)
+'''
+
+
 def _run_child(script: str, tmp_path: Path, argv: list[str], timeout: int) -> dict:
     """在真实解释器的子进程里跑一段探针脚本，返回其 PROBE_JSON 负载。"""
     child = tmp_path / "child_probe.py"
@@ -507,3 +624,42 @@ def test_connection_refused_fails_fast_with_connection_lost(tmp_path):
         f"connection_lost took {payload['elapsed']}s (>= {_REFUSED_FAST_FAIL_S}s); "
         f"the call hung until the auto budget expired: {payload['message']}"
     )
+
+
+def test_timeout_message_names_the_budget_and_its_seconds(tmp_path):
+    """A timeout must say which budget ran out, how many seconds it had, and how long the audio was."""
+    assert shutil.which("ffmpeg") is not None, "ffmpeg drives the real SDK transcode"
+
+    payload = _run_child(
+        _TIMEOUT_CHILD_SCRIPT,
+        tmp_path,
+        [
+            str(tmp_path / "tone.wav"),
+            str(_TIMEOUT_BUDGET_S),
+            str(int(_TIMEOUT_DURATION_S * 16_000)),
+        ],
+        _TIMEOUT_CHILD_HARD_DEADLINE_S,
+    )
+
+    assert payload["returned"] is True, payload.get("message")
+    assert payload["client_sha256"] == hashlib.sha256(
+        Path(sdk_client.__file__).read_bytes()
+    ).hexdigest(), "child tested a different capswriter_asr than the test session"
+
+    # The real server saw a real WebSocket upgrade and consumed the SDK's real
+    # final frame, then withheld the reply — that is what forces the budget out.
+    assert payload["connected"] is True, payload
+    assert payload["frames"] >= 1, payload
+    assert payload["final_seen"] is True, payload
+    assert payload["server_error"] is None, payload
+
+    assert payload["code"] == "timeout", (
+        f"silent server ended as {payload['code']!r}: {payload['message']}"
+    )
+    # It was the budget that ended the call, not some incidental hang.
+    assert payload["elapsed"] < 30.0, payload["elapsed"]
+
+    message = payload["message"]
+    assert "deadline_total" in message, message
+    assert f"{_TIMEOUT_BUDGET_S:.0f} 秒" in message, message
+    assert f"音频 {_TIMEOUT_DURATION_S:.1f} 秒" in message, message
