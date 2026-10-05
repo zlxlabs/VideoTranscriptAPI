@@ -115,6 +115,56 @@ skip（`-rs` 可见），此时**不能**认为准入已被验证。其它用 mo
 （下载/缓存/临时文件等）显式注入隔离的探测替身 `_ensure_audio_track`，不复用这批
 真实 CLI 断言。
 
+## 纯 mock 单元回归（无外部工具前置条件）
+
+下面两个文件把外部依赖整个替身掉：ffprobe 子进程由 `subprocess.run` 的 mock /
+一次性 runner 顶替，SDK 由 `transcribe_file_sync` 的 mock 顶替，媒体文件由
+`tmp_path` 现场写。它们不读 `/tmp` 预置 fixture、不起真实子进程，所以**不会**因
+缺 `ffmpeg` / `ffprobe` 而 skip——这与上一节的 skip 语义相反：把 `PATH` 清空到只剩
+一个空目录后跑这两个文件仍是全 passed、无 `SKIPPED` 行，同一环境下上一节那个
+文件则整段 skip（`-rs` 可见）。两节都要读：上一节证真实 argv/JSON，本节证编排与
+数值契约。
+
+CapsWriter 转录可观测性（#171）：`tests/unit/test_capswriter_observability.py`。
+锁的不变量：SDK 给的 `task_id` 必须出现在开始、进度与终态日志里，SDK 没给时只写
+`unknown`、不许编占位 id（`test_sdk_gets_on_progress_and_task_id_reaches_progress_and_terminal_logs`、
+`test_task_id_comes_from_sdk_payload_never_fabricated`）；进度按
+`PROGRESS_LOG_INTERVAL_SECONDS` 节流，首个事件必打（它带真实 `task_id`），窗口走完后
+重新打开，否则长任务会再次静默（`test_progress_log_is_throttled_but_first_event_always_logged`、
+`test_throttle_reopens_after_interval`）；媒体总时长未知时只写已处理秒数、不编百分比
+（`test_progress_without_known_total_omits_percent`）；进度回调是第三方边界，回调内
+抛异常只记 warning、转录照常成功（`test_progress_callback_exception_does_not_break_transcription`）；
+观测代码不得自己去探测媒体（`test_progress_observability_adds_no_new_media_io` 把
+`subprocess.run` 打成 AssertionError）。失败侧锁 `AsrError` 的 `code` 与原因随异常
+消息走到通知文案（`test_failure_reason_travels_into_notification_message`、
+`test_process_transcription_notifies_with_failure_reason`），以及上一次失败的细节不串进
+下一次成功（`test_successful_run_clears_stale_failure_detail`）。前置条件只有项目自身
+依赖（`capswriter_asr`、loguru）与 `tmp_path`；没有 skip 分支。
+
+转录时限预算的时长来源（#173 修 #155）：`tests/unit/test_media_duration_probe.py`。
+走真实入口 `process_transcription`，复用 `test_transcription_audio_admission.py` 的
+`wired` fixture 与替身类（同一套真实入口协作方，不另造会漂移的副本），并让
+`RouteDownloader` 复现缺陷现场——generic 路线从不写 `last_media_duration`。锁的不变量：
+音轨准入**同一次** ffprobe 解出的 `format.duration` 真的作为 `media_duration` kwarg 传到
+CapsWriter 层（`test_generic_path_duration_reaches_transcriber`）；修复不新增探测——
+`SingleProbeRunner` 对第二次子进程调用当场 AssertionError，argv 必须带 `-show_format`、
+零次 ffmpeg，且探测目标就是本次下载的媒体（`test_no_extra_media_probe`）；探测拿不到
+合法时长时回退 `downloader.last_media_duration`、两边都拿不到时保持既有两参调用形状
+（`test_unusable_probe_duration_falls_back_to_downloader_duration`、
+`test_no_duration_anywhere_keeps_two_arg_call_shape`）；负数 / NaN / Inf / 空串 /
+畸形数字 / JSON null / `format` 非对象一律当「没探测到」，判据读的是 CapsWriter 层真正
+收到的实参（`test_invalid_duration_never_fabricates_a_value`、
+`test_format_without_dict_is_not_duration`）；拒绝语义不变，无音轨与探测失败仍是具名原因
++ 引擎零调用（`test_no_audio_track_is_still_rejected_without_engine_call`、
+`test_probe_failure_is_still_check_failure`、`test_admission_rejection_still_raises_invalid_media`）；
+准入认可的时长必须被预算公式真正采纳（`deadline_total == duration*4+120`，而不是悄悄
+退回 SDK 自动预算），准入返回 `None` 时预算侧同样拿不到 deadline
+（`test_admission_returns_the_probed_duration`、
+`test_admission_returns_none_for_unusable_duration`、
+`test_every_admitted_duration_is_accepted_by_the_deadline_budget`）。前置条件：无真实
+ffprobe / ffmpeg、无预置 fixture、没有 skip 分支。拒绝路径的完整矩阵仍由上一节那个
+需要真实 ffprobe 的文件覆盖。
+
 ## 并发压测
 
 `scripts/perf/concurrent_load.py` 会提交本地 API 任务，并使用真实抖音和 B 站
