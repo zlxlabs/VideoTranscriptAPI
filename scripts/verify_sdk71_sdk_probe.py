@@ -37,9 +37,12 @@ def main() -> int:
         return 1
 
     if mode == "c2":
-        url = "ws://192.168.31.222:6016"
+        # The ASR endpoint is passed in: it lives in config/config.jsonc, which is
+        # untracked, and this repo is publicly visible (pre-push public-scan rejects
+        # private IPs). The production invocation passed ws://<capswriter-host>:6016.
+        url = sys.argv[3]
         print(
-            "CALL transcript = transcribe_file_sync(path, 'ws://192.168.31.222:6016'); "
+            f"CALL transcript = transcribe_file_sync(path, '{url}'); "
             "deadline_total omitted",
             flush=True,
         )

@@ -1,5 +1,9 @@
 # SDK 492fe19 生产验证原始证据
 
+> **脱敏声明（2026-10-05，pi-lead）**：本仓对外可见，pre-push public-scan 会拒绝内网地址。
+> 下列原始输出中的 ASR 服务端与 live-recorder 内网地址已替换为 `<capswriter-host>` / `<live-recorder-host>` 占位符，其余内容逐字未改。真实端点只存在于不入库的 `config/config.jsonc` 与 `.env`。
+
+
 ## 构建、发布与配置基线
 
 构建源：干净 detached worktree，HEAD `a21d9729b15dac3df2cc0e595dea5426a2d1718f`。
@@ -116,11 +120,11 @@ exit=0
 
 ## C2 真实 90 秒级音频默认路径
 
-调用行：`transcript = transcribe_file_sync(str(path), url)`，其中 `url="ws://192.168.31.222:6016"`；调用未传 `deadline_total`。音频是上节真实视频号直播录制的 91.557 秒 PCM 切片，SHA256 为 `36161dd2abc19f565036e23603630214230d772ae59f02000840e62a2f3cfd02`，该字节哈希在容器内复核相同。
+调用行：`transcript = transcribe_file_sync(str(path), url)`，其中 `url="ws://<capswriter-host>:6016"`（ASR 服务端地址取自 `config/config.jsonc`，该文件不入库；此处脱敏，运行时真实值见生产配置）；调用未传 `deadline_total`。音频是上节真实视频号直播录制的 91.557 秒 PCM 切片，SHA256 为 `36161dd2abc19f565036e23603630214230d772ae59f02000840e62a2f3cfd02`，该字节哈希在容器内复核相同。
 
 ```text
 $ ssh n305 'docker exec -i video-transcript-api /app/.venv/bin/python - c2 /tmp/sdk71-c2-90s.wav' < scripts/verify_sdk71_sdk_probe.py
-CALL transcript = transcribe_file_sync(path, 'ws://192.168.31.222:6016'); deadline_total omitted
+CALL transcript = transcribe_file_sync(path, 'ws://<capswriter-host>:6016'); deadline_total omitted  # 内网地址已脱敏
 RESULT code=done transcript_nonempty=True transcript_chars=395 elapsed_seconds=2.013 sdk_task_uuid=039f1190-a64d-4ebb-b461-cd312e7366a7
 exit=0
 
@@ -142,7 +146,7 @@ $ ssh n305 'python3 -u - submit' < scripts/verify_sdk71_api_task.py
 recording_source=recorder://wechat-channels-live/orig_2060970783849858363/250f1810fba9422dbdee6f1a3c236763
 recording_duration_seconds=196.224 limit_seconds=900
 file_token_length=32
-payload.download_url=http://192.168.31.219:8080/files/<redacted-file-token>/sdk71-short-recording.mp4
+payload.download_url=http://<live-recorder-host>:8080/files/<redacted-file-token>/sdk71-short-recording.mp4  # 内网地址已脱敏
 payload_sha256=a9853824c363149ed7f5f216f7b8e01b04643dedb85c1bfb4f555c95a2d9626f
 notifications=suppressed via channel sdk71_silent (no registered target)
 submitted_at=2026-10-05T10:57:53+00:00 http_status=200 response_code=202 task_id=task_3be6e44a085c4317962a58b631aa9906
