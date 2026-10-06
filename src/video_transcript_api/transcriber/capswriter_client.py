@@ -116,11 +116,43 @@ COND_JOIN_MISMATCH = "tokens_join_text_accu_mismatch"
 # 需要的一半，必然超时。因此本仓在拿得到时长时显式传 deadline_total 关掉自动预算。
 # 两个数字来自这一次实测，本轮固定不变，刻意不做成配置项（多来源漂移，见 issue
 # #147）：系数 = 实测 3.29 倍向上取整并留约 20% 余量；常数项覆盖下载完成到提交前
-# 的杂项开销。拿不到时长时不传 deadline_total，保持 SDK 自动预算——未探测路径上
-# 的媒体时长分布未知，用偏小的常数会把本来能成功的长媒体掐断。
+# 的杂项开销。拿不到时长时不传 deadline_total，保持 SDK 自动预算——不传时 SDK 会
+# 退回 max(120, duration + 60) 的小预算，宁可让长媒体走到超时也不静默掐断。
+# generic 与 recorder 路径自 PR #173（#170）起同样能拿到 ffprobe 时长，因此
+# 「拿不到时长」现在只出现在真的没探测到的退化输入上。
 
 DEADLINE_REALTIME_FACTOR = 4.0
 DEADLINE_OVERHEAD_SECONDS = 120.0
+
+
+# ============================================================================
+# 上传阶段单帧空闲上限（issue #181）
+# ============================================================================
+#
+# SDK 把「发一帧音频」整体交给一次 asyncio.wait(..., timeout=idle_timeout)，
+# 默认 idle_timeout=300.0 秒，与媒体长度无关。本仓生产实测（2026-10-05，一个
+# 17502 秒 / 494 MB 的直播录制）在这个默认值上两次失败：
+# AsrError("timeout", "发送音频帧超过 idle_timeout")。
+#
+# 成因是客户端与速率不匹配而不是网络抖动：客户端不节流，把整个文件按 256 KB 一帧
+# 往 socket 里灌（2026-10-06 实测，600 秒合成音频 54 帧 10.5 秒发完、3600 秒
+# 322 帧 51.6 秒发完，节奏只与帧数相关），而服务端只有在处理完积压、腾出接收
+# 窗口时才会继续读 socket。socket 缓冲区只有 MB 量级，灌进去之后每一次
+# ws.send 的等待时长就等于「服务端这一轮不读 socket 持续了多久」，而这一轮
+# 覆盖的是尚未消费完的积压，长媒体上必然远超 300 秒。12900 秒及以下的 10 个
+# 生产样本都在默认 300 秒下成功，说明该阈值卡在两者之间的某处，是量的问题，
+# 不是「某一帧偶发卡住」。
+#
+# 因此本仓在拿得到时长时显式传 idle_timeout，取「服务端读完整个积压所需时间」
+# 这一可证上界：单次停顿不可能超过剩余音频的服务端处理耗时，所以
+# 时长 / 实测倍速 + 固定开销 是它的上界，取整系数留余量。
+# 倍速与固定开销都出自 2026-10-03 那次生产实测（93.08898 秒音频耗时 306.3 秒）：
+# 固定开销 = 306.3 - 93.09/3.29 ≈ 278 秒，取 300 秒；倍速 3.29 向下取到 3.0。
+# 与 deadline_total 一样是全仓唯一计算点、刻意不做成配置项（issue #147）。
+# 拿不到时长时不传该键，行为与 SDK 默认（300 秒）完全一致。
+
+IDLE_REALTIME_FACTOR = 3.0
+IDLE_OVERHEAD_SECONDS = 300.0
 
 
 # ============================================================================
@@ -262,6 +294,30 @@ def _transcription_deadline(media_duration: Optional[float] = None) -> Optional[
         f"transcription_deadline duration={media_duration:.2f} value={deadline:.1f}"
     )
     return deadline
+
+
+def _asr_idle_timeout(media_duration: Optional[float] = None) -> Optional[float]:
+    """按实测吞吐算出上传阶段单帧等待上限（秒）。
+
+    全仓唯一计算 ``idle_timeout`` 的地方，含义与可证上界见
+    :data:`IDLE_REALTIME_FACTOR` 上方那段说明：单次发送停顿的上界是「服务端
+    读完剩余积压所需的时间」，即 ``media_duration / 倍速 + 固定开销``。
+
+    ``media_duration`` 拿不到（或非法）时返回 ``None``，调用点据此不传该键，
+    SDK 用它自己的默认 300.0 秒——与本函数存在前的行为逐字一致。
+    """
+    if (
+        media_duration is None
+        or not (float("-inf") < media_duration < float("inf"))
+        or media_duration < 0
+    ):
+        logger.warning("asr_idle_timeout duration=unknown fallback=sdk_default_300")
+        return None
+    idle_timeout = media_duration / IDLE_REALTIME_FACTOR + IDLE_OVERHEAD_SECONDS
+    logger.info(
+        f"asr_idle_timeout duration={media_duration:.2f} value={idle_timeout:.1f}"
+    )
+    return idle_timeout
 
 
 class CapsWriterContractError(ValueError):
@@ -936,6 +992,7 @@ class CapsWriterClient:
                 server_url = f"ws://{Config.server_addr}:{Config.server_port}"
                 # 全仓唯一计算点：拿不到时长时返回 None，下面据此不传该键。
                 deadline_total = _transcription_deadline(media_duration)
+                idle_timeout = _asr_idle_timeout(media_duration)
                 observer = _TranscriptionObserver(self.log, media_duration)
                 self.log(
                     f"{CAPSWRITER_START_LOG_KEY} attempt={attempts}/{self.max_retries} "
@@ -951,6 +1008,8 @@ class CapsWriterClient:
                 }
                 if deadline_total is not None:
                     sdk_kwargs["deadline_total"] = deadline_total
+                if idle_timeout is not None:
+                    sdk_kwargs["idle_timeout"] = idle_timeout
                 transcript = transcribe_file_sync(
                     file_path,
                     server_url,
