@@ -9,8 +9,8 @@ Ensures that:
    zeroed calibration stats without launching a ThreadPoolExecutor.
 4. SpeakerAwareProcessor.process(dialogs=[]) completes cleanly with empty output
    and honest calibration_status=none.
-5. NotesProcessor with empty chapter slices returns a failed NotesResult rather
-   than crashing on max_workers=0.
+5. NotesProcessor with empty chapters returns a failed NotesResult via
+   is_valid validation failure without issuing LLM calls.
 """
 
 from unittest.mock import MagicMock, Mock
@@ -112,6 +112,41 @@ class TestEmptyInputProcessors:
         assert stats["calibration_status"] == CalibrationStatus.NONE
         llm_client.call.assert_not_called()
 
+    def test_plain_text_process_whitespace_only_text(self, mock_config):
+        llm_client = Mock()
+        key_info_mock = Mock(spec=KeyInfo)
+        key_info_mock.to_dict.return_value = {}
+        key_info_mock.format_for_prompt.return_value = ""
+        key_info_extractor = Mock()
+        key_info_extractor.extract.return_value = key_info_mock
+
+        processor = PlainTextProcessor(
+            config=mock_config,
+            llm_client=llm_client,
+            key_info_extractor=key_info_extractor,
+            quality_validator=Mock(),
+        )
+
+        result = processor.process(
+            text=" \t\n",
+            title="Whitespace Recording",
+            author="Author",
+            description="",
+            platform="test",
+            media_id="m1_whitespace",
+        )
+
+        assert result["calibrated_text"] == ""
+        stats = result["stats"]
+        assert stats["original_length"] == len(" \t\n")
+        assert stats["calibrated_length"] == 0
+        assert stats["segment_count"] == 0
+        assert stats["total_segments"] == 0
+        assert stats["calibrated_segments"] == 0
+        assert stats["fallback_segments"] == 0
+        assert stats["calibration_status"] == CalibrationStatus.NONE
+        llm_client.call.assert_not_called()
+
     def test_speaker_aware_calibrate_chunks_empty_input(self, mock_config):
         llm_client = Mock()
         processor = SpeakerAwareProcessor(
@@ -174,7 +209,8 @@ class TestEmptyInputProcessors:
         assert stats["calibration_stats"]["calibration_status"] == CalibrationStatus.NONE
         llm_client.call.assert_not_called()
 
-    def test_notes_processor_empty_slices_returns_failed_result(self, mock_config):
+    def test_notes_processor_empty_chapters_fails_validation(self, mock_config):
+        # 空 chapters -> map_notes_chapter_slices 校验失败 -> is_valid=False -> FAILED，非 slices 空守卫路径
         llm_client = Mock()
         processor = NotesProcessor(llm_client, mock_config)
 
