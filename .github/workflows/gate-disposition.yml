@@ -1,6 +1,6 @@
 # Business-repo caller for gate-v2-disposition.yml.
-# Copy to .github/workflows/gate-disposition.yml. Replace BOTH the uses
-# @267eff0688c4ea5ad1253fae62e89e509b51322a and with.gate_ref with the same 40-hex of zlxlabs/gate.
+# Copy to .github/workflows/gate-disposition.yml. Replace
+# @__PINNED_GATE_SHA__ with the desired ref of zlxlabs/gate.
 name: gate-disposition
 
 on:
@@ -11,6 +11,9 @@ on:
       primary_run_attempt: { description: "canonical primary run attempt", required: true, type: string }
       finding_id: { description: "exact current-audit finding id", required: true, type: string }
       reason: { description: "reason for the false-positive disposition", required: true, type: string }
+      disposition: { description: "false-positive or deferred", required: false, type: string }
+      counterevidence_json: { description: "counterevidence JSON for false-positive", required: false, type: string }
+      tracking_issue: { description: "same-repository issue reference for deferred", required: false, type: string }
 
 permissions:
   actions: write
@@ -31,3 +34,6 @@ jobs:
       primary_run_attempt: ${{ inputs.primary_run_attempt }}
       finding_id: ${{ inputs.finding_id }}
       reason: ${{ inputs.reason }}
+      disposition: ${{ inputs.disposition }}
+      counterevidence_json: ${{ inputs.counterevidence_json }}
+      tracking_issue: ${{ inputs.tracking_issue }}
