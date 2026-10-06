@@ -116,8 +116,10 @@ COND_JOIN_MISMATCH = "tokens_join_text_accu_mismatch"
 # 需要的一半，必然超时。因此本仓在拿得到时长时显式传 deadline_total 关掉自动预算。
 # 两个数字来自这一次实测，本轮固定不变，刻意不做成配置项（多来源漂移，见 issue
 # #147）：系数 = 实测 3.29 倍向上取整并留约 20% 余量；常数项覆盖下载完成到提交前
-# 的杂项开销。拿不到时长时不传 deadline_total，保持 SDK 自动预算——未探测路径上
-# 的媒体时长分布未知，用偏小的常数会把本来能成功的长媒体掐断。
+# 的杂项开销。拿不到时长时不传 deadline_total，保持 SDK 自动预算——不传时 SDK 会
+# 退回 max(120, duration + 60) 的小预算，宁可让长媒体走到超时也不静默掐断。
+# generic 与 recorder 路径自 PR #173（#170）起同样能拿到 ffprobe 时长，因此
+# 「拿不到时长」现在只出现在真的没探测到的退化输入上。
 
 DEADLINE_REALTIME_FACTOR = 4.0
 DEADLINE_OVERHEAD_SECONDS = 120.0
