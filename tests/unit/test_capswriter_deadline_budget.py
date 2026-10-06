@@ -1,10 +1,11 @@
 """转录时限预算按实测吞吐计算（issue #155）。
 
 拿得到时长时本仓显式传 ``deadline_total = duration*4 + 120``；拿不到时长时不传该键，
-回退 SDK 自动预算。SDK 的自动预算自 pin ``492fe19``（上游 PR #71）起是
-``_auto_budget(duration) = duration*4 + 120``，语义是 watchdog（挂死检测）而非识别时限
-SLA，由 ``test_sdk_auto_budget_*`` 单独锁住。每个用例都断言真正传给
-``transcribe_file_sync`` 的实参。
+回退 SDK 自动预算。时长为 0 同属「拿不到」（issue #190）：直播录制的容器头部会写 0，
+拿它算预算等于 120 秒，会确定性掐断本来能跑完的任务。SDK 的自动预算自 pin
+``492fe19``（上游 PR #71）起是 ``_auto_budget(duration) = duration*4 + 120``，语义是
+watchdog（挂死检测）而非识别时限 SLA，由 ``test_sdk_auto_budget_*`` 单独锁住。每个用例都
+断言真正传给 ``transcribe_file_sync`` 的实参。
 """
 
 import inspect
@@ -93,7 +94,7 @@ def test_duration_flows_through_transcriber_layer(tmp_path, sdk_config, audio):
 
 
 @pytest.mark.parametrize("duration,expected", [
-    (0.0, 120.0), (1.0, 124.0), (30.0, 240.0), (45.0, 300.0),
+    (1.0, 124.0), (30.0, 240.0), (45.0, 300.0),
     (45.1, 300.4), (93.08898, 492.35592), (600.0, 2520.0), (3600.0, 14520.0),
 ])
 def test_known_duration_formula(tmp_path, sdk_config, audio, duration, expected):
@@ -102,20 +103,44 @@ def test_known_duration_formula(tmp_path, sdk_config, audio, duration, expected)
     assert sdk_call.call_args.kwargs["deadline_total"] == pytest.approx(expected)
 
 
-@pytest.mark.parametrize("media_duration", [None, -1.0, float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("media_duration", [None, 0, 0.0, -1.0, -5.0, float("nan"), float("inf"), float("-inf")])
 def test_unknown_duration_omits_deadline_kwarg(tmp_path, sdk_config, audio, media_duration):
     with _patch_sdk() as sdk_call:
         _make_client(tmp_path).transcribe_file(str(audio), media_duration=media_duration)
     assert "deadline_total" not in sdk_call.call_args.kwargs
 
 
+@pytest.mark.parametrize("media_duration", [0, 0.0, -5.0])
+def test_non_positive_duration_is_treated_as_unknown(tmp_path, sdk_config, audio, media_duration):
+    """时长 0 / 负数一律按「拿不到时长」退回 SDK 自动预算（issue #190）。
+
+    两层都要断言：``_transcription_deadline`` 返回 None，且真的没把
+    ``deadline_total`` 传给 SDK——只有第一层的话，调用点仍可能用别的值覆盖。
+
+    时长为 0 的现实来源是直播录制的容器头部：ffprobe 给出 ``format.duration``
+    为 0，按公式算出 0*4+120=120 秒的预算，会在远端还在正常识别时掐断任务。
+    SDK 自动预算改用转码后的实际采样数算时长，不受这个假 0 影响。
+    """
+    assert _transcription_deadline(media_duration) is None
+    with _patch_sdk() as sdk_call:
+        success, _ = _make_client(tmp_path).transcribe_file(
+            str(audio), media_duration=media_duration
+        )
+    assert success is True
+    assert "deadline_total" not in sdk_call.call_args.kwargs
+
+
 def test_transcription_deadline_math_equivalence():
-    """锁住链式比较与 math.isfinite 逐值等价，覆盖 nan, ±inf, 负数与正常值。"""
+    """锁住链式比较与 math.isfinite 逐值等价，覆盖 nan, ±inf, 零与负数。"""
     assert _transcription_deadline(None) is None
     assert _transcription_deadline(float("nan")) is None
     assert _transcription_deadline(float("inf")) is None
     assert _transcription_deadline(float("-inf")) is None
     assert _transcription_deadline(-1.0) is None
+    # issue #190: 0 不是「已知时长」，与负数同样退回 SDK 自动预算。
+    assert _transcription_deadline(0) is None
+    assert _transcription_deadline(0.0) is None
+    assert _transcription_deadline(-5.0) is None
     assert _transcription_deadline(93.08898) == pytest.approx(492.35592)
     assert _transcription_deadline(600.0) == 2520.0
 
@@ -247,5 +272,20 @@ def test_sdk_auto_budget_grows_with_duration_and_matches_repo_budget():
     assert auto_budget(600.0) > auto_budget(93.1) > auto_budget(0)
     # 显式路径没有被上游改动的部分：两者在拿得到时长时必须给同一个秒数，
     # 这正是本卡保留显式 deadline_total 的前提。
-    for duration in (0.0, 93.08898, 600.0, 3600.0):
+    for duration in (93.08898, 600.0, 3600.0):
         assert auto_budget(duration) == pytest.approx(_transcription_deadline(duration))
+
+
+def test_sdk_auto_budget_is_what_covers_zero_duration():
+    """时长 0 改由 SDK 自动预算兜底，两条路径给出的秒数仍然相等（issue #190）。
+
+    价值不在预算值（都是 120），而在「0 不再掐断任务」：显式路径交出控制权，
+    SDK 转码后按实际采样数算时长，长直播拿到的是长预算。
+    """
+    auto_budget = _sdk_auto_budget()
+
+    assert _transcription_deadline(0.0) is None
+    assert auto_budget(0.0) == pytest.approx(120.0)
+    # SDK 拿到的时长是转码后的实际采样数，不是容器头部那个 0，所以预算随真实
+    # 素材长度放大——这正是 0 必须退回 SDK 的理由。
+    assert auto_budget(17501.67) == pytest.approx(17501.67 * 4 + 120)

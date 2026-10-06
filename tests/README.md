@@ -168,6 +168,22 @@ ffprobe / ffmpeg、无预置 fixture、没有 skip 分支。拒绝路径的完�
 LLM 处理器空输入守卫（#179）：`tests/unit/test_empty_input_processors.py`。
 锁的不变量：`PlainTextProcessor._calibrate_segments` 与 `SpeakerAwareProcessor._calibrate_chunks` 在输入分段/分块列表为空时直接返回与空输入同构的空结果，不启动 `ThreadPoolExecutor(max_workers=0)`，不发起 LLM 调用；`NotesProcessor.process` 在空 chapters payload 下走 `is_valid` 校验失败返回 `FAILED`，不发起 LLM 调用；端到端空文本/空对话校对返回诚实状态 `calibration_status=none` 且不抛 `ValueError`。
 
+转录时限预算的零时长守卫（#190）：`tests/unit/test_capswriter_deadline_budget.py`。
+锁的不变量：`media_duration` 为 0 或负数时与「拿不到时长」完全同路——
+`_transcription_deadline` 返回 `None`，且真的不把 `deadline_total` 键传给
+`transcribe_file_sync`，由 SDK 改用转码后的实际采样数算时长
+（`test_non_positive_duration_is_treated_as_unknown`，
+覆盖 `0` / `0.0` / `-5.0`；`test_unknown_duration_omits_deadline_kwarg` 与
+`test_transcription_deadline_math_equivalence` 把同一判据铺进参数化矩阵与直调断言）。
+背景：直播录制的容器头部会把 `format.duration` 写 0，旧行为按公式算出
+`0*4+120=120` 秒的预算，确定性掐断本来能跑完的任务。预算值本身没变（同一条
+`duration*4+120` 公式），变的只是 0 的来源从本仓显式路径交回 SDK
+（`test_sdk_auto_budget_is_what_covers_zero_duration`；
+`tests/unit/test_youtube_api_duration.py::test_repo_budget_formula_matches_sdk_auto_budget`
+锁住两侧仍相等）。同 PR 把 `test_media_duration_probe.py` 里
+`test_every_admitted_duration_is_accepted_by_the_deadline_budget` 的 `"0"` 用例移出——
+0 不再是「准入认可的已知时长」。
+
 ## 并发压测
 
 `scripts/perf/concurrent_load.py` 会提交本地 API 任务，并使用真实抖音和 B 站

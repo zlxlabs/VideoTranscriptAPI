@@ -263,12 +263,14 @@ def test_admission_returns_none_for_unusable_duration(tmp_path, raw):
     assert _transcription_deadline(parsed) is None
 
 
-@pytest.mark.parametrize("raw", ["600.0", "1286.78", "17501.67", "0"])
+@pytest.mark.parametrize("raw", ["600.0", "1286.78", "17501.67"])
 def test_every_admitted_duration_is_accepted_by_the_deadline_budget(tmp_path, raw):
     """准入认可的时长必须被预算公式真正采纳（不能是「算出来是 None」的哑弹）。
 
     锁的是副作用的可观测面：时长一旦流向预算，``deadline_total`` 就是
-    ``duration*4+120``，而不是悄悄退回 SDK 自动预算。
+    ``duration*4+120``，而不是悄悄退回 SDK 自动预算。容器头部写 0 的直播录制
+    不在此列：0 按未知时长处理，由 ``test_capswriter_deadline_budget.py`` 覆盖
+    （issue #190）。
     """
     parsed = _admission_duration(tmp_path / "a.mp3", raw)
     assert parsed is not None
