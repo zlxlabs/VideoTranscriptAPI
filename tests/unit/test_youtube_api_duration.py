@@ -263,7 +263,13 @@ def test_repo_budget_formula_matches_sdk_auto_budget():
     """
     from capswriter_asr.client import _auto_budget
 
-    for duration in (0.0, 1.0, 93.0, 600.0, 1286.78, 17501.67):
+    for duration in (1.0, 93.0, 600.0, 1286.78, 17501.67):
         explicit = _transcription_deadline(duration)
         assert explicit == pytest.approx(_auto_budget(duration)), duration
         assert explicit == pytest.approx(duration * 4 + 120), duration
+
+    # 时长 0 不再是「已知时长」（issue #190：直播录制容器头部写 0）：显式路径
+    # 交出控制权，预算由 SDK 按转码后的实际采样数给出。同一条公式，所以 0 的
+    # 预算仍是 120 秒——变的是来源，不是秒数。
+    assert _transcription_deadline(0.0) is None
+    assert _auto_budget(0.0) == pytest.approx(120.0)

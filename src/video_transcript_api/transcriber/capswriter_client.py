@@ -120,6 +120,10 @@ COND_JOIN_MISMATCH = "tokens_join_text_accu_mismatch"
 # 退回 max(120, duration + 60) 的小预算，宁可让长媒体走到超时也不静默掐断。
 # generic 与 recorder 路径自 PR #173（#170）起同样能拿到 ffprobe 时长，因此
 # 「拿不到时长」现在只出现在真的没探测到的退化输入上。
+#
+# 时长为 0 与「拿不到时长」同等对待（issue #190）：直播录制的容器头部会把
+# duration 写 0，拿它算预算等于 0*4+120=120 秒，会确定性掐断本来能跑完的任务。
+# 退回 SDK 自动预算后，SDK 改用转码后实际采样数算时长，不受这个 0 影响。
 
 DEADLINE_REALTIME_FACTOR = 4.0
 DEADLINE_OVERHEAD_SECONDS = 120.0
@@ -251,11 +255,15 @@ def _transcription_deadline(media_duration: Optional[float] = None) -> Optional[
     ``media_duration`` 取自下载阶段 ffprobe 已解析出的时长（见
     ``downloaders/base.py::_validate_media_file``）。拿不到时长时返回
     ``None``，调用点据此不传 ``deadline_total``，保持 SDK 自动预算。
+
+    非正时长同样按「拿不到时长」处理（issue #190）：直播录制的容器头部会把
+    duration 写成 0，0*4+120=120 秒的预算会确定性掐断本来能跑完的任务；而
+    SDK 的自动预算改用转码后的实际采样数算时长，不受这个假 0 影响。
     """
     if (
         media_duration is None
         or not (float("-inf") < media_duration < float("inf"))
-        or media_duration < 0
+        or media_duration <= 0
     ):
         logger.warning("transcription_deadline duration=unknown fallback=sdk_auto")
         return None
