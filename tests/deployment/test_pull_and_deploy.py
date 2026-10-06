@@ -3,6 +3,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import yaml
+
 
 SCRIPT = Path(__file__).parents[2] / "docker" / "pull_and_deploy.sh"
 PUSH_SCRIPT = Path(__file__).parents[2] / "docker" / "push_to_ghcr.sh"
@@ -442,6 +444,12 @@ def test_compose_template_uses_legacy_compatible_env_file_syntax():
     source = (SCRIPT.parent / "docker-compose.deploy.yml").read_text(encoding="utf-8")
     assert "required:" not in source
     assert "- .env" in source
+
+
+def test_compose_template_sets_stop_grace_period():
+    source = (SCRIPT.parent / "docker-compose.deploy.yml").read_text(encoding="utf-8")
+    compose = yaml.safe_load(source)
+    assert compose["services"]["video-transcript-api"]["stop_grace_period"] == "30s"
 
 
 def test_build_script_uses_only_git_sha_tag():
