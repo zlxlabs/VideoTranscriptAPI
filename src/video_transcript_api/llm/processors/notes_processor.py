@@ -548,6 +548,15 @@ class NotesProcessor:
                     chapter_notes = retry_notes
                 return f"{_format_chapter_heading(chapter)}\n{chapter_notes.strip()}"
 
+            if not mapping.slices:
+                return NotesResult(
+                    text=None,
+                    status=NotesStatus.FAILED,
+                    error=mapping.error or "no chapter slices available",
+                    fingerprint=mapping.current_fingerprint,
+                    chapter_count=0,
+                )
+
             max_workers = min(len(mapping.slices), self.config.notes_concurrency)
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_positions = {

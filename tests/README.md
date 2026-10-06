@@ -165,6 +165,9 @@ CapsWriter 层（`test_generic_path_duration_reaches_transcriber`）；修复不
 ffprobe / ffmpeg、无预置 fixture、没有 skip 分支。拒绝路径的完整矩阵仍由上一节那个
 需要真实 ffprobe 的文件覆盖。
 
+LLM 处理器空输入守卫（#179）：`tests/unit/test_empty_input_processors.py`。
+锁的不变量：`PlainTextProcessor._calibrate_segments`、`SpeakerAwareProcessor._calibrate_chunks` 与 `NotesProcessor.process` 在输入分段/分块列表为空时直接返回与空输入同构的空结果，不启动 `ThreadPoolExecutor(max_workers=0)`，不发起 LLM 调用；端到端空文本/空对话校对返回诚实状态 `calibration_status=none` 且不抛 `ValueError`。
+
 ## 并发压测
 
 `scripts/perf/concurrent_load.py` 会提交本地 API 任务，并使用真实抖音和 B 站

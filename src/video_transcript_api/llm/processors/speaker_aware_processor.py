@@ -741,6 +741,23 @@ class SpeakerAwareProcessor:
             - calibrated_chunks: 校对后的分块列表（包含成功+降级的混合结果）
             - calibration_stats: 校准统计 {total_chunks, success_count, fallback_count, failed_count}
         """
+        if not chunks:
+            return [], {
+                "total_chunks": 0,
+                "success_count": 0,
+                "partial_count": 0,
+                "fallback_count": 0,
+                "failed_count": 0,
+                "dialog_counts": {
+                    "applied": 0,
+                    "kept_original": 0,
+                    "unknown_id": 0,
+                    "duplicate_id": 0,
+                    "malformed": 0,
+                },
+                "calibration_status": CalibrationStatus.NONE,
+            }
+
         model = selected_models["calibrate_model"] if selected_models else self.config.calibrate_model
         reasoning_effort = selected_models.get("calibrate_reasoning_effort") if selected_models else self.config.calibrate_reasoning_effort
 
