@@ -66,6 +66,21 @@ CapsWriter final 返回回归（#166）：`tests/unit/test_capswriter_sdk_transp
 该缺陷只在 CPython ≤3.11 出现（3.12 重写了 `wait_for`），因此 ≥3.12 显式 skip；
 skip 不等于守住回归，见 `docs/sessions/sdk65-upgrade-261004/design.md` I6。
 
+上传阶段单帧空闲上限（#181）：`tests/unit/test_capswriter_idle_timeout.py`。生产上一个
+17502 秒 / 494 MB 的直播录制在上传阶段两次同因失败（`AsrError("timeout",
+"发送音频帧超过 idle_timeout")`），根因是 SDK 默认 `idle_timeout=300.0` 与媒体长度无关。
+锁的不变量：有时长时 `idle_timeout` 键必须出现在真正传给 `transcribe_file_sync` 的实参里
+且取值 `duration/3 + 300`，并与 `deadline_total` 互不覆盖
+（`test_known_duration_passes_scaled_idle_timeout`）；生产失败的那个尺寸必须拿到远大于
+SDK 默认 300 秒的上限（`test_production_failure_size_clears_sdk_default`）；拿不到时长时
+（None / 负数 / NaN / ±Inf）**不传该键**，逐字回退 SDK 默认
+（`test_unknown_duration_omits_idle_timeout_kwarg`、`test_unknown_duration_returns_none`），
+并留一条可 grep 的降级日志（`test_unknown_duration_emits_greppable_log`）；公式本身逐值
+锁死（`test_known_duration_formula`、`test_constants_match_documented_formula`）；上传超时
+的 `code=timeout` 与原因仍随通知文案出去，#171 的行为不许回归
+（`test_upload_timeout_still_surfaces_code_and_reason`）。前置条件只有项目自身依赖
+（`capswriter_asr`、loguru）与 `tmp_path`；没有 skip 分支。
+
 ## 手动测试门禁
 
 `tests/manual/` 默认自动发现时被排除；即使显式传入某个手动测试文件，未设置
