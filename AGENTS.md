@@ -1,5 +1,4 @@
 过程中请使用中文和我沟通，但 console 里请优先使用英文。
-仓专属运行事实（n305 端口、说话人归属、舰队接入范围）见 docs/project-memory.md。
 # Repository Guidelines
 
 ## Project Structure & Module Organization
