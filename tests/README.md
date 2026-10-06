@@ -166,7 +166,7 @@ ffprobe / ffmpeg、无预置 fixture、没有 skip 分支。拒绝路径的完�
 需要真实 ffprobe 的文件覆盖。
 
 LLM 处理器空输入守卫（#179）：`tests/unit/test_empty_input_processors.py`。
-锁的不变量：`PlainTextProcessor._calibrate_segments`、`SpeakerAwareProcessor._calibrate_chunks` 与 `NotesProcessor.process` 在输入分段/分块列表为空时直接返回与空输入同构的空结果，不启动 `ThreadPoolExecutor(max_workers=0)`，不发起 LLM 调用；端到端空文本/空对话校对返回诚实状态 `calibration_status=none` 且不抛 `ValueError`。
+锁的不变量：`PlainTextProcessor._calibrate_segments` 与 `SpeakerAwareProcessor._calibrate_chunks` 在输入分段/分块列表为空时直接返回与空输入同构的空结果，不启动 `ThreadPoolExecutor(max_workers=0)`，不发起 LLM 调用；`NotesProcessor.process` 在空 chapters payload 下走 `is_valid` 校验失败返回 `FAILED`，不发起 LLM 调用；端到端空文本/空对话校对返回诚实状态 `calibration_status=none` 且不抛 `ValueError`。
 
 ## 并发压测
 
