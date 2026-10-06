@@ -81,6 +81,7 @@ def test_known_duration_passes_scaled_idle_timeout(tmp_path, sdk_config, audio):
         )
     assert success is True
     keywords = sdk_call.call_args.kwargs
+    assert "idle_timeout" in keywords, sorted(keywords)
     assert keywords["idle_timeout"] == pytest.approx(600.0 / 3 + 300.0)
     # 与 deadline_total 同属一次预算，两个键互不覆盖。
     assert keywords["deadline_total"] == pytest.approx(600.0 * 4 + 120.0)
@@ -90,7 +91,9 @@ def test_production_failure_size_clears_sdk_default(tmp_path, sdk_config, audio)
     """生产失败的那个尺寸：17502 秒必须拿到远大于 SDK 默认 300 秒的上限。"""
     with _patch_sdk() as sdk_call:
         _make_client(tmp_path).transcribe_file(str(audio), media_duration=17502.0)
-    idle_timeout = sdk_call.call_args.kwargs["idle_timeout"]
+    keywords = sdk_call.call_args.kwargs
+    assert "idle_timeout" in keywords, sorted(keywords)
+    idle_timeout = keywords["idle_timeout"]
     assert idle_timeout == pytest.approx(17502.0 / 3 + 300.0)
     assert idle_timeout > SDK_DEFAULT_IDLE_TIMEOUT
 
