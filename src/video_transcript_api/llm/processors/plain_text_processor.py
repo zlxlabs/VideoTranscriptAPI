@@ -124,7 +124,7 @@ class PlainTextProcessor:
             segments = self.segmenter.segment(text)
             logger.debug(f"Text segmented: {len(segments)} segments")
         else:
-            segments = [text]
+            segments = [text] if text.strip() else []
             logger.debug("Text length below threshold, no segmentation")
 
         # 步骤3: 分段校对
@@ -155,7 +155,9 @@ class PlainTextProcessor:
         # 上面局部变量 calibrated_segments（校对后文本列表）混淆——此处在赋值前先读取计数。
         calibrated_segment_count = total_segments - fallback_segments
 
-        if fallback_segments == 0 and low_quality_segments == 0:
+        if total_segments == 0:
+            calibration_status = CalibrationStatus.NONE
+        elif fallback_segments == 0 and low_quality_segments == 0:
             calibration_status = CalibrationStatus.FULL
         elif calibrated_segment_count == 0:
             calibration_status = CalibrationStatus.NONE
@@ -204,6 +206,9 @@ class PlainTextProcessor:
               仍采用 LLM 候选文本；"fallback": 最终采用了原文格式化，即
               _fallback_plain_text 或异常兜底路径返回了 _format_plain_text(original))
         """
+        if not segments:
+            return [], []
+
         model = selected_models["calibrate_model"] if selected_models else self.config.calibrate_model
         reasoning_effort = selected_models.get("calibrate_reasoning_effort") if selected_models else self.config.calibrate_reasoning_effort
 
