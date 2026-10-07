@@ -30,6 +30,7 @@ class _DummyCacheManager:
     def __init__(self):
         self.saved = []
         self._outbox = {}
+        self.tasks = {}
 
     @contextmanager
     def media_lock(self, platform, media_id):
@@ -71,7 +72,9 @@ class _DummyCacheManager:
         return True
 
     def get_task_by_id(self, task_id):
-        return {"view_token": f"token-{task_id}"}
+        return self.tasks.setdefault(
+            task_id, {"task_id": task_id, "view_token": f"token-{task_id}"},
+        )
 
     def update_task_llm_config(self, task_id, models_used):
         pass
@@ -93,6 +96,7 @@ class _DummyCacheManager:
         return None
 
     def update_task_status(self, task_id, status, **kwargs):
+        self.get_task_by_id(task_id).update(kwargs)
         # Real CacheManager.update_task_status is a compare-and-set that
         # returns True on a genuine win (see H2 fix, local codex review
         # round 7: _handle_llm_task now gates its completion notification

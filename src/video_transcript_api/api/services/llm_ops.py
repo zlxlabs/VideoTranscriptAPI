@@ -484,6 +484,7 @@ def _handle_notes_generation(
             terminal_snapshot={
                 "result": {
                     "详细笔记": notes_result.text,
+                    "notes_status": NotesStatus.GENERATED,
                     "stats": {
                         "notes_status": NotesStatus.GENERATED,
                         "notes_length": len(notes_result.text),
