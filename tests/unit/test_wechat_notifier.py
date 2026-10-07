@@ -378,6 +378,17 @@ class TestFormatLLMConfigMarkdown:
 class TestNotifyTaskStatus:
     """Tests for WechatNotifier.notify_task_status."""
 
+    def test_received_notification_has_task_heading(self, notifier):
+        with patch.object(notifier, "send_text", return_value=True) as mock_send:
+            notifier.notify_task_status(
+                url="https://youtube.com/watch?v=test",
+                status="已接收",
+                title="Test Video",
+                task_id="task_abcdef123456",
+            )
+
+        assert mock_send.call_args[0][0].splitlines()[0] == "📥 [#abcdef] Test Video"
+
     def test_basic_notification(self, notifier):
         """Basic notification should include URL and status."""
         with patch.object(notifier, "send_text", return_value=True) as mock_send:

@@ -229,27 +229,30 @@ class NotificationRouter:
         webhook: str = None,
         webhooks: Dict[str, str] = None,
         original_url: str = None,
+        task_id: str = None,
     ) -> Dict[str, bool]:
-        """Send view link to target channels."""
-        from .channel import _clean_url, _apply_risk_control_safe
+        """Send the task-accepted message with the shared task heading."""
+        from .channel import _clean_url, build_task_notification_heading
         from ..rendering import get_base_url
-
-        if title:
-            title = _apply_risk_control_safe(title, text_type="title")
 
         base_url = get_base_url()
         view_url = f"{base_url}/view/{view_token}"
+        heading = build_task_notification_heading(
+            task_id, title, original_url or "", icon="📥",
+        )
 
         if original_url:
-            clean = _clean_url(original_url)
-            message = f"# {title}\n\n{clean}\n\n🔗 点击查看转录进度和结果：\n{view_url}"
+            message = (
+                f"{heading}\n\n{_clean_url(original_url)}"
+                f"\n\n🔗 点击查看转录进度和结果：\n{view_url}"
+            )
         else:
-            message = f"# 🔗 【查看链接】{title}\n\n🔗 点击查看转录进度和结果：\n{view_url}"
+            message = f"{heading}\n\n🔗 点击查看转录进度和结果：\n{view_url}"
 
         return self.send_rich(
             message,
             channel_name=channel_name,
             webhook=webhook,
             webhooks=webhooks,
-            title=f"🔗 {title}" if title else "查看链接",
+            title=heading,
         )

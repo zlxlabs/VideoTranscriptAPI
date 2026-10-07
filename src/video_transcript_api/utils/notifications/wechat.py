@@ -1,6 +1,5 @@
 import json
 import requests
-import datetime
 import re
 from wecom_notifier import WeComNotifier
 from ..logging import setup_logger, load_config
@@ -336,7 +335,10 @@ class WechatNotifier:
             # 默认处理中状态
             return "🔄"
 
-    def notify_task_status(self, url, status, error=None, title=None, author=None, transcript=None, view_url=None):
+    def notify_task_status(
+        self, url, status, error=None, title=None, author=None, transcript=None,
+        view_url=None, task_id=None, completion_body=None,
+    ):
         """
         通知任务状态
 
@@ -351,45 +353,19 @@ class WechatNotifier:
         返回:
             bool: 发送是否成功
         """
-        # 添加时间戳前缀（使用配置时区）
-        from ..timeutil.timezone_helper import get_configured_timezone
-        tz = get_configured_timezone()
-        timestamp = datetime.datetime.now(tz).strftime("%y%m%d-%H%M%S")
+        from .channel import build_task_status_content
 
-        # 清洗URL
-        clean_url = self._clean_url(url)
-
-        # 根据状态选择对应的emoji
-        status_emoji = self._get_status_emoji(status, error)
-
-        # 对标题和作者进行风控处理（带 URL 保护）
-        if title:
-            title = self._apply_risk_control_safe(title, text_type="title")
-        if author:
-            author = self._apply_risk_control_safe(author, text_type="author")
-
-        # 构建通知内容（markdown_v2格式）
-        content = f"## {timestamp}\n\n{status_emoji} **视频转录任务状态更新**\n\n{clean_url}\n\n**状态：** {status}"
-
-        # 添加标题和作者信息（如果有）
-        if title:
-            content += f"\n\n**标题：** {title}"
-        if author:
-            content += f"\n\n**作者：** {author}"
-
-        # 添加错误信息（如果有）
-        if error:
-            content += f"\n\n**错误：** {error}"
-
-        # 添加转录文本预览（如果有）
-        if transcript and "转录完成" in status:
-            # 最多显示前100个字符
-            preview = transcript[:100] + ("..." if len(transcript) > 100 else "")
-            content += f"\n\n**转录预览：**\n```\n{preview}\n```"
-
-        if view_url:
-            content += f"\n\n🔗 查看：{view_url}"
-
+        content = build_task_status_content(
+            url=url,
+            status=status,
+            error=error,
+            title=title,
+            author=author,
+            transcript=transcript,
+            view_url=view_url,
+            task_id=task_id,
+            completion_body=completion_body,
+        )
         return self.send_text(content, skip_risk_control=True)
 
 def wechat_notify(message, webhook=None, config=None):

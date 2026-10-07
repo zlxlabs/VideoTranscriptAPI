@@ -370,11 +370,12 @@ async def transcribe_video(
 
                     notification_router = get_notification_router()
                     notification_router.send_view_link(
-                        title=f"🎬 {title}",
+                        title=title,
                         view_token=view_token,
                         channel_name=effective_channel,
                         webhooks=notification_webhooks,
                         original_url=display_url,
+                        task_id=task_id,
                     )
                     logger.info(f"已发送任务创建通知: {task_id}，使用URL: {display_url}")
                 except Exception as exc:
