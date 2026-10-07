@@ -239,15 +239,25 @@ def _emit_status_notification(
 
 
 def _render_success_body(task, view_url, status):
-    """Render success content from the persisted terminal snapshot."""
+    """Render success content from the persisted terminal snapshot.
+
+    A success row whose snapshot lacks a persisted ``result`` degrades to
+    ``completion_body=None`` (header + view link) and is sent normally: a
+    raise here would fail this row on every replay and never let it be
+    marked sent (I4 no-loss). Any other render error still propagates and
+    keeps the row pending for retry.
+    """
     if status != TaskStatus.SUCCESS:
         return None
     snapshot = task.get("terminal_snapshot") or {}
     result = snapshot.get("result")
     if not isinstance(result, dict):
-        raise ValueError(
-            f"success terminal notification lacks persisted result: {task.get('task_id')}"
+        logger.warning(
+            f"COMPLETION-BODY-MISSING task_id={task.get('task_id')}: "
+            "success terminal notification lacks persisted result, "
+            "sending header + view link only"
         )
+        return None
     from .llm_ops import _render_completion_body
 
     return _render_completion_body(
@@ -411,7 +421,14 @@ def run_terminal_notification_dispatcher() -> None:
 
 
 def _compose_dispatcher_error(row: dict, task: dict) -> str:
-    """Build the dispatcher error/body: original error, completed_at, recovery note."""
+    """Build the dispatcher error/body: original error, completed_at, recovery note.
+
+    Success rows compose no note: completed_at/recovery lines are failure
+    diagnostics, and a non-None error would flip the channel-side status
+    emoji from ✅ to ❌.
+    """
+    if row["status"] == TaskStatus.SUCCESS:
+        return None
     parts = []
     error_message = row.get("error_message") or task.get("error_message")
     if error_message:

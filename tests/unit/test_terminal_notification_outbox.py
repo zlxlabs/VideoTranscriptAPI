@@ -9,11 +9,13 @@ All console output must be in English only (no emoji, no Chinese).
 
 import asyncio
 import datetime
+import re
 import sqlite3
 import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
+from loguru import logger as loguru_logger
 
 from src.video_transcript_api.api.services import llm_ops, transcription
 from src.video_transcript_api.api.services.terminal_status import (
@@ -219,6 +221,129 @@ class TestPersistedCompletionRendering:
         card = notifier.send_card.call_args.kwargs
         assert card["title"] == card["content"].splitlines()[0]
         assert card["title"] == f"✅ [#{task_id.removeprefix('task_')[:6]}] Card title"
+
+
+def _collect_warning_lines():
+    """按仓库既有做法收 loguru 输出（caplog 收不到 loguru sink）。"""
+    records: list = []
+    sink_id = loguru_logger.add(lambda m: records.append(str(m)), level="WARNING")
+    return records, sink_id
+
+
+class TestSuccessWithoutPersistedResultDegrades:
+    """成功终态缺 result 时：照发一条只有抬头+查看链接的 ✅ 并标记已
+    发送，不再让这条记录每轮补发都渲染失败、永远留在待发状态。
+    其他渲染异常（结果存在但渲染报错）不降级，记录保持待发。
+    """
+
+    def _degraded_feishu_router(self, monkeypatch):
+        from src.video_transcript_api.utils.notifications import channel as channel_module
+        from src.video_transcript_api.utils.notifications.channel import FeishuChannel
+        from src.video_transcript_api.utils.notifications.router import NotificationRouter
+
+        notifier = MagicMock()
+        monkeypatch.setattr(
+            channel_module, "load_config",
+            lambda: {"feishu": {"webhook": "https://feishu.invalid/hook"}},
+        )
+        monkeypatch.setattr(
+            channel_module, "_get_global_feishu_notifier", lambda: notifier,
+        )
+        feishu = FeishuChannel()
+        router = NotificationRouter.__new__(NotificationRouter)
+        router.channels = [feishu]
+        return router, notifier
+
+    def _make_pending_success_without_result(self, cm, router):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.PROCESSING)
+        assert finalize_terminal_status_and_notify(
+            task_id,
+            TaskStatus.SUCCESS,
+            title="No persisted result",
+            terminal_snapshot={"use_speaker_recognition": False},
+            cache_manager=cm,
+            router=router,
+            defer_delivery=True,
+        ) is True
+        assert cm.is_terminal_notification_pending(task_id) is True
+        return task_id
+
+    def _assert_degraded_message(self, cm, task_id, notifier):
+        assert notifier.send_card.call_count == 1
+        content = notifier.send_card.call_args.kwargs["content"]
+        first_line = content.splitlines()[0]
+        assert re.match(r"^✅ \[#[0-9a-f]{6}\] .+", first_line), first_line
+        assert re.search(r"🔗 查看：\S+/view/\S+", content), content
+        assert _outbox_state(cm, task_id)["notified_at"] is not None
+        assert cm.is_terminal_notification_pending(task_id) is False
+
+    def test_dispatcher_delivers_header_and_link_when_result_missing(
+        self, cm, monkeypatch,
+    ):
+        router, notifier = self._degraded_feishu_router(monkeypatch)
+        task_id = self._make_pending_success_without_result(cm, router)
+
+        records, sink_id = _collect_warning_lines()
+        try:
+            assert deliver_pending_terminal_notifications(cm, router=router) == 1
+        finally:
+            loguru_logger.remove(sink_id)
+
+        self._assert_degraded_message(cm, task_id, notifier)
+        assert any("COMPLETION-BODY-MISSING task_id=" in line for line in records)
+
+    def test_inline_deliverer_also_degrades_when_result_missing(
+        self, cm, monkeypatch,
+    ):
+        router, notifier = self._degraded_feishu_router(monkeypatch)
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.PROCESSING)
+
+        records, sink_id = _collect_warning_lines()
+        try:
+            assert finalize_terminal_status_and_notify(
+                task_id,
+                TaskStatus.SUCCESS,
+                title="No persisted result",
+                terminal_snapshot={"use_speaker_recognition": False},
+                cache_manager=cm,
+                router=router,
+            ) is True
+        finally:
+            loguru_logger.remove(sink_id)
+
+        self._assert_degraded_message(cm, task_id, notifier)
+        assert any("COMPLETION-BODY-MISSING task_id=" in line for line in records)
+
+    def test_other_render_error_keeps_row_pending_without_sending(self, cm):
+        task_id = _new_task(cm)
+        cm.update_task_status(task_id, TaskStatus.PROCESSING)
+        snapshot = {
+            "result": {"内容总结": "real result", "stats": {}},
+            "use_speaker_recognition": False,
+        }
+        router = _accepted_router()
+        assert finalize_terminal_status_and_notify(
+            task_id,
+            TaskStatus.SUCCESS,
+            terminal_snapshot=snapshot,
+            cache_manager=cm,
+            router=router,
+            defer_delivery=True,
+        ) is True
+
+        with patch.object(
+            llm_ops, "_render_completion_body",
+            side_effect=RuntimeError("render boom"),
+        ):
+            assert deliver_pending_terminal_notifications(cm, router=router) == 0
+
+        router.notify_task_status.assert_not_called()
+        state = _outbox_state(cm, task_id)
+        assert state["notified_at"] is None
+        assert state["attempts"] == 1
+        assert cm.is_terminal_notification_pending(task_id) is True
 
 
 class TestSteadyStateDispatcherAgeGate:
