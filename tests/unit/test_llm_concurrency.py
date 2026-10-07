@@ -143,36 +143,25 @@ def patched_llm_environment(monkeypatch):
     """Patch llm_ops module dependencies for isolated testing."""
     dummy_queue = _DummyQueue()
     dummy_cache = _DummyCacheManager()
-    sent_long_text = []
-
-    def fake_send_long_text(**kwargs):
-        sent_long_text.append(kwargs)
-
-    def fake_wechat_notifier(webhook=None):
-        return _DummyNotifier(webhook)
+    sent_terminal = []
 
     class _FakeRouter:
-        def send_long_text(self, **kwargs):
-            sent_long_text.append(kwargs)
-            return {"fake": True}
         def send_text(self, content, **kwargs):
             return {"fake": True}
         def notify_task_status(self, **kwargs):
+            sent_terminal.append(kwargs)
             return {"fake": True}
 
     # Patch llm_ops module-level variables
     monkeypatch.setattr(llm_ops_module, "llm_task_queue", dummy_queue)
     monkeypatch.setattr(llm_ops_module, "cache_manager", dummy_cache)
-    monkeypatch.setattr(llm_ops_module, "send_long_text_wechat", fake_send_long_text)
-    monkeypatch.setattr(llm_ops_module, "WechatNotifier", fake_wechat_notifier)
     monkeypatch.setattr(llm_ops_module, "get_notification_router", lambda: _FakeRouter())
-    monkeypatch.setattr(llm_ops_module, "get_base_url", lambda: "https://fake-base")
     monkeypatch.setattr(llm_ops_module, "time", SimpleNamespace(sleep=lambda *_: None))
 
     return {
         "queue": dummy_queue,
         "cache": dummy_cache,
-        "sent_long_text": sent_long_text,
+        "sent_terminal": sent_terminal,
     }
 
 
@@ -248,8 +237,8 @@ def test_llm_tasks_run_concurrently(monkeypatch, patched_llm_environment):
     # Queue should have completed both tasks
     assert patched_llm_environment["queue"].completed == 2
 
-    # Both tasks should have sent long text notifications
-    assert len(patched_llm_environment["sent_long_text"]) == 2
+    # Each task is delivered through exactly one terminal status notification.
+    assert len(patched_llm_environment["sent_terminal"]) == 2
 
     # Each task saves calibrated and summary results
     assert len(patched_llm_environment["cache"].saved) == 4  # 2 tasks x 2 results each

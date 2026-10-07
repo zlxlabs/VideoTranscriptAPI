@@ -218,7 +218,7 @@ def _patches(cm, coordinator, notifier_mock):
         patch.object(llm_ops, "cache_manager", cm),
         patch.object(llm_ops, "llm_coordinator", coordinator),
         patch.object(llm_ops, "llm_task_queue", MagicMock()),
-        patch.object(llm_ops, "_send_notification", notifier_mock),
+        patch.object(llm_ops, "_render_completion_body", notifier_mock),
         patch.object(llm_ops, "get_notification_router", lambda: MagicMock()),
         patch.object(llm_ops, "_generate_title_if_needed", lambda t, title, tr: title),
         patch.object(llm_ops, "_prepare_llm_content", lambda t, tr, spk: tr),
@@ -275,8 +275,8 @@ class TestIdentityFallbackRestorationReachesAllConsumers:
 
         # 3) The completion notification consumes the SAME result_dict
         # object _save_llm_results mutated in place.
-        assert notifier_mock.called, "completion notification must have fired"
-        notified_result = notifier_mock.call_args.kwargs["result_dict"]
+        assert notifier_mock.called, "completion body must have been rendered"
+        notified_result = notifier_mock.call_args.args[0]
         assert notified_result["校对文本"] == "张三：Hello there\n\n李四：Hi back"
         assert notified_result["structured_data"]["dialogs"][0]["speaker"] == "张三"
 
@@ -391,7 +391,7 @@ class TestIdentityFallbackRestorationRespectsFingerprintBoundary:
             "SPEAKER_01：And a completely different reply"
         )
 
-        notified_result = notifier_mock.call_args.kwargs["result_dict"]
+        notified_result = notifier_mock.call_args.args[0]
         assert notified_result["structured_data"]["dialogs"][0]["speaker"] == "SPEAKER_00"
 
 
@@ -535,7 +535,7 @@ class TestIdentityFallbackRestorationSourcesFromVerifiedMapping:
         )
         assert cache_data["llm_calibrated"] == "张三：Hello there\n\n李四：Hi back"
 
-        notified_result = notifier_mock.call_args.kwargs["result_dict"]
+        notified_result = notifier_mock.call_args.args[0]
         assert notified_result["校对文本"] == "张三：Hello there\n\n李四：Hi back"
         assert notified_result["structured_data"]["dialogs"][0]["speaker"] == "张三"
 

@@ -68,6 +68,8 @@ class DummyCacheManager:
 
     def update_task_status(self, task_id, status, **kwargs):
         self.status_updates.append((task_id, status, kwargs))
+        task = self.tasks.setdefault(task_id, {"task_id": task_id})
+        task.update(kwargs)
         # Real CacheManager.update_task_status is a compare-and-set that
         # returns True on a genuine win (see H2 fix, local codex review
         # round 7: process_transcription's cache-hit branch now gates its
@@ -194,9 +196,7 @@ class OrderedNotificationRouter:
         self.events = events
 
     def notify_task_status(self, *args, **kwargs):
-        status = kwargs.get("status", "")
-        if status.startswith("正在下载视频"):
-            self.events.append("notify_download")
+        self.events.append("terminal_notification")
         return {"wechat": True}
 
     def send_text(self, *args, **kwargs):
@@ -215,11 +215,8 @@ AUDIO_ADMISSION_CALLS = []
 def patch_runtime(monkeypatch):
     queue = DummyQueue()
     monkeypatch.setattr(transcription, "llm_task_queue", queue)
-    monkeypatch.setattr(transcription, "WechatNotifier", DummyNotifier)
-    monkeypatch.setattr(transcription, "send_long_text_wechat", lambda *args, **kwargs: None)
     monkeypatch.setattr(transcription, "Transcriber", DummyTranscriber)
     monkeypatch.setattr(transcription, "FunASRSpeakerClient", DummyFunASR)
-    monkeypatch.setattr(transcription, "get_base_url", lambda: "http://test")
     AUDIO_ADMISSION_CALLS.clear()
     monkeypatch.setattr(
         transcription, "_ensure_audio_track", AUDIO_ADMISSION_CALLS.append
@@ -250,6 +247,9 @@ def test_flow_cache_hit(monkeypatch, patch_runtime):
     }
     cache_manager = DummyCacheManager(cache_data=cache_data)
     monkeypatch.setattr(transcription, "cache_manager", cache_manager)
+    notification_router = MagicMock()
+    notification_router.notify_task_status.return_value = {"wechat": True}
+    monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)
 
     def fail_create_downloader(url):
         raise AssertionError("create_downloader should not be called on cache hit")
@@ -270,14 +270,14 @@ def test_flow_cache_hit(monkeypatch, patch_runtime):
     assert len(patch_runtime.items) == 0
 
 
-def test_download_info_is_resolved_after_download_notification(
+def test_download_info_is_resolved_without_progress_notification(
     monkeypatch, patch_runtime
 ):
     """A downloader may perform real work while resolving download info.
 
     BBDown is one such downloader: its ``get_download_info`` path invokes the
-    actual download. The user must see the download status before that call,
-    and the call must happen exactly once.
+    actual download. The removed progress notice must not be emitted, and the
+    call must happen exactly once.
     """
     events = []
     cache_manager = DummyCacheManager(cache_data=None)
@@ -298,7 +298,7 @@ def test_download_info_is_resolved_after_download_notification(
     )
 
     assert result["status"] == "success"
-    assert events == ["notify_download", "get_download_info", "download_file"]
+    assert events == ["get_download_info", "download_file"]
 
 
 def test_flow_cache_hit_with_disabled_calibration_notifies_disclaimer(monkeypatch, patch_runtime):
@@ -357,9 +357,9 @@ def test_flow_cache_hit_with_disabled_calibration_notifies_disclaimer(monkeypatc
     assert result["status"] == "success"
     assert result["data"]["cached"] is True
 
-    assert notification_router.send_long_text.called
-    sent_text = notification_router.send_long_text.call_args.kwargs["text"]
-    assert "未启用" in sent_text
+    notification_router.notify_task_status.assert_called_once()
+    sent_text = notification_router.notify_task_status.call_args.kwargs["completion_body"]
+    assert "AI 校对未启用" in sent_text
 
 
 def test_flow_cache_hit_with_summary_disabled_shows_not_enabled_label(monkeypatch, patch_runtime):
@@ -413,8 +413,8 @@ def test_flow_cache_hit_with_summary_disabled_shows_not_enabled_label(monkeypatc
     assert result["status"] == "success"
     assert result["data"]["cached"] is True
 
-    assert notification_router.send_long_text.called
-    sent_text = notification_router.send_long_text.call_args.kwargs["text"]
+    notification_router.notify_task_status.assert_called_once()
+    sent_text = notification_router.notify_task_status.call_args.kwargs["completion_body"]
     assert "未启用" in sent_text
     assert "未生成" not in sent_text
 
@@ -463,9 +463,9 @@ def test_flow_cache_hit_with_full_calibration_has_no_disclaimer(monkeypatch, pat
     )
 
     assert result["status"] == "success"
-    assert notification_router.send_long_text.called
-    sent_text = notification_router.send_long_text.call_args.kwargs["text"]
-    assert "未启用" not in sent_text
+    notification_router.notify_task_status.assert_called_once()
+    sent_text = notification_router.notify_task_status.call_args.kwargs["completion_body"]
+    assert "AI 校对未启用" not in sent_text
 
 
 def test_flow_subtitle_preferred(monkeypatch, patch_runtime):

@@ -102,7 +102,7 @@ def _patches(cm, coordinator):
         patch.object(llm_ops, "cache_manager", cm),
         patch.object(llm_ops, "llm_coordinator", coordinator),
         patch.object(llm_ops, "llm_task_queue", MagicMock()),
-        patch.object(llm_ops, "_send_notification", MagicMock()),
+        patch.object(llm_ops, "_render_completion_body", MagicMock()),
         patch.object(llm_ops, "get_notification_router", lambda: MagicMock()),
         patch.object(llm_ops, "_generate_title_if_needed", lambda t, title, tr: title),
         patch.object(llm_ops, "_prepare_llm_content", lambda t, tr, spk: tr),

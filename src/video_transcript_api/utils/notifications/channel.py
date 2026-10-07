@@ -229,7 +229,7 @@ def build_task_status_content(
     if transcript and "转录完成" in status:
         preview = transcript[:100] + ("..." if len(transcript) > 100 else "")
         content += f"\n\n**转录预览：**\n```\n{preview}\n```"
-    if view_url:
+    if view_url and not completion_body:
         content += f"\n\n🔗 查看：{view_url}"
     if completion_body:
         safe_body = _apply_risk_control_safe(completion_body, text_type="summary")

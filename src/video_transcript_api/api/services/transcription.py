@@ -227,13 +227,7 @@ from ...transcriber import FunASRSpeakerClient, Transcriber
 # 非有限值 / 负数 / 非数字一律 None。准入探测解析出的 format.duration 走这条判据，
 # 保证「准入认为合法的时长」与「预算公式接受的时长」不可能分叉。
 from ...transcriber.capswriter_client import _finite_time_or_none
-from ...utils.notifications import (
-    WechatNotifier,
-    send_long_text_wechat,
-    get_notification_router,
-)
-from ...utils.notifications.channel import _clean_url
-from ...utils.rendering import get_base_url
+from ...utils.notifications import get_notification_router
 from ...utils.perf_tracker import PerfTracker
 from ...utils.task_status import TaskStatus
 from ...utils.llm_status import CalibrationStatus, SummaryStatus
@@ -778,8 +772,8 @@ def _handoff_to_llm_stage(
         calibrating_status_kwargs: 透传给 update_task_status(...,
             TaskStatus.CALIBRATING, **kwargs) 的关键字参数（platform/media_id/
             title/author/download_url），由调用方按各自分支的变量名组装。
-        task_notifier: 绑定了通知渠道的任务通知器，put() 失败时用于
-            task_notifier.send_text 告警（与重排前的既有行为一致）。
+        task_notifier: 绑定了通知渠道的任务通知器，put() 失败时通过终态
+            通知路径发送告警（与重排后的单终态通知约定一致）。
         log_context: 日志里标识调用分支的简短中文标签（如"缓存""youtube-api"
             "平台字幕""常规转录"），拼进本函数内部的日志文案，方便按分支定位
             问题。
@@ -848,8 +842,8 @@ def _handoff_to_llm_stage(
         logger.exception(f"将LLM任务加入队列失败（{log_context}）: {exc}")
         # R3 修复（PR3 review hardening）：release 提到通知之前——release()
         # 是 InflightRegistry 内部一次加锁的 dict.pop，幂等且不会抛异常
-        # （见 api/context.py::InflightRegistry.release 的文档），而
-        # task_notifier.send_text 是外部 webhook 调用，可能因超时/限流抛
+        # （见 api/context.py::InflightRegistry.release 的文档），而终态
+        # 通知是外部 webhook 调用，可能因超时/限流抛
         # 异常。旧顺序里通知排在 release 之前：通知一旦抛异常，会直接跳出
         # 这个 except 块，release 和下面的 FAILED 收敛写入都不会执行——
         # "llm" 桶里的登记条目永久漏掉一个名额（且没有 future 完成回调能
@@ -862,8 +856,8 @@ def _handoff_to_llm_stage(
         # 与 R2/K3（llm_ops.py 里成功/失败两侧的同一顺序重排，见该文件
         # _handle_llm_task 的注释）同一套顺序原则：先写终态 CAS 并检查返回值，
         # 终态落定后再尝试通知；通知放进独立 try/except 兜住，异常只记日志，
-        # 不影响已经写定的终态。旧顺序里通知（task_notifier.send_text，外部
-        # webhook 调用，可能因超时/限流抛异常）排在终态写入之前，一旦抛异常会
+        # 不影响已经写定的终态。旧顺序里任务通知（外部 webhook 调用，可能因
+        # 超时/限流抛异常）排在终态写入之前，一旦抛异常会
         # 直接跳出这个 except 块，下面的 FAILED 写入永远不会执行——任务永久停在
         # CALIBRATING（非终态），客户端只能一直轮询、再也等不到结果；既有测试
         # 还反过来锁死了"通知异常会传播"这个错误行为，本次一并修正（见
@@ -993,15 +987,15 @@ def process_transcription(
 
         class _TaskNotifier:
             """Bound notifier for this task — wraps router with channel/webhook context."""
-            def notify_task_status(self, url, status, error=None, title=None, author=None, transcript=None, view_url=None):
+            def notify_task_status(
+                self, url, status, error=None, title=None, author=None,
+                transcript=None, view_url=None, task_id=None, completion_body=None,
+            ):
                 return _router.notify_task_status(
                     url=url, status=status, error=error, title=title,
                     author=author, transcript=transcript, view_url=view_url,
+                    task_id=task_id, completion_body=completion_body,
                     channel_name=notification_channel, webhooks=notification_webhooks,
-                )
-            def send_text(self, content, skip_risk_control=False):
-                return _router.send_text(
-                    content, channel_name=notification_channel, webhooks=notification_webhooks,
                 )
 
         task_notifier = _TaskNotifier()
@@ -1091,13 +1085,6 @@ def process_transcription(
                     "message": f"任务已被并发流程标记为 success，跳过失败通知（当前状态: {current_status}）",
                 }
             return {"status": "failed", "message": error_msg}
-
-        engine_info = (
-            "说话人识别(FunASR)" if use_speaker_recognition else "普通转录(CapsWriter)"
-        )
-        task_notifier.notify_task_status(
-            display_url, f"开始处理（进行中）- {engine_info}"
-        )
 
         # ==================== 阶段1: URL 解析（提取 platform 和 video_id）====================
         from ...utils.url_parser import URLParser
@@ -1394,102 +1381,25 @@ def process_transcription(
                 and not calibration_effectively_missing
             ):
                 logger.info("缓存中已有 LLM 结果，直接使用")
-                cache_type = "含说话人识别" if has_speaker_recognition else "普通转录"
-                engine_info = "FunASR" if has_speaker_recognition else "CapsWriter"
-                task_notifier.notify_task_status(
-                    display_url,
-                    f"使用已有缓存({cache_type}-{engine_info}，含LLM结果)",
-                    title=video_title,
-                    author=author,
-                    transcript="使用缓存的校对和总结文本...",
-                )
-
-                # 直接发送缓存的 LLM 结果（仅发送总结文本）
-                logger.info("缓存模式 - 发送总结文本")
-
-                # 获取查看链接
-                task_info = cache_manager.get_task_by_id(task_id)
-                view_url = ""
-                if task_info and task_info.get("view_token"):
-                    base_url = get_base_url()
-                    view_url = f"{base_url}/view/{task_info['view_token']}"
-
-                # 计算统计信息
-                original_length = len(transcript)
-                calibrated_length = len(cache_data.get("llm_calibrated", ""))
                 calibrated_text = cache_data.get("llm_calibrated", "")
-
-                # 判断是否跳过了总结：
-                # - 真正的"短文本跳过"：summary 与 calibrated 内容相同（见
-                #   llm_ops._save_llm_results 的 SKIPPED_SHORT 分支，会把
-                #   calibrated 文本原样复制成 summary 落盘）；
-                # - 本次/历史请求根本未要求总结（summarize=False，见函数顶部
-                #   注释：disabled 时不落盘 llm_summary.txt）：has_llm_summary
-                #   为 False，此时 cache_data 里没有 "llm_summary" 键，不能无
-                #   条件下标访问，否则 KeyError（这正是本次修复的问题）。
-                #   两种情况在展示上等价，都走"未生成总结"文案，与周边已有的
-                #   skip_summary 分支保持一致。
-                if has_llm_summary:
-                    summary_text = cache_data["llm_summary"]
-                    skip_summary = summary_text == calibrated_text
-                else:
-                    summary_text = calibrated_text
-                    skip_summary = True
-
-                # 通知里的总结状态文案：与 llm_ops._send_notification 保持一致的
-                # 三态区分（failed/disabled/其他一律"未生成"）——这条"缓存全命中"
-                # 路径此前硬编码"未生成"，不区分 summary_status，导致用户主动
-                # 关闭总结（disabled）时通知误报成"未生成"，与诚实状态模型的
-                # 承诺不符（ci-gate review，云端 CI 发现）。
-                cached_summary_status = cached_llm_status.get("summary_status")
-                if cached_summary_status == SummaryStatus.FAILED:
-                    summary_status_label = "生成失败"
-                elif cached_summary_status == SummaryStatus.DISABLED:
-                    summary_status_label = "未启用"
-                else:
-                    summary_status_label = "未生成"
-
-                # 构建完整的消息格式
-                speaker_info = "（含说话人识别）" if has_speaker_recognition else ""
-                # 这条"缓存全命中"路径独立拼接消息，不经过 llm_ops._send_notification/
-                # _build_calibration_warning，之前完全没有消费 calibration_status——
-                # 但触发这条分支不代表本轮真的做过 LLM 校对：calibrate_requested=False
-                # 时即便历史上跑过一轮 disabled（本地格式化占位文本落盘），
-                # calibrated_layer_satisfied 仍会因 cached_calibration_status==DISABLED
-                # 而判定"层未满足"，need_calibrated 却因 calibrate_requested=False 恒为
-                # False，两者结合会让这条分支把"未经 LLM 校对的占位文本"当作
-                # calibrated_text/summary_text 发出，且不带任何提示（ci-gate review）。
-                calibration_warning = (
-                    "\n⚠️ **AI 校对未启用**：当前显示为未经校对的原始语音识别文本"
-                    "（可能含错别字、断句错误）。"
-                    if cached_calibration_status == CalibrationStatus.DISABLED
-                    else ""
+                summary_text = (
+                    cache_data["llm_summary"] if has_llm_summary else calibrated_text
                 )
-                if skip_summary:
-                    # 短文本/未启用/失败，均展示校对文本兜底
-                    full_message = f"""## 总结和校对
-🌐 网页查看：{view_url}
-📄 直接获取：{view_url}?raw=calibrated
-
-## 转录统计
-原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_status_label}{calibration_warning}
-
-## 校对文本{speaker_info}
-{summary_text}"""
-                    logger.info(f"缓存模式 - 发送校对文本（总结{summary_status_label}）")
-                else:
-                    # 长文本，有总结
-                    summary_length = len(summary_text)
-                    full_message = f"""## 总结和校对
-🌐 网页查看：{view_url}
-📄 直接获取：{view_url}?raw=calibrated
-
-## 转录统计
-原始 {original_length:,} 字 | 校对 {calibrated_length:,} 字 | 总结 {summary_length:,} 字{calibration_warning}
-
-## 总结{speaker_info}
-{summary_text}"""
-                    logger.info("缓存模式 - 发送总结文本")
+                skip_summary = not has_llm_summary or summary_text == calibrated_text
+                cached_summary_status = cached_llm_status.get("summary_status")
+                completion_result = {
+                    "校对文本": calibrated_text,
+                    "内容总结": summary_text,
+                    "skip_summary": skip_summary,
+                    "stats": {
+                        "original_length": len(transcript),
+                        "calibrated_length": len(calibrated_text),
+                        "summary_length": len(summary_text),
+                        "calibration_status": cached_calibration_status,
+                        "summary_status": cached_summary_status,
+                    },
+                    "models_used": {},
+                }
 
                 # 缓存全命中（含 LLM 结果）：无后续 LLM 工作，直接置终态 success。
                 # 把本次已读到的 llm_status.json 快照（cached_llm_status，见上方
@@ -1539,6 +1449,8 @@ def process_transcription(
                         "media_id": cache_data.get("media_id"),
                         "calibration_status": mirrored_calibration_status,
                         "summary_status": mirrored_summary_status,
+                        "result": completion_result,
+                        "use_speaker_recognition": has_speaker_recognition,
                         "processing_options": processing_options,
                         "observability": tracker.observation(),
                     },
@@ -1553,36 +1465,6 @@ def process_transcription(
                         f"任务状态 CAS 写入 success 失败(任务已处于终态 {current_status}，"
                         f"可能已被关闭清算/恢复流程判定)，跳过完成通知: {task_id}"
                     )
-                else:
-                    # K3 修复（本地 codex review 第 8 轮）：完成通知与其辅助
-                    # 逻辑（发送校对/总结正文、拼装查看链接、发送完成通知）
-                    # 此前仍在最外层通用失败处理的 try/except（本函数末尾的
-                    # `except Exception as exc:`）覆盖范围内——success 已经
-                    # 落库后，这里任意一步抛异常都会被那个 except 当成
-                    # "转录处理异常"：把返回值改成 failed、发一条误导性的
-                    # "转录异常"通知，且原本没有检查 FAILED CAS 的返回值就
-                    # 声称处理完毕。改为独立 try/except 兜住这段通知逻辑
-                    # 本身的异常：通知失败只记日志，不影响已经写定的
-                    # success 任务结果，也不会误触发失败通知。
-                    try:
-                        # Content body only. Terminal status notify is emitted
-                        # by finalize_terminal_status_and_notify on CAS win.
-                        _router.send_long_text(
-                            title=video_title,
-                            url=display_url,
-                            text=full_message,
-                            is_summary=not skip_summary,
-                            has_speaker_recognition=has_speaker_recognition,
-                            channel_name=notification_channel,
-                            webhooks=notification_webhooks,
-                            skip_content_type_header=True,
-                        )
-                        logger.info(f"已发送缓存的 LLM 结果: {video_title}")
-                    except Exception:
-                        logger.exception(
-                            f"完成通知发送失败（任务已成功落库，不影响任务结果）: {task_id}"
-                        )
-
                 # 缓存完全命中（含 LLM 结果），输出性能摘要
                 tracker.log_summary()
 
@@ -1597,14 +1479,6 @@ def process_transcription(
                         "speaker_recognition": has_speaker_recognition,
                     },
                 }
-
-            task_notifier.notify_task_status(
-                display_url,
-                "使用已有缓存",
-                title=video_title,
-                author=author,
-                transcript="正在处理已存在的转录文本...",
-            )
 
             # 缓存部分命中（transcript 已在，但请求的层里至少一层缺失），记录计数
             tracker.count("cache_hit_partial")
@@ -1963,13 +1837,6 @@ def process_transcription(
                             f"segments={len(yt_api_segments) if yt_api_segments else 0}"
                         )
 
-                        task_notifier.notify_task_status(
-                            display_url,
-                            "平台字幕获取成功 - 使用 YouTube API Server",
-                            title=video_title,
-                            author=author,
-                        )
-
                         _finalize_presentation_fields()
                         # 保存到缓存
                         cache_result = cache_manager.save_cache(
@@ -2064,13 +1931,6 @@ def process_transcription(
                                 title=video_title, author_name=author,
                             )
 
-                        task_notifier.notify_task_status(
-                            display_url,
-                            f"正在转录音视频 - {engine_info}",
-                            title=video_title,
-                            author=author,
-                        )
-
                         # 根据是否需要说话人识别选择转录器
                         with tracker.track("transcription"):
                             if use_speaker_recognition:
@@ -2146,14 +2006,6 @@ def process_transcription(
                                 error_msg, notify_status="转录结果保存失败",
                                 title=video_title, author_name=author,
                             )
-
-                        task_notifier.notify_task_status(
-                            display_url,
-                            f"转录完成（进行中）- {engine_info}，后面还有校对/摘要",
-                            title=video_title,
-                            author=author,
-                            transcript=transcript,
-                        )
 
                         # 加入 LLM 处理队列
                         handoff_failure = _handoff_to_llm_stage(
@@ -2288,13 +2140,6 @@ def process_transcription(
                 # 如果有字幕（文本或仅有 segments），直接使用
                 logger.info(f"使用平台提供的字幕: {url}")
 
-                task_notifier.notify_task_status(
-                    display_url,
-                    "平台字幕获取成功 - 直接使用平台字幕",
-                    title=video_title,
-                    author=author,
-                )
-
                 _finalize_presentation_fields()
                 # 使用新的缓存系统保存平台字幕（有 segments 则写侧车 JSON）
                 cache_result = cache_manager.save_cache(
@@ -2371,13 +2216,6 @@ def process_transcription(
             else:
                 # 没有字幕，需要下载音视频并转录
                 logger.info(f"下载视频进行转录: {url}")
-                task_notifier.notify_task_status(
-                    display_url,
-                    f"正在下载视频 - {engine_info}",
-                    title=video_title,
-                    author=author,
-                )
-
                 # 下载文件
                 local_file = None
                 actual_downloader = None
@@ -2480,13 +2318,6 @@ def process_transcription(
                 try:
                     # 开始转录
                     logger.info(f"开始转录音视频: {local_file}")
-                    task_notifier.notify_task_status(
-                        display_url,
-                        f"正在转录音视频 - {engine_info}",
-                        title=video_title,
-                        author=author,
-                    )
-
                     # platform 和 video_id 已在前面设置
 
                     # 根据是否需要说话人识别选择转录器（用 PerfTracker 记录转录阶段耗时）
@@ -2582,15 +2413,6 @@ def process_transcription(
 
                     # 获取转录文本
                     transcript = transcription_result.get("transcript", "")
-
-                    # 通知转录完成，包含转录文本预览和服务器类型信息
-                    task_notifier.notify_task_status(
-                        display_url,
-                        f"转录完成（进行中）- {engine_info}，后面还有校对/摘要",
-                        title=video_title,
-                        author=author,
-                        transcript=transcript,
-                    )
 
                     # 将LLM处理任务加入队列
                     handoff_failure = _handoff_to_llm_stage(

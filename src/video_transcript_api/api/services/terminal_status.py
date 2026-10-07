@@ -153,16 +153,12 @@ def deliver_terminal_notification(
 
     error_for_notify = notify_error if notify_error is not None else error_message
 
-    display_url = url
-    task = None
-    if not display_url or title is None or author is None:
-        task = cache_manager.get_task_by_id(task_id) or {}
-        if not display_url:
-            display_url = task.get("url") or ""
-        if title is None:
-            title = task.get("title")
-        if author is None:
-            author = task.get("author")
+    task = cache_manager.get_task_by_id(task_id) or {}
+    display_url = url or task.get("url") or ""
+    if title is None:
+        title = task.get("title")
+    if author is None:
+        author = task.get("author")
     view_url = _resolve_view_url(cache_manager, task_id, task)
 
     accepted = False
@@ -174,6 +170,7 @@ def deliver_terminal_notification(
             return
         cache_manager.mark_terminal_notification_attempted(task_id)
         try:
+            completion_body = _render_success_body(task, view_url, status)
             result = _emit_status_notification(
                 display_url=display_url or "",
                 notify_status=notify_status,
@@ -185,6 +182,8 @@ def deliver_terminal_notification(
                 router=router,
                 notify_via=notify_via,
                 view_url=view_url,
+                task_id=task_id,
+                completion_body=completion_body,
             )
             accepted = _notification_accepted(result)
         except Exception:
@@ -208,6 +207,8 @@ def _emit_status_notification(
     router=None,
     notify_via=None,
     view_url: Optional[str] = None,
+    task_id: str,
+    completion_body: Optional[str] = None,
 ) -> None:
     """Dispatch the status line through a bound notifier or the router."""
     if notify_via is not None:
@@ -218,6 +219,8 @@ def _emit_status_notification(
             title,
             author,
             view_url=view_url,
+            task_id=task_id,
+            completion_body=completion_body,
         )
 
     sender = router if router is not None else get_notification_router()
@@ -230,6 +233,28 @@ def _emit_status_notification(
         channel_name=channel_name,
         webhooks=webhooks,
         view_url=view_url,
+        task_id=task_id,
+        completion_body=completion_body,
+    )
+
+
+def _render_success_body(task, view_url, status):
+    """Render success content from the persisted terminal snapshot."""
+    if status != TaskStatus.SUCCESS:
+        return None
+    snapshot = task.get("terminal_snapshot") or {}
+    result = snapshot.get("result")
+    if not isinstance(result, dict):
+        raise ValueError(
+            f"success terminal notification lacks persisted result: {task.get('task_id')}"
+        )
+    from .llm_ops import _render_completion_body
+
+    return _render_completion_body(
+        result,
+        view_url or "",
+        use_speaker_recognition=snapshot.get("use_speaker_recognition", False),
+        calibrate_only=snapshot.get("calibrate_only", False),
     )
 
 
@@ -310,6 +335,7 @@ def deliver_pending_terminal_notifications(
                 continue
             cache_manager.mark_terminal_notification_attempted(task_id)
             try:
+                completion_body = _render_success_body(task, view_url, row["status"])
                 result = router.notify_task_status(
                     url=task.get("url") or "",
                     status=notify_status,
@@ -318,6 +344,8 @@ def deliver_pending_terminal_notifications(
                     author=task.get("author"),
                     webhooks=webhooks,
                     view_url=view_url,
+                    task_id=task_id,
+                    completion_body=completion_body,
                 )
                 accepted = _notification_accepted(result)
             except Exception:

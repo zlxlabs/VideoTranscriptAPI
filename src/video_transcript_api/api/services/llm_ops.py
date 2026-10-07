@@ -37,13 +37,7 @@ from ...llm.processors.notes_processor import (
     compute_notes_anchor_fingerprint,
     load_notes_source_segments,
 )
-from ...utils.notifications import (
-    WechatNotifier,
-    send_long_text_wechat,
-    format_llm_config_markdown,
-    get_notification_router,
-)
-from ...utils.rendering import get_base_url
+from ...utils.notifications import format_llm_config_markdown, get_notification_router
 from ...utils.perf_tracker import PerfTracker
 from ...utils.task_status import TaskStatus
 from .terminal_status import (
@@ -489,10 +483,15 @@ def _handle_notes_generation(
             media_id=media_id,
             terminal_snapshot={
                 "result": {
-                    "notes_status": NotesStatus.GENERATED,
-                    "notes_chapter_count": notes_result.chapter_count,
-                    "notes_fingerprint": notes_result.fingerprint,
+                    "详细笔记": notes_result.text,
+                    "stats": {
+                        "notes_status": NotesStatus.GENERATED,
+                        "notes_length": len(notes_result.text),
+                        "notes_chapter_count": notes_result.chapter_count,
+                    },
+                    "models_used": selected_models,
                 },
+                "use_speaker_recognition": use_speaker_recognition,
                 "processing_options": processing_options,
                 "observability": tracker.observation(),
             },
@@ -556,20 +555,8 @@ def _handle_llm_task(llm_task: dict):
             video_title = llm_task["video_title"]
             transcript = llm_task["transcript"]
             use_speaker_recognition = llm_task.get("use_speaker_recognition", False)
-            wechat_webhook = llm_task.get("wechat_webhook")
             notification_channel = llm_task.get("notification_channel")
             notification_webhooks = llm_task.get("notification_webhooks", {})
-
-            _router = get_notification_router()
-
-            class _TaskNotifier:
-                def send_text(self, content, skip_risk_control=False):
-                    return _router.send_text(
-                        content, channel_name=notification_channel,
-                        webhooks=notification_webhooks,
-                    )
-
-            task_notifier = _TaskNotifier()
             logger.info(f"开始处理LLM任务: {task_id}, 标题: {video_title}")
 
             notes_attempted = False
@@ -578,28 +565,12 @@ def _handle_llm_task(llm_task: dict):
                 raw_processing_options = llm_task.get("processing_options") or {}
                 if raw_processing_options.get("notes") is True:
                     notes_attempted = True
-                    notes_notification_result = _handle_notes_generation(
+                    _handle_notes_generation(
                         llm_task=llm_task,
                         tracker=tracker,
                         processing_options=raw_processing_options,
                         notes_outcome=notes_outcome,
                     )
-                    if notes_notification_result is not None:
-                        try:
-                            _send_notification(
-                                task_id=task_id,
-                                video_title=video_title,
-                                display_url=display_url,
-                                use_speaker_recognition=use_speaker_recognition,
-                                result_dict=notes_notification_result,
-                                notification_channel=notification_channel,
-                                notification_webhooks=notification_webhooks,
-                            )
-                        except Exception:
-                            logger.exception(
-                                "详细笔记完成通知发送失败"
-                                f"（任务已成功落库，不影响任务结果）: {task_id}"
-                            )
                     tracker.log_summary()
                     return
 
@@ -856,6 +827,8 @@ def _handle_llm_task(llm_task: dict):
                     chapters_status=final_stats.get("chapters_status"),
                     terminal_snapshot={
                         "result": result_dict,
+                        "use_speaker_recognition": use_speaker_recognition,
+                        "calibrate_only": calibrate_only,
                         "processing_options": processing_options,
                         "observability": tracker.observation(),
                     },
@@ -872,7 +845,7 @@ def _handle_llm_task(llm_task: dict):
                     # K3 修复（本地 codex review 第 8 轮）：H2 把 CAS 提到通知
                     # 之前是对的，但通知调用此前仍在外层通用失败处理的
                     # try/except（下面的 `except Exception as exc:`）覆盖范围
-                    # 内——success 已经落库后，_send_notification 抛出的任何
+                    # 内——success 已经落库后，完成正文渲染抛出的任何
                     # 异常（通知渠道超时/限流等）都会被那个 except 当成"任务
                     # 失败"处理：返回值上把任务判成失败、发一条误导性的
                     # "【LLM API调用异常】"通知、且无条件声称"已更新为
@@ -880,21 +853,6 @@ def _handle_llm_task(llm_task: dict):
                     # 已经是 success）。这里用独立的 try/except 兜住通知本身
                     # 的异常：通知失败只记日志，不影响已经写定的任务结果，
                     # 也不会误触发失败通知/失败日志。
-                    if not calibrate_only:
-                        try:
-                            _send_notification(
-                                task_id=task_id,
-                                video_title=video_title,
-                                display_url=display_url,
-                                use_speaker_recognition=use_speaker_recognition,
-                                result_dict=result_dict,
-                                notification_channel=notification_channel,
-                                notification_webhooks=notification_webhooks,
-                            )
-                        except Exception:
-                            logger.exception(
-                                f"完成通知发送失败（任务已成功落库，不影响任务结果）: {task_id}"
-                            )
                     deliver_terminal_notification(
                         task_id,
                         TaskStatus.SUCCESS,
@@ -921,8 +879,8 @@ def _handle_llm_task(llm_task: dict):
 
                 # 终态由 LLM 阶段统一写回（对所有任务生效，修复普通任务 LLM 失败被静默的问题）
                 #
-                # R2 修复（PR3 review hardening）：此前失败通知
-                # （task_notifier.send_text）排在 FAILED CAS 之前——通知调用
+                # R2 修复（PR3 review hardening）：此前失败通知排在 FAILED CAS
+                # 之前——通知调用
                 # 抛出的异常（webhook 超时/限流等）会直接跳出这层 except，
                 # 既不会被下面的 try/except 兜住，也不会走到 finally 之外的
                 # 任何终态写入，任务永久停在 calibrating（非终态），客户端
@@ -1209,7 +1167,7 @@ def _restore_cached_summary_for_notification(result_dict: dict, merged_snapshot:
     llm_summary.txt，本轮只补校对层），_build_result_dict() 产出的
     result_dict["内容总结"] 仍是 None、skip_summary=True——这只反映"本轮
     是否重新生成"，不反映"总结是否存在"。_save_llm_results 内部对
-    llm_status.json 的合并语义是对的（保留旧值），但随后 _send_notification
+    llm_status.json 的合并语义是对的（保留旧值），但随后完成正文渲染
     直接消费这份内存态的 result_dict，会把缓存里真实存在的总结误报成
     "总结未生成"。
 
@@ -1227,7 +1185,7 @@ def _restore_cached_summary_for_notification(result_dict: dict, merged_snapshot:
     用户，又绕开了校对文本通知路径自身的 5000 字截断（"总结"分支不做长度
     截断）。因此这里额外核实合并后（llm_status.json）的 summary_status
     必须是 GENERATED 才回填；SKIPPED_SHORT/FAILED/DISABLED/PENDING 均维持
-    "未生成"语义不变，交由 _send_notification 按各自既有文案处理。
+    "未生成"语义不变，交由完成正文渲染按各自既有文案处理。
 
     Args:
         result_dict: _build_result_dict() 的输出，原地修改（补回总结文本、
@@ -1769,7 +1727,7 @@ def _restore_real_names_after_identity_fallback(
 
     V2 修复（PR3 review hardening）：此前只修补了 structured_data，
     calibrated_text（"校对文本"）在调用本函数之前已经从 result_dict 提取
-    成局部变量并落盘，通知（_send_notification）与任务终态快照
+    成局部变量并落盘，完成正文渲染与任务终态快照
     （terminal_snapshot）也都在 _save_llm_results 返回之后直接消费调用方
     那份未经修补的 result_dict——查看页的结构化数据显示的是修补后的真名，
     主文本/通知/快照却仍是 identity_fallback 的占位名，自相矛盾。调用方
@@ -2072,7 +2030,7 @@ def _save_llm_results(
         # 背景：R4 修复（_restore_real_names_after_identity_fallback）此前
         # 只修补了下面"完整结构化保存"分支里的 structured_data，但
         # calibrated_text（"校对文本"）在函数最顶部就已经从 result_dict
-        # 提取成局部变量、通知（_send_notification）与任务终态快照
+        # 提取成局部变量、完成正文渲染与任务终态快照
         # （terminal_snapshot）也都在本函数返回之后直接消费调用方那份
         # 未经修补的 result_dict——查看页的结构化数据显示的是修补后的
         # 真名，主文本/通知/快照却仍是 identity_fallback 的占位名，自相
@@ -2081,7 +2039,7 @@ def _save_llm_results(
         # 修法：把恢复动作挪到本函数最早可行的位置（suppress_calibration
         # 刚算出来、calibrated_text 尚未被提取为局部变量之前），原地修改
         # result_dict 这个"单一权威副本"——_handle_llm_task 里
-        # terminal_snapshot/_send_notification 消费的正是同一个 dict
+        # terminal_snapshot/完成正文渲染消费的正是同一个 dict
         # 对象，原地修改自动对它们可见，沿用
         # _restore_cached_summary_for_notification 已经在用的同一种
         # "调用方传入的 dict 原地修改"写法。下面 calibrated_text 的提取
@@ -2511,29 +2469,15 @@ def _save_llm_results(
     }
 
 
-def _send_notification(
-    task_id: str,
-    video_title: str,
-    display_url: str,
-    use_speaker_recognition: bool,
+def _render_completion_body(
     result_dict: dict,
-    notification_channel: str = None,
-    notification_webhooks: dict = None,
-):
-    """Send LLM results notification via router (multi-channel).
-
-    Args:
-        task_id: task ID
-        video_title: video title
-        display_url: display URL
-        use_speaker_recognition: speaker recognition flag
-        result_dict: LLM result dict
-        notification_channel: target channel (wechat/feishu/None=all)
-        notification_webhooks: per-channel webhook dict
-    """
-    if notification_webhooks is None:
-        notification_webhooks = {}
-    router = get_notification_router()
+    view_url: str,
+    use_speaker_recognition: bool = False,
+    calibrate_only: bool = False,
+) -> str:
+    """Render the persisted completion result for the terminal notification."""
+    if calibrate_only:
+        return f"🌐 网页查看：{view_url}"
 
     calibrated_text = result_dict.get("校对文本", "")
     summary_text = result_dict.get("内容总结")
@@ -2541,12 +2485,6 @@ def _send_notification(
     skip_summary = result_dict.get("skip_summary", False)
     stats = result_dict.get("stats", {})
     models_used = result_dict.get("models_used", {})
-
-    task_info = cache_manager.get_task_by_id(task_id)
-    view_url = ""
-    if task_info and task_info.get("view_token"):
-        base_url = get_base_url()
-        view_url = f"{base_url}/view/{task_info['view_token']}"
 
     original_length = stats.get("original_length", 0)
     calibrated_length = stats.get("calibrated_length", 0)
@@ -2588,7 +2526,6 @@ def _send_notification(
 共 {notes_chapter_count:,} 章 | {notes_length:,} 字
 
 {model_config_text}"""
-        logger.info(f"发送详细笔记完成通知: {task_id}")
     elif skip_summary:
         if len(calibrated_text) <= NOTIFICATION_TEXT_THRESHOLD:
             full_message = f"""## 总结和校对
@@ -2602,7 +2539,6 @@ def _send_notification(
 
 ## 校对文本{speaker_info}
 {calibrated_text}"""
-            logger.info(f"发送校对文本（总结{summary_status_label}，文本较短直接发送）: {task_id}")
         else:
             full_message = f"""## 总结和校对
 🌐 网页查看：{view_url}
@@ -2614,10 +2550,6 @@ def _send_notification(
 {model_config_text}
 
 ⚠️ 校对文本过长（{calibrated_length:,} 字），请点击上方链接在网页中查看完整内容。"""
-            logger.info(
-                f"校对文本过长（{calibrated_length} 字 > {NOTIFICATION_TEXT_THRESHOLD}），"
-                f"仅发送链接: {task_id}"
-            )
     else:
         full_message = f"""## 总结和校对
 🌐 网页查看：{view_url}
@@ -2630,19 +2562,8 @@ def _send_notification(
 
 ## 总结{speaker_info}
 {summary_text}"""
-        logger.info(f"发送总结文本: {task_id}")
 
-    router.send_long_text(
-        title=video_title,
-        url=display_url,
-        text=full_message,
-        is_summary=not skip_summary,
-        has_speaker_recognition=use_speaker_recognition,
-        channel_name=notification_channel,
-        webhooks=notification_webhooks,
-        skip_content_type_header=True,
-    )
-    logger.info(f"content notification queued: {task_id}")
+    return full_message
 
 
 def _build_calibration_warning(stats: dict) -> str:
