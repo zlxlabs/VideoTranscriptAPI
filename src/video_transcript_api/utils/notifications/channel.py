@@ -231,9 +231,9 @@ def build_task_status_content(
         content += f"\n\n**转录预览：**\n```\n{preview}\n```"
     if view_url and not completion_body:
         content += f"\n\n🔗 查看：{view_url}"
-    # 超长正文的分段由 wecom_notifier 库负责，本层不截断 completion_body：
-    # 企业微信每段 MAX_BYTES_PER_MESSAGE=3800 字节，飞书为 19000。
-    # 旧的 send_long_text 内部也只是调用 send_rich，分段能力一直在库里。
+    # 本层不截断 completion_body；分段由 wecom-notifier 库负责；
+    # 飞书 interactive 卡片暂不分段，企业微信超长单行有边界缺陷，
+    # 见 zlxlabs/wecom-notifier#2 #3、本仓 #195。
     if completion_body:
         safe_body = _apply_risk_control_safe(completion_body, text_type="summary")
         content += f"\n\n{safe_body}"

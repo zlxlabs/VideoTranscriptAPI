@@ -28,6 +28,12 @@ I6 (suppress at write) A terminal write that must not notify produces no
 
 `sent` (= `notified_at`) means "handed to the notifier", NOT "delivered":
 the current implementation enqueues into an in-process daemon queue.
+
+Cross-cutting notification invariants N1-N4 (one logical terminal notice per
+task, degraded-body visibility, parameter threading, no business-layer
+splitting) are specified in `docs/sessions/261007-notify-slim/design.md`,
+section "通知不变式（N1–N4）"; each entry names the code site and the test
+that locks it.
 """
 
 import threading
@@ -241,23 +247,32 @@ def _emit_status_notification(
 def _render_success_body(task, view_url, status):
     """Render success content from the persisted terminal snapshot.
 
-    A success row whose snapshot lacks a persisted ``result`` degrades to
-    ``completion_body=None`` (header + view link) and is sent normally: a
-    raise here would fail this row on every replay and never let it be
-    marked sent (I4 no-loss). Any other render error still propagates and
-    keeps the row pending for retry.
+    A success row whose snapshot lacks a persisted ``result`` (missing or not
+    a dict) degrades to a visible notice plus the view link and is sent
+    normally: a raise here would fail this row on every replay and never let
+    it be marked sent (I4 no-loss), and silently dropping the body would
+    leave the user with no hint that the summary is missing. An empty dict
+    counts as missing too (N2): it still gets the COMPLETION-BODY-MISSING
+    warning here, then renders through ``_render_completion_body``'s
+    empty-input guard, which returns the same degraded notice. The missing
+    result is deterministic, so the row is not retried for the body; any
+    other render error still propagates and keeps the row pending for retry.
     """
     if status != TaskStatus.SUCCESS:
         return None
     snapshot = task.get("terminal_snapshot") or {}
     result = snapshot.get("result")
-    if not isinstance(result, dict):
+    if not isinstance(result, dict) or not result:
         logger.warning(
             f"COMPLETION-BODY-MISSING task_id={task.get('task_id')}: "
             "success terminal notification lacks persisted result, "
-            "sending header + view link only"
+            "sending header + degraded notice + view link"
         )
-        return None
+    if not isinstance(result, dict):
+        degraded = "⚠️ 总结未能载入，请在网页查看"
+        if view_url:
+            degraded += f"\n\n🔗 查看：{view_url}"
+        return degraded
     from .llm_ops import _render_completion_body
 
     return _render_completion_body(

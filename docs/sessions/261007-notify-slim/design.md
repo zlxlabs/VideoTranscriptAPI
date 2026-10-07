@@ -87,9 +87,28 @@
 - 两个渠道都保留，路由逻辑不变。
 - 每个任务的成功或失败终态通知恰好一条，现有的"每个任务一行发件箱记录"机制保持不变。
 
+## 通知不变式（N1–N4）
+
+编号从 N 起，避免与 `terminal_status.py` 模块 docstring 里已有的 I1–I6（发件箱行级不变式）撞名。每条写明代码位置与锁定它的测试。
+
+- **N1（每任务恰好一条逻辑终态通知）** 每个任务恰好产生一条逻辑终态通知，发件箱 `task_terminal_notifications` 中只有一行；物理分段（一条消息超长时拆成多条）不是业务层的职责，由 `wecom-notifier` 库负责，库的分段缺口（飞书 interactive 卡片不分段、企业微信超长单行边界）见 #195。
+  代码：`task_terminal_notifications.task_id` UNIQUE 约束（schema 层）；`src/video_transcript_api/api/services/terminal_status.py`（终态单出口与两个投递入口）。
+  测试：`tests/unit/test_terminal_notification_outbox.py::TestOutboxSchema::test_task_id_unique_constraint`、`::test_outbox_schema_has_no_owner_columns`；恰好一条由同文件 `TestSerialDeliveryIsExclusive`、`TestSuccessNotificationOrder` 锁定。
+- **N2（✅ 正文来自快照，缺失时可见降级且不重试）** ✅ 消息正文来自 `terminal_snapshot.result`；`result` 缺失、不是 dict 或是空 dict 时，降级为抬头 + 可见提示（`⚠️ 总结未能载入，请在网页查看`）+ 查看链接，并打 `COMPLETION-BODY-MISSING` WARNING。缺失是确定性的，重试也补不回来，所以该行照常标记已发送、不重试；`result` 存在但渲染抛异常仍保持待发重试。
+  代码：`terminal_status.py::_render_success_body`。
+  测试：`tests/unit/test_terminal_notification_outbox.py::TestSuccessWithoutPersistedResultDegrades`（缺失、空 dict、其他渲染异常三路）。
+- **N3（参数贯通）** `task_id` 和 `completion_body` 从终态入口（`deliver_terminal_notification` 与 `deliver_pending_terminal_notifications`）一路贯通，经 `NotificationRouter.notify_task_status(**kwargs)` 到达企业微信和飞书两个渠道，不丢失、不改名。
+  代码：`terminal_status.py::_emit_status_notification` → `src/video_transcript_api/utils/notifications/router.py::notify_task_status` → `src/video_transcript_api/utils/notifications/channel.py` 两个渠道的 `notify_task_status`。
+  测试：`tests/unit/test_notification_e2e_delivery.py`（真实 Router + 真实渠道，仅替身最底层传输，对两个入口断言双渠道收到统一抬头和快照总结）。
+- **N4（业务层不截断、不切分）** 业务层对完成正文不截断、不切分、不预拆卡片：`build_task_status_content` 把 `completion_body` 原样拼接进消息，超长时的物理分段交由 `wecom-notifier` 库。
+  代码：`channel.py::build_task_status_content`（拼接处注释即此约定）。
+  测试：`tests/unit/test_notification_e2e_delivery.py`（快照里的总结全文出现在两个渠道收到的内容中）；2026-10-08 的 `9f68fe7f`（业务层飞书分卡）已 revert，回退即恢复此不变式。
+
 ## 已否决方案
 
 - **详细程度开关**（`verbose` / `minimal`）：没有第二个使用场景，排查问题看日志即可。
 - **从提交时刻开始计时**：批量提交时会让排在后面的任务全部误报。
 - **用硬超时公式 `时长 × 4 + 120` 当偏慢门槛**：太晚，到那时已经直接失败了。
 - **编辑或回复之前的消息**：飞书自定义机器人和企业微信 markdown_v2 都不支持。
+- **业务层自行分卡或预切**（2026-10-08 revert `9f68fe7f`）：与 `wecom-notifier` 库的分段职责重复，用户拍板超长内容的分段只交给库负责（缺口见 #195）。
+- **截断完成正文里的总结**：用户要在聊天里看到具体总结，截断后正文失去价值；总结缺失时改为可见提示 + 链接（N2）。

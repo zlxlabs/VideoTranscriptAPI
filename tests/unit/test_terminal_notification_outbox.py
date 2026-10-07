@@ -254,14 +254,18 @@ class TestSuccessWithoutPersistedResultDegrades:
         router.channels = [feishu]
         return router, notifier
 
-    def _make_pending_success_without_result(self, cm, router):
+    def _make_pending_success_without_result(self, cm, router, terminal_snapshot=None):
         task_id = _new_task(cm)
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
         assert finalize_terminal_status_and_notify(
             task_id,
             TaskStatus.SUCCESS,
             title="No persisted result",
-            terminal_snapshot={"use_speaker_recognition": False},
+            terminal_snapshot=(
+                terminal_snapshot
+                if terminal_snapshot is not None
+                else {"use_speaker_recognition": False}
+            ),
             cache_manager=cm,
             router=router,
             defer_delivery=True,
@@ -274,6 +278,7 @@ class TestSuccessWithoutPersistedResultDegrades:
         content = notifier.send_card.call_args.kwargs["content"]
         first_line = content.splitlines()[0]
         assert re.match(r"^✅ \[#[0-9a-f]{6}\] .+", first_line), first_line
+        assert "⚠️ 总结未能载入，请在网页查看" in content, content
         assert re.search(r"🔗 查看：\S+/view/\S+", content), content
         assert _outbox_state(cm, task_id)["notified_at"] is not None
         assert cm.is_terminal_notification_pending(task_id) is False
@@ -283,6 +288,21 @@ class TestSuccessWithoutPersistedResultDegrades:
     ):
         router, notifier = self._degraded_feishu_router(monkeypatch)
         task_id = self._make_pending_success_without_result(cm, router)
+
+        records, sink_id = _collect_warning_lines()
+        try:
+            assert deliver_pending_terminal_notifications(cm, router=router) == 1
+        finally:
+            loguru_logger.remove(sink_id)
+
+        self._assert_degraded_message(cm, task_id, notifier)
+        assert any("COMPLETION-BODY-MISSING task_id=" in line for line in records)
+
+    def test_dispatcher_degrades_on_empty_result_dict(self, cm, monkeypatch):
+        router, notifier = self._degraded_feishu_router(monkeypatch)
+        task_id = self._make_pending_success_without_result(
+            cm, router, terminal_snapshot={"result": {}, "use_speaker_recognition": False},
+        )
 
         records, sink_id = _collect_warning_lines()
         try:

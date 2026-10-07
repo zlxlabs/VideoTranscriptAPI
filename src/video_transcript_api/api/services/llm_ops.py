@@ -2477,6 +2477,14 @@ def _render_completion_body(
     calibrate_only: bool = False,
 ) -> str:
     """Render the persisted completion result for the terminal notification."""
+    if not result_dict:
+        # 空结果按缺失处理（N2）：渲染不出统计与总结，正文给可见降级提示，
+        # 让用户知道去网页看，而不是发出一条没有解释的空壳消息。
+        degraded = "⚠️ 总结未能载入，请在网页查看"
+        if view_url:
+            degraded += f"\n\n🔗 查看：{view_url}"
+        return degraded
+
     if calibrate_only:
         return f"🌐 网页查看：{view_url}"
 
