@@ -231,13 +231,69 @@ def build_task_status_content(
         content += f"\n\n**转录预览：**\n```\n{preview}\n```"
     if view_url and not completion_body:
         content += f"\n\n🔗 查看：{view_url}"
-    # 超长正文的分段由 wecom_notifier 库负责，本层不截断 completion_body：
-    # 企业微信每段 MAX_BYTES_PER_MESSAGE=3800 字节，飞书为 19000。
+    # 本层不截断 completion_body：企业微信由 wecom_notifier 库按
+    # MAX_BYTES_PER_MESSAGE=3800 分段；飞书由 FeishuChannel.send_rich 按
+    # FEISHU_CARD_MAX_BYTES 拆成多张卡片（库对 interactive 类型不分段）。
     # 旧的 send_long_text 内部也只是调用 send_rich，分段能力一直在库里。
     if completion_body:
         safe_body = _apply_risk_control_safe(completion_body, text_type="summary")
         content += f"\n\n{safe_body}"
     return content
+
+
+# Feishu interactive cards get no library-side segmentation, so this layer
+# enforces its own UTF-8 byte budget with headroom below the library's
+# 19000-byte and Feishu's 30KB limits.
+FEISHU_CARD_MAX_BYTES = 18000
+
+
+def _split_feishu_card_content(content: str, max_bytes: int = FEISHU_CARD_MAX_BYTES) -> list:
+    """Split content into chunks each within the UTF-8 byte budget.
+
+    Cuts at blank lines first with greedy packing; a paragraph that alone
+    exceeds the budget is hard-cut at UTF-8 character boundaries.
+    Joining the returned chunks reproduces the original text exactly.
+    """
+    if len(content.encode("utf-8")) <= max_bytes:
+        return [content]
+
+    def byte_len(text: str) -> int:
+        return len(text.encode("utf-8"))
+
+    def hard_cut(text: str) -> list:
+        pieces = []
+        start = 0
+        while start < len(text):
+            lo, hi = start + 1, len(text)
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if byte_len(text[start:mid]) <= max_bytes:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            pieces.append(text[start:lo])
+            start = lo
+        return pieces
+
+    chunks = []
+    current = ""
+    for i, paragraph in enumerate(content.split("\n\n")):
+        piece = paragraph if i == 0 else "\n\n" + paragraph
+        if byte_len(current + piece) <= max_bytes:
+            current += piece
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        if byte_len(piece) <= max_bytes:
+            current = piece
+        else:
+            pieces = hard_cut(piece)
+            chunks.extend(pieces[:-1])
+            current = pieces[-1]
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 class FeishuChannel:
@@ -284,7 +340,13 @@ class FeishuChannel:
             return False
 
     def send_rich(self, content: str, webhook: str = None, title: str = "通知", **kwargs) -> bool:
-        """Send rich content as Feishu card (accepts markdown)."""
+        """Send rich content as Feishu card (accepts markdown).
+
+        Content over FEISHU_CARD_MAX_BYTES is split into multiple cards;
+        chunk i (i >= 2) gets the title suffix " (i/n)". The heading line
+        always stays on the first card. Every chunk must be submitted
+        successfully for this to return True.
+        """
         target = webhook or self.webhook
         if not target:
             logger.warning("[feishu] No webhook configured, skipping send_rich")
@@ -293,13 +355,16 @@ class FeishuChannel:
             logger.warning("[feishu] Empty content, skipping send_rich")
             return False
         try:
-            self.notifier.send_card(
-                webhook_url=target,
-                content=content,
-                title=title,
-                async_send=True,
-            )
-            logger.debug(f"[feishu] Card submitted: {content[:50]}...")
+            cards = _split_feishu_card_content(content)
+            for i, card_content in enumerate(cards, start=1):
+                card_title = title if i == 1 else f"{title} ({i}/{len(cards)})"
+                self.notifier.send_card(
+                    webhook_url=target,
+                    content=card_content,
+                    title=card_title,
+                    async_send=True,
+                )
+            logger.debug(f"[feishu] Cards submitted ({len(cards)}): {content[:50]}...")
             return True
         except Exception as e:
             logger.exception(f"[feishu] send_rich failed: {e}")
