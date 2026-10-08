@@ -35,7 +35,17 @@ class PerfTracker:
         self.task_id = task_id
         self._records: List[Dict] = []
         self._counters: Dict[str, int] = {}
+        self._media_duration_s: Optional[float] = None
         self._lock = threading.Lock()
+
+    def set_media_duration(self, duration_s: Optional[float]) -> None:
+        """记录探测到的媒体时长（秒），随终态快照 observability 落库。
+
+        供偏慢门槛的后续校准使用（261007-notify-slim 卡 2）；None 表示
+        未拿到时长，不写入观测。
+        """
+        with self._lock:
+            self._media_duration_s = duration_s
 
     @contextmanager
     def track(self, stage: str):
@@ -138,6 +148,10 @@ class PerfTracker:
             and value >= 0
         }
         observation = {"stages": summary["stages"]}
+        with self._lock:
+            media_duration_s = self._media_duration_s
+        if media_duration_s is not None:
+            observation["media_duration_s"] = media_duration_s
         if counters:
             observation["counters"] = counters
         return observation

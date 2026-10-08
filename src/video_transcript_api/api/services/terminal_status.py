@@ -40,7 +40,7 @@ import threading
 from typing import Any, Dict, Optional
 
 from ..context import get_cache_manager, get_logger, lazy_resource
-from ...utils.notifications import get_notification_router
+from ...utils.notifications import get_notification_router, slow_alert
 from ...utils.task_status import TaskStatus
 
 logger = lazy_resource(get_logger)
@@ -83,6 +83,10 @@ def finalize_terminal_status_and_notify(
     Pass defer_delivery=True to persist the outbox row without inline delivery;
     the caller must deliver it after any content notification.
     """
+    # 先取消计时再写终态，且不论 CAS 成败都执行。到点回调持有同一把锁
+    # 完成 ⏳ 入队，因此若回调先拿锁，⏳ 必先于终态写入及终态通知入队。
+    slow_alert.cancel_all(task_id)
+
     if cache_manager is None:
         cache_manager = get_cache_manager()
 

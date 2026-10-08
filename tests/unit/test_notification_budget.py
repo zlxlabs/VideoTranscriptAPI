@@ -13,6 +13,7 @@ from video_transcript_api.downloaders.generic import GenericDownloader
 from video_transcript_api.downloaders.models import DownloadInfo, VideoMetadata
 from video_transcript_api.downloaders.subtitle_types import SubtitleResult
 from video_transcript_api.utils.llm_status import CalibrationStatus, ChaptersStatus
+from video_transcript_api.utils.notifications import slow_alert
 from video_transcript_api.utils.notifications.channel import build_task_status_content
 from video_transcript_api.utils.task_status import TaskStatus
 
@@ -284,3 +285,29 @@ def test_large_generic_download_sends_no_progress_notification(tmp_path, monkeyp
     assert (tmp_path / "large.mp4").stat().st_size == total > 20 * 1024 * 1024
     assert (96 % 30) < 10
     notifier.assert_not_called()
+
+
+def test_normal_speed_task_sends_no_slow_alert(harness, monkeypatch):
+    """正常速度的全流程任务(转录+LLM 成功终态)零条 ⏳。
+
+    偏慢提醒(261007-notify-slim 卡 2)的预算约束:接线后的流水线会注册
+    计时器,但正常速度的任务在门槛内到达终态,计时被终态取消,不得产生
+    任何 ⏳ 富文本消息。
+    """
+    cm, _queue, router, _media = harness
+    slow_alert_sends = []
+
+    def record_send_rich(content, **_kwargs):
+        slow_alert_sends.append(content)
+        return {}
+
+    monkeypatch.setattr(slow_alert, "get_notification_router", lambda: SimpleNamespace(
+        send_rich=record_send_rich,
+    ))
+    task_id = _new_task(cm)
+    assert _transcribe(harness, task_id, monkeypatch, "download")["status"] == "success"
+    _run_llm(harness, monkeypatch)
+    _assert_notice(harness, "✅", summary=SUMMARY)
+    assert cm.get_task_by_id(task_id)["status"] == TaskStatus.SUCCESS
+    assert slow_alert_sends == []
+    slow_alert.cancel_all(task_id)

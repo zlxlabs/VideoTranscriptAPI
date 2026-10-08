@@ -186,6 +186,18 @@ LLM 处理器空输入守卫（#179）：`tests/unit/test_empty_input_processors
 `test_every_admitted_duration_is_accepted_by_the_deadline_budget` 的 `"0"` 用例移出——
 0 不再是「准入认可的已知时长」。
 
+偏慢提醒（261007-notify-slim 卡 2）：`tests/unit/test_slow_task_alert.py`。
+锁的不变量：转录门槛公式 `600 + 0.15×时长`、时长未知（None / 非正 / 非有限，
+与 `_transcription_deadline` 同判据）回退 1800s；转录阶段到点恰好发一条 ⏳、
+首行统一抬头、正文含阶段与分钟数、双渠道都收到；两个阶段共用「已提醒」标记，
+已提醒任务的 LLM 阶段再超时不再发送；LLM 队列排队时间不计入（LLM 阶段计时
+从 worker 出队起算）；终态先于到点时不发送且计时状态已释放；到点与终态并发
+（竞态）时终态之后绝无新增发送（内部连跑 5 轮）；走真实 `process_transcription` +
+`_handle_llm_task` 的流水线后 `terminal_snapshot.observability.media_duration_s`
+等于探测值。计时门槛靠 monkeypatch 模块常量调小，不真实等待。同卡的预算约束
+（正常速度任务零条 ⏳）由 `tests/unit/test_notification_budget.py` 的
+`test_normal_speed_task_sends_no_slow_alert` 锁定。
+
 ## 并发压测
 
 `scripts/perf/concurrent_load.py` 会提交本地 API 任务，并使用真实抖音和 B 站
