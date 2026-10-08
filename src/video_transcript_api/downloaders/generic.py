@@ -611,14 +611,6 @@ class GenericDownloader(BaseDownloader):
         retry_backoff = (5, 15)
         chunk_size = 1024 * 1024  # 1MB 块大小
         
-        # 尝试导入企微通知器
-        try:
-            # 使用包内绝对导入，避免重复加载模块导致全局实例被初始化两次
-            from ..utils.notifications import WechatNotifier
-            wechat_notifier = WechatNotifier()
-        except:
-            wechat_notifier = None
-        
         for attempt in range(max_retries):
             if attempt > 0:
                 delay = retry_backoff[min(attempt - 1, len(retry_backoff) - 1)]
@@ -694,15 +686,6 @@ class GenericDownloader(BaseDownloader):
                                     progress_msg = f"下载进度: {progress:.1f}% ({downloaded / (1024*1024):.2f}/{total_size / (1024*1024):.2f} MB)"
                                     logger.info(progress_msg)
                                     
-                                    # 对于大文件（>20MB），每30%进度发送企微通知
-                                    if (total_size > 20 * 1024 * 1024 and 
-                                        wechat_notifier and 
-                                        progress % 30 < 10 and 
-                                        progress > 10):
-                                        try:
-                                            wechat_notifier.send_text(f"【文件下载进度】\n链接: {url[:50]}...\n{progress_msg}")
-                                        except:
-                                            pass  # 通知失败不影响下载
                                 else:
                                     logger.info(f"已下载: {downloaded / (1024*1024):.2f} MB")
                                 last_log_time = now

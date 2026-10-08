@@ -223,13 +223,11 @@ def test_notes_task_only_adds_notes_layer(notes_cache):
     assert notes_cache.get_task_by_id(task_id)["progress"] == {
         "stage": "notes", "done": 1, "total": 1
     }
-    notification_router.send_long_text.assert_called_once()
-    long_text_call = notification_router.send_long_text.call_args.kwargs
-    assert long_text_call["title"] == "Notes demo"
-    assert "详细笔记已生成" in long_text_call["text"]
-    notification_router.notify_task_status.assert_called()
+    notification_router.notify_task_status.assert_called_once()
     terminal_kwargs = notification_router.notify_task_status.call_args.kwargs
     assert terminal_kwargs.get("status") == "【任务完成】"
+    assert "详细笔记已生成" in terminal_kwargs["completion_body"]
+    assert "?raw=notes" in terminal_kwargs["completion_body"]
 
     for name, path in protected_files.items():
         with open(path, "rb") as artifact_file:
@@ -273,8 +271,7 @@ def test_notes_task_failure_writes_failed_status_without_artifact(notes_cache):
         notes_cache.get_task_by_id(task_id)["terminal_snapshot"]["status"]
         == TaskStatus.FAILED
     )
-    notification_router.send_long_text.assert_not_called()
-    notification_router.notify_task_status.assert_called()
+    notification_router.notify_task_status.assert_called_once()
     fail_kwargs = notification_router.notify_task_status.call_args.kwargs
     assert fail_kwargs.get("status") == "【任务失败】"
     assert "【LLM API调用异常】" in (fail_kwargs.get("error") or "")

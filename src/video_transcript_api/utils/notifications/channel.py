@@ -173,6 +173,33 @@ def _apply_risk_control_safe(content: str, text_type: str = "general") -> str:
     return _restore_urls(sanitized, url_map)
 
 
+def _default_task_title(url: str) -> str:
+    """Return the established platform title, or the cleaned URL."""
+    for domain, title in (
+        (("youtube.com", "youtu.be"), "YouTube视频转录"),
+        (("bilibili.com", "b23.tv"), "Bilibili视频转录"),
+        (("xiaoyuzhoufm.com",), "小宇宙播客转录"),
+        (("podcasts.apple.com",), "Apple播客转录"),
+        (("xiaohongshu.com", "xhslink.com", "xhslink.cn"), "小红书内容转录"),
+        (("douyin.com",), "抖音视频转录"),
+        (("weixin.qq.com",), "视频号视频转录"),
+        (("twitter.com", "x.com"), "X视频转录"),
+    ):
+        if any(host in (url or "") for host in domain):
+            return title
+    return _clean_url(url or "")
+
+
+def build_task_notification_heading(
+    task_id: str, title: str = None, url: str = "", icon: str = "📥",
+) -> str:
+    """Build the shared task-notification heading for both channels."""
+    short_id = (task_id or "000000").removeprefix("task_")[:6]
+    display_title = title or _default_task_title(url)
+    display_title = _apply_risk_control_safe(display_title, text_type="title")
+    return f"{icon} [#{short_id}] {display_title}"
+
+
 def build_task_status_content(
     url: str,
     status: str,
@@ -181,23 +208,20 @@ def build_task_status_content(
     author: str = None,
     transcript: str = None,
     view_url: str = None,
+    task_id: str = None,
+    completion_body: str = None,
 ) -> str:
     """Build task status notification content (shared across channels)."""
-    from ..timeutil.timezone_helper import get_configured_timezone
-
-    tz = get_configured_timezone()
-    timestamp = datetime.datetime.now(tz).strftime("%y%m%d-%H%M%S")
     clean = _clean_url(url)
     emoji = _get_status_emoji(status, error)
+    if "已接收" in status:
+        emoji = "📥"
 
-    if title:
-        title = _apply_risk_control_safe(title, text_type="title")
+    heading = build_task_notification_heading(task_id, title, url, emoji)
     if author:
         author = _apply_risk_control_safe(author, text_type="author")
 
-    content = f"## {timestamp}\n\n{emoji} **视频转录任务状态更新**\n\n{clean}\n\n**状态：** {status}"
-    if title:
-        content += f"\n\n**标题：** {title}"
+    content = f"{heading}\n\n{clean}\n\n**状态：** {status}"
     if author:
         content += f"\n\n**作者：** {author}"
     if error:
@@ -205,8 +229,14 @@ def build_task_status_content(
     if transcript and "转录完成" in status:
         preview = transcript[:100] + ("..." if len(transcript) > 100 else "")
         content += f"\n\n**转录预览：**\n```\n{preview}\n```"
-    if view_url:
+    if view_url and not completion_body:
         content += f"\n\n🔗 查看：{view_url}"
+    # 本层不截断 completion_body；分段由 wecom-notifier 库负责；
+    # 飞书 interactive 卡片暂不分段，企业微信超长单行有边界缺陷，
+    # 见 zlxlabs/wecom-notifier#2 #3、本仓 #195。
+    if completion_body:
+        safe_body = _apply_risk_control_safe(completion_body, text_type="summary")
+        content += f"\n\n{safe_body}"
     return content
 
 
@@ -285,12 +315,16 @@ class FeishuChannel:
         transcript: str = None,
         webhook: str = None,
         view_url: str = None,
+        task_id: str = None,
+        completion_body: str = None,
     ) -> bool:
         """Send task status notification via Feishu card."""
         content = build_task_status_content(
-            url, status, error, title, author, transcript, view_url=view_url,
+            url, status, error, title, author, transcript,
+            view_url=view_url, task_id=task_id, completion_body=completion_body,
         )
-        return self.send_rich(content, webhook=webhook, title="视频转录任务状态更新")
+        heading = content.splitlines()[0]
+        return self.send_rich(content, webhook=webhook, title=heading)
 
 
 class WeComChannel:
@@ -334,14 +368,18 @@ class WeComChannel:
         transcript: str = None,
         webhook: str = None,
         view_url: str = None,
+        task_id: str = None,
+        completion_body: str = None,
     ) -> bool:
         """Send task status notification via WeCom."""
         if webhook and webhook != self._notifier.webhook:
             from .wechat import WechatNotifier
             notifier = WechatNotifier(webhook)
             return notifier.notify_task_status(
-                url, status, error, title, author, transcript, view_url=view_url,
+                url, status, error, title, author, transcript,
+                view_url=view_url, task_id=task_id, completion_body=completion_body,
             )
         return self._notifier.notify_task_status(
-            url, status, error, title, author, transcript, view_url=view_url,
+            url, status, error, title, author, transcript,
+            view_url=view_url, task_id=task_id, completion_body=completion_body,
         )

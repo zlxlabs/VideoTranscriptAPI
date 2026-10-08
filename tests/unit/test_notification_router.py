@@ -95,6 +95,20 @@ class TestSingleChannel:
         wechat.notify_task_status.assert_called_once()
         assert result["wechat"] is True
 
+    def test_send_view_link_uses_received_task_heading(self, router_wechat_only):
+        router, _wechat = router_wechat_only
+        with patch.object(router, "send_rich", return_value={"wechat": True}) as send:
+            router.send_view_link(
+                title="Video title",
+                view_token="token",
+                original_url="https://youtube.com/watch?v=abc",
+                task_id="task_abcdef123456",
+            )
+
+        content = send.call_args.args[0]
+        assert content.splitlines()[0] == "📥 [#abcdef] Video title"
+        assert send.call_args.kwargs["title"] == content.splitlines()[0]
+
 
 # ============================================================
 # Multi-Channel Parallel Dispatch

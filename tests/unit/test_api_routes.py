@@ -12,6 +12,7 @@ All console output must be in English only (no emoji, no Chinese).
 """
 
 import asyncio
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -268,6 +269,41 @@ class TestTranscribeEndpoint:
         assert body["data"]["task_id"] == "task-abc-123"
         assert body["data"]["view_token"] == "vt-xyz-789"
         mock_cache_manager.create_task.assert_called_once()
+
+    def test_transcribe_received_notification_has_task_short_id(
+        self, client, monkeypatch, mock_cache_manager,
+    ):
+        from video_transcript_api.api.routes import tasks
+        from video_transcript_api.utils.notifications.router import NotificationRouter
+
+        mock_cache_manager.generate_task_id.return_value = "task_abcdef123456"
+        mock_cache_manager.create_task.return_value = {
+            "task_id": "task_abcdef123456",
+            "view_token": "view-token",
+        }
+        sent = {}
+
+        class RecordingChannel:
+            name = "wechat"
+
+            def send_rich(self, content, webhook=None, **kwargs):
+                sent["content"] = content
+                sent["title"] = kwargs["title"]
+                return True
+
+        router = NotificationRouter.__new__(NotificationRouter)
+        router.channels = [RecordingChannel()]
+        monkeypatch.setattr(tasks, "get_notification_router", lambda: router)
+
+        response = client.post(
+            "/api/transcribe",
+            json={"url": "https://www.youtube.com/watch?v=abc123"},
+        )
+
+        assert response.status_code == 200
+        heading = sent["content"].splitlines()[0]
+        assert re.fullmatch(r"📥 \[#abcdef\] .+", heading)
+        assert sent["title"] == heading
 
     def test_transcribe_empty_url_returns_400(self, client):
         resp = client.post("/api/transcribe", json={"url": ""})

@@ -373,9 +373,6 @@ class TestRecalibrateChaptersSkipGate:
             def send_text(self, content, **kwargs):
                 return {"fake": True}
 
-            def send_long_text(self, **kwargs):
-                return {"fake": True}
-
             def notify_task_status(self, **kwargs):
                 return {"fake": True}
 
@@ -390,7 +387,6 @@ class TestRecalibrateChaptersSkipGate:
         monkeypatch.setattr(
             llm_ops, "get_notification_router", lambda: _FakeRouter()
         )
-        monkeypatch.setattr(llm_ops, "get_base_url", lambda: "https://fake-base")
 
         llm_task = {
             # Mirrors the recalibrate route payload (tasks.py): calibrate_only

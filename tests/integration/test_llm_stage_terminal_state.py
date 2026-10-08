@@ -69,7 +69,7 @@ def _patches(cm, coordinator):
         patch.object(llm_ops, "llm_task_queue", MagicMock()),
         patch.object(llm_ops, "_build_result_dict", lambda r: {}),
         patch.object(llm_ops, "_save_llm_results", mock_save_llm_results),
-        patch.object(llm_ops, "_send_notification", MagicMock()),
+        patch.object(llm_ops, "_render_completion_body", MagicMock()),
         patch.object(llm_ops, "get_notification_router", lambda: MagicMock()),
         patch.object(llm_ops, "_generate_title_if_needed", lambda t, title, tr: title),
         patch.object(llm_ops, "_prepare_llm_content", lambda t, tr, spk: "content"),
@@ -160,7 +160,7 @@ class TestLlmTaskFailedWriteReraises:
             patch.object(llm_ops, "llm_task_queue", task_queue),
             patch.object(llm_ops, "_build_result_dict", lambda r: {}),
             patch.object(llm_ops, "_save_llm_results", MagicMock(return_value=None)),
-            patch.object(llm_ops, "_send_notification", MagicMock()),
+            patch.object(llm_ops, "_render_completion_body", MagicMock()),
             patch.object(llm_ops, "get_notification_router", lambda: router),
             patch.object(llm_ops, "_generate_title_if_needed", lambda t, title, tr: title),
             patch.object(llm_ops, "_prepare_llm_content", lambda t, tr, spk: "content"),
@@ -215,7 +215,7 @@ class TestLlmStageCasLossSuppressesNotification:
             patch.object(llm_ops, "llm_task_queue", MagicMock()),
             patch.object(llm_ops, "_build_result_dict", lambda r: {}),
             patch.object(llm_ops, "_save_llm_results", MagicMock(return_value=None)),
-            patch.object(llm_ops, "_send_notification", mock_send_notification),
+            patch.object(llm_ops, "_render_completion_body", mock_send_notification),
             patch.object(llm_ops, "get_notification_router", lambda: MagicMock()),
             patch.object(llm_ops, "_generate_title_if_needed", lambda t, title, tr: title),
             patch.object(llm_ops, "_prepare_llm_content", lambda t, tr, spk: "content"),
@@ -286,7 +286,7 @@ class TestLlmStageNotificationExceptionDoesNotFailTask:
             patch.object(llm_ops, "_build_result_dict", lambda r: {}),
             patch.object(llm_ops, "_save_llm_results", MagicMock(return_value=None)),
             patch.object(
-                llm_ops, "_send_notification",
+                llm_ops, "_render_completion_body",
                 MagicMock(side_effect=RuntimeError("webhook timeout")),
             ),
             patch.object(llm_ops, "get_notification_router", lambda: router_mock),
@@ -821,7 +821,6 @@ class TestCalibrateOnlyStatusNotifyCarriesViewLink:
         view_token = cm.get_task_by_id(task_id)["view_token"]
         router = MagicMock()
         router.notify_task_status.return_value = {"wechat": True}
-        content_notify = MagicMock()
         coordinator = MagicMock()
         coordinator.process.return_value = MagicMock()
         task = _llm_task(task_id)
@@ -833,7 +832,6 @@ class TestCalibrateOnlyStatusNotifyCarriesViewLink:
             patch.object(llm_ops, "llm_task_queue", MagicMock()),
             patch.object(llm_ops, "_build_result_dict", lambda r: {}),
             patch.object(llm_ops, "_save_llm_results", MagicMock(return_value=None)),
-            patch.object(llm_ops, "_send_notification", content_notify),
             patch.object(llm_ops, "get_notification_router", lambda: router),
             patch.object(llm_ops, "_generate_title_if_needed", lambda t, title, tr: title),
             patch.object(llm_ops, "_prepare_llm_content", lambda t, tr, spk: "content"),
@@ -847,7 +845,6 @@ class TestCalibrateOnlyStatusNotifyCarriesViewLink:
                 ctx.stop()
 
         assert cm.get_task_by_id(task_id)["status"] == "success"
-        content_notify.assert_not_called()
         router.notify_task_status.assert_called_once()
         kwargs = router.notify_task_status.call_args.kwargs
         blob = " ".join(
@@ -855,6 +852,7 @@ class TestCalibrateOnlyStatusNotifyCarriesViewLink:
                 str(kwargs.get("status") or ""),
                 str(kwargs.get("error") or ""),
                 str(kwargs.get("view_url") or ""),
+                str(kwargs.get("completion_body") or ""),
                 str(kwargs.get("url") or ""),
             ]
         )
@@ -869,6 +867,8 @@ class TestCalibrateOnlyStatusNotifyCarriesViewLink:
             title=kwargs.get("title"),
             author=kwargs.get("author"),
             view_url=kwargs.get("view_url"),
+            task_id=kwargs.get("task_id"),
+            completion_body=kwargs.get("completion_body"),
         )
         assert f"/view/{view_token}" in body
         assert body.count("/view/") == 1

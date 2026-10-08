@@ -28,6 +28,12 @@ I6 (suppress at write) A terminal write that must not notify produces no
 
 `sent` (= `notified_at`) means "handed to the notifier", NOT "delivered":
 the current implementation enqueues into an in-process daemon queue.
+
+Cross-cutting notification invariants N1-N4 (one logical terminal notice per
+task, degraded-body visibility, parameter threading, no business-layer
+splitting) are specified in `docs/sessions/261007-notify-slim/design.md`,
+section "通知不变式（N1–N4）"; each entry names the code site and the test
+that locks it.
 """
 
 import threading
@@ -153,16 +159,12 @@ def deliver_terminal_notification(
 
     error_for_notify = notify_error if notify_error is not None else error_message
 
-    display_url = url
-    task = None
-    if not display_url or title is None or author is None:
-        task = cache_manager.get_task_by_id(task_id) or {}
-        if not display_url:
-            display_url = task.get("url") or ""
-        if title is None:
-            title = task.get("title")
-        if author is None:
-            author = task.get("author")
+    task = cache_manager.get_task_by_id(task_id) or {}
+    display_url = url or task.get("url") or ""
+    if title is None:
+        title = task.get("title")
+    if author is None:
+        author = task.get("author")
     view_url = _resolve_view_url(cache_manager, task_id, task)
 
     accepted = False
@@ -174,6 +176,7 @@ def deliver_terminal_notification(
             return
         cache_manager.mark_terminal_notification_attempted(task_id)
         try:
+            completion_body = _render_success_body(task, view_url, status)
             result = _emit_status_notification(
                 display_url=display_url or "",
                 notify_status=notify_status,
@@ -185,6 +188,8 @@ def deliver_terminal_notification(
                 router=router,
                 notify_via=notify_via,
                 view_url=view_url,
+                task_id=task_id,
+                completion_body=completion_body,
             )
             accepted = _notification_accepted(result)
         except Exception:
@@ -208,6 +213,8 @@ def _emit_status_notification(
     router=None,
     notify_via=None,
     view_url: Optional[str] = None,
+    task_id: str,
+    completion_body: Optional[str] = None,
 ) -> None:
     """Dispatch the status line through a bound notifier or the router."""
     if notify_via is not None:
@@ -218,6 +225,8 @@ def _emit_status_notification(
             title,
             author,
             view_url=view_url,
+            task_id=task_id,
+            completion_body=completion_body,
         )
 
     sender = router if router is not None else get_notification_router()
@@ -230,6 +239,47 @@ def _emit_status_notification(
         channel_name=channel_name,
         webhooks=webhooks,
         view_url=view_url,
+        task_id=task_id,
+        completion_body=completion_body,
+    )
+
+
+def _render_success_body(task, view_url, status):
+    """Render success content from the persisted terminal snapshot.
+
+    A success row whose snapshot lacks a persisted ``result`` (missing or not
+    a dict) degrades to a visible notice plus the view link and is sent
+    normally: a raise here would fail this row on every replay and never let
+    it be marked sent (I4 no-loss), and silently dropping the body would
+    leave the user with no hint that the summary is missing. An empty dict
+    counts as missing too (N2): it still gets the COMPLETION-BODY-MISSING
+    warning here, then renders through ``_render_completion_body``'s
+    empty-input guard, which returns the same degraded notice. The missing
+    result is deterministic, so the row is not retried for the body; any
+    other render error still propagates and keeps the row pending for retry.
+    """
+    if status != TaskStatus.SUCCESS:
+        return None
+    snapshot = task.get("terminal_snapshot") or {}
+    result = snapshot.get("result")
+    if not isinstance(result, dict) or not result:
+        logger.warning(
+            f"COMPLETION-BODY-MISSING task_id={task.get('task_id')}: "
+            "success terminal notification lacks persisted result, "
+            "sending header + degraded notice + view link"
+        )
+    if not isinstance(result, dict):
+        degraded = "⚠️ 总结未能载入，请在网页查看"
+        if view_url:
+            degraded += f"\n\n🔗 查看：{view_url}"
+        return degraded
+    from .llm_ops import _render_completion_body
+
+    return _render_completion_body(
+        result,
+        view_url or "",
+        use_speaker_recognition=snapshot.get("use_speaker_recognition", False),
+        calibrate_only=snapshot.get("calibrate_only", False),
     )
 
 
@@ -310,6 +360,7 @@ def deliver_pending_terminal_notifications(
                 continue
             cache_manager.mark_terminal_notification_attempted(task_id)
             try:
+                completion_body = _render_success_body(task, view_url, row["status"])
                 result = router.notify_task_status(
                     url=task.get("url") or "",
                     status=notify_status,
@@ -318,6 +369,8 @@ def deliver_pending_terminal_notifications(
                     author=task.get("author"),
                     webhooks=webhooks,
                     view_url=view_url,
+                    task_id=task_id,
+                    completion_body=completion_body,
                 )
                 accepted = _notification_accepted(result)
             except Exception:
@@ -383,7 +436,14 @@ def run_terminal_notification_dispatcher() -> None:
 
 
 def _compose_dispatcher_error(row: dict, task: dict) -> str:
-    """Build the dispatcher error/body: original error, completed_at, recovery note."""
+    """Build the dispatcher error/body: original error, completed_at, recovery note.
+
+    Success rows compose no note: completed_at/recovery lines are failure
+    diagnostics, and a non-None error would flip the channel-side status
+    emoji from ✅ to ❌.
+    """
+    if row["status"] == TaskStatus.SUCCESS:
+        return None
     parts = []
     error_message = row.get("error_message") or task.get("error_message")
     if error_message:

@@ -196,13 +196,17 @@ class TestFeishuNotifyTaskStatus:
         with patch.object(feishu_channel, "send_rich", return_value=True) as mock_send:
             result = feishu_channel.notify_task_status(
                 url="https://youtube.com/watch?v=test",
-                status="started",
+                status="【任务完成】",
+                title="Test Video",
+                task_id="task_abcdef123456",
             )
 
         assert result is True
         sent_content = mock_send.call_args[0][0]
+        assert sent_content.splitlines()[0] == "✅ [#abcdef] Test Video"
+        assert mock_send.call_args.kwargs["title"] == sent_content.splitlines()[0]
         assert "youtube.com" in sent_content
-        assert "started" in sent_content
+        assert "【任务完成】" in sent_content
 
     def test_notification_with_error(self, feishu_channel):
         with patch.object(feishu_channel, "send_rich", return_value=True) as mock_send:

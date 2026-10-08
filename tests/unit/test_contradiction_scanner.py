@@ -764,7 +764,7 @@ def test_llm_ops_passes_explicit_contradiction_gate_to_coordinator(monkeypatch):
     cache_manager.update_task_status.return_value = True
     monkeypatch.setattr(llm_ops, "cache_manager", cache_manager)
     monkeypatch.setattr(llm_ops, "_save_llm_results", MagicMock(return_value={}))
-    monkeypatch.setattr(llm_ops, "_send_notification", MagicMock())
+    monkeypatch.setattr(llm_ops, "_render_completion_body", MagicMock())
     monkeypatch.setattr(
         llm_ops,
         "get_notification_router",
@@ -875,7 +875,6 @@ def test_cached_layer_handoff_preserves_explicit_contradiction_scan(monkeypatch)
     monkeypatch.setattr(transcription, "get_notification_router", lambda: Router())
     monkeypatch.setattr(transcription, "get_temp_manager", lambda: TempManager())
     monkeypatch.setattr(transcription, "_register_llm_handoff", lambda task_id: None)
-    monkeypatch.setattr(transcription, "get_base_url", lambda: "https://example.test")
 
     result = transcription.process_transcription(
         task_id="task-contradiction-cache",

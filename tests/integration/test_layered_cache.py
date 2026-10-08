@@ -84,6 +84,7 @@ class DummyCacheManager:
 
     def update_task_status(self, task_id, status, **kwargs):
         self.status_updates.append((task_id, status, kwargs))
+        self.tasks.setdefault(task_id, {"task_id": task_id}).update(kwargs)
         # Real CacheManager.update_task_status is a compare-and-set that
         # returns True on a genuine win (see H2 fix, local codex review
         # round 7: process_transcription's cache-hit branch now gates its
@@ -140,9 +141,6 @@ BASE_CACHE_DATA = {
 def patch_runtime(monkeypatch):
     queue = DummyQueue()
     monkeypatch.setattr(transcription, "llm_task_queue", queue)
-    monkeypatch.setattr(transcription, "WechatNotifier", DummyNotifier)
-    monkeypatch.setattr(transcription, "send_long_text_wechat", lambda *a, **k: None)
-    monkeypatch.setattr(transcription, "get_base_url", lambda: "http://test")
 
     def fail_create_downloader(url):
         raise AssertionError("create_downloader should not be called on cache hit")
@@ -1243,7 +1241,7 @@ class TestSpeakerCacheSummaryOnlyBackfillEndToEnd:
                 patch.object(llm_ops, "cache_manager", real_cm),
                 patch.object(llm_ops, "llm_coordinator", coordinator),
                 patch.object(llm_ops, "llm_task_queue", MagicMock()),
-                patch.object(llm_ops, "_send_notification", MagicMock()),
+                patch.object(llm_ops, "_render_completion_body", MagicMock()),
                 patch.object(llm_ops, "get_notification_router", lambda: MagicMock()),
                 patch.object(llm_ops, "_generate_title_if_needed", lambda t, title, tr: title),
             ]
@@ -1466,8 +1464,8 @@ class TestTranscriptOnlyCacheBothSwitchesOffIsNotFullHit:
             # text (not a blank string), and uses the codebase's existing
             # "disabled" wording rather than silently implying "not yet
             # generated".
-            assert notification_router.send_long_text.called
-            sent_text = notification_router.send_long_text.call_args.kwargs["text"]
+            notification_router.notify_task_status.assert_called_once()
+            sent_text = notification_router.notify_task_status.call_args.kwargs["completion_body"]
             assert sent_text.strip() != ""
             assert "RAW uncalibrated transcript (locally formatted)" in sent_text
             assert "未启用" in sent_text
@@ -1621,13 +1619,11 @@ class TestCalibrateOnlyBackfillPreservesExistingSummaryNotification:
             # ---- Notification: must carry the real cached summary text
             # and must NOT report "总结未生成" (summary not generated) --
             # this is the codex-review R8 #1 regression this test locks down.
-            assert notification_router.send_long_text.called
-            call_kwargs = notification_router.send_long_text.call_args.kwargs
-            sent_text = call_kwargs["text"]
+            notification_router.notify_task_status.assert_called_once()
+            sent_text = notification_router.notify_task_status.call_args.kwargs["completion_body"]
             assert "EXISTING real summary text from a prior generation" in sent_text
             assert "总结未生成" not in sent_text
             assert "未生成" not in sent_text
-            assert call_kwargs["is_summary"] is True
         finally:
             real_cm.close()
 
@@ -1771,14 +1767,12 @@ class TestCalibrateOnlyBackfillDoesNotMisreportSkippedShortAsSummary:
             # in play) and must NOT leak the stale SKIPPED_SHORT fallback
             # content as if it were a real "总结" -- this is the
             # codex-review R9 P2 regression this test locks down.
-            assert notification_router.send_long_text.called
-            call_kwargs = notification_router.send_long_text.call_args.kwargs
-            sent_text = call_kwargs["text"]
+            notification_router.notify_task_status.assert_called_once()
+            sent_text = notification_router.notify_task_status.call_args.kwargs["completion_body"]
             assert "## 校对文本" in sent_text
             assert "REAL calibrated text from this round" in sent_text
             assert "STALE calibrated-as-summary fallback text" not in sent_text
             assert "总结 未生成" in sent_text
-            assert call_kwargs["is_summary"] is False
         finally:
             real_cm.close()
 
@@ -1840,8 +1834,7 @@ class TestFullHitCasLossSuppressesNotification:
 
         # The actual bug this test pins down: once the CAS write loses, no
         # notification of any kind (content or "task complete") may be sent.
-        notification_router.send_long_text.assert_not_called()
-        notification_router.send_text.assert_not_called()
+        notification_router.notify_task_status.assert_not_called()
 
         # The CAS write was genuinely attempted with SUCCESS (and lost) --
         # this isn't a case of the write being skipped outright.
@@ -1881,7 +1874,7 @@ class TestFullHitCasLossSuppressesNotification:
         )
 
         assert result["status"] == "success"
-        notification_router.send_long_text.assert_called_once()
+        notification_router.notify_task_status.assert_called_once()
         terminal_status_calls = [
             call for call in notification_router.notify_task_status.call_args_list
             if call.kwargs.get("status") == "【任务完成】"
@@ -1915,7 +1908,7 @@ class TestFullHitNotificationExceptionDoesNotFailTask:
 
         notification_router = MagicMock()
         notification_router.notify_task_status.return_value = {"wechat": True}
-        notification_router.send_long_text.side_effect = RuntimeError("webhook timeout")
+        notification_router.notify_task_status.side_effect = RuntimeError("webhook timeout")
         monkeypatch.setattr(transcription, "get_notification_router", lambda: notification_router)
 
         result = transcription.process_transcription(
@@ -1993,5 +1986,5 @@ class TestFullHitNotificationExceptionDoesNotFailTask:
             if call.kwargs.get("status") == "转录异常"
         ]
         assert error_calls == []
-        # 正文通知本身必须已经真正发出（异常发生在它之后的完成通知阶段）。
-        notification_router.send_long_text.assert_called_once()
+        # The terminal notification is the only send path.
+        notification_router.notify_task_status.assert_called_once()

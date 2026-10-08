@@ -486,7 +486,6 @@ def wired(tmp_path, monkeypatch):
     monkeypatch.setattr(transcription, "llm_task_queue", FakeQueue())
     monkeypatch.setattr(transcription, "Transcriber", RecordingTranscriber)
     monkeypatch.setattr(transcription, "FunASRSpeakerClient", RecordingFunASR)
-    monkeypatch.setattr(transcription, "get_base_url", lambda: "http://test")
     monkeypatch.setattr(subprocess, "run", spy)
 
     RecordingTranscriber.calls = []
