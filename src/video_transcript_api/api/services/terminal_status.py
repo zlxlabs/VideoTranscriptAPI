@@ -163,7 +163,9 @@ def deliver_terminal_notification(
 
     error_for_notify = notify_error if notify_error is not None else error_message
 
-    task = cache_manager.get_task_by_id(task_id) or {}
+    task = _prepare_local_upload_notification_task(
+        cache_manager, cache_manager.get_task_by_id(task_id) or {}
+    )
     display_url = url or task.get("url") or ""
     if title is None:
         title = task.get("title")
@@ -363,7 +365,9 @@ def deliver_pending_terminal_notifications(
     sent = 0
     for row in rows:
         task_id = row["task_id"]
-        task = cache_manager.get_task_by_id(task_id) or {}
+        task = _prepare_local_upload_notification_task(
+            cache_manager, cache_manager.get_task_by_id(task_id) or {}
+        )
         notify_status = (
             TERMINAL_SUCCESS_STATUS
             if row["status"] == TaskStatus.SUCCESS
@@ -477,11 +481,34 @@ def _compose_dispatcher_error(row: dict, task: dict) -> str:
     return "\n".join(parts) if parts else None
 
 
+def _prepare_local_upload_notification_task(cache_manager, task: dict) -> dict:
+    """Enrich an ephemeral delivery copy; never write aliases back to task/audit."""
+    task = dict(task)
+    if task.get("platform") != "local_upload":
+        return task
+    upload = cache_manager.get_local_upload_for_task(task["task_id"])
+    if upload is None:
+        raise ValueError(f"local upload delivery mapping missing: {task['task_id']}")
+    from ...utils.notifications.task_formatter import local_upload_notification_fields
+
+    fields = local_upload_notification_fields(upload)
+    task["title"] = fields["title"]
+    task["url"] = fields["source_url"] or fields["source_label"]
+    task["source_label"] = fields["source_label"]
+    task["view_token"] = upload["view_token"]
+    return task
+
+
 def _resolve_view_url(cache_manager, task_id: str, task: Optional[dict] = None) -> Optional[str]:
-    """Build `{base_url}/view/{view_token}` from the task row."""
+    """Build `{base_url}/view/{view_token}` from task or upload identity."""
     if task is None:
         task = cache_manager.get_task_by_id(task_id) or {}
     token = task.get("view_token")
+    if not token and task.get("platform") == "local_upload":
+        upload = cache_manager.get_local_upload_for_task(task_id)
+        if upload is None:
+            raise ValueError(f"local upload delivery mapping missing: {task_id}")
+        token = upload["view_token"]
     if not token:
         return None
     from ...utils.rendering import get_base_url

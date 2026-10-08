@@ -138,14 +138,11 @@ class TempFileManager:
         freed = 0
         if d is not None and d.exists():
             freed = self._path_size(d)
-            try:
-                shutil.rmtree(d)
-                logger.info(
-                    f"任务临时文件已清理: task_{task_id} "
-                    f"(释放 {freed / 1024 / 1024:.2f} MB)"
-                )
-            except Exception as e:
-                logger.warning(f"清理任务临时目录失败: {d}, 错误: {e}")
+            shutil.rmtree(d)
+            logger.info(
+                f"任务临时文件已清理: task_{task_id} "
+                f"(释放 {freed / 1024 / 1024:.2f} MB)"
+            )
 
         # 从全局 tracked 列表里移除该任务目录下的条目，避免列表无限增长
         if d is not None:

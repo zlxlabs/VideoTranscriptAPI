@@ -654,13 +654,17 @@ async def process_task_queue():
                         )
                         logger.info(f"任务完成: {task_id}")
                     except Exception as exc:
+                        failure_label = (
+                            "UPLOAD_PROCESSING_FAILED: "
+                            if local_media_path is not None else ""
+                        )
                         logger.exception(
-                            f"任务处理失败: {task_id}, URL: {url}, 错误: {exc}"
+                            f"{failure_label}任务处理失败: {task_id}, URL: {url}, 错误: {exc}"
                         )
                         finalize_terminal_status_and_notify(
                             task_id,
                             TaskStatus.FAILED,
-                            error_message=f"转录任务失败: {exc}",
+                            error_message=f"{failure_label}转录任务失败: {exc}",
                             url=url,
                             notify_error=str(exc),
                             channel_name=notification_channel,
@@ -1113,6 +1117,12 @@ def process_transcription(
                 键）：CAS 写入成功时为 {"status": "failed", ...}；CAS 返回
                 False 且既有终态已是 success 时为 {"status": "success",
                 ...}；CAS 写入抛异常则不返回，异常向上传播。"""
+            if local_media_path is not None:
+                error_msg = f"UPLOAD_PROCESSING_FAILED: {error_msg}"
+                logger.error(
+                    "UPLOAD_PROCESSING_FAILED task_id={} reason=processing_failed",
+                    task_id,
+                )
             try:
                 fail_status_written = finalize_terminal_status_and_notify(
                     task_id,
@@ -2518,6 +2528,29 @@ def process_transcription(
                             title=video_title, author_name=author,
                         )
 
+                    if local_media_path is not None:
+                        temp_dir = get_temp_manager().get_task_dir(task_id)
+                        observed_temp_bytes = sum(
+                            path.stat().st_size
+                            for path in temp_dir.rglob("*")
+                            if path.is_file()
+                        )
+                        budget_mib = get_config().get("storage", {}).get(
+                            "upload_limits", {}
+                        ).get("upload_temp_budget_mib")
+                        budget_bytes = int(float(budget_mib) * 1024 * 1024)
+                        if not get_runtime().reserve_upload_temp(
+                            task_id,
+                            observed_temp_bytes,
+                            budget_bytes,
+                            str(get_temp_manager().base_dir),
+                        ):
+                            return _fail_task_and_notify(
+                                "上传转录产生的临时文件超过预算（upload_temp_budget）",
+                                title=video_title,
+                                author_name=author,
+                            )
+
                     # 获取转录文本
                     transcript = transcription_result.get("transcript", "")
 
@@ -2599,12 +2632,18 @@ def process_transcription(
         # 通知，但缺少收敛日志）；现在显式 try/except 记日志后重新抛出，
         # 行为不变、可观测性补齐，且与 _handoff_to_llm_stage /
         # _fail_task_and_notify 两处站点统一。
+        failure_message = (
+            f"UPLOAD_PROCESSING_FAILED: 转录任务异常: {exc}"
+            if local_media_path is not None else f"转录任务异常: {exc}"
+        )
+        if local_media_path is not None:
+            logger.error("UPLOAD_PROCESSING_FAILED task_id={} reason=unhandled_worker_error", task_id)
         try:
             failed_status_written = finalize_terminal_status_and_notify(
                 task_id,
                 TaskStatus.FAILED,
                 download_url=download_url,
-                error_message=f"转录任务异常: {exc}",
+                error_message=failure_message,
                 url=display_url,
                 notify_error=str(exc),
                 channel_name=notification_channel,
@@ -2620,7 +2659,7 @@ def process_transcription(
         if failed_status_written:
             return {
                 "status": "failed",
-                "message": f"转录任务异常: {exc}",
+                "message": failure_message,
                 "error": str(exc),
             }
 
@@ -2653,11 +2692,15 @@ def process_transcription(
         # 临时文件只是转录的输入，转录段结束即可清，不依赖 LLM 阶段终态（codex#9）。
         # 失败打 WARNING 不中断主流程；务必 clear_current_task 避免线程复用串号（codex#1）。
         try:
-            temp_manager.clean_up_task(task_id)
-        except Exception as cleanup_exc:
-            logger.warning(
-                f"清理任务临时文件失败（不影响主流程）: {task_id}, 错误: {cleanup_exc}"
-            )
+            if local_media_path is not None:
+                temp_manager.clean_up_task(task_id)
+            else:
+                try:
+                    temp_manager.clean_up_task(task_id)
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        f"清理任务临时文件失败（不影响主流程）: {task_id}, 错误: {cleanup_exc}"
+                    )
         finally:
             temp_manager.clear_current_task()
             temp_manager.mark_done(task_id)

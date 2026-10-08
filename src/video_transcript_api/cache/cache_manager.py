@@ -355,6 +355,7 @@ class CacheManager:
                     media_id TEXT UNIQUE,
                     view_token TEXT UNIQUE,
                     created_at TEXT NOT NULL,
+                    terminal_at TEXT,
                     expires_at TEXT,
                     revoked_at TEXT,
                     error_code TEXT,
@@ -386,6 +387,7 @@ class CacheManager:
                 ("media_path", "TEXT"),
                 ("byte_size", "INTEGER"),
                 ("sha256", "TEXT"),
+                ("terminal_at", "TEXT"),
             ):
                 if column not in upload_columns:
                     cursor.execute(
@@ -400,7 +402,17 @@ class CacheManager:
                     SELECT RAISE(ABORT, 'local upload revocation is write-once');
                 END
             ''')
-
+            cursor.execute('''
+                CREATE TRIGGER IF NOT EXISTS local_upload_terminal_clock_write_once
+                BEFORE UPDATE OF terminal_at, expires_at ON local_uploads
+                WHEN OLD.terminal_at IS NOT NULL AND (
+                    NEW.terminal_at IS NOT OLD.terminal_at OR
+                    NEW.expires_at IS NOT OLD.expires_at
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'local upload terminal clock is write-once');
+                END
+            ''')
             # 创建索引以提高查询性能
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_platform_media_id ON video_cache(platform, media_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_url ON video_cache(url)')
@@ -426,6 +438,26 @@ class CacheManager:
             
         # 执行数据库迁移
         self._migrate_database()
+        with self._get_cursor() as cursor:
+            task_columns = {
+                row[1] for row in cursor.execute("PRAGMA table_info(task_status)").fetchall()
+            }
+            if "completed_at" in task_columns:
+                cursor.execute(
+                    """UPDATE local_uploads
+                   SET terminal_at = (
+                           SELECT completed_at FROM task_status
+                           WHERE task_id = local_uploads.root_task_id
+                       ),
+                       expires_at = CASE WHEN retention = '30d' THEN (
+                           SELECT datetime(completed_at, '+30 days') FROM task_status
+                           WHERE task_id = local_uploads.root_task_id
+                       ) ELSE NULL END
+                   WHERE terminal_at IS NULL AND root_task_id IN (
+                       SELECT task_id FROM task_status
+                       WHERE status IN ('success', 'failed') AND completed_at IS NOT NULL
+                   )"""
+                )
     
     def _migrate_database(self):
         """执行数据库迁移"""
@@ -876,6 +908,50 @@ class CacheManager:
             )
             row = cursor.fetchone()
             return dict(row) if row is not None else None
+
+    def get_local_upload_for_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Resolve delivery metadata by this task's isolated upload media identity."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """SELECT u.* FROM local_uploads u
+                   JOIN task_status t ON t.platform = 'local_upload'
+                     AND t.media_id = u.media_id
+                   WHERE t.task_id = ? AND u.state = 'accepted'""",
+                (task_id,),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row is not None else None
+
+    def get_active_local_upload_for_reprocess(
+        self,
+        cursor,
+        *,
+        view_token: str,
+        owner_user_id: str,
+        root_task_id: str,
+        media_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Authorize one upload child inside the caller's immediate transaction."""
+        now_text = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        cursor.execute(
+            """SELECT u.* FROM local_uploads u
+               JOIN task_status root ON root.task_id = u.root_task_id
+               WHERE u.view_token = ? AND u.owner_user_id = ?
+                 AND u.root_task_id = ? AND u.media_id = ?
+                 AND u.state = 'accepted' AND u.revoked_at IS NULL
+                 AND root.platform = 'local_upload' AND root.media_id = u.media_id
+                 AND root.view_token = ''
+                 AND ((u.retention = 'never' AND u.expires_at IS NULL)
+                   OR (u.retention = '30d' AND (
+                       u.expires_at > ? OR
+                       (u.expires_at IS NULL AND root.status NOT IN ('success', 'failed'))
+                   )))""",
+            (view_token, owner_user_id, root_task_id, media_id, now_text),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row is not None else None
 
     def set_local_upload_error(self, upload_id: str, error_code: str) -> None:
         with self._get_cursor() as cursor:
@@ -2926,13 +3002,15 @@ class CacheManager:
                 if updated and status in ['success', 'failed']:
                     cursor.execute(
                         """UPDATE local_uploads
-                           SET expires_at = (
-                               SELECT datetime(completed_at, '+30 days')
-                               FROM task_status WHERE task_id = ?
-                           )
-                           WHERE root_task_id = ? AND retention = '30d'
-                             AND expires_at IS NULL""",
-                        (task_id, task_id),
+                           SET terminal_at = (
+                                   SELECT completed_at FROM task_status WHERE task_id = ?
+                               ),
+                               expires_at = CASE WHEN retention = '30d' THEN (
+                                   SELECT datetime(completed_at, '+30 days')
+                                   FROM task_status WHERE task_id = ?
+                               ) ELSE NULL END
+                           WHERE root_task_id = ? AND terminal_at IS NULL""",
+                        (task_id, task_id, task_id),
                     )
                 if not updated:
                     logger.info(

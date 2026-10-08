@@ -26,6 +26,7 @@ from ..context import (
 from ..processing_options import normalize_processing_options
 from ..services.transcription import verify_token
 from ...utils.logging import logger
+from ...utils.notifications import get_notification_router
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 _METADATA_MAX_BYTES = 4096
@@ -338,7 +339,41 @@ async def receive_upload(
                 raise _reject(410, failure_code, "上传幂等key已超过24小时受理截止时间") from exc
             raise
         transferred = True
-        return JSONResponse(_receipt(cache_manager.get_local_upload_by_id(accepted["upload_id"])), status_code=202)
+        from ...utils.notifications.task_formatter import local_upload_notification_fields
+
+        accepted_record = cache_manager.get_local_upload_by_id(accepted["upload_id"])
+        notification_fields = local_upload_notification_fields(accepted_record)
+        notification_webhooks = {
+            channel: user_info.get(field)
+            for channel, field in (
+                ("wechat", "wechat_webhook"),
+                ("feishu", "feishu_webhook"),
+            )
+            if user_info.get(field)
+        }
+        try:
+            notification_result = get_notification_router().send_view_link(
+                title=notification_fields["title"],
+                view_token=accepted_record["view_token"],
+                original_url=(
+                    notification_fields["source_url"]
+                    or notification_fields["source_label"]
+                ),
+                task_id=task_id,
+                webhooks=notification_webhooks,
+            )
+        except Exception:
+            logger.exception("UPLOAD_ACCEPTED_NOTIFICATION_FAILED task_id={}", task_id)
+        else:
+            if not isinstance(notification_result, dict) or not any(
+                result is True for result in notification_result.values()
+            ):
+                logger.error(
+                    "UPLOAD_ACCEPTED_NOTIFICATION_FAILED task_id={} result={}",
+                    task_id,
+                    notification_result,
+                )
+        return JSONResponse(_receipt(accepted_record), status_code=202)
     except asyncio.QueueFull as exc:
         failure_code = "queue_full"
         raise _reject(503, failure_code, "转录队列已满，上传未正式受理") from exc

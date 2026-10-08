@@ -64,7 +64,12 @@ def build_completion_share_receipt(task: dict, view_url: str) -> str:
         )
     ]
     original_url = task.get("url")
-    if original_url:
+    source_label = task.get("source_label")
+    if source_label:
+        lines.append(f"来源：{source_label}")
+    if original_url and not source_label:
+        lines.append(f"原始地址：{original_url}")
+    elif original_url and source_label and original_url != source_label:
         lines.append(f"原始地址：{original_url}")
     if view_url:
         lines.extend(["", f"总结和校对：{view_url}"])

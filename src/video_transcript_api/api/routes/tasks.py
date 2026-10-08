@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import json
+import os
 import queue
 from pathlib import Path
 
@@ -67,25 +68,60 @@ def _is_notes_task_options(value) -> bool:
 
 
 def _find_inflight_notes_task(cursor, view_token: str) -> str | None:
-    """Find an in-flight notes task using persisted task_status fields."""
-    cursor.execute(
-        """
-        SELECT task_id, processing_options
-        FROM task_status
-        WHERE view_token = ?
-          AND status IN (?, ?, ?)
-        """,
-        (
-            view_token,
-            TaskStatus.QUEUED,
-            TaskStatus.PROCESSING,
-            TaskStatus.CALIBRATING,
-        ),
-    )
+    """Find an in-flight notes task without grouping uploads by blank alias."""
+    if view_token.startswith("upload_"):
+        cursor.execute(
+            "SELECT media_id FROM local_uploads WHERE view_token = ?",
+            (view_token,),
+        )
+        upload = cursor.fetchone()
+        if upload is None:
+            return None
+        cursor.execute(
+            """SELECT task_id, processing_options FROM task_status
+               WHERE platform = 'local_upload' AND media_id = ?
+                 AND status IN (?, ?, ?)""",
+            (
+                upload["media_id"],
+                TaskStatus.QUEUED,
+                TaskStatus.PROCESSING,
+                TaskStatus.CALIBRATING,
+            ),
+        )
+    else:
+        cursor.execute(
+            """SELECT task_id, processing_options FROM task_status
+               WHERE view_token = ? AND status IN (?, ?, ?)""",
+            (
+                view_token,
+                TaskStatus.QUEUED,
+                TaskStatus.PROCESSING,
+                TaskStatus.CALIBRATING,
+            ),
+        )
     for task_row in cursor.fetchall():
         if _is_notes_task_options(task_row["processing_options"]):
             return task_row["task_id"]
     return None
+
+
+def _admit_upload_reprocess(cursor, view_token, user_id, cache_data):
+    """Lock current upload owner/eligibility with its child task INSERT."""
+    if cache_data.get("platform") != "local_upload":
+        return view_token
+    if os.environ.get("VTA_UPLOADS_ENABLED", "").strip().lower() != "true":
+        raise HTTPException(status_code=404, detail="上传分享不可用")
+    task_info = cache_data.get("task_info") or {}
+    upload = cache_manager.get_active_local_upload_for_reprocess(
+        cursor,
+        view_token=view_token,
+        owner_user_id=user_id,
+        root_task_id=task_info.get("task_id"),
+        media_id=cache_data.get("media_id"),
+    )
+    if upload is None:
+        raise HTTPException(status_code=404, detail="上传分享不可用或已关闭")
+    return ""
 
 
 def _read_fresh_notes_status(cache_dir: str | None) -> str | None:
@@ -614,6 +650,10 @@ async def recalibrate(
         raise HTTPException(status_code=400, detail="缓存中没有转录数据，无法重新校对")
 
     task_info = cache_data.get("task_info", {})
+    is_local_upload = cache_data.get("platform") == "local_upload"
+    if is_local_upload:
+        with cache_manager._get_cursor() as cursor:
+            _admit_upload_reprocess(cursor, view_token, user_id, cache_data)
 
     # 归属校验（本地 codex review 第 8 轮 K1）：recalibrate 会创建新任务、
     # 覆盖共享媒体的校对/说话人产物并消耗 LLM 配额，不能像 GET
@@ -630,7 +670,7 @@ async def recalibrate(
     # 判定逻辑理应有同一套调度方式，不能一个在线程池跑、一个在事件循环里
     # 裸跑）。
     original_task_id = task_info.get("task_id")
-    if original_task_id:
+    if original_task_id and not is_local_upload:
         try:
             owned = await asyncio.to_thread(
                 check_view_token_ownership,
@@ -686,6 +726,11 @@ async def recalibrate(
     try:
         try:
             with cache_manager._get_cursor() as cursor:
+                if is_local_upload:
+                    cursor.execute("BEGIN IMMEDIATE")
+                child_view_token = _admit_upload_reprocess(
+                    cursor, view_token, user_id, cache_data
+                )
                 cursor.execute('''
                     INSERT INTO task_status
                     (task_id, view_token, url, platform, media_id,
@@ -693,13 +738,15 @@ async def recalibrate(
                      processing_options, submitted_by)
                     VALUES (?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?)
                 ''', (
-                    task_id, view_token, task_info.get("url", ""),
+                    task_id, child_view_token, task_info.get("url", ""),
                     platform, media_id, use_speaker_recognition,
                     video_title, author,
                     json.dumps(recalibrate_processing_options, sort_keys=True),
                     user_id,
                 ))
             logger.info(f"重新校对任务创建成功: {task_id}, view_token: {view_token}")
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"创建重新校对任务失败: {e}")
             raise HTTPException(status_code=500, detail=f"创建重新校对任务失败: {e}")
@@ -901,13 +948,17 @@ async def resummarize(
         raise HTTPException(status_code=400, detail="缓存中没有转录数据，无法重新生成总结")
 
     task_info = cache_data.get("task_info", {})
+    is_local_upload = cache_data.get("platform") == "local_upload"
+    if is_local_upload:
+        with cache_manager._get_cursor() as cursor:
+            _admit_upload_reprocess(cursor, view_token, user_id, cache_data)
 
     # 归属校验：与 recalibrate 完全同一套判定（check_view_token_ownership +
     # asyncio.to_thread，fail-closed）——resummarize 同样会创建新任务、
     # 消耗 LLM 配额并覆盖共享媒体的总结产物，不能对公开分享的 view_token
     # 一律放行。
     original_task_id = task_info.get("task_id")
-    if original_task_id:
+    if original_task_id and not is_local_upload:
         try:
             owned = await asyncio.to_thread(
                 check_view_token_ownership,
@@ -971,6 +1022,11 @@ async def resummarize(
     try:
         try:
             with cache_manager._get_cursor() as cursor:
+                if is_local_upload:
+                    cursor.execute("BEGIN IMMEDIATE")
+                child_view_token = _admit_upload_reprocess(
+                    cursor, view_token, user_id, cache_data
+                )
                 cursor.execute('''
                     INSERT INTO task_status
                     (task_id, view_token, url, platform, media_id,
@@ -978,13 +1034,15 @@ async def resummarize(
                      processing_options, submitted_by)
                     VALUES (?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?)
                 ''', (
-                    task_id, view_token, task_info.get("url", ""),
+                    task_id, child_view_token, task_info.get("url", ""),
                     platform, media_id, use_speaker_recognition,
                     video_title, author,
                     json.dumps(resummarize_processing_options, sort_keys=True),
                     user_id,
                 ))
             logger.info(f"重新生成总结任务创建成功: {task_id}, view_token: {view_token}")
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"创建重新生成总结任务失败: {e}")
             raise HTTPException(status_code=500, detail=f"创建重新生成总结任务失败: {e}")
@@ -1165,8 +1223,12 @@ async def generate_notes(
         )
 
     task_info = cache_data.get("task_info", {})
+    is_local_upload = cache_data.get("platform") == "local_upload"
+    if is_local_upload:
+        with cache_manager._get_cursor() as cursor:
+            _admit_upload_reprocess(cursor, view_token, user_id, cache_data)
     original_task_id = task_info.get("task_id")
-    if original_task_id:
+    if original_task_id and not is_local_upload:
         try:
             owned = await asyncio.to_thread(
                 check_view_token_ownership,
@@ -1247,6 +1309,9 @@ async def generate_notes(
                 # Serialize check + insert so concurrent requests cannot both
                 # observe "no in-flight notes task" and enqueue duplicates.
                 cursor.execute("BEGIN IMMEDIATE")
+                child_view_token = _admit_upload_reprocess(
+                    cursor, view_token, user_id, cache_data
+                )
                 inflight_notes_task_id = _find_inflight_notes_task(
                     cursor,
                     view_token,
@@ -1268,7 +1333,7 @@ async def generate_notes(
                             """,
                             (
                                 task_id,
-                                view_token,
+                                child_view_token,
                                 task_info.get("url", ""),
                                 platform,
                                 media_id,
