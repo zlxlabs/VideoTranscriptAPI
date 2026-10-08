@@ -337,7 +337,7 @@ class WechatNotifier:
 
     def notify_task_status(
         self, url, status, error=None, title=None, author=None, transcript=None,
-        view_url=None, task_id=None, completion_body=None,
+        view_url=None, task_id=None, completion_body=None, completion_receipt=None,
     ):
         """
         通知任务状态
@@ -366,7 +366,10 @@ class WechatNotifier:
             task_id=task_id,
             completion_body=completion_body,
         )
-        return self.send_text(content, skip_risk_control=True)
+        accepted = self.send_text(content, skip_risk_control=True)
+        if not accepted or completion_receipt is None:
+            return accepted
+        return self.send_text(completion_receipt, skip_risk_control=True)
 
 def wechat_notify(message, webhook=None, config=None):
     """

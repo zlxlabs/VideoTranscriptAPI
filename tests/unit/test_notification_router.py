@@ -416,3 +416,53 @@ class TestStatusEmojiMatchesLayeredCopy:
         assert _get_status_emoji("【任务失败】") == "❌"
         assert "进行中" in "转录完成（进行中）- 普通转录(CapsWriter)，后面还有校对/摘要"
         assert "【任务完成】" != "转录完成（进行中）- 普通转录(CapsWriter)，后面还有校对/摘要"
+
+
+class TestCompletionReceiptGroupResults:
+    def test_feishu_second_submission_failure_keeps_channel_group_false(self):
+        from src.video_transcript_api.api.services.terminal_status import _notification_accepted
+        from src.video_transcript_api.utils.notifications.channel import FeishuChannel
+
+        feishu = FeishuChannel.__new__(FeishuChannel)
+        feishu.send_rich = MagicMock(side_effect=[True, False])
+        router = NotificationRouter.__new__(NotificationRouter)
+        router.channels = [feishu]
+
+        results = router.notify_task_status(
+            url="https://example.test/video",
+            status="【任务完成】",
+            title="Receipt failure",
+            task_id="task_abcdef123456",
+            completion_body="full summary body",
+            completion_receipt="✅ [#abcdef] Receipt failure\nsummary excerpt",
+        )
+
+        assert results == {"feishu": False}
+        assert _notification_accepted(results) is False
+        calls = feishu.send_rich.call_args_list
+        assert len(calls) == 2
+        assert "full summary body" in calls[0].args[0]
+        assert calls[1].args[0].startswith("✅ [#abcdef]")
+
+    def test_wecom_first_submission_failure_suppresses_receipt(self):
+        from src.video_transcript_api.utils.notifications.channel import WeComChannel
+        from src.video_transcript_api.utils.notifications.wechat import WechatNotifier
+
+        notifier = WechatNotifier.__new__(WechatNotifier)
+        notifier.webhook = "hook"
+        notifier.send_text = MagicMock(return_value=False)
+        wecom = WeComChannel.__new__(WeComChannel)
+        wecom._notifier = notifier
+
+        accepted = wecom.notify_task_status(
+            url="https://example.test/video",
+            status="【任务完成】",
+            title="Full body failure",
+            task_id="task_abcdef123456",
+            completion_body="full summary body",
+            completion_receipt="✅ [#abcdef] Full body failure\nsummary excerpt",
+        )
+
+        assert accepted is False
+        notifier.send_text.assert_called_once()
+        assert "full summary body" in notifier.send_text.call_args.args[0]
