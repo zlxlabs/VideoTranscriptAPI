@@ -32,3 +32,10 @@
 - **本段结论**：CapsWriter 上传输出重定向到任务临时目录；共享 `_handoff_to_llm_stage` 仅对 `local_upload` 在 CALIBRATING 更新/队列发布前删除整个 source/audio/ASR task dir，保留既有 finally 幂等收尾。
 - **关键决策与已否决方案**：不在 queue put 后等待消费者、不引新锁/event/state/interface；失败清理会在任何 publish 前直接抛出，因此不能让 LLM 先消费再报错。
 - **下一步唯一动作**：将生产顺序修正单独 commit/push，再在新空 scratch 验证 H1 绿、H0 反向顺序变异红，并运行关联 Narrow-Verify。
+
+## 2026-10-09 · H0 红验与最小生产修正
+
+- **当前阶段**：implementing；H0 并发探针已在独立空 scratch 中以 `AssertionError` 红，生产修正已落盘，待 push 后做 H1 scratch 验证。
+- **本段结论**：H0 真实消费者 `NoModelWork.process` 观察到 `source_exists=True`；修正把上传 CapsWriter 输出放进任务临时目录，并在共享 handoff helper 的 CALIBRATING/queue publish 前执行现有幂等清理。
+- **关键决策与已否决方案**：不等队列消费后再清理、不加锁/等待器/生产状态；只有 `platform=local_upload` 走提前清理，URL 链路保持原顺序。
+- **下一步唯一动作**：提交推送此最小顺序修正，然后用新空 scratch 验证 H1 与反向顺序变异，并在 scratch 跑全量 make test。
