@@ -50,6 +50,37 @@ def test_receipt_uses_original_url_exact_view_url_and_first_paragraph():
     assert "第二段不要复制" not in receipt
 
 
+def test_disabled_summary_receipt_keeps_urls_without_summary_paragraph():
+    task = {
+        "task_id": "task_disabled123",
+        "title": "禁用总结标题",
+        "url": "https://example.test/video?id=disabled&track=keep",
+        "terminal_snapshot": {
+            "result": {
+                "内容总结": "不得复制的总结正文。",
+                "skip_summary": False,
+                "stats": {"summary_status": "disabled"},
+            },
+            "calibrate_only": False,
+        },
+    }
+
+    receipt = build_completion_share_receipt(
+        task, "https://view.test/view/disabled-token"
+    )
+
+    assert "总结未启用" in receipt
+    assert "原始地址：https://example.test/video?id=disabled&track=keep" in receipt
+    assert "总结和校对：https://view.test/view/disabled-token" in receipt
+    assert "不得复制的总结正文。" not in receipt
+    assert receipt == (
+        "✅ [#disabl] 禁用总结标题\n"
+        "原始地址：https://example.test/video?id=disabled&track=keep\n\n"
+        "总结和校对：https://view.test/view/disabled-token\n\n"
+        "ℹ️ 总结未启用"
+    )
+
+
 @pytest.mark.parametrize(
     ("snapshot", "calibrate_only", "expected_notice"),
     [
