@@ -21,4 +21,12 @@
 - **关键决策与已否决方案**:取消点放在 CAS 赢分支(而非函数入口)——只有真正写入终态才取消,非终态写入(CALIBRATING 等经 update_task_status 的路径)不受影响;终态黏性下的 CAS 输家分支无需取消,赢家路径已覆盖。
 - **下一步唯一动作**:红验(用例 3 去共用标记、用例 5 去终态取消),然后收尾全量验证。
 
+## 里程碑 4:红验与收尾
+
+- **当前阶段**:implementing 完成,进入验收
+- **本段结论**:红验两项均转红且都是断言失败——用例 3 去掉共用"已提醒"标记后 `AssertionError: assert 2 == 1`;用例 5 去掉终态取消后 `AssertionError: assert 'task_aabbcc112233' not in {...}`;各自只还原刚改坏的一处,还原后窄验证 14 例全绿。竞态用例连续 5 次运行全绿。`make test` 退出码 0(summary:3719 passed, 3 skipped, 1 subtests passed;注:Makefile 的 `-q` 与 pyproject addopts 的 `-q` 叠加为 `-qq`,末行被 pytest 省略,summary 行取自去掉命令行 `-q` 的等效全量运行)。全部改动文件 `py_compile` 退出码 0。
+- **关键决策与已否决方案**:无新增。
+- **下一步唯一动作**:写验收报告。
+
+
 
