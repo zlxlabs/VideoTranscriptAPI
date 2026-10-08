@@ -19,5 +19,6 @@ merged_pr: null
   - [x] 真实 FastAPI/ASGI 与临时 cache.db 上由 client 发 raw 文件字节及 headers；锁定实际落盘字节、服务端 SHA-256、Unicode metadata、root row 与 dispatcher 实际消费路径。producer fixture 保留在 `tests/integration/test_upload_intake.py`。
   - [x] 缺/错 Bearer、默认关闭、额度未知、非 octet-stream、声明/实收超限、receiver/inflight/free-space 满载均在 body/file/ASR 边界前显式拒绝。
   - [x] 同 key 重放/变化 metadata、相同字节新 key、真实 ASGI 断开、队列满、SQLite commit fault、queue put fault、窗口跨期与丢失202回执重查均有 producer→consumer 测试；same-intent 不读 body/不重入队。
-  - [ ] 最终CI及系统级部署 unit 的环境传递仍由 lead 验收；未改真实 systemd/service 或生产环境。本地隔离裸shell验证待最终阶段执行。
+  - [x] 未设置VTA开关的真实consumer测试在`env -i`裸shell与隔离的临时systemd user unit分别运行成功；未改真实systemd/service或生产环境。
+  - [ ] Hosted CI及实际生产unit环境传递仍由lead验收；本地隔离验证不等于生产部署/容量证明。
 - **完成条件**：本地代码与测试已覆盖 202/失败边界；正式合并、CI 与真实部署环境变量/容量证明由 lead 后续托管，生产仍关闭。

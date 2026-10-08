@@ -34,6 +34,19 @@ implementing；完成第一份独立可运行单元：bounded metadata decoder �
 - `receiving` key在创建+24h截止前保留唯一；正式接受在截止点及以后显式410，过期receiving草稿和未移交暂存路径由maintenance退休；不自动重试/换key。
 - 首次QueueFull在读body前拒绝；若数据库已提交后`put_nowait`仍失败，事务补偿撤回root/token映射、保留失败receipt并清理文件，不能返回202。
 
+## Milestone 3：全仓验证与交付
+
+### 本段结论（≤3句）
+
+- `make test` 完整门禁 exit 0；输出到 `/tmp/vta-upload-B-make-test.log`，pytest 到 100%，3 个既有用例 skip，无失败。
+- 同一未设置 `VTA_UPLOADS_ENABLED` 的消费测试分别在 `env -i` 裸shell与临时 systemd user unit `vta-upload-B-env-verify-1791469452-1251284.service` 运行成功；未修改真实 unit/生产配置。
+- commit `9ed74d9b5997aea4acbd3722b2cd6db537571faa` 已 push，draft PR #202：`https://github.com/zlxlabs/VideoTranscriptAPI/pull/202`；本地树clean。CI / 独立主审由lead托管，尚未ready/merge。
+
+### 关键决策与未验证项
+
+- 上传默认保持关闭，示例四项生产额度均为null；本地测试额度只存在临时 fixture，不作为生产容量结论。
+- 真实生产 systemd unit、ASR服务容量、恢复域和部署仍未验证；本卡未触碰真实配置、数据、通知或生产ASR。
+
 ## 下一步唯一动作
 
-完成文档/测试说明与全仓门禁，核对每个不变量的producer/consumer锁定测试，再更新本进度并提交推送下一里程碑。
+等待 Pi lead 对 draft PR #202 独立验收并托管CI/主审；执行器不标ready、不合并、不部署。
