@@ -33,6 +33,13 @@
 - **关键决策与已否决方案**：不在 queue put 后等待消费者、不引新锁/event/state/interface；失败清理会在任何 publish 前直接抛出，因此不能让 LLM 先消费再报错。
 - **下一步唯一动作**：将生产顺序修正单独 commit/push，再在新空 scratch 验证 H1 绿、H0 反向顺序变异红，并运行关联 Narrow-Verify。
 
+## 2026-10-09 · C-Fix1 隔离复验完成
+
+- **当前阶段**：implementing；H1 worker 并发探针、H0 与 H1 顺序变异红验、固定 H1 scratch 全量 `make test` 均已执行；Hosted CI/新独审仍由 lead 接管。
+- **本段结论**：H0 的实际 LLM `process` 入口见源/ASR 文件存在并红；H1 清理提前及 ASR 输出 task-dir 重定向后，同一消费者入口三类产物均不存在。空 scratch 的 `make test` 通过且原 C 树 28 个 ignored data 文件前后 manifest/hash 完全一致。
+- **关键决策与已否决方案**：scratch checkout 预态确认 config/data/logs/.venv 全缺失、源文件 inode 独立；只在这个沙盒允许 Makefile 合成配置/data，不碰原 C 树旧数据或生产设置。
+- **下一步唯一动作**：将本进度条目与 Fix1 实现提交推送至 PR #206，保持 draft，由 lead 组织 H0..H1 独审与 Hosted CI。
+
 ## 2026-10-09 · H0 红验与最小生产修正
 
 - **当前阶段**：implementing；H0 并发探针已在独立空 scratch 中以 `AssertionError` 红，生产修正已落盘，待 push 后做 H1 scratch 验证。
