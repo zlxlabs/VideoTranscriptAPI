@@ -215,6 +215,15 @@ async def receive_upload(
     metadata_header: str | None = Header(None, alias="X-Upload-Metadata"),
     user_info: dict = Depends(verify_token),
 ):
+    """Receive one durable upload and publish its already-committed receipt.
+
+    SQL acceptance and queue publication are the受理 boundary. Notification is
+    deliberately outside that transaction: an unexpected router/formatting/send
+    exception remains visible as HTTP 500 after the accepted row and queue item
+    exist, while an explicit channel ``False`` keeps the normal HTTP 202 and
+    emits the existing grepable failure log. There is no rollback or replay
+    path tied to notification delivery.
+    """
     # No body parameter: FastAPI resolves auth and these bounded headers before streaming.
     config = get_config()
     limits = _upload_limits(config)
@@ -272,8 +281,10 @@ async def receive_upload(
             raise _reject(503, failure_code, "转录队列已满")
         inflight_acquired = True
         declared_bytes = metadata["byte_size"]
-        # Keep one source-sized processing footprint reserved until the existing worker finishes.
-        reservation_bytes = declared_bytes * 2
+        # Reserve only the durable source before receiving it. ASR output and
+        # atomic-writer peaks are admitted at their real write boundary by the
+        # worker; a fixed multiple would reject valid small-output jobs.
+        reservation_bytes = declared_bytes
         budget_bytes = int(limits["upload_temp_budget_mib"] * _MIB)
         if not runtime.reserve_upload_temp(
             task_id, reservation_bytes, budget_bytes, str(temp_manager.base_dir)
@@ -313,6 +324,13 @@ async def receive_upload(
             media_file.flush()
             os.fsync(media_file.fileno())
 
+        if not runtime.reserve_upload_temp(
+            task_id, observed_bytes, budget_bytes, str(temp_manager.base_dir)
+        ):
+            failure_code = "upload_temp_budget"
+            cache_manager.set_local_upload_error(upload_id, failure_code)
+            raise _reject(507, failure_code, "上传临时存储预算或可用磁盘空间不足")
+
         if task_queue.full():
             failure_code = "queue_full"
             cache_manager.set_local_upload_error(upload_id, failure_code)
@@ -351,28 +369,22 @@ async def receive_upload(
             )
             if user_info.get(field)
         }
-        try:
-            notification_result = get_notification_router().send_view_link(
-                title=notification_fields["title"],
-                view_token=accepted_record["view_token"],
-                original_url=(
-                    notification_fields["source_url"]
-                    or notification_fields["source_label"]
-                ),
-                task_id=task_id,
-                webhooks=notification_webhooks,
+        notification_result = get_notification_router().send_view_link(
+            title=notification_fields["title"],
+            view_token=accepted_record["view_token"],
+            original_url=notification_fields["source_url"],
+            source_label=notification_fields["source_label"],
+            task_id=task_id,
+            webhooks=notification_webhooks,
+        )
+        if not isinstance(notification_result, dict) or not any(
+            result is True for result in notification_result.values()
+        ):
+            logger.error(
+                "UPLOAD_ACCEPTED_NOTIFICATION_FAILED task_id={} result={}",
+                task_id,
+                notification_result,
             )
-        except Exception:
-            logger.exception("UPLOAD_ACCEPTED_NOTIFICATION_FAILED task_id={}", task_id)
-        else:
-            if not isinstance(notification_result, dict) or not any(
-                result is True for result in notification_result.values()
-            ):
-                logger.error(
-                    "UPLOAD_ACCEPTED_NOTIFICATION_FAILED task_id={} result={}",
-                    task_id,
-                    notification_result,
-                )
         return JSONResponse(_receipt(accepted_record), status_code=202)
     except asyncio.QueueFull as exc:
         failure_code = "queue_full"

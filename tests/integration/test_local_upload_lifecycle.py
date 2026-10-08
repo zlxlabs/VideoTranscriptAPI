@@ -247,6 +247,7 @@ def test_http_upload_acceptance_notifies_independent_public_capability(lifecycle
         "title": "Owner selected title",
         "view_token": receipt["view_token"],
         "original_url": "https://source.example.test/watch?id=9",
+        "source_label": "本地上传",
         "task_id": receipt["task_id"],
         "webhooks": {},
     }
@@ -335,7 +336,7 @@ def test_upload_notification_exception_keeps_acceptance_and_receipt(
     accepted = cache.get_local_upload_by_owner_key("alice", key)
     assert accepted["state"] == "accepted"
     assert accepted["root_task_id"]
-    assert response.json()["detail"] == "Internal Server Error"
+    assert response.text == "Internal Server Error"
     assert duplicate.status_code == 200
     assert duplicate.json()["task_id"] == accepted["root_task_id"]
     assert task_queue.qsize() == 1

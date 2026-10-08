@@ -467,6 +467,11 @@ async def get_history(
     conditions: list = []
     params: list = []
 
+    if source == "url":
+        # URL history keeps the legacy query semantics but must not count local
+        # upload roots; filter in SQL before COUNT/LIMIT/OFFSET.
+        conditions.append("(platform IS NULL OR platform != 'local_upload')")
+
     if webhook:
         conditions.append("wechat_webhook = ?")
         params.append(webhook)

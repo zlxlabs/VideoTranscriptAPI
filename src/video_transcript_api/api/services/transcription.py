@@ -5,7 +5,7 @@ import os
 import threading
 from pathlib import Path
 import time
-from typing import Optional, Dict, Any
+from typing import Callable, Optional, Dict, Any
 
 from fastapi import HTTPException, Header, Request
 from pydantic import BaseModel, Field, StrictBool, field_validator
@@ -184,6 +184,51 @@ def _ensure_audio_track(local_file: str) -> Optional[float]:
         f"audio_streams={len(audio_streams)} streams={len(streams)}"
     )
     return media_duration
+
+
+def _local_upload_write_admission(
+    task_id: str,
+) -> Callable[[Path, int], bool]:
+    """Reserve the real local-upload atomic-write peak before creating a tmp file.
+
+    The upload route reserves the source bytes first. CapsWriter calls this
+    single optional callback for every text or compatibility JSON product;
+    the callback measures the task directory, adds the UTF-8 tmp copy, and
+    updates the same RuntimeContext reservation. This keeps source bytes,
+    already-written products, and replacement peaks in one source of truth.
+    """
+    runtime = get_runtime()
+    temp_manager = get_temp_manager()
+    task_dir = temp_manager.get_task_dir(task_id)
+    if task_dir is None:
+        raise RuntimeError(f"local upload task directory missing: {task_id}")
+    resolved_task_dir = task_dir.resolve()
+    limits = get_config().get("storage", {}).get("upload_limits", {})
+    budget_bytes = int(float(limits["upload_temp_budget_mib"]) * 1024 * 1024)
+    base_dir = str(temp_manager.base_dir)
+
+    def admit(target: Path, content_bytes: int) -> bool:
+        if not target.resolve().is_relative_to(resolved_task_dir):
+            raise ValueError(f"local upload writer escaped task directory: {target}")
+        current_bytes = sum(
+            path.stat().st_size
+            for path in resolved_task_dir.rglob("*")
+            if path.is_file()
+        )
+        peak_bytes = current_bytes + content_bytes
+        accepted = runtime.reserve_upload_temp(
+            task_id, peak_bytes, budget_bytes, base_dir
+        )
+        if not accepted:
+            logger.error(
+                "UPLOAD_TEMP_BUDGET_REJECTED task_id={} peak_bytes={} budget_bytes={}",
+                task_id,
+                peak_bytes,
+                budget_bytes,
+            )
+        return accepted
+
+    return admit
 
 
 def _rebuild_text_from_segments(segments) -> str:
@@ -2493,6 +2538,9 @@ def process_transcription(
                                         )
                                     transcriber.output_dir = str(local_task_dir)
                                     transcriber.capswriter_client.output_dir = str(local_task_dir)
+                                    transcriber.capswriter_client.write_admission = (
+                                        _local_upload_write_admission(task_id)
+                                    )
                                 # 使用时间戳作为临时输出基础名
                                 temp_output_base = datetime.datetime.now().strftime(
                                     "%y%m%d-%H%M%S"

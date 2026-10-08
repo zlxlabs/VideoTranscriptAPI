@@ -154,7 +154,7 @@ class Transcriber:
                         # 读取转录文本
                         try:
                             with open(file_path_str, "r", encoding="utf-8") as f:
-                                result["transcript"] = f.read().strip()
+                                result["transcript"] = f.read()
                             logger.info(f"已从文本文件提取转录文本")
                         except Exception as e:
                             logger.warning(f"读取转录文本失败: {str(e)}")

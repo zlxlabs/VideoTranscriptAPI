@@ -230,9 +230,14 @@ class NotificationRouter:
         webhooks: Dict[str, str] = None,
         original_url: str = None,
         task_id: str = None,
+        source_label: str = None,
     ) -> Dict[str, bool]:
         """Send the task-accepted message with the shared task heading."""
-        from .channel import _clean_url, build_task_notification_heading
+        from .channel import (
+            _apply_risk_control_safe,
+            _clean_url,
+            build_task_notification_heading,
+        )
         from ..rendering import get_base_url
 
         base_url = get_base_url()
@@ -241,7 +246,16 @@ class NotificationRouter:
             task_id, title, original_url or "", icon="📥",
         )
 
-        if original_url:
+        if source_label:
+            safe_label = _apply_risk_control_safe(source_label, text_type="general")
+            source_lines = [f"来源：{safe_label}"]
+            if original_url:
+                source_lines.append(f"原始地址：{_clean_url(original_url)}")
+            message = (
+                f"{heading}\n\n" + "\n".join(source_lines)
+                + f"\n\n🔗 点击查看转录进度和结果：\n{view_url}"
+            )
+        elif original_url:
             message = (
                 f"{heading}\n\n{_clean_url(original_url)}"
                 f"\n\n🔗 点击查看转录进度和结果：\n{view_url}"

@@ -16,7 +16,7 @@ import re
 import argparse
 import itertools
 from pathlib import Path
-from typing import Tuple, List, Optional, Dict, Any
+from typing import Callable, Tuple, List, Optional, Dict, Any
 
 from capswriter_asr import AsrError, transcribe_file_sync
 from loguru import logger
@@ -691,7 +691,12 @@ def _create_segments_from_capswriter(
 _TMP_WRITE_COUNTER = itertools.count()
 
 
-def _atomic_write_text(target: Path, content: str) -> None:
+def _atomic_write_text(
+    target: Path,
+    content: str,
+    *,
+    write_admission: Optional[Callable[[Path, int], bool]] = None,
+) -> None:
     """先写 ``<target>.tmp-<pid>-<n>`` 再 rename 就位。
 
     ``output_dir`` 是共享工作区（``get_workspace_dir()``），直接
@@ -699,9 +704,14 @@ def _atomic_write_text(target: Path, content: str) -> None:
     损坏。临时名带 pid 与进程内序号，避免共享目录下同名目标互相覆盖。
 
     失败时只删自己的临时文件，绝不删已经就位的目标：那个目标很可能正是上一次
-    成功的结果。
+    成功的结果。``write_admission`` 若存在，会在创建临时文件前收到目标路径和
+    UTF-8 编码后的临时副本字节数；调用方据此把当前目标（若存在）与新副本的
+    峰值一并纳入同一份资源预留。返回 False 时不创建文件并直接失败。
     """
     target = Path(target)
+    content_bytes = len(content.encode("utf-8"))
+    if write_admission is not None and not write_admission(target, content_bytes):
+        raise RuntimeError(f"write admission rejected for {target}")
     tmp_path = target.with_name(
         f"{target.name}.tmp-{os.getpid()}-{next(_TMP_WRITE_COUNTER)}"
     )
@@ -719,6 +729,8 @@ def _atomic_write_text(target: Path, content: str) -> None:
 class CapsWriterClient:
     """CapsWriter客户端类"""
 
+    write_admission: Optional[Callable[[Path, int], bool]] = None
+
     def __init__(
         self,
         server_addr: str = None,
@@ -726,6 +738,7 @@ class CapsWriterClient:
         output_dir: str = None,
         max_retries: int = None,
         retry_delay: int = None,
+        write_admission: Optional[Callable[[Path, int], bool]] = None,
     ):
         """
         初始化客户端
@@ -758,6 +771,7 @@ class CapsWriterClient:
         self.retry_delay = retry_delay or project_config.get("capswriter", {}).get(
             "retry_delay", 5
         )
+        self.write_admission = write_admission
         # 最近一次失败尝试的原因细节（``code=..., 原因: ...``），由 transcribe_file
         # 在返回 False 时写入、每次调用开头清空。转录层读它拼进 RuntimeError 消息，
         # 让失败原因经既有异常通路进通知（不另开错误传递通道）。
@@ -901,7 +915,11 @@ class CapsWriterClient:
 
         # 全部构建成功，才开始落盘
         for path, content in products:
-            _atomic_write_text(path, content)
+            _atomic_write_text(
+                path,
+                content,
+                write_admission=self.write_admission,
+            )
             self.log(f"已生成: {path}")
 
         preview = text_accu[:100] + "..." if len(text_accu) > 100 else text_accu
