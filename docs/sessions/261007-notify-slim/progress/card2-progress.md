@@ -14,3 +14,11 @@
 - **关键决策与已否决方案**:`perf_tracker` 键作流水线判据——routes/tasks.py 不在本卡 Scope-Globs 内,无法给 resummarize 加显式标志,而该键天然只有转录交接 payload 携带;否决了"在 LLM 阶段重查任务行判断来源"——多一次 DB 查询且语义不比 payload 键更可靠。
 - **下一步唯一动作**:终态取消接线 + 正常速度任务零 ⏳ 的预算用例。
 
+## 里程碑 3:终态取消接线 + 通知预算用例
+
+- **当前阶段**:implementing(提交 3/3 完成,功能闭环)
+- **本段结论**:终态唯一入口 `finalize_terminal_status_and_notify` 在 CAS 赢后调用 `slow_alert.cancel_all`,与到点回调同锁互斥,终态后绝无 ⏳。`test_notification_budget.py` 新增 `test_normal_speed_task_sends_no_slow_alert`,走真实下载+转录+LLM 成功终态流水线断言零条 ⏳、恰好一条 ✅。`tests/README.md` 登记新测试文件与预算约束。budget + slow_alert 合跑 23 例全绿。
+- **关键决策与已否决方案**:取消点放在 CAS 赢分支(而非函数入口)——只有真正写入终态才取消,非终态写入(CALIBRATING 等经 update_task_status 的路径)不受影响;终态黏性下的 CAS 输家分支无需取消,赢家路径已覆盖。
+- **下一步唯一动作**:红验(用例 3 去共用标记、用例 5 去终态取消),然后收尾全量验证。
+
+

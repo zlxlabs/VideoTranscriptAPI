@@ -40,7 +40,7 @@ import threading
 from typing import Any, Dict, Optional
 
 from ..context import get_cache_manager, get_logger, lazy_resource
-from ...utils.notifications import get_notification_router
+from ...utils.notifications import get_notification_router, slow_alert
 from ...utils.task_status import TaskStatus
 
 logger = lazy_resource(get_logger)
@@ -105,6 +105,11 @@ def finalize_terminal_status_and_notify(
         return False
 
     logger.info(f"terminal CAS won: {task_id} -> {status}")
+
+    # 偏慢提醒（261007-notify-slim 卡 2）：这里是终态唯一入口，任务进入
+    # 成功/失败终态即取消全部偏慢计时。cancel_all 与计时器到点回调在同一
+    # 把锁下互斥，保证终态之后绝不再发出 ⏳。
+    slow_alert.cancel_all(task_id)
 
     if suppress_terminal_notification:
         logger.debug(
