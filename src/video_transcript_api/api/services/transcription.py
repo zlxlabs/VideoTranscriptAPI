@@ -1,7 +1,9 @@
 import asyncio
 import datetime
+import json
 import os
 import threading
+from pathlib import Path
 import time
 from typing import Optional, Dict, Any
 
@@ -576,6 +578,45 @@ async def process_task_queue():
             processing_options = normalize_processing_options(task.get("processing_options"))
 
             try:
+                local_upload = None
+                local_media_path = None
+                local_media_id = None
+                if task.get("platform") == "local_upload":
+                    local_upload = cache_manager.get_admitted_local_upload_by_task(task_id)
+                    temp_manager = get_temp_manager()
+                    task_dir = temp_manager.base_dir / f"task_{task_id}"
+                    candidate = Path(local_upload["media_path"]) if local_upload else None
+                    resolved_task_dir = task_dir.resolve()
+                    valid_mapping = bool(
+                        local_upload
+                        and candidate
+                        and candidate.name == "upload-source.bin"
+                        and candidate.is_file()
+                        and candidate.resolve(strict=True).is_relative_to(resolved_task_dir)
+                    )
+                    if not valid_mapping:
+                        logger.error(
+                            "local upload stale admission rejected before ASR: task_id={}", task_id
+                        )
+                        cache_manager.update_task_status(
+                            task_id,
+                            TaskStatus.FAILED,
+                            platform="local_upload",
+                            error_message="Local upload durable admission or media mapping is missing",
+                            suppress_terminal_notification=True,
+                        )
+                        get_runtime().inflight_registry.release("transcription", task_id)
+                        get_runtime().release_upload_temp(task_id)
+                        temp_manager.clean_up_task(task_id)
+                        if task_dir.exists():
+                            raise OSError(f"failed to remove stale upload media directory: {task_dir}")
+                        continue
+                    local_media_path = str(candidate.resolve(strict=True))
+                    local_media_id = local_upload["media_id"]
+                    metadata = json.loads(local_upload["request_metadata"])
+                    metadata_override = {"title": metadata.get("title") or local_upload["filename"]}
+                    url = local_upload["source_url"] or ""
+
                 cache_manager.update_task_status(task_id, TaskStatus.PROCESSING, download_url=download_url)
 
                 runtime = get_runtime()
@@ -592,6 +633,8 @@ async def process_task_queue():
                     notification_channel=notification_channel,
                     notification_webhooks=dict(notification_webhooks),
                     processing_options=dict(processing_options),
+                    local_media_path=local_media_path,
+                    local_media_id=local_media_id,
                 ):
                     try:
                         process_transcription(
@@ -606,6 +649,8 @@ async def process_task_queue():
                             processing_options=processing_options,
                             preparsed_url=preparsed_url,
                             url_parse_attempted=url_parse_attempted,
+                            local_media_path=local_media_path,
+                            local_media_id=local_media_id,
                         )
                         logger.info(f"任务完成: {task_id}")
                     except Exception as exc:
@@ -653,8 +698,15 @@ async def process_task_queue():
                 # 引入新的失败面。
                 try:
                     get_runtime().inflight_registry.release("transcription", task_id)
+                    get_runtime().release_upload_temp(task_id)
                 except Exception:
                     logger.exception(f"释放在途任务登记表名额失败: {task_id}")
+                if task.get("platform") == "local_upload":
+                    temp_manager = get_temp_manager()
+                    task_dir = temp_manager.base_dir / f"task_{task_id}"
+                    temp_manager.clean_up_task(task_id)
+                    if task_dir.exists():
+                        raise OSError(f"failed to remove unsubmitted upload media directory: {task_dir}")
                 # G1 修复（CI review 第 2 轮 major）：此前这里认为
                 # "update_task_status 自身的异常也不能向上传播"——重新核实后
                 # 发现这个理由不成立：下面的 task_queue.task_done() 是外层
@@ -927,7 +979,7 @@ def process_transcription(
     task_id, url, use_speaker_recognition=False, wechat_webhook=None,
     download_url=None, metadata_override=None, notification_channel=None,
     notification_webhooks=None, processing_options=None, preparsed_url=None,
-    url_parse_attempted=False,
+    url_parse_attempted=False, local_media_path=None, local_media_id=None,
 ):
     """
     处理视频转录
@@ -1112,7 +1164,12 @@ def process_transcription(
         logger.info(f"[URL解析] 开始解析 URL: {check_url[:100]}")
 
         with tracker.track("url_parse"):
-            if preparsed_url is not None:
+            if local_media_path is not None:
+                platform = "local_upload"
+                video_id = local_media_id
+                parse_url = url
+                logger.info("[local-upload] using durable server-owned media id={}", video_id)
+            elif preparsed_url is not None:
                 platform = preparsed_url.platform
                 video_id = preparsed_url.video_id
                 parse_url = preparsed_url.normalized_url or url
@@ -1155,7 +1212,7 @@ def process_transcription(
         is_generic_downloader = platform == 'generic'
 
         with tracker.track("cache_check"):
-            if video_id and platform and not is_generic_downloader:
+            if video_id and platform and not is_generic_downloader and platform != "local_upload":
                 logger.info(
                     f"[缓存检测] 检查缓存: platform={platform}, video_id={video_id}, "
                     f"use_speaker_recognition={use_speaker_recognition}"
@@ -1690,7 +1747,7 @@ def process_transcription(
             from urllib.parse import urlparse
             url_scheme = urlparse(url).scheme.lower()
 
-            if url_scheme not in ("http", "https"):
+            if local_media_path is not None or url_scheme not in ("http", "https"):
                 logger.info(
                     f"[元数据获取] URL scheme 非 http/https（{url_scheme or '空'}），"
                     f"跳过元数据探测，直接使用 metadata_override 兜底: {parse_url}"
@@ -1769,7 +1826,9 @@ def process_transcription(
             # 下载器准备
             from ...downloaders.generic import GenericDownloader
             download_downloader = None
-            if has_separate_download_url:
+            if local_media_path is not None:
+                download_downloader = None
+            elif has_separate_download_url:
                 download_downloader = GenericDownloader()
             elif metadata_downloader:
                 download_downloader = metadata_downloader
@@ -2097,7 +2156,9 @@ def process_transcription(
             # ========== 原有逻辑（非 YouTube API Server 路径）==========
             # 已在前面完成元数据解析与下载器准备
             original_downloader = None
-            if not download_url:
+            if local_media_path is not None:
+                original_downloader = None
+            elif not download_url:
                 original_downloader = metadata_downloader or create_downloader(url)
             else:
                 logger.info("已提供 download_url，使用解析的元数据，跳过传统下载器的 get_video_info")
@@ -2242,7 +2303,10 @@ def process_transcription(
                 # 下载文件
                 local_file = None
                 actual_downloader = None
-                if has_separate_download_url:
+                if local_media_path is not None:
+                    local_file = local_media_path
+                    logger.info("[local-upload] ASR input is the owned upload file")
+                elif has_separate_download_url:
                     actual_downloader = download_downloader
                     actual_download_url = download_url or url
                     logger.info(f"使用 GenericDownloader 下载文件: {actual_download_url}")
@@ -2325,6 +2389,22 @@ def process_transcription(
                     return _fail_task_and_notify(
                         str(admission_exc), title=video_title, author_name=author,
                     )
+                if local_media_path is not None:
+                    max_hours = get_config().get("storage", {}).get("upload_limits", {}).get(
+                        "max_media_hours"
+                    )
+                    if probed_media_duration is None:
+                        return _fail_task_and_notify(
+                            "上传媒体时长未知，拒绝进入转录（media_duration_unknown）",
+                            title=video_title,
+                            author_name=author,
+                        )
+                    if max_hours is None or probed_media_duration > max_hours * 3600:
+                        return _fail_task_and_notify(
+                            "上传媒体超过允许时长，拒绝进入转录（media_duration_limit）",
+                            title=video_title,
+                            author_name=author,
+                        )
 
                 # 时长载体（issue #155）：优先取本次准入探测解析出的容器时长。
                 # generic / recorder:// 走自实现的 download_file，从不调用

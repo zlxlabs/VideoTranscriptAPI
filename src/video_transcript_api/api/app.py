@@ -29,7 +29,7 @@ from .context import (
     run_with_runtime,
     unbind_runtime,
 )
-from .routes import audit, health, tasks, users, views
+from .routes import audit, health, tasks, uploads, users, views
 from .services.transcription import process_llm_queue, process_task_queue
 from .services.terminal_status import run_terminal_notification_dispatcher
 
@@ -160,6 +160,15 @@ async def _periodic_maintenance(config: dict) -> None:
             # 出现在里面，不会被波及（见 CacheManager.recover_orphaned_tasks
             # 的详细说明）。
             runtime = get_runtime()
+            retired_upload_intents = await runtime.run_maintenance(
+                get_cache_manager().cleanup_expired_local_upload_receiving,
+                storage.get("temp_dir", ""),
+                now=now,
+            )
+            if retired_upload_intents:
+                logger.info(
+                    f"定期清理：退休 {retired_upload_intents} 条过期上传接收记录"
+                )
             if getattr(runtime, "recovery_pending", False):
                 restrict_to_task_ids = getattr(runtime, "startup_recovery_task_ids", None)
                 recovered = await runtime.run_maintenance(
@@ -363,6 +372,7 @@ def create_app(
 
     app.include_router(health.router)
     app.include_router(tasks.router)
+    app.include_router(uploads.router)
     app.include_router(audit.router)
     app.include_router(users.router)
     app.include_router(views.router)
@@ -376,6 +386,12 @@ def create_app(
         old_files_count = temp_manager.clean_up_old_files()
         if old_files_count > 0:
             logger.info(f"启动时清理了 {old_files_count} 个旧临时文件")
+        retired_upload_intents = await app.state.runtime.run_maintenance(
+            get_cache_manager().cleanup_expired_local_upload_receiving,
+            temp_manager.base_dir,
+        )
+        if retired_upload_intents:
+            logger.info(f"启动时退休了 {retired_upload_intents} 条过期上传接收记录")
 
         init_all_notifiers()
 
