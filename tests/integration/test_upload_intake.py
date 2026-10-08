@@ -25,6 +25,7 @@ from video_transcript_api.api.context import (
     unbind_runtime,
     validate_config,
 )
+from video_transcript_api.api.processing_options import normalize_processing_options
 from video_transcript_api.api.routes import uploads
 from video_transcript_api.api.services import transcription
 from video_transcript_api.cache.cache_manager import CacheManager
@@ -130,6 +131,7 @@ def upload_client(tmp_path, monkeypatch):
         result = {
             "task_id": args[0], "url": args[1],
             "local_media_id": kwargs["local_media_id"],
+            "processing_options": kwargs["processing_options"],
             "bytes": Path(path).read_bytes(), "path": path,
         }
         with worker_lock:
@@ -254,6 +256,9 @@ def test_real_http_stream_sqlite_dispatch_idempotency_and_owner_stop(upload_clie
     dispatched = worker_results.get(timeout=2)
     assert dispatched["task_id"] == receipt["task_id"]
     assert dispatched["local_media_id"] == stored["media_id"]
+    assert dispatched["processing_options"] == normalize_processing_options(
+        PRODUCER_METADATA["processing_options"]
+    )
     assert dispatched["bytes"] == RAW_PRODUCER_BYTES
     assert "upload-source.bin" in dispatched["path"]
     _wait_for_worker_release(runtime)
@@ -304,6 +309,81 @@ def test_real_http_stream_sqlite_dispatch_idempotency_and_owner_stop(upload_clie
         f"/api/uploads/{independent_receipt['upload_id']}/share",
         headers={"Authorization": f"Bearer {OTHER_TOKEN}"},
     ).status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("processing_options", "expected_options"),
+    [
+        pytest.param(
+            {
+                "calibrate": False,
+                "summarize": False,
+                "infer_speaker_names": False,
+                "chapters": False,
+            },
+            {
+                "calibrate": False,
+                "summarize": False,
+                "infer_speaker_names": False,
+                "chapters": False,
+            },
+            id="all-disabled",
+        ),
+        pytest.param(
+            {
+                "calibrate": False,
+                "summarize": True,
+                "infer_speaker_names": True,
+                "chapters": False,
+            },
+            {
+                "calibrate": False,
+                "summarize": True,
+                "infer_speaker_names": True,
+                "chapters": False,
+            },
+            id="mixed",
+        ),
+        pytest.param({}, normalize_processing_options(None), id="default"),
+    ],
+)
+def test_processing_options_cross_real_upload_boundaries(
+    upload_client, monkeypatch, processing_options, expected_options
+):
+    client, runtime, body_reads, _worker_calls, worker_results = upload_client
+    monkeypatch.setenv("VTA_UPLOADS_ENABLED", "true")
+    queue_payloads = []
+    original_put = runtime.task_queue.put_nowait
+
+    def capture_queue_payload(item):
+        queue_payloads.append(dict(item))
+        original_put(item)
+
+    monkeypatch.setattr(runtime.task_queue, "put_nowait", capture_queue_payload)
+    key = _key()
+    payload = {**PRODUCER_METADATA, "processing_options": processing_options}
+
+    response = _post(client, key, payload, RAW_PRODUCER_BYTES, "options-boundary")
+
+    assert response.status_code == 202
+    assert body_reads["options-boundary"] > 0
+    receipt = response.json()
+    stored = runtime.cache_manager.get_local_upload_by_owner_key("alice", key)
+    root = runtime.cache_manager.get_task_by_id(receipt["task_id"])
+    dispatched = worker_results.get(timeout=2)
+    _wait_for_worker_release(runtime)
+
+    assert json.loads(stored["request_metadata"])["processing_options"] == expected_options
+    assert root["processing_options"] == expected_options
+    assert queue_payloads == [
+        {
+            "id": receipt["task_id"],
+            "url": payload["source_url"],
+            "platform": "local_upload",
+            "processing_options": expected_options,
+        }
+    ]
+    assert dispatched["processing_options"] == expected_options
 
 
 @pytest.mark.parametrize(
@@ -494,6 +574,9 @@ def test_http_queue_handoff_precedes_durable_acceptance_commit(upload_client, mo
             "id": response.json()["task_id"],
             "url": PRODUCER_METADATA["source_url"],
             "platform": "local_upload",
+            "processing_options": normalize_processing_options(
+                PRODUCER_METADATA["processing_options"]
+            ),
         },
     )]
     assert runtime.cache_manager.get_local_upload_by_owner_key("alice", key)["state"] == "accepted"
@@ -571,6 +654,9 @@ def test_sql_commit_failure_leaves_stale_queue_item_for_dispatcher_to_drop(uploa
     payload = queued_payloads[0]
     assert payload["url"] == PRODUCER_METADATA["source_url"]
     assert payload["platform"] == "local_upload"
+    assert payload["processing_options"] == normalize_processing_options(
+        PRODUCER_METADATA["processing_options"]
+    )
     assert queue_observations == [({"state": "receiving", "root_task_id": None}, None)]
     client.portal.call(runtime.task_queue.join)
     assert runtime.task_queue.qsize() == 0

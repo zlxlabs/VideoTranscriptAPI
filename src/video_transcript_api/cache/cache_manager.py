@@ -855,6 +855,7 @@ class CacheManager:
                     "id": task_id,
                     "url": source_url or "",
                     "platform": "local_upload",
+                    "processing_options": json.loads(options_json),
                 })
             return record
 

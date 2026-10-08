@@ -72,3 +72,31 @@ implementing；H1最小顺序修复已提交并push至原PR分支，随后完成
 ### 下一步唯一动作
 
 push本进度证据并写终态报告；PR保持draft交lead做H0..H1增量review和CI，不ready/merge。
+
+## Milestone H2：公开处理选项透传
+
+### 当前阶段
+
+implementing；已完成真实 HTTP→持久 SQLite→runtime queue→dispatcher→捕获 consumer 的参数修正与窄测。
+
+### 本段结论（≤3句）
+
+- producer 现在在同一 SQL 临界生成的 queue payload 中发布已写入 task/request metadata 的规范化 `processing_options`，consumer 收到的值不再回退为全开启。
+- 新增真实全关、混合、缺省三组边界测试，并断言 HTTP body/header、SQLite、queue payload 与 `process_transcription` 参数一致；旧 H1 交接和标准处理选项回归保持通过。
+
+### 公开字段与实际消费映射（机械对照 decoder/normalize keys）
+
+| HTTP metadata | 持久记录 | queue payload | 实际 consumer 字段/用途 |
+|---|---|---|---|
+| `filename` | `local_uploads.filename`、`request_metadata` | 无 | `metadata_override.title` 缺省回退与展示 |
+| `byte_size` | `local_uploads.byte_size` | 无 | 接收大小/哈希与临时预算验收 |
+| `title/source_url/retention` | task title/url、upload source/retention、request metadata | `url`=source_url | consumer 的 `url`/title；retention 供回执分享期限 |
+| `processing_options.{calibrate,summarize,infer_speaker_names,chapters,contradiction_scan}` | task `processing_options`、request metadata | `processing_options` | dispatcher normalize 后传 `process_transcription`，控制对应处理层 |
+
+### 复审接受不修
+
+- P2 setup 故障已真实返回 HTTP 500 并释放资源；P3 SQLite commit 故障仍保留 `receive_incomplete` 诊断名；两项均非本卡阻断，不改接收接口或添加防御 catch。
+
+### 下一步唯一动作
+
+提交并推送 H2 小修；保持 draft，交 lead 做 H1→H2 增量复审与正式 CI，不 ready/merge。
