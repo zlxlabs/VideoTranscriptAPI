@@ -10,6 +10,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from video_transcript_api.api.services import terminal_status
+from video_transcript_api.api.services.terminal_status import (
+    finalize_terminal_status_and_notify,
+)
 from video_transcript_api.utils.notifications import slow_alert
 from video_transcript_api.utils.notifications.router import NotificationRouter
 
@@ -102,6 +106,77 @@ def test_llm_queue_wait_is_not_counted(channels, monkeypatch):
     slow_alert.cancel_all("task_aabbcc112233")
     time.sleep(0.3)
     assert len(wecom.sent) == 0
+
+
+def test_terminal_cas_loss_cancels_slow_alert(channels, monkeypatch):
+    wecom, feishu = channels
+    task_id = "task_cas_lossabcdef"
+    monkeypatch.setattr(slow_alert, "SLOW_TRANSCRIPTION_UNKNOWN_DURATION_SECONDS", 0.1)
+    slow_alert.track_transcription(task_id, url="https://example.test/video")
+    cache_manager = SimpleNamespace(
+        update_task_status=lambda *_a, **_kw: False,
+        get_task_by_id=lambda _task_id: {"status": "failed"},
+    )
+    assert not finalize_terminal_status_and_notify(task_id, "success", cache_manager=cache_manager)
+    assert task_id not in slow_alert._TASKS
+    time.sleep(0.2)
+    assert wecom.sent == feishu.sent == []
+
+
+def test_terminal_cancels_timing_before_status_write(channels, monkeypatch):
+    task_id = "task_cancel_before_writeabcdef"
+    slow_alert.track_transcription(task_id, url="https://example.test/video")
+    cache_manager = SimpleNamespace(update_task_status=lambda *_a, **_kw: task_id not in slow_alert._TASKS)
+    assert finalize_terminal_status_and_notify(
+        task_id, "success", cache_manager=cache_manager, defer_delivery=True,
+    )
+
+
+def test_slow_alert_enqueue_precedes_concurrent_terminal_enqueue(channels, monkeypatch):
+    task_id = "task_enqueue_orderabcdef"
+    slow_alert.track_transcription(task_id, url="https://example.test/video")
+    timing = slow_alert._TASKS[task_id]
+    slow_started, release_slow, update_called, finalize_started = [threading.Event() for _ in range(4)]
+    records = []
+
+    def send_slow(*_args):
+        slow_started.set()
+        assert release_slow.wait(timeout=2.0)
+        records.append("slow")
+
+    def update_status(*_args, **_kwargs):
+        update_called.set()
+        return True
+
+    def finalize():
+        finalize_started.set()
+        finalize_terminal_status_and_notify(task_id, "success", cache_manager=cache_manager)
+
+    monkeypatch.setattr(slow_alert, "_send_alert", send_slow)
+    monkeypatch.setattr(terminal_status, "deliver_terminal_notification",
+                        lambda *_a, **_kw: records.append("terminal"))
+    cache_manager = SimpleNamespace(
+        update_task_status=update_status,
+        get_task_by_id=lambda _task_id: {"status": "success"},
+    )
+    deadline_thread = threading.Thread(
+        target=slow_alert._on_deadline,
+        args=(task_id, "transcription", timing.transcription_start, 0.0, timing.generation),
+        daemon=True,
+    )
+    finalize_thread = threading.Thread(target=finalize, daemon=True)
+    deadline_thread.start()
+    assert slow_started.wait(timeout=2.0)
+    finalize_thread.start()
+    try:
+        assert finalize_started.wait(timeout=2.0)
+        assert not update_called.wait(timeout=0.2)
+    finally:
+        release_slow.set()
+        deadline_thread.join(timeout=2.0)
+        finalize_thread.join(timeout=2.0)
+    assert not deadline_thread.is_alive() and not finalize_thread.is_alive()
+    assert update_called.is_set() and records == ["slow", "terminal"]
 
 
 def test_terminal_before_deadline_no_alert_and_timing_released(channels, monkeypatch):

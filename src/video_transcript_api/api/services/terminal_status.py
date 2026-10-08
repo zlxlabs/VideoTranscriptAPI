@@ -83,6 +83,10 @@ def finalize_terminal_status_and_notify(
     Pass defer_delivery=True to persist the outbox row without inline delivery;
     the caller must deliver it after any content notification.
     """
+    # 先取消计时再写终态，且不论 CAS 成败都执行。到点回调持有同一把锁
+    # 完成 ⏳ 入队，因此若回调先拿锁，⏳ 必先于终态写入及终态通知入队。
+    slow_alert.cancel_all(task_id)
+
     if cache_manager is None:
         cache_manager = get_cache_manager()
 
@@ -105,11 +109,6 @@ def finalize_terminal_status_and_notify(
         return False
 
     logger.info(f"terminal CAS won: {task_id} -> {status}")
-
-    # 偏慢提醒（261007-notify-slim 卡 2）：这里是终态唯一入口，任务进入
-    # 成功/失败终态即取消全部偏慢计时。cancel_all 与计时器到点回调在同一
-    # 把锁下互斥，保证终态之后绝不再发出 ⏳。
-    slow_alert.cancel_all(task_id)
 
     if suppress_terminal_notification:
         logger.debug(

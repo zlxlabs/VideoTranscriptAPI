@@ -9,9 +9,9 @@
   - 大模型阶段：LLM worker 开始处理该任务（``track_llm``）到任务终态；
     在 LLM 队列里排队的时间不计入（起点是出队之后）。
 - 两个阶段共用"已提醒"标记，每个任务最多发一条 ⏳。
-- 任务进入终态时由终态唯一入口（``finalize_terminal_status_and_notify``）调用
-  ``cancel_all`` 取消全部计时。到点判定与终态取消在同一把锁（``_LOCK``）下
-  互斥：谁先拿到锁谁赢，终态之后绝不再发送。
+- 任务进入终态时由终态唯一入口（``finalize_terminal_status_and_notify``）在写入前
+  调用 ``cancel_all`` 取消全部计时，不论终态 CAS 抢写成败。到点判定、⏳ 入队与终态取消
+  在同一把锁（``_LOCK``）下互斥：若到点回调先拿锁，⏳ 必先于终态写入及终态通知入队。
 - 计时不持久化，服务重启后不恢复，由现有的恢复扫描兜底。
 
 发送失败只记日志，绝不影响任务主流程；计时线程全部是 daemon，不留常驻线程。
@@ -199,7 +199,7 @@ def cancel_all(task_id: str) -> None:
 
 
 def _on_deadline(task_id, stage, stage_start, threshold, generation):
-    """计时器到点回调：在锁内重新验证资格，赢了才发送（发送在锁外）。"""
+    """计时器到点回调：锁内重新验证资格并完成 ⏳ 入队。"""
     with _LOCK:
         timing = _TASKS.get(task_id)
         if timing is None or timing.alerted or generation != timing.generation:
@@ -211,10 +211,10 @@ def _on_deadline(task_id, stage, stage_start, threshold, generation):
             timing.url, timing.title, timing.channel_name,
             timing.webhooks, timing.view_url,
         )
-    try:
-        _send_alert(*payload)
-    except Exception:
-        logger.exception(f"slow-task alert send failed: {task_id}")
+        try:
+            _send_alert(*payload)
+        except Exception:
+            logger.exception(f"slow-task alert send failed: {task_id}")
 
 
 def _send_alert(
