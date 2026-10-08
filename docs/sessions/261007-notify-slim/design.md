@@ -21,7 +21,7 @@
 | 消息 | 何时发 | 内容 |
 |---|---|---|
 | 📥 已接收 | 提交路由排队成功 | 抬头 + 链接 + 查看页 |
-| ✅ 完成 | 任务成功终态（所有成功路径统一） | 抬头 + 查看链接 + 字数统计 + 校对警告 + 模型 + 总结正文（沿用现有总结消息正文规则，超长时只给链接） |
+| ✅ 完整总结 + ✅ 分享回执 | 任务成功终态（所有成功路径统一；由同一条 outbox 按顺序提交两条） | 先完整完成正文（不在业务层截断），再短回执（统一抬头 + 原始地址 + view URL + 网页分享摘要首段） |
 | ❌ 失败 | 任务失败终态 | 抬头 + 失败状态 + 错误原因 + 查看页 |
 | ⏳ 偏慢 | 超过预估时间，每个任务最多一次（第 2 张卡） | 抬头 + 当前阶段 + 已用时长 / 预估时长 + 查看页 |
 
@@ -30,7 +30,7 @@
 **删除的消息**：开始处理、正在下载视频、下载进度、正在转录音视频、转录完成（进行中）、平台字幕获取成功、YouTube API 字幕获取成功、使用已有缓存（部分命中和全部命中两种）。
 此外，原来分两条发的"总结正文"和"【任务完成】"合并为一条 ✅。
 
-**正常任务的消息数**：每个渠道从 7 条降到 2 条。
+**后续决策更新（261008-completion-share）**：用户明确推翻“总结正文和任务完成合并为一条”。成功终态现在在原有接收通知之后发送完整 AI 总结，再追加一条分享短回执；正常成功每渠道总预算为 3 条，失败总预算为 2 条。失败终态仍一条 ❌，不恢复任何进度推送。详见 `docs/sessions/261008-completion-share/design.md`。
 
 ## 统一抬头
 
@@ -85,22 +85,22 @@
 
 - 查看页和数据库中的进度字段照常更新，只删推送，不删状态写入。
 - 两个渠道都保留，路由逻辑不变。
-- 每个任务的成功或失败终态通知恰好一条，现有的"每个任务一行发件箱记录"机制保持不变。
+- 每个任务仍只有一行终态发件箱记录；失败终态一条，成功终态按同一行有序提交完整总结与分享回执两条逻辑消息（决策更新见 `docs/sessions/261008-completion-share/design.md`）。
 
 ## 通知不变式（N1–N4）
 
 编号从 N 起，避免与 `terminal_status.py` 模块 docstring 里已有的 I1–I6（发件箱行级不变式）撞名。每条写明代码位置与锁定它的测试。
 
-- **N1（每任务恰好一条逻辑终态通知）** 每个任务恰好产生一条逻辑终态通知，发件箱 `task_terminal_notifications` 中只有一行；物理分段（一条消息超长时拆成多条）不是业务层的职责，由 `wecom-notifier` 库负责，库的分段缺口（飞书 interactive 卡片不分段、企业微信超长单行边界）见 #195。
+- **N1（每任务一条 outbox 记录；终态逻辑消息数量见后续决策）** 发件箱 `task_terminal_notifications` 每任务只有一行；失败终态发一条，成功终态由该行按序提交完整总结和分享回执两条（加上已接收，普通成功预算为 3 条），详见 `docs/sessions/261008-completion-share/design.md`。物理分段仍交给 `wecom-notifier`，库的分段缺口（飞书 interactive 卡片不分段、企业微信超长单行边界）见 #195。
   代码：`task_terminal_notifications.task_id` UNIQUE 约束（schema 层）；`src/video_transcript_api/api/services/terminal_status.py`（终态单出口与两个投递入口）。
-  测试：`tests/unit/test_terminal_notification_outbox.py::TestOutboxSchema::test_task_id_unique_constraint`、`::test_outbox_schema_has_no_owner_columns`；恰好一条由同文件 `TestSerialDeliveryIsExclusive`、`TestSuccessNotificationOrder` 锁定。
+  测试：`tests/unit/test_terminal_notification_outbox.py::TestOutboxSchema::test_task_id_unique_constraint`、`::test_outbox_schema_has_no_owner_columns`；单一 outbox 行及两投递入口互斥由同文件相关测试锁定，成功两条消息的顺序由 `tests/unit/test_notification_e2e_delivery.py` 锁定。
 - **N2（✅ 正文来自快照，缺失时可见降级且不重试）** ✅ 消息正文来自 `terminal_snapshot.result`；`result` 缺失、不是 dict 或是空 dict 时，降级为抬头 + 可见提示（`⚠️ 总结未能载入，请在网页查看`）+ 查看链接，并打 `COMPLETION-BODY-MISSING` WARNING。缺失是确定性的，重试也补不回来，所以该行照常标记已发送、不重试；`result` 存在但渲染抛异常仍保持待发重试。
   代码：`terminal_status.py::_render_success_body`。
   测试：`tests/unit/test_terminal_notification_outbox.py::TestSuccessWithoutPersistedResultDegrades`（缺失、空 dict、其他渲染异常三路）。
-- **N3（参数贯通）** `task_id` 和 `completion_body` 从终态入口（`deliver_terminal_notification` 与 `deliver_pending_terminal_notifications`）一路贯通，经 `NotificationRouter.notify_task_status(**kwargs)` 到达企业微信和飞书两个渠道，不丢失、不改名。
+- **N3（参数贯通）** `task_id`、`completion_body` 与成功回执从终态入口（`deliver_terminal_notification` 与 `deliver_pending_terminal_notifications`）一路贯通，经 `NotificationRouter.notify_task_status(**kwargs)` 到达企业微信和飞书两个渠道，不丢失、不改名。
   代码：`terminal_status.py::_emit_status_notification` → `src/video_transcript_api/utils/notifications/router.py::notify_task_status` → `src/video_transcript_api/utils/notifications/channel.py` 两个渠道的 `notify_task_status`。
   测试：`tests/unit/test_notification_e2e_delivery.py`（真实 Router + 真实渠道，仅替身最底层传输，对两个入口断言双渠道收到统一抬头和快照总结）。
-- **N4（业务层不截断、不切分）** 业务层对完成正文不截断、不切分、不预拆卡片：`build_task_status_content` 把 `completion_body` 原样拼接进消息，超长时的物理分段交由 `wecom-notifier` 库。
+- **N4（业务层不截断、不切分）** 业务层对完整完成正文不截断、不切分、不预拆卡片：`build_task_status_content` 把 `completion_body` 原样拼接进消息，超长时的物理分段交由 `wecom-notifier` 库；后续增加的分享回执为独立短消息，规则见 `docs/sessions/261008-completion-share/design.md`。
   代码：`channel.py::build_task_status_content`（拼接处注释即此约定）。
   测试：`tests/unit/test_notification_e2e_delivery.py`（快照里的总结全文出现在两个渠道收到的内容中）；2026-10-08 的 `9f68fe7f`（业务层飞书分卡）已 revert，回退即恢复此不变式。
 
