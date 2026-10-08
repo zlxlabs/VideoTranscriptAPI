@@ -1,5 +1,6 @@
 import os
 import json
+import hashlib
 import sqlite3
 import datetime
 import uuid
@@ -341,6 +342,43 @@ class CacheManager:
                 )
             ''')
 
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS local_uploads (
+                    upload_id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    idempotency_created_at TEXT NOT NULL,
+                    metadata_fingerprint TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('receiving', 'accepted')),
+                    retention TEXT NOT NULL CHECK(retention IN ('30d', 'never')),
+                    root_task_id TEXT UNIQUE,
+                    media_id TEXT UNIQUE,
+                    view_token TEXT UNIQUE,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT,
+                    revoked_at TEXT,
+                    error_code TEXT,
+                    UNIQUE(owner_user_id, idempotency_key),
+                    FOREIGN KEY(root_task_id) REFERENCES task_status(task_id)
+                )
+            ''')
+            cursor.execute(
+                'CREATE INDEX IF NOT EXISTS idx_local_upload_view_token '
+                'ON local_uploads(view_token)'
+            )
+            cursor.execute(
+                'CREATE INDEX IF NOT EXISTS idx_local_upload_expiry '
+                'ON local_uploads(retention, expires_at, revoked_at)'
+            )
+            cursor.execute('''
+                CREATE TRIGGER IF NOT EXISTS local_upload_revocation_write_once
+                BEFORE UPDATE OF revoked_at ON local_uploads
+                WHEN OLD.revoked_at IS NOT NULL AND NEW.revoked_at IS NOT OLD.revoked_at
+                BEGIN
+                    SELECT RAISE(ABORT, 'local upload revocation is write-once');
+                END
+            ''')
+
             # 创建索引以提高查询性能
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_platform_media_id ON video_cache(platform, media_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_url ON video_cache(url)')
@@ -558,6 +596,246 @@ class CacheManager:
 
         logger.info(f"数据库迁移完成，恢复了 {len(existing_data)} 条记录")
             
+    _UPLOAD_IDEMPOTENCY_WINDOW = datetime.timedelta(hours=24)
+    _UPLOAD_KEY_FUTURE_SKEW = datetime.timedelta(minutes=5)
+
+    @staticmethod
+    def _upload_key_timestamp(idempotency_key: str) -> datetime.datetime:
+        """Parse the producer key `<UTC epoch ms>-<UUID>` without accepting aliases."""
+        if not isinstance(idempotency_key, str) or "-" not in idempotency_key:
+            raise ValueError("idempotency key must be <UTC_epoch_ms>-<UUID>")
+        epoch_text, uuid_text = idempotency_key.split("-", 1)
+        if len(epoch_text) != 13 or not epoch_text.isascii() or not epoch_text.isdigit():
+            raise ValueError("idempotency key must be <UTC_epoch_ms>-<UUID>")
+        try:
+            parsed_uuid = uuid.UUID(uuid_text)
+        except ValueError as exc:
+            raise ValueError("idempotency key must be <UTC_epoch_ms>-<UUID>") from exc
+        if str(parsed_uuid) != uuid_text.lower():
+            raise ValueError("idempotency key must use canonical UUID text")
+        return datetime.datetime.fromtimestamp(
+            int(epoch_text) / 1000, tz=datetime.timezone.utc
+        )
+
+    @classmethod
+    def _validate_upload_key_window(
+        cls, idempotency_key: str, now: datetime.datetime
+    ) -> datetime.datetime:
+        created_at = cls._upload_key_timestamp(idempotency_key)
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        now = now.astimezone(datetime.timezone.utc)
+        if created_at > now + cls._UPLOAD_KEY_FUTURE_SKEW:
+            raise ValueError("idempotency key exceeds allowed clock skew")
+        if now - created_at > cls._UPLOAD_IDEMPOTENCY_WINDOW:
+            raise ValueError("idempotency key is outside the 24-hour acceptance window")
+        return created_at
+
+    @staticmethod
+    def _utc_sql_timestamp(value: datetime.datetime) -> str:
+        if value.tzinfo is None:
+            raise ValueError("timestamp must be timezone-aware")
+        return value.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    def register_local_upload(
+        self,
+        *,
+        owner_user_id: str,
+        idempotency_key: str,
+        retention: str,
+        intent_metadata: Optional[Dict[str, Any]] = None,
+        now: Optional[datetime.datetime] = None,
+    ) -> Dict[str, Any]:
+        """Persist one owner's upload intent in cache.db; this does not receive media."""
+        if not isinstance(owner_user_id, str) or not owner_user_id.strip():
+            raise ValueError("owner_user_id must be non-empty")
+        if retention not in {"30d", "never"}:
+            raise ValueError("retention must be '30d' or 'never'")
+        canonical_metadata = json.dumps(
+            {"retention": retention, "metadata": intent_metadata or {}},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        metadata_fingerprint = hashlib.sha256(canonical_metadata.encode("utf-8")).hexdigest()
+        now = now or datetime.datetime.now(datetime.timezone.utc)
+        with self._get_cursor() as cursor:
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute(
+                "SELECT * FROM local_uploads WHERE owner_user_id = ? AND idempotency_key = ?",
+                (owner_user_id, idempotency_key),
+            )
+            existing = cursor.fetchone()
+            if existing is not None:
+                record = dict(existing)
+                if record["metadata_fingerprint"] != metadata_fingerprint:
+                    raise ValueError("idempotency key metadata conflicts with recorded intent")
+                return record
+            created_at = self._validate_upload_key_window(idempotency_key, now)
+            upload_id = f"upload_{uuid.uuid4().hex}"
+            cursor.execute(
+                """INSERT INTO local_uploads
+                   (upload_id, owner_user_id, idempotency_key, idempotency_created_at,
+                    metadata_fingerprint, state, retention, created_at)
+                   VALUES (?, ?, ?, ?, ?, 'receiving', ?, ?)""",
+                (
+                    upload_id,
+                    owner_user_id,
+                    idempotency_key,
+                    self._utc_sql_timestamp(created_at),
+                    metadata_fingerprint,
+                    retention,
+                    self._utc_sql_timestamp(now),
+                ),
+            )
+            cursor.execute("SELECT * FROM local_uploads WHERE upload_id = ?", (upload_id,))
+            return dict(cursor.fetchone())
+
+    def accept_local_upload(
+        self,
+        upload_id: str,
+        *,
+        media_id: str,
+        title: Optional[str] = None,
+        processing_options: Optional[Dict[str, Any]] = None,
+        task_id: Optional[str] = None,
+        now: Optional[datetime.datetime] = None,
+    ) -> Dict[str, Any]:
+        """Create a root task with a blank legacy token and persist its separate share token."""
+        if not media_id:
+            raise ValueError("media_id must be non-empty")
+        now = now or datetime.datetime.now(datetime.timezone.utc)
+        task_id = task_id or self.generate_task_id()
+        view_token = f"upload_{secrets.token_urlsafe(32)}"
+        options_json = json.dumps(processing_options or {}, ensure_ascii=False, sort_keys=True)
+        with self._get_cursor() as cursor:
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute("SELECT * FROM local_uploads WHERE upload_id = ?", (upload_id,))
+            upload = cursor.fetchone()
+            if upload is None:
+                raise ValueError("local upload intent does not exist")
+            if upload["state"] == "accepted":
+                return dict(upload)
+            if upload["revoked_at"] is not None:
+                raise ValueError("revoked local upload cannot be accepted")
+            self._validate_upload_key_window(upload["idempotency_key"], now)
+            cursor.execute(
+                """INSERT INTO task_status
+                   (task_id, view_token, url, platform, media_id, status, title,
+                    processing_options, submitted_by)
+                   VALUES (?, '', '', 'local_upload', ?, 'queued', ?, ?, ?)""",
+                (task_id, media_id, title, options_json, upload["owner_user_id"]),
+            )
+            cursor.execute(
+                """UPDATE local_uploads
+                   SET state = 'accepted', root_task_id = ?, media_id = ?, view_token = ?
+                   WHERE upload_id = ? AND state = 'receiving' AND revoked_at IS NULL""",
+                (task_id, media_id, view_token, upload_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("local upload acceptance lost its receiving state")
+            cursor.execute("SELECT * FROM local_uploads WHERE upload_id = ?", (upload_id,))
+            return dict(cursor.fetchone())
+
+    def get_local_upload_by_id(self, upload_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT * FROM local_uploads WHERE upload_id = ?", (upload_id,))
+            row = cursor.fetchone()
+            return dict(row) if row is not None else None
+
+    def get_local_upload_by_owner_key(
+        self, owner_user_id: str, idempotency_key: str
+    ) -> Optional[Dict[str, Any]]:
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM local_uploads WHERE owner_user_id = ? AND idempotency_key = ?",
+                (owner_user_id, idempotency_key),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row is not None else None
+
+    def get_local_upload_by_view_token(
+        self, view_token: str
+    ) -> Optional[Dict[str, Any]]:
+        if not view_token or not view_token.startswith("upload_"):
+            return None
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """SELECT u.*, t.status AS root_status, t.url AS root_url,
+                          t.download_url AS root_download_url, t.platform AS root_platform,
+                          t.media_id AS root_media_id, t.use_speaker_recognition AS root_speaker,
+                          t.title AS root_title, t.created_at AS root_created_at,
+                          t.completed_at AS root_completed_at, t.error_message AS root_error,
+                          t.llm_config AS root_llm_config, t.calibration_status,
+                          t.summary_status, t.chapters_status
+                   FROM local_uploads u
+                   JOIN task_status t ON t.task_id = u.root_task_id
+                   WHERE u.view_token = ?""",
+                (view_token,),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row is not None else None
+
+    @staticmethod
+    def local_upload_share_is_active(
+        upload: Dict[str, Any], now: Optional[datetime.datetime] = None
+    ) -> bool:
+        if upload.get("state") != "accepted" or upload.get("revoked_at") is not None:
+            return False
+        if upload.get("retention") == "never":
+            return upload.get("expires_at") is None
+        expires_at = upload.get("expires_at")
+        if not expires_at:
+            return upload.get("root_status") not in {"success", "failed", None}
+        now_text = CacheManager._utc_sql_timestamp(
+            now or datetime.datetime.now(datetime.timezone.utc)
+        )
+        return expires_at > now_text
+
+    def revoke_local_upload(
+        self, upload_id: str, *, now: Optional[datetime.datetime] = None
+    ) -> Dict[str, Any]:
+        revoked_at = self._utc_sql_timestamp(
+            now or datetime.datetime.now(datetime.timezone.utc)
+        )
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE local_uploads SET revoked_at = COALESCE(revoked_at, ?) WHERE upload_id = ?",
+                (revoked_at, upload_id),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("local upload does not exist")
+            cursor.execute("SELECT * FROM local_uploads WHERE upload_id = ?", (upload_id,))
+            return dict(cursor.fetchone())
+
+    @staticmethod
+    def _has_active_local_upload_for_task(cursor, task_id: str, now_text: str) -> bool:
+        cursor.execute(
+            """SELECT 1 FROM local_uploads
+               WHERE root_task_id = ? AND state = 'accepted' AND revoked_at IS NULL
+                 AND ((retention = 'never' AND expires_at IS NULL)
+                      OR (retention = '30d' AND expires_at > ?))
+               LIMIT 1""",
+            (task_id, now_text),
+        )
+        return cursor.fetchone() is not None
+
+    @staticmethod
+    def _has_active_local_upload_for_media(cursor, platform: str, media_id: str, now_text: str) -> bool:
+        if platform != "local_upload":
+            return False
+        cursor.execute(
+            """SELECT 1 FROM local_uploads u
+               JOIN task_status t ON t.task_id = u.root_task_id
+               WHERE u.media_id = ? AND t.platform = 'local_upload'
+                 AND u.state = 'accepted' AND u.revoked_at IS NULL
+                 AND ((u.retention = 'never' AND u.expires_at IS NULL)
+                      OR (u.retention = '30d' AND u.expires_at > ?))
+               LIMIT 1""",
+            (media_id, now_text),
+        )
+        return cursor.fetchone() is not None
+
     def _get_file_path(self, platform: str, media_id: str, date: datetime.datetime = None) -> Path:
         """
         获取文件存储路径
@@ -1820,6 +2098,23 @@ class CacheManager:
                             )
                             continue
 
+                        # Upload share qualification owns a longer lifetime than
+                        # the generic cache age. This remains true when the
+                        # feature flag is off; disabling access is not deletion.
+                        with self._get_cursor() as cursor:
+                            upload_share_is_active = self._has_active_local_upload_for_media(
+                                cursor,
+                                platform,
+                                media_id,
+                                self._utc_sql_timestamp(effective_now),
+                            )
+                        if upload_share_is_active:
+                            logger.info(
+                                "Cache cleanup preserved an active local upload: {}",
+                                media_id,
+                            )
+                            continue
+
                         # 复核 2：重新查询该行 updated_at 是否仍早于
                         # cutoff，防止等锁期间被 save_cache() 并发刷新。
                         with self._get_cursor() as cursor:
@@ -1987,15 +2282,19 @@ class CacheManager:
             ).strftime('%Y-%m-%d %H:%M:%S')
 
             deleted_count = 0
+            # Keyset pagination advances past protected rows too; otherwise a
+            # full batch of valid never-expiring uploads would be selected forever.
+            last_task_id = ""
             while True:
                 with self._get_cursor() as cursor:
                     cursor.execute('''
                         SELECT task_id FROM task_status
                         WHERE status IN (?, ?)
                           AND COALESCE(completed_at, created_at) < ?
-                        ORDER BY COALESCE(completed_at, created_at)
+                          AND task_id > ?
+                        ORDER BY task_id
                         LIMIT 500
-                    ''', (TaskStatus.SUCCESS, TaskStatus.FAILED, cutoff))
+                    ''', (TaskStatus.SUCCESS, TaskStatus.FAILED, cutoff, last_task_id))
                     task_ids = [row[0] for row in cursor.fetchall()]
                 if not task_ids:
                     break
@@ -2029,6 +2328,11 @@ class CacheManager:
                             )
                             row = cursor.fetchone()
                             if row is None:
+                                connection.rollback()
+                                continue
+                            if self._has_active_local_upload_for_task(
+                                cursor, task_id, self._utc_sql_timestamp(effective_now)
+                            ):
                                 connection.rollback()
                                 continue
                             task = dict(row)
@@ -2097,6 +2401,7 @@ class CacheManager:
                             raise
                         finally:
                             cursor.close()
+                last_task_id = task_ids[-1]
                 if len(task_ids) < 500:
                     break
 
@@ -2462,6 +2767,17 @@ class CacheManager:
                 cursor.execute(query, params)
 
                 updated = cursor.rowcount == 1
+                if updated and status in ['success', 'failed']:
+                    cursor.execute(
+                        """UPDATE local_uploads
+                           SET expires_at = (
+                               SELECT datetime(completed_at, '+30 days')
+                               FROM task_status WHERE task_id = ?
+                           )
+                           WHERE root_task_id = ? AND retention = '30d'
+                             AND expires_at IS NULL""",
+                        (task_id, task_id),
+                    )
                 if not updated:
                     logger.info(
                         f"任务状态更新被终态黏性拦截(已是终态,跳过): {task_id} -> {status}"
@@ -3091,6 +3407,8 @@ class CacheManager:
         Returns:
             Dict: 任务信息
         """
+        if not view_token or view_token.startswith("upload_"):
+            return None
         try:
             with self._get_cursor() as cursor:
                 # success 最高优先级；failed 垫底；其余状态居中按最新排序。

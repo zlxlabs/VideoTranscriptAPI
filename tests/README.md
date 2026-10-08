@@ -46,6 +46,8 @@ uv run pytest tests/deployment
 默认门禁会阻断指向非 loopback 地址的 AF_INET/AF_INET6 出站连接；DNS 解析、
 loopback 与 Unix 域套接字放行，真实外网测试仍应放在 `tests/manual/`。
 
+本地上传安全基线：`tests/unit/test_local_upload_policy.py` 用临时 SQLite、真实 `ViewTokenResolver` 与 cache/task cleanup 消费者验证 owner/key 幂等、blank legacy token 隔离、`upload_` token、固定终态期限、write-once 撤销、开关关闭后的拒读与有效成果保护；另启动真实 Python 子进程消费同一 SQLite，验证缺省关闭与显式环境开关。`tests/cache/test_cache_cleanup.py` 的缓存 fixture 仅写 `tmp_path`，并从缓存 producer 返回的实际文件路径删除，不触碰仓库 `test_cache_dir/`。
+
 任务通知数量回归：`tests/unit/test_notification_budget.py` 从真实转录入口运行下载、平台字幕、YouTube API 字幕、部分/全部缓存命中与两种失败路径，断言成功路径携带完整总结和分享回执、失败不带回执；同文件还以 25 MiB 下载 fixture 锁定 generic 下载不发进度通知。`tests/unit/test_terminal_notification_outbox.py` 覆盖单行 outbox、缺失快照可见降级与标记 sent、两条成功消息共用快照及失败路径。`tests/unit/test_notification_e2e_delivery.py` 使用真实 `process_transcription → _TaskNotifier → NotificationRouter → WeComChannel/FeishuChannel → wecom-notifier FIFO → HTTP JSON`（只替换最终外部 POST），并覆盖即时与 outbox 补发入口；检查 SQLite 实际快照字节、双渠道最终 payload 中完整总结先于分享回执、精确 view URL 与网页首段。`tests/unit/test_completion_share.py` 锁定 Markdown→网页同源 HTML→首个 p 可见文本与缺总结状态。相关设计及 N1–N4 更新见 `docs/sessions/261008-completion-share/design.md`。
 
 任务观测回归：`tests/unit/test_task_observability_report.py` 覆盖只读 CLI、旧 schema、
