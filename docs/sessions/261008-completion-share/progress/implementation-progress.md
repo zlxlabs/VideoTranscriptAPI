@@ -24,3 +24,16 @@
 - **验证**：完整 E2E 已通过真实 `process_transcription → _TaskNotifier → Router → 两渠道依赖 FIFO 消费者 → 最终 HTTP JSON 替身`，并覆盖即时与补发入口/SQLite 快照；窄测命令 119 passed（154 上游 deprecation warnings）。
 - **决策**：保留现有单行 outbox、CAS 和至少一次重放窗口；不引入业务截断、预切分或发送 ledger。失败正文/缺失结果可见性继续由既有降级处理。
 - **下一步**：提交此已通过单元；随后完善失败组接受条件/并发反复跑，完成 `make test` 和三项修复后红验，更新进度并开 draft PR。
+
+## 2026-10-08：整卡验证与三项有效红验完成
+
+- **阶段**：实现与本地验证通过；准备提交验证存档并发布 draft PR。
+- **结论**：完整短测通过（119 passed）；`make test` 从头到 100% 退出码 0，输出含 3 个 skip、无失败（pytest 本地配置未打印总用例数）；真实 Router/channel/FIFO/最终 HTTP E2E 通过即时、补发和真实 `process_transcription → notify_via` 路径。
+- **并发验证**：包含 outbox helper/dispatcher 互斥、slow-alert 入队顺序、期限与终态竞态的 3 个时序测试，连续 5 轮全部通过（每轮 3 passed）。
+- **修复后红验**（每次均先有真修复提交，只临时改坏一个最小代码块；全部失败为 AssertionError，之后精确还原）：
+  1. 交换 WeCom 完整正文/回执入队顺序：真实 producer E2E 报 `assert PERSISTED_SUMMARY in complete_body`，完整摘要错误地出现在短回执。
+  2. 在 `build_task_status_content` 丢弃完整正文：同一真实 HTTP E2E 报 `assert PERSISTED_SUMMARY in complete_body`，payload 只包含 `[summary omitted]`。
+  3. 首段提取故意返回错误文字：`test_receipt_uses_original_url_exact_view_url_and_first_paragraph` 报精确回执断言不等，期望 `第一段 重点。`、实收 `wrong excerpt`。
+- **决策/守卫**：三次注入后仅恢复各自那一处，`git diff` 显示源代码无注入残留；不改 CI、测试守卫、依赖或生产环境。同步移除旧设计残留的“总结与完成合并”过时句。
+- **验证环境**：本地 worktree `.venv` / CPython 3.11.15；pytest outbound guard 屏蔽非 loopback 网络，所有平台 HTTP 都由最终 `requests.post` 替身拦截；不承诺真实平台收信。
+- **下一步**：提交本进度与旧文档同步；确认远端 head/PR 状态后只推本卡分支，创建 draft PR，并回查 URL、number、headRefName 与 CI 结论。
