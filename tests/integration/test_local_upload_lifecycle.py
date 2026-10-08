@@ -174,6 +174,12 @@ def test_http_upload_acceptance_notifies_independent_public_capability(lifecycle
     )
     reservations = []
     notifications = []
+    notification_errors = []
+    monkeypatch.setattr(
+        uploads_routes.logger,
+        "error",
+        lambda *args: notification_errors.append(args),
+    )
 
     class ReadyProcessor:
         done = lambda _self: False
@@ -208,7 +214,7 @@ def test_http_upload_acceptance_notifies_independent_public_capability(lifecycle
         uploads_routes,
         "get_notification_router",
         lambda: SimpleNamespace(
-            send_view_link=lambda **kwargs: notifications.append(kwargs) or {"test": True}
+            send_view_link=lambda **kwargs: notifications.append(kwargs) or {"test": False}
         ),
     )
     app = FastAPI()
@@ -221,7 +227,7 @@ def test_http_upload_acceptance_notifies_independent_public_capability(lifecycle
         metadata = {
             "filename": "user-file.mp4",
             "byte_size": len(raw),
-            "title": "Owner selected title",
+            "title": None,
             "source_url": "https://source.example.test/watch?id=9",
             "retention": "30d",
             "processing_options": {"calibrate": False, "summarize": False},
@@ -242,9 +248,16 @@ def test_http_upload_acceptance_notifies_independent_public_capability(lifecycle
     assert response.status_code == 202, response.text
     receipt = response.json()
     assert reservations == [len(raw), len(raw)]
+    assert notification_errors == [
+        (
+            "UPLOAD_ACCEPTED_NOTIFICATION_FAILED task_id={} result={}",
+            receipt["task_id"],
+            {"test": False},
+        )
+    ]
     assert len(notifications) == 1
     assert notifications[0] == {
-        "title": "Owner selected title",
+        "title": "user-file.mp4",
         "view_token": receipt["view_token"],
         "original_url": "https://source.example.test/watch?id=9",
         "source_label": "本地上传",
@@ -599,6 +612,7 @@ def test_dispatcher_uses_real_transcriber_then_cleans_owned_media_before_llm(
     workspace_dir = tmp_path / "workspace"
     monkeypatch.setattr(transcriber_module, "get_workspace_dir", lambda: str(workspace_dir))
     monkeypatch.setattr(capswriter_module.Config, "load_from_project_config", lambda: None)
+    monkeypatch.setattr(capswriter_module.Config, "generate_funasr_compat", True)
     monkeypatch.setattr(
         capswriter_module,
         "load_config",
@@ -611,22 +625,33 @@ def test_dispatcher_uses_real_transcriber_then_cleans_owned_media_before_llm(
     asr_calls = []
     asr_output_paths = []
     reservations = []
+    asr_peak_bytes = []
     llm_observation = {}
     llm_started = threading.Event()
     llm_done = threading.Event()
 
     def capswriter_fixture(audio_path, *, media_duration=None):
         asr_calls.append((str(audio_path), Path(audio_path).read_bytes(), media_duration))
-        transcript_path = Path(real_transcriber.capswriter_client.output_dir) / "capswriter-output.txt"
-        from video_transcript_api.transcriber.capswriter_client import _atomic_write_text
-
-        _atomic_write_text(
-            transcript_path,
-            transcript_bytes.decode("utf-8"),
-            write_admission=real_transcriber.capswriter_client.write_admission,
+        raw_result = {
+            "task_id": "local-upload-fixture",
+            "text_accu": transcript_bytes.decode("utf-8"),
+            "tokens": list(transcript_bytes.decode("utf-8")),
+            "timestamps": [
+                round(index * 0.2, 2)
+                for index in range(len(transcript_bytes.decode("utf-8")))
+            ],
+            "duration": 60.0,
+            "time_start": 1.0,
+            "time_complete": 2.0,
+        }
+        generated = asyncio.run(
+            real_transcriber.capswriter_client._save_results(
+                Path(audio_path), raw_result
+            )
         )
-        asr_output_paths.append(transcript_path)
-        return True, [transcript_path]
+        asr_output_paths.extend(generated)
+        asr_peak_bytes.append(sum(path.stat().st_size for path in generated))
+        return True, generated
 
     real_transcriber.capswriter_client.transcribe_file = capswriter_fixture
     monkeypatch.setattr(transcription, "Transcriber", lambda: real_transcriber)
@@ -759,8 +784,12 @@ def test_dispatcher_uses_real_transcriber_then_cleans_owned_media_before_llm(
     assert not llm_consumer.is_alive()
     assert len(asr_calls) == 1
     assert asr_calls[0] == (str(source_path), source_bytes, 60.0)
-    expected_temp_bytes = len(source_bytes) + len(transcript_bytes)
-    assert reservations == [expected_temp_bytes, expected_temp_bytes]
+    expected_text_bytes = len(transcript_bytes)
+    assert reservations[0] == len(source_bytes) + expected_text_bytes
+    assert reservations[-2:] == [
+        len(source_bytes) + asr_peak_bytes[0],
+        len(source_bytes) + asr_peak_bytes[0],
+    ]
     assert llm_queue.empty()
     llm_task = llm_observation["task"]
     assert llm_task["task_id"] == task_id
@@ -768,7 +797,7 @@ def test_dispatcher_uses_real_transcriber_then_cleans_owned_media_before_llm(
     assert llm_task["processing_options"] == options
     assert llm_observation["source_exists"] is False
     assert llm_observation["task_dir_exists"] is False
-    assert llm_observation["asr_outputs_exist"] == [False]
+    assert llm_observation["asr_outputs_exist"] == [False] * len(asr_output_paths)
     assert not source_path.exists()
     assert not task_dir.exists()
     root = cache.get_task_by_id(task_id)
@@ -786,3 +815,126 @@ def test_dispatcher_uses_real_transcriber_then_cleans_owned_media_before_llm(
         for item in delivered
     )
     cache.close()
+
+
+def test_local_upload_funasr_branch_observes_source_only_before_llm(
+    tmp_path, monkeypatch
+):
+    cache = CacheManager(str(tmp_path / "cache"))
+    temp_manager = TempFileManager(str(tmp_path / "temp"))
+    llm_queue = queue.Queue()
+    source_bytes = b"funasr upload source"
+    options = {
+        "calibrate": False,
+        "summarize": False,
+        "infer_speaker_names": False,
+        "chapters": False,
+    }
+    now = datetime.datetime.now(datetime.timezone.utc)
+    intent = cache.register_local_upload(
+        owner_user_id="alice",
+        idempotency_key=f"{int(now.timestamp() * 1000)}-{uuid.uuid4()}",
+        retention="never",
+        intent_metadata={"filename": "speaker.mp4", "title": "Speaker title"},
+    )
+    task_id = cache.generate_task_id()
+    task_dir = temp_manager.create_task_dir(task_id)
+    source_path = task_dir / "upload-source.bin"
+    source_path.write_bytes(source_bytes)
+    upload = cache.accept_local_upload(
+        intent["upload_id"],
+        media_id=f"upload_{uuid.uuid4().hex}",
+        task_id=task_id,
+        filename="speaker.mp4",
+        title="Speaker title",
+        request_metadata={"filename": "speaker.mp4", "title": "Speaker title"},
+        media_path=str(source_path),
+        byte_size=len(source_bytes),
+        sha256=hashlib.sha256(source_bytes).hexdigest(),
+        processing_options=options,
+    )
+    cache.update_task_status(task_id, "processing")
+    reservations = []
+    runtime = SimpleNamespace(
+        reserve_upload_temp=lambda _task, size, budget, _dir: (
+            reservations.append(size) or size <= budget
+        ),
+        release_upload_temp=lambda _task: None,
+        inflight_registry=SimpleNamespace(
+            register_internal=lambda *_args: None,
+            release=lambda *_args: None,
+        ),
+    )
+
+    class FakeFunASR:
+        def transcribe_sync(self, audio_path):
+            assert Path(audio_path).read_bytes() == source_bytes
+            assert sorted(path.name for path in task_dir.iterdir()) == [
+                "upload-source.bin"
+            ]
+            return {
+                "formatted_text": "Speaker A: spoken words",
+                "transcription_result": {
+                    "segments": [
+                        {"speaker": "A", "text": "spoken words"},
+                    ]
+                },
+            }
+
+    router = SimpleNamespace(
+        notify_task_status=lambda **_kwargs: {"fixture": True}
+    )
+    monkeypatch.setattr(transcription, "cache_manager", cache)
+    monkeypatch.setattr(transcription, "llm_task_queue", llm_queue)
+    monkeypatch.setattr(transcription, "get_temp_manager", lambda: temp_manager)
+    monkeypatch.setattr(transcription, "get_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        transcription,
+        "get_inflight_registry",
+        lambda: runtime.inflight_registry,
+    )
+    monkeypatch.setattr(
+        transcription,
+        "get_config",
+        lambda: {"storage": {"upload_limits": {
+            "max_media_hours": 1,
+            "upload_temp_budget_mib": 8,
+        }}},
+    )
+    monkeypatch.setattr(transcription, "FunASRSpeakerClient", FakeFunASR)
+    monkeypatch.setattr(transcription, "_ensure_audio_track", lambda _path: 60.0)
+    monkeypatch.setattr(transcription, "get_notification_router", lambda: router)
+    monkeypatch.setattr(
+        transcription.slow_alert,
+        "track_transcription",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        transcription.slow_alert,
+        "duration_known",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        transcription.slow_alert,
+        "cancel_all",
+        lambda *_args, **_kwargs: None,
+    )
+
+    try:
+        result = transcription.process_transcription(
+            task_id,
+            "",
+            use_speaker_recognition=True,
+            metadata_override={"title": "Speaker title"},
+            processing_options=options,
+            local_media_path=str(source_path),
+            local_media_id=upload["media_id"],
+        )
+        assert result["status"] == "success"
+        assert reservations == [len(source_bytes)]
+        assert not source_path.exists()
+        assert not task_dir.exists()
+        assert llm_queue.qsize() == 1
+        assert llm_queue.get_nowait()["transcription_data"]["segments"]
+    finally:
+        cache.close()

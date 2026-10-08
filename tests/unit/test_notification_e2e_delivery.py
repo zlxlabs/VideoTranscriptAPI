@@ -318,14 +318,16 @@ def test_local_upload_terminal_producer_sends_public_share_url_and_source_label(
         task_id=root_task_id,
         filename="clip.mp4",
         title=TITLE,
-        source_url="",
+        source_url="https://source.example.test/watch?id=7",
         request_metadata={"filename": "clip.mp4", "title": TITLE},
         media_path="/not-in-notification/persistent/source.mp4",
         byte_size=42,
         sha256="a" * 64,
     )
     cm.save_cache(
-        platform="local_upload", url="", media_id=media_id,
+        platform="local_upload",
+        url="https://source.example.test/watch?id=7",
+        media_id=media_id,
         use_speaker_recognition=False, transcript_data="upload transcript",
         transcript_type="capswriter", title=TITLE, author="", description="",
     )
@@ -363,6 +365,7 @@ def test_local_upload_terminal_producer_sends_public_share_url_and_source_label(
         assert TITLE in full_message and TITLE in receipt
         assert expected_url in full_message and expected_url in receipt
         assert "本地上传" in receipt
+        assert "原始地址：https://source.example.test/watch" in receipt
         assert PERSISTED_SUMMARY in full_message
         assert "第一段含 重点、链接文本 和中文。" in receipt
         assert "persistent/source.mp4" not in "\n".join(contents)
