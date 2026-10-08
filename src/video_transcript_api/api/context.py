@@ -10,6 +10,7 @@ import concurrent.futures
 import contextvars
 import datetime
 import hashlib
+import math
 import os
 import queue
 import re
@@ -177,6 +178,7 @@ def validate_config(config: Any) -> dict:
             "task_status_retention_days",
             "audit_log_retention_days",
             "max_download_size_mb",
+            "upload_limits",
         },
         "storage",
     )
@@ -208,6 +210,34 @@ def validate_config(config: Any) -> dict:
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ConfigError(
                 "storage.max_download_size_mb must be a non-negative integer"
+            )
+    upload_limits = storage.get("upload_limits")
+    if upload_limits is not None:
+        upload_limits = _require_dict(storage, "upload_limits")
+        _reject_unknown(
+            upload_limits,
+            {"max_file_mib", "max_media_hours", "receive_concurrency", "upload_temp_budget_mib"},
+            "storage.upload_limits",
+        )
+        for field in ("max_file_mib", "max_media_hours", "upload_temp_budget_mib"):
+            value = upload_limits.get(field)
+            if value is not None and (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ConfigError(
+                    f"storage.upload_limits.{field} must be a positive finite number or null"
+                )
+        concurrency = upload_limits.get("receive_concurrency")
+        if concurrency is not None and (
+            not isinstance(concurrency, int)
+            or isinstance(concurrency, bool)
+            or concurrency <= 0
+        ):
+            raise ConfigError(
+                "storage.upload_limits.receive_concurrency must be a positive integer or null"
             )
 
     # llm is required, not optional-like the backend_sections below: unlike
@@ -957,6 +987,12 @@ class RuntimeContext:
         # 的数据结构或独立模块。
         self.terminal_write_pending: set[str] = set()
         self._terminal_write_pending_guard = threading.Lock()
+        upload_limits = self.config["storage"].get("upload_limits") or {}
+        self.upload_receiver_slots = threading.BoundedSemaphore(
+            upload_limits.get("receive_concurrency") or 1
+        )
+        self._upload_budget_guard = threading.Lock()
+        self._upload_reserved_bytes: dict[str, int] = {}
 
     def start(self) -> None:
         if self.started:
@@ -1003,6 +1039,26 @@ class RuntimeContext:
             max_workers=1, thread_name_prefix="maintenance"
         )
         self.started = True
+
+    def reserve_upload_temp(
+        self, task_id: str, byte_count: int, budget_bytes: int, temp_dir: str
+    ) -> bool:
+        import shutil
+
+        with self._upload_budget_guard:
+            current = sum(self._upload_reserved_bytes.values())
+            if current + byte_count > budget_bytes:
+                return False
+            free_bytes = shutil.disk_usage(temp_dir).free
+            safety_margin = max(1024 * 1024, budget_bytes // 20)
+            if free_bytes < byte_count + safety_margin:
+                return False
+            self._upload_reserved_bytes[task_id] = byte_count
+            return True
+
+    def release_upload_temp(self, task_id: str) -> None:
+        with self._upload_budget_guard:
+            self._upload_reserved_bytes.pop(task_id, None)
 
     def track_future(
         self, future: concurrent.futures.Future, *, kind: str = "transcription",
@@ -1076,6 +1132,7 @@ class RuntimeContext:
             finally:
                 if task_id is not None:
                     self.inflight_registry.release(kind, task_id)
+                    self.release_upload_temp(task_id)
                 if kind == "llm":
                     self.llm_submit_semaphore.release()
                 with self._worker_futures_condition:
