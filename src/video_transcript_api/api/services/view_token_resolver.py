@@ -1,5 +1,6 @@
 """View-token business logic coordinated through an existing CacheManager."""
 
+import os
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ...transcriber.segments import normalize_segments
@@ -11,6 +12,7 @@ if TYPE_CHECKING:
 
 
 logger = setup_logger("view_token_resolver")
+UPLOAD_DISABLED = "UPLOAD_DISABLED"
 
 
 class ViewTokenResolver:
@@ -124,7 +126,7 @@ class ViewTokenResolver:
             )
 
         llm_config = self._cache_manager.get_task_llm_config(task_info["task_id"])
-        if not llm_config:
+        if not llm_config and task_info.get("platform") != "local_upload":
             llm_config = self._get_llm_config_by_view_token(task_info["view_token"])
 
         payload: Dict[str, Any] = {
@@ -156,10 +158,42 @@ class ViewTokenResolver:
             )
         return payload
 
+    def _local_upload_task_info(self, view_token: str) -> Optional[Dict[str, Any]]:
+        """Resolve only an independently recorded upload capability, never a legacy blank token."""
+        upload = self._cache_manager.get_local_upload_by_view_token(view_token)
+        if upload is None:
+            return None
+        if os.environ.get("VTA_UPLOADS_ENABLED", "").strip().lower() != "true":
+            logger.warning("{}: local upload content read denied while disabled", UPLOAD_DISABLED)
+            return None
+        if not self._cache_manager.local_upload_share_is_active(upload):
+            return None
+        return {
+            "task_id": upload["root_task_id"],
+            "view_token": view_token,
+            "url": upload.get("root_url") or "",
+            "download_url": upload.get("root_download_url"),
+            "platform": upload.get("root_platform"),
+            "media_id": upload.get("root_media_id"),
+            "use_speaker_recognition": bool(upload.get("root_speaker")),
+            "status": upload.get("root_status"),
+            "title": upload.get("root_title") or "本地上传",
+            "created_at": upload.get("root_created_at"),
+            "completed_at": upload.get("root_completed_at"),
+            "error_message": upload.get("root_error"),
+            "llm_config": upload.get("root_llm_config"),
+        }
+
     def get_view_data_by_token(self, view_token: str) -> Optional[Dict[str, Any]]:
         """Return the view-page data associated with a view token."""
+        if not view_token:
+            return None
         try:
-            task_info = self._cache_manager.get_task_by_view_token(view_token)
+            task_info = (
+                self._local_upload_task_info(view_token)
+                if view_token.startswith("upload_")
+                else self._cache_manager.get_task_by_view_token(view_token)
+            )
             if not task_info:
                 return None
 
@@ -228,8 +262,14 @@ class ViewTokenResolver:
 
     def get_cache_by_view_token(self, view_token: str) -> Optional[Dict[str, Any]]:
         """Return complete cache data plus task information for a view token."""
+        if not view_token:
+            return None
         try:
-            task_info = self._cache_manager.get_task_by_view_token(view_token)
+            task_info = (
+                self._local_upload_task_info(view_token)
+                if view_token.startswith("upload_")
+                else self._cache_manager.get_task_by_view_token(view_token)
+            )
             if not task_info:
                 logger.warning(f"未找到 view_token 对应的任务: {view_token}")
                 return None
@@ -263,6 +303,8 @@ class ViewTokenResolver:
         self, view_token: str
     ) -> Optional[Dict[str, Any]]:
         """Find the newest non-empty LLM config for tasks sharing a token."""
+        if not view_token or view_token.startswith("upload_"):
+            return None
         try:
             with self._cache_manager._get_cursor() as cursor:
                 cursor.execute(

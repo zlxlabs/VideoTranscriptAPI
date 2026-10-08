@@ -657,6 +657,12 @@ def check_view_token_ownership(
         （或 legacy 审计行兜底通过），可以放行；否则 fail-closed 拒绝。
     """
 
+    # The upload baseline deliberately has no reprocessing implementation yet.
+    # Never reinterpret its independent public capability as a task_status
+    # view_token (including through the legacy audit-log ownership fallback).
+    if not view_token or view_token.startswith("upload_"):
+        return False
+
     def _legacy_owns_task(candidate_task_id: str) -> bool:
         """纯 legacy 兜底：某个 task_id 在所有已知来源里都查不到
         submitted_by（既不在 task_audit_snapshots，也不在 cache.db 的
