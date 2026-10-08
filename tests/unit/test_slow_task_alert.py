@@ -142,3 +142,86 @@ def test_deadline_and_terminal_race_never_alerts_after_cancel(channels, monkeypa
         assert len(wecom.sent) + len(feishu.sent) == count_at_cancel
         assert count_at_cancel <= 2
         assert task_id not in slow_alert._TASKS
+
+
+def test_media_duration_recorded_in_terminal_snapshot(tmp_path, monkeypatch):
+    from video_transcript_api.api.services import llm_ops, transcription
+    from video_transcript_api.cache.cache_manager import CacheManager
+    from video_transcript_api.downloaders.models import DownloadInfo, VideoMetadata
+    from video_transcript_api.utils.task_status import TaskStatus
+
+    cm = CacheManager(cache_dir=str(tmp_path / "cache"))
+    queue = SimpleNamespace(items=[], completed=0)
+    queue.put = queue.items.append
+    queue.task_done = lambda: setattr(queue, "completed", queue.completed + 1)
+    recording = SimpleNamespace(
+        notify_task_status=lambda **_kw: {"wechat": True},
+        send_rich=lambda *_a, **_k: {},
+    )
+    media = tmp_path / "audio.mp3"
+    media.write_bytes(b"audio")
+
+    class Downloader:
+        use_api_server = False
+
+        def get_metadata(self, _url):
+            return VideoMetadata("video-1", "youtube", "Slow title", "Slow author")
+
+        def get_subtitle_result(self, _url):
+            return None
+
+        def get_download_info(self, _url):
+            return DownloadInfo("https://cdn.example.test/audio.mp3", "mp3", "audio.mp3")
+
+        def download_file(self, _url, _name):
+            return str(media)
+
+    result_dict = {
+        "校对文本": "slow-alert calibrated fixture", "内容总结": "slow-alert summary",
+        "skip_summary": False,
+        "stats": {
+            "original_length": 24, "calibrated_length": 28,
+            "summary_length": 18, "calibration_status": "full",
+            "summary_status": "generated",
+        },
+        "models_used": {},
+    }
+    monkeypatch.setattr(transcription, "cache_manager", cm)
+    monkeypatch.setattr(transcription, "llm_task_queue", queue)
+    monkeypatch.setattr(transcription, "get_notification_router", lambda: recording)
+    monkeypatch.setattr(transcription, "_ensure_audio_track", lambda *_: 3600.0)
+    monkeypatch.setattr(transcription, "Transcriber", lambda: SimpleNamespace(
+        transcribe=lambda *_a, **_k: {"transcript": "slow-alert transcript"},
+    ))
+    monkeypatch.setattr(transcription, "create_downloader", lambda _url: Downloader())
+    monkeypatch.setattr(llm_ops, "cache_manager", cm)
+    monkeypatch.setattr(llm_ops, "llm_task_queue", queue)
+    monkeypatch.setattr(llm_ops, "get_notification_router", lambda: recording)
+    monkeypatch.setattr(llm_ops, "llm_coordinator", SimpleNamespace(
+        process=lambda **_kw: object(),
+    ))
+    monkeypatch.setattr(llm_ops, "_build_result_dict", lambda _value: result_dict)
+    monkeypatch.setattr(llm_ops, "_save_llm_results", lambda **_kw: {
+        "calibration_status": "full", "summary_status": "generated",
+        "chapters_status": "disabled",
+    })
+    monkeypatch.setattr(llm_ops, "_prepare_llm_content", lambda *_a, **_k: "input")
+    monkeypatch.setattr(llm_ops, "_requires_llm_title", lambda *_a, **_k: False)
+
+    task_id = cm.create_task(url="https://www.youtube.com/watch?v=slowalert")["task_id"]
+    try:
+        cm.update_task_status(task_id, TaskStatus.PROCESSING)
+        result = transcription.process_transcription(
+            task_id=task_id, url="https://www.youtube.com/watch?v=slowalert",
+            use_speaker_recognition=False, wechat_webhook=None, download_url=None,
+            metadata_override=None,
+            processing_options={"calibrate": True, "summarize": True, "chapters": False},
+        )
+        assert result["status"] == "success"
+        assert len(queue.items) == 1
+        llm_ops._handle_llm_task(queue.items.pop())
+        snapshot = cm.get_task_by_id(task_id)["terminal_snapshot"]
+        assert snapshot["observability"]["media_duration_s"] == 3600.0
+    finally:
+        slow_alert.cancel_all(task_id)
+        cm.close()

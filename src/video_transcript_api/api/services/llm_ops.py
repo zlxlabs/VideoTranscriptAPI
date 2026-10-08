@@ -37,7 +37,11 @@ from ...llm.processors.notes_processor import (
     compute_notes_anchor_fingerprint,
     load_notes_source_segments,
 )
-from ...utils.notifications import format_llm_config_markdown, get_notification_router
+from ...utils.notifications import (
+    format_llm_config_markdown,
+    get_notification_router,
+    slow_alert,
+)
 from ...utils.perf_tracker import PerfTracker
 from ...utils.task_status import TaskStatus
 from .terminal_status import (
@@ -544,8 +548,12 @@ def _handle_llm_task(llm_task: dict):
     # 线程池会复用线程处理后续任务，每次任务入口都重新绑定即可，无需成对 reset
     bind_task_id(task_id)
 
-    # 从 transcription 阶段传递过来的性能追踪器，若无则创建新实例
-    tracker: PerfTracker = llm_task.pop("perf_tracker", None) or PerfTracker(task_id=task_id)
+    # 从 transcription 阶段传递过来的性能追踪器，若无则创建新实例。
+    # 该键同时是偏慢提醒（261007-notify-slim 卡 2）的"流水线任务"判据：
+    # 只有转录 worker 交接的 payload 带 perf_tracker，routes/tasks.py 的
+    # recalibrate / resummarize 直接构造的 llm_task 没有它。
+    tracker_from_transcription = llm_task.pop("perf_tracker", None)
+    tracker: PerfTracker = tracker_from_transcription or PerfTracker(task_id=task_id)
 
     try:
         with task_lock(task_id):
@@ -614,6 +622,13 @@ def _handle_llm_task(llm_task: dict):
 
                 # 是否为仅校对模式（重新校对场景）
                 calibrate_only = llm_task.get("calibrate_only", False)
+
+                # 偏慢提醒（卡 2）接入大模型阶段：计时从本 worker 开始处理
+                # 起算，LLM 队列排队时间不计入。notes 生成分支已在上方
+                # return；recalibrate（calibrate_only）与 resummarize（无
+                # perf_tracker）按卡面非目标不接入。
+                if tracker_from_transcription is not None and not calibrate_only:
+                    slow_alert.track_llm(task_id, title=video_title)
 
                 # 处理深度开关（只转录/转录+校对/全流程）：缺失时按全流程兜底，
                 # 与 processing_options.normalize_processing_options(None) 语义一致。

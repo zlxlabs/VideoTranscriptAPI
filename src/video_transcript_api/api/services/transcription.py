@@ -227,11 +227,11 @@ from ...transcriber import FunASRSpeakerClient, Transcriber
 # 非有限值 / 负数 / 非数字一律 None。准入探测解析出的 format.duration 走这条判据，
 # 保证「准入认为合法的时长」与「预算公式接受的时长」不可能分叉。
 from ...transcriber.capswriter_client import _finite_time_or_none
-from ...utils.notifications import get_notification_router
+from ...utils.notifications import get_notification_router, slow_alert
 from ...utils.perf_tracker import PerfTracker
 from ...utils.task_status import TaskStatus
 from ...utils.llm_status import CalibrationStatus, SummaryStatus
-from .terminal_status import finalize_terminal_status_and_notify
+from .terminal_status import _resolve_view_url, finalize_terminal_status_and_notify
 
 logger = lazy_resource(get_logger)
 config = lazy_resource(get_config)
@@ -916,6 +916,10 @@ def _handoff_to_llm_stage(
             }
         return {"status": "failed", "message": f"LLM任务加入队列失败: {exc}"}
 
+    # 偏慢提醒（卡 2）：交接成功即转录阶段结束，取消转录阶段计时；
+    # 大模型阶段的计时由 LLM worker 自己启动。本函数是五处转录→LLM 交接
+    # 的唯一汇合点，在这里收口一次即可覆盖全部分支。
+    slow_alert.finish_transcription(task_id)
     return None
 
 
@@ -982,6 +986,17 @@ def process_transcription(
         # url 本身就是平台链接，直接使用
         display_url = url
         logger.info(f"通知将使用URL: {display_url}")
+
+        # 偏慢提醒（261007-notify-slim 卡 2）：转录 worker 开始处理即起算，
+        # 排队时间天然不计入。view_url 必须在这里解析好存进计时状态——计时
+        # 回调线程没有 runtime context，查不了库。
+        slow_alert.track_transcription(
+            task_id,
+            url=display_url,
+            channel_name=notification_channel,
+            webhooks=notification_webhooks,
+            view_url=_resolve_view_url(cache_manager, task_id),
+        )
 
         _router = get_notification_router()
 
@@ -1930,6 +1945,12 @@ def process_transcription(
                                 str(admission_exc),
                                 title=video_title, author_name=author,
                             )
+                        # 偏慢提醒（卡 2）：拿到时长即写入观测并重算转录门槛
+                        #（仍从 worker 开始处理那一刻起算）。
+                        tracker.set_media_duration(probed_media_duration)
+                        slow_alert.duration_known(
+                            task_id, probed_media_duration, title=video_title,
+                        )
 
                         # 根据是否需要说话人识别选择转录器
                         with tracker.track("transcription"):
@@ -2314,6 +2335,10 @@ def process_transcription(
                     if probed_media_duration is not None
                     else getattr(actual_downloader, "last_media_duration", None)
                 )
+                # 偏慢提醒（卡 2）：拿到时长即写入观测并重算转录门槛
+                #（仍从 worker 开始处理那一刻起算）。
+                tracker.set_media_duration(media_duration)
+                slow_alert.duration_known(task_id, media_duration, title=video_title)
 
                 try:
                     # 开始转录
