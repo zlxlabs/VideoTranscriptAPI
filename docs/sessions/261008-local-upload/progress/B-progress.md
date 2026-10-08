@@ -51,7 +51,7 @@ implementing；完成第一份独立可运行单元：bounded metadata decoder �
 
 ### 当前阶段
 
-implementing；H0 `840facda8e0cb251a1197cf3647c5accd5c496ff` 后续审查指出两项原合同缺口。先在固定H0上固化四个真实AssertionError红测，之后完成最小顺序修复；H1窄测与A/URL回归已绿，本段准备作为H1小提交推送。
+implementing；固定H0上固化四个真实AssertionError红测，完成最小顺序修复。H1 narrow+A/URL回归已绿，本段准备作为H1小提交推送；全量make test未跑。
 
 ### 本段结论（≤3句）
 
@@ -63,7 +63,7 @@ implementing；H0 `840facda8e0cb251a1197cf3647c5accd5c496ff` 后续审查指出�
 
 - 新参数`enqueue`只服务HTTP队列跨SQLite原子发布边界；callback同步调用且无await，既有A store-level direct acceptance仍可不带queue callback。没有新增服务层/状态/锁/重试/fallback。
 - 真实测试位于`tests/integration/test_upload_intake.py`：队列put hook用独立SQLite连接观察未提交receiving/root-none和实际payload；commit fault时实际queue收到payload，真实dispatcher drain后没有PROCESSING/executor submit/ASR；cleanup/accept两顺序均使用真实临时SQLite与文件字节，Pause仅位于测试fixture。
-- 红验命令：`uv run --frozen pytest -q tests/integration/test_upload_intake.py::test_http_queue_handoff_precedes_durable_acceptance_commit tests/integration/test_upload_intake.py::test_sql_commit_failure_leaves_stale_queue_item_for_dispatcher_to_drop tests/integration/test_upload_intake.py::test_receiving_cleanup_rechecks_after_accept_wins_and_preserves_owned_file tests/integration/test_upload_intake.py::test_receiving_cleanup_retires_before_unlink_and_accept_loses`；H0输出4 failed/AssertionError，H1同命令4 passed。
+- H0红验命令：`uv run --frozen pytest -q tests/integration/test_upload_intake.py::test_http_queue_handoff_precedes_durable_acceptance_commit tests/integration/test_upload_intake.py::test_sql_commit_failure_leaves_stale_queue_item_for_dispatcher_to_drop tests/integration/test_upload_intake.py::test_receiving_cleanup_rechecks_after_accept_wins_and_preserves_owned_file tests/integration/test_upload_intake.py::test_receiving_cleanup_retires_before_unlink_and_accept_loses`；H0四项均以AssertionError显示期望receiving/null或文件存在、实际accepted/root或文件已删；H1同四项4 passed。
 - H1窄测`uv run --frozen pytest -q tests/unit/test_upload_routes.py tests/unit/test_upload_dispatch.py tests/integration/test_upload_intake.py`：35个测试点通过；另含A store/Resolver、URL API/history、runtime及maintenance的回归命令退出0。
 - 当前增量242行左右，仅原scope内7个文件；已先保存H0红验日志与受控两个文件顺序测试，接下来按显式路径小提交并push。
 
