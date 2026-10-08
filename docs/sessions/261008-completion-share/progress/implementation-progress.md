@@ -16,3 +16,11 @@
 - **红证据**：`test_completion_share.py` 当前因生产 helper 尚未建立而 collection 报 `ModuleNotFoundError`；真实 `process_transcription → notify_via` E2E 已到达两渠道 HTTP consumer，但旧实现仅捕获每渠道一个最终 JSON（2 条），验收期望完整正文 + 回执的每渠道两条（4 条），在 `wait_for_payloads(4)` 断言失败。
 - **决策**：只 mock HTTP POST；不 mock `notify_via`、Router、channel 或终态服务。`process_transcription` 使用已有缓存命中分支，避免额外网络/模型服务。
 - **下一步**：提交红测试；增加共享首段/回执构造器与终态贯通，再给 `_TaskNotifier` 加最小签名参数转发，使真实 E2E 变绿。
+
+## 2026-10-08：首个实现单元通过
+
+- **阶段**：最小实现与首批回归通过，待提交。
+- **结论**：新增 `completion_share.py`，将总结经既有 Markdown renderer 渲染后提取第一个 HTML `<p>` 的可见文本；两个终态投递入口均从快照生成完整正文和短回执。WeCom/Feishu channel 先提交完整消息、成功后再提交回执；整组结果要求两次提交均显式成功。已将 receipt 参数贯通 `terminal_status → _TaskNotifier → Router → WeCom/Feishu`。
+- **验证**：完整 E2E 已通过真实 `process_transcription → _TaskNotifier → Router → 两渠道依赖 FIFO 消费者 → 最终 HTTP JSON 替身`，并覆盖即时与补发入口/SQLite 快照；窄测命令 119 passed（154 上游 deprecation warnings）。
+- **决策**：保留现有单行 outbox、CAS 和至少一次重放窗口；不引入业务截断、预切分或发送 ledger。失败正文/缺失结果可见性继续由既有降级处理。
+- **下一步**：提交此已通过单元；随后完善失败组接受条件/并发反复跑，完成 `make test` 和三项修复后红验，更新进度并开 draft PR。

@@ -189,8 +189,10 @@ class TestPersistedCompletionRendering:
 
         assert deliver_pending_terminal_notifications(cm, router=router) == 1
 
-        body = router.notify_task_status.call_args.kwargs["completion_body"]
+        kwargs = router.notify_task_status.call_args.kwargs
+        body = kwargs["completion_body"]
         assert "summary restored from terminal_snapshot.result" in body
+        assert "summary restored from terminal_snapshot.result" in kwargs["completion_receipt"]
 
     def test_feishu_card_title_matches_task_heading(self, cm, monkeypatch):
         from src.video_transcript_api.utils.notifications import channel as channel_module
@@ -218,9 +220,11 @@ class TestPersistedCompletionRendering:
             router=router,
         ) is True
 
-        card = notifier.send_card.call_args.kwargs
-        assert card["title"] == card["content"].splitlines()[0]
-        assert card["title"] == f"✅ [#{task_id.removeprefix('task_')[:6]}] Card title"
+        assert notifier.send_card.call_count == 2
+        full_card, receipt_card = [call.kwargs for call in notifier.send_card.call_args_list]
+        expected_heading = f"✅ [#{task_id.removeprefix('task_')[:6]}] Card title"
+        assert full_card["title"] == full_card["content"].splitlines()[0] == expected_heading
+        assert receipt_card["title"] == receipt_card["content"].splitlines()[0] == expected_heading
 
 
 def _collect_warning_lines():
@@ -274,12 +278,17 @@ class TestSuccessWithoutPersistedResultDegrades:
         return task_id
 
     def _assert_degraded_message(self, cm, task_id, notifier):
-        assert notifier.send_card.call_count == 1
-        content = notifier.send_card.call_args.kwargs["content"]
-        first_line = content.splitlines()[0]
+        assert notifier.send_card.call_count == 2
+        full_content, receipt_content = [
+            call.kwargs["content"] for call in notifier.send_card.call_args_list
+        ]
+        first_line = full_content.splitlines()[0]
         assert re.match(r"^✅ \[#[0-9a-f]{6}\] .+", first_line), first_line
-        assert "⚠️ 总结未能载入，请在网页查看" in content, content
-        assert re.search(r"🔗 查看：\S+/view/\S+", content), content
+        assert "⚠️ 总结未能载入，请在网页查看" in full_content, full_content
+        receipt_line = receipt_content.splitlines()[0]
+        assert re.match(r"^✅ \[#[0-9a-f]{6}\] .+", receipt_line), receipt_line
+        assert "总结和校对：http" in receipt_content
+        assert "⚠️ 总结未能载入，请在网页查看" in receipt_content
         assert _outbox_state(cm, task_id)["notified_at"] is not None
         assert cm.is_terminal_notification_pending(task_id) is False
 
@@ -288,6 +297,21 @@ class TestSuccessWithoutPersistedResultDegrades:
     ):
         router, notifier = self._degraded_feishu_router(monkeypatch)
         task_id = self._make_pending_success_without_result(cm, router)
+
+        records, sink_id = _collect_warning_lines()
+        try:
+            assert deliver_pending_terminal_notifications(cm, router=router) == 1
+        finally:
+            loguru_logger.remove(sink_id)
+
+        self._assert_degraded_message(cm, task_id, notifier)
+        assert any("COMPLETION-BODY-MISSING task_id=" in line for line in records)
+
+    def test_dispatcher_degrades_on_non_dict_result(self, cm, monkeypatch):
+        router, notifier = self._degraded_feishu_router(monkeypatch)
+        task_id = self._make_pending_success_without_result(
+            cm, router, terminal_snapshot={"result": ["not", "a", "dict"]},
+        )
 
         records, sink_id = _collect_warning_lines()
         try:
@@ -507,7 +531,7 @@ class TestSuccessNotificationOrder:
         llm_ops._handle_llm_task(llm_task)
         return task_id
 
-    def test_success_sends_one_terminal_message_with_completion_body(self, cm, monkeypatch):
+    def test_success_sends_full_body_then_share_receipt(self, cm, monkeypatch):
         router = MagicMock()
         events = []
         router.notify_task_status.side_effect = lambda **kwargs: (
@@ -522,6 +546,9 @@ class TestSuccessNotificationOrder:
         assert kwargs["channel_name"] == "feishu"
         assert kwargs["webhooks"] == {"feishu": "hook"}
         assert kwargs["completion_body"] is not None
+        assert kwargs["completion_receipt"].startswith("✅ [#")
+        assert "总结和校对：" not in kwargs["completion_body"]
+        assert "总结和校对：" in kwargs["completion_receipt"]
 
     def test_calibrate_only_sends_terminal_status_with_view_link_only(self, cm, monkeypatch):
         router = _accepted_router()
@@ -530,6 +557,8 @@ class TestSuccessNotificationOrder:
         kwargs = router.notify_task_status.call_args.kwargs
         assert kwargs["completion_body"].startswith("🌐 网页查看：")
         assert "## 总结" not in kwargs["completion_body"]
+        assert "总结和校对：" in kwargs["completion_receipt"]
+        assert "仅完成校对" in kwargs["completion_receipt"]
 
 
 class TestRedCTranscriptionWorkerExceptCasGate:

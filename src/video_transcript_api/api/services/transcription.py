@@ -1005,11 +1005,13 @@ def process_transcription(
             def notify_task_status(
                 self, url, status, error=None, title=None, author=None,
                 transcript=None, view_url=None, task_id=None, completion_body=None,
+                completion_receipt=None,
             ):
                 return _router.notify_task_status(
                     url=url, status=status, error=error, title=title,
                     author=author, transcript=transcript, view_url=view_url,
                     task_id=task_id, completion_body=completion_body,
+                    completion_receipt=completion_receipt,
                     channel_name=notification_channel, webhooks=notification_webhooks,
                 )
 

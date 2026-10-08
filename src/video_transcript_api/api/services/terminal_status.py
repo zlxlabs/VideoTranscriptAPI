@@ -181,6 +181,7 @@ def deliver_terminal_notification(
         cache_manager.mark_terminal_notification_attempted(task_id)
         try:
             completion_body = _render_success_body(task, view_url, status)
+            completion_receipt = _render_success_receipt(task, view_url, status)
             result = _emit_status_notification(
                 display_url=display_url or "",
                 notify_status=notify_status,
@@ -194,6 +195,7 @@ def deliver_terminal_notification(
                 view_url=view_url,
                 task_id=task_id,
                 completion_body=completion_body,
+                completion_receipt=completion_receipt,
             )
             accepted = _notification_accepted(result)
         except Exception:
@@ -219,6 +221,7 @@ def _emit_status_notification(
     view_url: Optional[str] = None,
     task_id: str,
     completion_body: Optional[str] = None,
+    completion_receipt: Optional[str] = None,
 ) -> None:
     """Dispatch the status line through a bound notifier or the router."""
     if notify_via is not None:
@@ -231,6 +234,7 @@ def _emit_status_notification(
             view_url=view_url,
             task_id=task_id,
             completion_body=completion_body,
+            completion_receipt=completion_receipt,
         )
 
     sender = router if router is not None else get_notification_router()
@@ -245,7 +249,17 @@ def _emit_status_notification(
         view_url=view_url,
         task_id=task_id,
         completion_body=completion_body,
+        completion_receipt=completion_receipt,
     )
+
+
+def _render_success_receipt(task, view_url, status):
+    """Render a copyable success receipt from the persisted terminal snapshot."""
+    if status != TaskStatus.SUCCESS:
+        return None
+    from ...utils.notifications.completion_share import build_completion_share_receipt
+
+    return build_completion_share_receipt(task, view_url or "")
 
 
 def _render_success_body(task, view_url, status):
@@ -365,6 +379,7 @@ def deliver_pending_terminal_notifications(
             cache_manager.mark_terminal_notification_attempted(task_id)
             try:
                 completion_body = _render_success_body(task, view_url, row["status"])
+                completion_receipt = _render_success_receipt(task, view_url, row["status"])
                 result = router.notify_task_status(
                     url=task.get("url") or "",
                     status=notify_status,
@@ -375,6 +390,7 @@ def deliver_pending_terminal_notifications(
                     view_url=view_url,
                     task_id=task_id,
                     completion_body=completion_body,
+                    completion_receipt=completion_receipt,
                 )
                 accepted = _notification_accepted(result)
             except Exception:

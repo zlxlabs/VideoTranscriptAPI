@@ -191,7 +191,7 @@ def _assert_ordered_summary_receipt(delivery, task_id, original_url, view_token)
         assert "第二段必须完整发送但不能进入短回执。" not in receipt
         assert all("总结和校对：" not in content for content in contents[:-1])
         if source == "feishu":
-            assert channel_records[-1][1]["card"]["header"]["title"] == receipt.splitlines()[0]
+            assert channel_records[-1][1]["card"]["header"]["title"]["content"] == receipt.splitlines()[0]
 
 
 @pytest.mark.parametrize("entry_point", ["inline", "replay"])
@@ -216,7 +216,9 @@ def test_process_transcription_notify_via_reaches_both_real_channels(
 ):
     """Exercise the real local _TaskNotifier adapter; no notify_via mock."""
     from video_transcript_api.api.services import transcription as implementation
+    from video_transcript_api.utils import rendering as runtime_rendering
 
+    monkeypatch.setattr(runtime_rendering, "get_base_url", lambda: BASE_URL)
     original_url = "https://www.youtube.com/watch?v=budget"
     task_id = cm.create_task(url=original_url)["task_id"]
     cm.update_task_status(task_id, TaskStatus.PROCESSING)

@@ -211,6 +211,12 @@ def _assert_notice(harness, icon, *, summary=None, error=None):
     assert heading.startswith(icon)
     if summary is not None:
         assert summary in content
+        receipt = kwargs["completion_receipt"]
+        assert summary in receipt
+        assert "总结和校对：" in receipt
+        assert "原始地址：" in receipt
+    else:
+        assert kwargs.get("completion_receipt") is None
     if error is not None:
         assert error in content
 
@@ -218,7 +224,7 @@ def _assert_notice(harness, icon, *, summary=None, error=None):
 @pytest.mark.parametrize(
     "path", ["download", "platform-subtitle", "youtube-api-subtitle", "partial-cache", "full-cache"],
 )
-def test_success_paths_send_one_completion_with_summary(harness, monkeypatch, path):
+def test_success_paths_prepare_full_summary_and_share_receipt(harness, monkeypatch, path):
     cm, queue, _router, _media = harness
     task_id = _new_task(cm)
     result = _transcribe(harness, task_id, monkeypatch, path)

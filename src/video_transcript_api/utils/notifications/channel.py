@@ -317,14 +317,21 @@ class FeishuChannel:
         view_url: str = None,
         task_id: str = None,
         completion_body: str = None,
+        completion_receipt: str = None,
     ) -> bool:
-        """Send task status notification via Feishu card."""
+        """Submit full status content before an optional completion receipt."""
         content = build_task_status_content(
             url, status, error, title, author, transcript,
             view_url=view_url, task_id=task_id, completion_body=completion_body,
         )
         heading = content.splitlines()[0]
-        return self.send_rich(content, webhook=webhook, title=heading)
+        accepted = self.send_rich(content, webhook=webhook, title=heading)
+        if not accepted or completion_receipt is None:
+            return accepted
+        receipt_heading = completion_receipt.splitlines()[0]
+        return self.send_rich(
+            completion_receipt, webhook=webhook, title=receipt_heading,
+        )
 
 
 class WeComChannel:
@@ -370,16 +377,19 @@ class WeComChannel:
         view_url: str = None,
         task_id: str = None,
         completion_body: str = None,
+        completion_receipt: str = None,
     ) -> bool:
-        """Send task status notification via WeCom."""
+        """Submit full status content before an optional WeCom receipt."""
         if webhook and webhook != self._notifier.webhook:
             from .wechat import WechatNotifier
             notifier = WechatNotifier(webhook)
             return notifier.notify_task_status(
                 url, status, error, title, author, transcript,
                 view_url=view_url, task_id=task_id, completion_body=completion_body,
+                completion_receipt=completion_receipt,
             )
         return self._notifier.notify_task_status(
             url, status, error, title, author, transcript,
             view_url=view_url, task_id=task_id, completion_body=completion_body,
+            completion_receipt=completion_receipt,
         )
