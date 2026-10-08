@@ -172,6 +172,7 @@ def test_http_upload_acceptance_notifies_independent_public_capability(lifecycle
         try_register=lambda *_args: True,
         release=lambda *_args: None,
     )
+    reservations = []
     notifications = []
 
     class ReadyProcessor:
@@ -181,7 +182,9 @@ def test_http_upload_acceptance_notifies_independent_public_capability(lifecycle
     runtime = SimpleNamespace(
         started=True,
         upload_receiver_slots=threading.BoundedSemaphore(1),
-        reserve_upload_temp=lambda _task, size, budget, _dir: size <= budget,
+        reserve_upload_temp=lambda _task, size, budget, _dir: (
+            reservations.append(size) or size <= budget
+        ),
         release_upload_temp=lambda _task: None,
     )
     config = {
@@ -238,6 +241,7 @@ def test_http_upload_acceptance_notifies_independent_public_capability(lifecycle
         )
     assert response.status_code == 202, response.text
     receipt = response.json()
+    assert reservations == [len(raw), len(raw)]
     assert len(notifications) == 1
     assert notifications[0] == {
         "title": "Owner selected title",
@@ -250,6 +254,91 @@ def test_http_upload_acceptance_notifies_independent_public_capability(lifecycle
     assert "user-file.mp4" not in notifications[0]["view_token"]
     assert "/accepted-temp/" not in json.dumps(notifications[0])
     assert task_queue.get_nowait()["id"] == receipt["task_id"]
+
+
+def test_upload_notification_exception_keeps_acceptance_and_receipt(
+    lifecycle_client, monkeypatch
+):
+    _client, cache, _llm_queue, _user = lifecycle_client
+    temp_manager = TempFileManager(str(cache.cache_dir.parent / "notification-failure-temp"))
+    task_queue = asyncio.Queue(maxsize=2)
+    registry = SimpleNamespace(
+        try_register=lambda *_args: True,
+        release=lambda *_args: None,
+    )
+    runtime = SimpleNamespace(
+        started=True,
+        upload_receiver_slots=threading.BoundedSemaphore(1),
+        reserve_upload_temp=lambda _task, size, budget, _dir: size <= budget,
+        release_upload_temp=lambda _task: None,
+    )
+    config = {
+        "storage": {
+            "temp_dir": str(temp_manager.base_dir),
+            "upload_limits": {
+                "max_file_mib": 1,
+                "max_media_hours": 1,
+                "receive_concurrency": 1,
+                "upload_temp_budget_mib": 4,
+            },
+        }
+    }
+
+    class ReadyProcessor:
+        done = lambda _self: False
+        get_coro = staticmethod(lambda: transcription.process_task_queue)
+
+    def fail_notification(**_kwargs):
+        raise RuntimeError("notification formatter failure")
+
+    monkeypatch.setenv("VTA_UPLOADS_ENABLED", "true")
+    monkeypatch.setattr(uploads_routes, "get_cache_manager", lambda: cache)
+    monkeypatch.setattr(uploads_routes, "get_config", lambda: config)
+    monkeypatch.setattr(uploads_routes, "get_task_queue", lambda: task_queue)
+    monkeypatch.setattr(uploads_routes, "get_temp_manager", lambda: temp_manager)
+    monkeypatch.setattr(uploads_routes, "get_inflight_registry", lambda: registry)
+    monkeypatch.setattr(
+        uploads_routes,
+        "get_notification_router",
+        lambda: SimpleNamespace(send_view_link=fail_notification),
+    )
+
+    raw = b"accepted despite notification failure"
+    metadata = {
+        "filename": "notification.mp4",
+        "byte_size": len(raw),
+        "title": "Notification failure",
+        "source_url": None,
+        "retention": "never",
+        "processing_options": {},
+    }
+    key = f"{int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)}-{uuid.uuid4()}"
+    headers = {
+        "Authorization": "Bearer test-owner",
+        "Content-Type": "application/octet-stream",
+        "Idempotency-Key": key,
+        "X-Upload-Metadata": base64.urlsafe_b64encode(
+            json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode()
+        ).decode().rstrip("="),
+    }
+
+    app = FastAPI()
+    app.state.runtime = runtime
+    app.state.queue_processor = ReadyProcessor()
+    app.include_router(uploads_routes.router)
+    app.dependency_overrides[verify_token] = lambda: OWNER
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/api/uploads", content=raw, headers=headers)
+        duplicate = client.post("/api/uploads", content=b"wrong body", headers=headers)
+
+    assert response.status_code == 500
+    accepted = cache.get_local_upload_by_owner_key("alice", key)
+    assert accepted["state"] == "accepted"
+    assert accepted["root_task_id"]
+    assert response.json()["detail"] == "Internal Server Error"
+    assert duplicate.status_code == 200
+    assert duplicate.json()["task_id"] == accepted["root_task_id"]
+    assert task_queue.qsize() == 1
 
 
 def test_upload_reprocess_routes_use_owner_gate_and_never_persist_legacy_token(
@@ -520,6 +609,7 @@ def test_dispatcher_uses_real_transcriber_then_cleans_owned_media_before_llm(
     transcript_bytes = "真实 CapsWriter 输出文本".encode("utf-8")
     asr_calls = []
     asr_output_paths = []
+    reservations = []
     llm_observation = {}
     llm_started = threading.Event()
     llm_done = threading.Event()
@@ -527,7 +617,13 @@ def test_dispatcher_uses_real_transcriber_then_cleans_owned_media_before_llm(
     def capswriter_fixture(audio_path, *, media_duration=None):
         asr_calls.append((str(audio_path), Path(audio_path).read_bytes(), media_duration))
         transcript_path = Path(real_transcriber.capswriter_client.output_dir) / "capswriter-output.txt"
-        transcript_path.write_bytes(transcript_bytes)
+        from video_transcript_api.transcriber.capswriter_client import _atomic_write_text
+
+        _atomic_write_text(
+            transcript_path,
+            transcript_bytes.decode("utf-8"),
+            write_admission=real_transcriber.capswriter_client.write_admission,
+        )
         asr_output_paths.append(transcript_path)
         return True, [transcript_path]
 
@@ -595,7 +691,9 @@ def test_dispatcher_uses_real_transcriber_then_cleans_owned_media_before_llm(
             release=lambda *_args: None,
             register_internal=lambda *_args: None,
         ),
-        reserve_upload_temp=lambda _task, size, budget, _dir: size <= budget,
+        reserve_upload_temp=lambda _task, size, budget, _dir: (
+            reservations.append(size) or size <= budget
+        ),
         release_upload_temp=lambda _task: None,
         track_future=None,
         temp_manager=temp_manager,
@@ -660,6 +758,8 @@ def test_dispatcher_uses_real_transcriber_then_cleans_owned_media_before_llm(
     assert not llm_consumer.is_alive()
     assert len(asr_calls) == 1
     assert asr_calls[0] == (str(source_path), source_bytes, 60.0)
+    expected_temp_bytes = len(source_bytes) + len(transcript_bytes)
+    assert reservations == [expected_temp_bytes, expected_temp_bytes]
     assert llm_queue.empty()
     llm_task = llm_observation["task"]
     assert llm_task["task_id"] == task_id

@@ -203,7 +203,8 @@ def test_accepted_upload_link_reaches_final_http_payload_with_public_capability(
     delivery["router"].send_view_link(
         title=TITLE,
         view_token=view_token,
-        original_url="本地上传",
+        original_url="https://source.example.test/watch?id=9",
+        source_label="本地上传",
         task_id="task_abcdef0123456789",
         webhooks={"wechat": WECHAT_WEBHOOK, "feishu": FEISHU_WEBHOOK},
     )
@@ -215,6 +216,7 @@ def test_accepted_upload_link_reaches_final_http_payload_with_public_capability(
         assert TITLE in content
         assert expected_url in content
         assert "本地上传" in content
+        assert "https://source.example.test/watch" in content
         assert "fakepath" not in content
         assert "server-owned" not in content
 

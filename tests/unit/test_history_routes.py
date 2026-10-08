@@ -224,6 +224,32 @@ class TestHistoryEndpoint:
         assert "task-done" in task_ids
         assert "task-proc" in task_ids
 
+    def test_source_url_excludes_local_upload_snapshots_before_pagination(
+        self, history_client
+    ):
+        client, setup = history_client
+        al = setup["audit_logger"]
+        insert = setup["insert_task"]
+
+        _log(al, "url-task")
+        _log(al, "upload-task")
+        insert("url-task", "vt-url", platform="youtube", submitted_by="test-user")
+        insert(
+            "upload-task",
+            "vt-upload",
+            platform="local_upload",
+            submitted_by="test-user",
+        )
+
+        response = client.get(
+            "/api/audit/history?source=url&status=all&limit=1&offset=0"
+        )
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["total"] == 1
+        assert [item["task_id"] for item in data["items"]] == ["url-task"]
+
     def test_filter_by_webhook(self, history_client):
         """webhook filter should return only matching rows."""
         client, setup = history_client

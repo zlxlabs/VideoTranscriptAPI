@@ -336,6 +336,23 @@ def test_atomic_write_replaces_content_in_place(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["audio.txt"]
 
 
+def test_atomic_write_admission_runs_before_utf8_temp_creation(tmp_path):
+    target = tmp_path / "audio.txt"
+    target.write_text("previous", encoding="utf-8")
+    calls = []
+
+    def reject_write(path, content_bytes):
+        calls.append((path, content_bytes, sorted(item.name for item in tmp_path.iterdir())))
+        return False
+
+    with pytest.raises(RuntimeError, match="write admission rejected"):
+        _atomic_write_text(target, "你好", write_admission=reject_write)
+
+    assert calls == [(target, len("你好".encode("utf-8")), ["audio.txt"])]
+    assert target.read_text(encoding="utf-8") == "previous"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["audio.txt"]
+
+
 def test_atomic_write_temp_name_carries_pid_and_sequence(tmp_path):
     target = tmp_path / "audio.txt"
     _atomic_write_text(target, "a")
