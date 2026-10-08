@@ -502,20 +502,33 @@ def test_dispatcher_uses_real_transcriber_then_cleans_owned_media_before_llm(
         {"id": task_id, "url": "", "platform": "local_upload", "processing_options": options}
     )
 
+    from video_transcript_api.transcriber import capswriter_client as capswriter_module
     from video_transcript_api.transcriber import transcriber as transcriber_module
     from video_transcript_api.transcriber.transcriber import Transcriber
 
-    monkeypatch.setattr(transcriber_module, "get_workspace_dir", lambda: str(task_dir))
+    workspace_dir = tmp_path / "workspace"
+    monkeypatch.setattr(transcriber_module, "get_workspace_dir", lambda: str(workspace_dir))
+    monkeypatch.setattr(capswriter_module.Config, "load_from_project_config", lambda: None)
+    monkeypatch.setattr(
+        capswriter_module,
+        "load_config",
+        lambda: {"capswriter": {"server_url": "ws://127.0.0.1:6006"}},
+    )
     real_transcriber = Transcriber(
         config={"capswriter": {"server_url": "ws://127.0.0.1:6006", "max_retries": 0}}
     )
     transcript_bytes = "真实 CapsWriter 输出文本".encode("utf-8")
     asr_calls = []
+    asr_output_paths = []
+    llm_observation = {}
+    llm_started = threading.Event()
+    llm_done = threading.Event()
 
     def capswriter_fixture(audio_path, *, media_duration=None):
         asr_calls.append((str(audio_path), Path(audio_path).read_bytes(), media_duration))
-        transcript_path = task_dir / "capswriter-output.txt"
+        transcript_path = Path(real_transcriber.capswriter_client.output_dir) / "capswriter-output.txt"
         transcript_path.write_bytes(transcript_bytes)
+        asr_output_paths.append(transcript_path)
         return True, [transcript_path]
 
     real_transcriber.capswriter_client.transcribe_file = capswriter_fixture
@@ -556,6 +569,10 @@ def test_dispatcher_uses_real_transcriber_then_cleans_owned_media_before_llm(
 
     class NoModelWork:
         def process(self, **kwargs):
+            llm_observation["source_exists"] = source_path.exists()
+            llm_observation["task_dir_exists"] = task_dir.exists()
+            llm_observation["asr_outputs_exist"] = [path.exists() for path in asr_output_paths]
+            llm_started.set()
             assert kwargs["skip_calibration"] is True
             assert kwargs["skip_summary"] is True
             assert kwargs["skip_chapters"] is True
@@ -588,6 +605,28 @@ def test_dispatcher_uses_real_transcriber_then_cleans_owned_media_before_llm(
         logger=test_logger,
     )
 
+    from video_transcript_api.api.context import run_with_runtime
+
+    original_llm_put = llm_queue.put
+
+    def put_before_cleanup(item, *args, **kwargs):
+        original_llm_put(item, *args, **kwargs)
+        if not llm_started.wait(timeout=5):
+            raise TimeoutError("LLM consumer did not reach process before cleanup")
+
+    llm_queue.put = put_before_cleanup
+
+    def consume_llm_task():
+        task = llm_queue.get()
+        llm_observation["task"] = task
+        try:
+            run_with_runtime(runtime, llm_ops._handle_llm_task, task)
+        finally:
+            llm_done.set()
+
+    llm_consumer = threading.Thread(target=consume_llm_task, name="upload-llm-consumer")
+    llm_consumer.start()
+
     async def dispatch_and_wait():
         loop_state["loop"] = asyncio.get_running_loop()
         future_done = asyncio.Event()
@@ -614,21 +653,23 @@ def test_dispatcher_uses_real_transcriber_then_cleans_owned_media_before_llm(
 
     try:
         asyncio.run(dispatch_and_wait())
+        assert llm_done.wait(timeout=5)
+        llm_consumer.join(timeout=5)
     finally:
         executor.shutdown(wait=True)
+    assert not llm_consumer.is_alive()
     assert len(asr_calls) == 1
     assert asr_calls[0] == (str(source_path), source_bytes, 60.0)
-    assert not source_path.exists()
-    assert not task_dir.exists()
-    assert llm_queue.qsize() == 1
-    llm_task = llm_queue.get_nowait()
+    assert llm_queue.empty()
+    llm_task = llm_observation["task"]
     assert llm_task["task_id"] == task_id
     assert llm_task["media_id"] == upload["media_id"]
     assert llm_task["processing_options"] == options
-
-    from video_transcript_api.api.context import run_with_runtime
-
-    run_with_runtime(runtime, llm_ops._handle_llm_task, llm_task)
+    assert llm_observation["source_exists"] is False
+    assert llm_observation["task_dir_exists"] is False
+    assert llm_observation["asr_outputs_exist"] == [False]
+    assert not source_path.exists()
+    assert not task_dir.exists()
     root = cache.get_task_by_id(task_id)
     assert root["status"] == "success"
     assert root["view_token"] == ""

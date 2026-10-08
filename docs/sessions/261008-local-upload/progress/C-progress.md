@@ -18,3 +18,10 @@
 - **本段结论**：HTTP upload accepted 通知、终态补发到最终 HTTP JSON、三条 owner 重处理路由、全部 public body/summary 出口、历史过滤/期限原因、terminal clock write-once 与真实 worker/ASR 接线均由新增测试覆盖；当前分支待提交推送。
 - **关键决策与已否决方案**：不改已合并 B 的持久 admission/media-path 契约；public token 仅用于上传记录和临时投递副本，root/child task 与 audit alias 仍为空。
 - **下一步唯一动作**：提交并推送本卡分支的 C 实现，保持 PR draft，由 lead 接管 hosted CI / 独立审查。
+
+## 2026-10-09 · C-Fix1 并发清理顺序回归
+
+- **当前阶段**：implementing；只改既有生命周期集成测试，尚未在原 C 树执行运行时测试。
+- **本段结论**：按 `C-r1-verdict.md` 的真实 producer 脚本，将 dispatcher 生命周期测试改为消费者与 producer 并发，LLM coordinator `process` 入口观察源文件、task dir 与 ASR 输出是否存在；目标断言为进入 LLM 前均不存在。
+- **关键决策与已否决方案**：事件屏障停在真实 `llm_queue.put` 与真实消费者 `process` 入口，不增加生产锁/event/state；Transcriber workspace 与上传 task temp 分开，避免测试替生产环境掩盖 ASR 输出落点。
+- **下一步唯一动作**：提交这条回归测试后，在固定 H0 的新空 scratch 中确认 assertion 红，再修生产交接顺序。
