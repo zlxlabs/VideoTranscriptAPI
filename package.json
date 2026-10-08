@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "description": "JS unit tests (vitest) for the PWA front-end assets of VideoTranscriptAPI",
   "scripts": {
-    "test:web": "vitest run"
+    "test:web": "vitest run",
+    "test:browser": "npm --prefix e2e test"
   },
   "devDependencies": {
     "jsdom": "27.0.1",

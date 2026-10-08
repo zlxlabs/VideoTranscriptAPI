@@ -1,0 +1,13 @@
+{
+  "name": "video-transcript-api-browser-tests",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Blocking Chromium regression tests for the existing VideoTranscriptAPI web pages",
+  "scripts": {
+    "test": "node run-browser-tests.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.0",
+    "@types/node": "22.20.1"
+  }
+}
