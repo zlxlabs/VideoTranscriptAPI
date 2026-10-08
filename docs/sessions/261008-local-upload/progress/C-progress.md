@@ -25,3 +25,10 @@
 - **本段结论**：按 `C-r1-verdict.md` 的真实 producer 脚本，将 dispatcher 生命周期测试改为消费者与 producer 并发，LLM coordinator `process` 入口观察源文件、task dir 与 ASR 输出是否存在；目标断言为进入 LLM 前均不存在。
 - **关键决策与已否决方案**：事件屏障停在真实 `llm_queue.put` 与真实消费者 `process` 入口，不增加生产锁/event/state；Transcriber workspace 与上传 task temp 分开，避免测试替生产环境掩盖 ASR 输出落点。
 - **下一步唯一动作**：提交这条回归测试后，在固定 H0 的新空 scratch 中确认 assertion 红，再修生产交接顺序。
+
+## 2026-10-09 · 修正 LLM handoff 前清理
+
+- **当前阶段**：implementing；H0 scratch 中并发消费者已触发真实 `AssertionError`，生产顺序修复已写入但尚未运行 H1 scratch 绿验。
+- **本段结论**：CapsWriter 上传输出重定向到任务临时目录；共享 `_handoff_to_llm_stage` 仅对 `local_upload` 在 CALIBRATING 更新/队列发布前删除整个 source/audio/ASR task dir，保留既有 finally 幂等收尾。
+- **关键决策与已否决方案**：不在 queue put 后等待消费者、不引新锁/event/state/interface；失败清理会在任何 publish 前直接抛出，因此不能让 LLM 先消费再报错。
+- **下一步唯一动作**：将生产顺序修正单独 commit/push，再在新空 scratch 验证 H1 绿、H0 反向顺序变异红，并运行关联 Narrow-Verify。

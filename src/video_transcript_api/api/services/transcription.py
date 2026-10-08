@@ -838,6 +838,11 @@ def _handoff_to_llm_stage(
         None 表示交接成功；否则返回调用方应直接 return 的 failed 响应 dict
         （含 "status"/"message" 两个键）。
     """
+    if llm_payload.get("platform") == "local_upload":
+        # The LLM queue consumer can start as soon as put() publishes. Retire
+        # every upload-owned media/ASR artifact before exposing that payload.
+        get_temp_manager().clean_up_task(task_id)
+
     try:
         calibrating_written = cache_manager.update_task_status(
             task_id, TaskStatus.CALIBRATING, **calibrating_status_kwargs,
@@ -2480,6 +2485,14 @@ def process_transcription(
                             else:
                                 # 使用普通 CapsWriter 转录器
                                 transcriber = Transcriber()
+                                if local_media_path is not None:
+                                    local_task_dir = temp_manager.get_task_dir(task_id)
+                                    if local_task_dir is None:
+                                        raise RuntimeError(
+                                            f"local upload task temp directory missing: {task_id}"
+                                        )
+                                    transcriber.output_dir = str(local_task_dir)
+                                    transcriber.capswriter_client.output_dir = str(local_task_dir)
                                 # 使用时间戳作为临时输出基础名
                                 temp_output_base = datetime.datetime.now().strftime(
                                     "%y%m%d-%H%M%S"
