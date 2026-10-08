@@ -77,4 +77,3 @@ def test_write_admission_rejection_creates_no_tmp_file(tmp_path, monkeypatch):
         "upload-source.bin",
     ]
     assert (task_dir / "result.txt").read_bytes() == b"old"
-
