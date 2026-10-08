@@ -1,0 +1,43 @@
+name: Browser regression
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  chromium-regression:
+    runs-on: [self-hosted, ci]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+      - name: Install Python dependencies
+        run: uv sync --frozen
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            e2e/package-lock.json
+      - name: Install root Node dependencies
+        run: npm ci
+      - name: Install browser-test dependencies
+        working-directory: e2e
+        run: npm ci
+      - name: Install canonical Chromium browser
+        working-directory: e2e
+        run: npx playwright install chromium
+
+      - name: Run existing Vitest web contracts
+        run: npm run test:web
+      - name: Run blocking Chromium regression
+        run: npm run test:browser

@@ -22,7 +22,7 @@ jobs:
     with:
       tier: personal
       runner: self
-      has_ui: false
+      has_ui: true
       design_doc: ""
     secrets:
       FEISHU_CI_WEBHOOK: ${{ secrets.FEISHU_CI_WEBHOOK }}

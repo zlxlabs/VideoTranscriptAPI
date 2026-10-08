@@ -1,4 +1,6 @@
 过程中请使用中文和我沟通，但 console 里请优先使用英文。
+
+ui-evidence-exempt: 2026-10-08 PWRS_REPORTER_TOKEN 缺失且自建 runner 的 PWRS 访问与实际发布链路尚未验证 (#199)
 # Repository Guidelines
 
 ## Project Structure & Module Organization
