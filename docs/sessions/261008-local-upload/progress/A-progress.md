@@ -2,13 +2,13 @@
 
 ## 当前阶段
 
-implementing；安全基线代码与真实 SQLite/Resolver/cleanup 用例已落地，本地完整 gate 和窄测已通过，待红验、提交/推送与 PR 独立审查。HTTP接收、worker、网页、生产额度和恢复演练尚未实现，不能启用生产上传。
+implementing；store/Resolver/cleanup 代码已提交为 `132daf96`，窄测五连绿、指定回归与 `make test` 均通过；blank/source/cleanup 三项变异均由 AssertionError 命中且恢复后绿。待设计/六里程碑文件提交、push 与 PR 独立审查。HTTP接收、worker、网页、生产额度和恢复演练尚未实现，不能启用生产上传。
 
 ## 本段结论（≤3句）
 
 - A 使用现有 `CacheManager` 作为 store，新增 `local_uploads`；不增加 Service 转发层或账户/队列平台。
 - Resolver 通过独立 `upload_` token 读取，旧 NOT NULL token 列保持空字符串；禁用、撤销、到期拒读且不改变有效成果清理保护。
-- 最终窄测连续五次通过，指定 URL/history/cache/task/媒体锁清理回归与 `make test` 全量 gate 均通过；历史 `tests/cache/test_cache_cleanup.py` 会删除仓库 fixture，已改成 `tmp_path` 且消费 producer 返回的路径。
+- 最终窄测连续五次通过，指定 URL/history/cache/task/媒体锁清理回归与 `make test` 全量 gate 均通过；blank lookup、上传 source fallback、active-cache cleanup predicate 的移除各自触发普通 AssertionError，恢复后对应测试各绿。历史 `tests/cache/test_cache_cleanup.py` 会删除仓库 fixture，已改成 `tmp_path` 且消费 producer 返回的路径。
 
 ## 关键决策与否决方案
 
@@ -19,4 +19,4 @@ implementing；安全基线代码与真实 SQLite/Resolver/cleanup 用例已落�
 
 ## 下一步唯一动作
 
-提交已验证代码与本进度记录；提交后逐项移除 blank/source/cleanup predicate 做 AssertionError 红验，恢复实现后推送分支。
+提交设计合同、六个里程碑和更新后的本进度记录，再推送两笔提交并创建 draft PR。
