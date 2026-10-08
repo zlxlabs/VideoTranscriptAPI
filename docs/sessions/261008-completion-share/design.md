@@ -46,6 +46,7 @@ URL 继续使用 task 的 view token 与既有 `get_base_url`；不暴露本地�
 | `notify_via` 参数不截断 | `transcription.py::_TaskNotifier.notify_task_status` | 真实 `process_transcription → notify_via → Router → 双渠道 HTTP` E2E |
 | 即时与补发从 SQLite producer 快照字节重建相同两条消息 | `terminal_status.py` 两个投递入口 | 参数化 E2E + SQLite 字节断言 |
 | 首段来自 HTML 首个 `<p>` 可见文本 | `utils/notifications/completion_share.py` | `test_completion_share.py` |
+| `summary_status="disabled"` 时保留“总结未启用”、原始地址与 view URL，不复制总结正文 | `utils/notifications/completion_share.py` | `test_completion_share.py::test_disabled_summary_receipt_keeps_urls_without_summary_paragraph` |
 | 最终企业微信 markdown_v2 与飞书 interactive payload 顺序/正文完整 | 真实 Router/channel/依赖 FIFO | `test_notification_e2e_delivery.py` |
 | 3 条成功/2 条失败预算，不恢复进度推送 | 现有任务处理与终态通知入口 | `test_notification_budget.py` |
 | 缺失快照三态可见降级、不永久卡住 | 终态 renderer 与回执 renderer | `test_terminal_notification_outbox.py` |
