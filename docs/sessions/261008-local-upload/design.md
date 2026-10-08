@@ -39,7 +39,7 @@ Resolver 每次新请求都查独立上传记录并核对开关、撤销和截�
 ### 响应
 
 - `GET /api/uploads/capabilities`（Bearer）：`{enabled:boolean, default_retention:'30d', retention_options:['30d','never'], limits:{max_file_mib,max_media_hours,receive_concurrency,upload_temp_budget_mib}}`。四项额度必须正且有限、来自经过真实消费环境验证的配置；当前生产值未知/未测，缺一项即 `enabled=false`。不得用示例值声称已测。
-- `POST /api/uploads`：只有 root、accepted 状态及媒体映射在 SQLite 正式提交、且单次队列 handoff 成功后才返回 202；相同意图返回原回执（包括仍为 receiving 的阶段回执），变化 metadata 返回 409。receiving/failed/未知回执均不伪装为 accepted/202；队列或提交失败不能留下可用分享 capability。FastAPI 错误必须明确 status/detail。
+- `POST /api/uploads`：root、accepted 状态和媒体映射在 `BEGIN IMMEDIATE` 事务中写入，并在同一无 await SQL 临界步骤内仅调用一次有界队列 `put_nowait`；事务提交成功后才正式受理并返回 202。SQLite 与进程内队列并非共同事务：队列 put 成功而 SQLite commit 失败时允许留下stale队列项，但dispatcher必须先核验持久admission/root/media映射、在 PROCESSING/executor.submit/ASR 前拒绝它。QueueFull自然回滚未受理SQL，不依赖事后撤回已accepted root。相同意图返回原回执（包括仍为 receiving 的阶段回执），变化 metadata 返回 409；receiving/failed/未知回执均不伪装为 accepted/202。FastAPI 错误必须明确 status/detail。
 - `GET /api/uploads/by-idempotency-key/{key}`（Bearer/owner）：已存在 receipt 或 404；不能借查询创建任务。
 - receipt：`upload_id`、`state`（接收阶段，不复制 `task_status`）、`task_id`（未正式受理时 null）、`view_token`（正式受理后独立 `upload_` token，否则 null）、`retention`、`expires_at`（终态前与 `never` 为 null）、`share_active`、`error_code`（无错误为 null）。处理进度继续由既有 `GET /api/task/{task_id}` 承载。
 - `DELETE /api/uploads/{upload_id}/share`（Bearer/owner）：`{upload_id, share_active:false, revoked_at}`。重复关闭返回原截止，不得复活。关闭/到期后所有新 public read 和新 reprocess 拒绝；已经授权的传输和已接受处理可继续。
@@ -56,7 +56,7 @@ Resolver 每次新请求都查独立上传记录并核对开关、撤销和截�
 | 有效产物不被 cache/task/audit 清理删除；开关 off 不影响保护；关闭后恢复原清理；媒体仍临时 | `cleanup_old_cache/cleanup_task_status`；现有 `task_exists` 与 `TempFileManager` | local policy cleanup/controlled ordering tests、`tests/cache/test_task_status_cleanup.py`、`tests/cache/test_cache_cleanup.py` |
 | URL 读、去重、history 与 task 行为不改变 | 原有 URL routes/CacheManager | `tests/unit/test_view_token_resolver.py`、`test_api_routes.py`、`test_history_routes.py` 及 cache cleanup 套件 |
 
-当前真实开发验证入口：A 的窄测与 `make test`；B 真实 HTTP/SQLite/dispatcher 入口为 `uv run --frozen pytest -q tests/unit/test_upload_routes.py tests/unit/test_upload_dispatch.py tests/integration/test_upload_intake.py`。B 测试覆盖真实 Bearer、raw body 实际字节与服务端 SHA-256、容量/队列/SQL/断开、重复与丢回执、owner 撤销及 stale dispatcher。所有生产额度仍为 null/未知，`VTA_UPLOADS_ENABLED` 缺失时 intake 与 share 都关闭；部署/systemd 恢复及容量验证仍是上线前置条件，本卡不触及生产 unit、数据卷或服务。
+当前真实开发验证入口：A 的窄测与 `make test`；B 真实 HTTP/SQLite/dispatcher 入口为 `uv run --frozen pytest -q tests/unit/test_upload_routes.py tests/unit/test_upload_dispatch.py tests/integration/test_upload_intake.py`。B 测试覆盖真实 Bearer、raw body 实际字节与服务端 SHA-256、容量、queue put 与 SQL commit 双顺序、cleanup/accept 两顺序、真实 stale dispatcher、断开、重复/丢回执与撤销。所有生产额度仍为 null/未知，`VTA_UPLOADS_ENABLED` 缺失时 intake 与 share 都关闭；部署/systemd 恢复及容量验证仍是上线前置条件，本卡不触及生产 unit、数据卷或服务。
 
 ## 非目标与依赖
 

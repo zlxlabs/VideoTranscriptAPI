@@ -330,18 +330,17 @@ async def receive_upload(
                 media_path=str(media_path),
                 byte_size=observed_bytes,
                 sha256=digest.hexdigest(),
+                enqueue=task_queue.put_nowait,
             )
         except ValueError as exc:
             if "24-hour" in str(exc):
                 failure_code = "acceptance_window_expired"
                 raise _reject(410, failure_code, "上传幂等key已超过24小时受理截止时间") from exc
             raise
-        task_queue.put_nowait({"id": task_id, "url": metadata["source_url"] or "", "platform": "local_upload"})
         transferred = True
         return JSONResponse(_receipt(cache_manager.get_local_upload_by_id(accepted["upload_id"])), status_code=202)
     except asyncio.QueueFull as exc:
         failure_code = "queue_full"
-        cache_manager.cancel_local_upload_acceptance(upload_id, task_id, failure_code)
         raise _reject(503, failure_code, "转录队列已满，上传未正式受理") from exc
     finally:
         if body_started and not transferred:

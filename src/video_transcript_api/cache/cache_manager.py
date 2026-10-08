@@ -6,7 +6,7 @@ import datetime
 import uuid
 import secrets
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple, Union
+from typing import Optional, Dict, Any, List, Tuple, Union, Callable
 from contextlib import contextmanager
 import threading
 import time
@@ -753,23 +753,24 @@ class CacheManager:
                 resolved_path = media_path.resolve()
                 if not resolved_path.is_relative_to(base_dir):
                     raise ValueError("receiving upload media path escaped configured temp directory")
-                if media_path.exists():
-                    if not media_path.is_file():
-                        raise ValueError("receiving upload media mapping is not a file")
-                    media_path.unlink()
+                if media_path.exists() and not media_path.is_file():
+                    raise ValueError("receiving upload media mapping is not a file")
 
         deleted = 0
         for row in expired:
+            retired_path = None
             with self._get_cursor() as cursor:
                 cursor.execute("BEGIN IMMEDIATE")
                 cursor.execute(
-                    "SELECT state, idempotency_key FROM local_uploads WHERE upload_id = ?",
+                    """SELECT state, idempotency_key, media_path FROM local_uploads
+                       WHERE upload_id = ?""",
                     (row["upload_id"],),
                 )
                 current = cursor.fetchone()
                 if (
                     current is not None
                     and current["state"] == "receiving"
+                    and current["media_path"] == row["media_path"]
                     and now >= self._upload_key_timestamp(current["idempotency_key"])
                     + self._UPLOAD_IDEMPOTENCY_WINDOW
                 ):
@@ -777,7 +778,12 @@ class CacheManager:
                         "DELETE FROM local_uploads WHERE upload_id = ? AND state = 'receiving'",
                         (row["upload_id"],),
                     )
-                    deleted += cursor.rowcount
+                    row_deleted = cursor.rowcount
+                    deleted += row_deleted
+                    if row_deleted:
+                        retired_path = current["media_path"]
+            if retired_path:
+                Path(retired_path).unlink(missing_ok=True)
         return deleted
 
     def accept_local_upload(
@@ -794,9 +800,16 @@ class CacheManager:
         media_path: Optional[str] = None,
         byte_size: Optional[int] = None,
         sha256: Optional[str] = None,
+        enqueue: Optional[Callable[[Dict[str, Any]], None]] = None,
         now: Optional[datetime.datetime] = None,
     ) -> Dict[str, Any]:
-        """Atomically create the root and durable accepted admission for one upload."""
+        """Create root/admission and optionally hand off once before SQL commit.
+
+        The HTTP producer must supply its queue's synchronous ``put_nowait`` callback;
+        it executes inside this no-await SQL transaction. Existing store-level callers
+        may omit it when they are not producing an HTTP task. If commit fails after the
+        callback succeeds, the dispatcher rejects the stale item against durable state.
+        """
         if not media_id:
             raise ValueError("media_id must be non-empty")
         now = now or datetime.datetime.now(datetime.timezone.utc)
@@ -836,7 +849,14 @@ class CacheManager:
             if cursor.rowcount != 1:
                 raise RuntimeError("local upload acceptance lost its receiving state")
             cursor.execute("SELECT * FROM local_uploads WHERE upload_id = ?", (upload_id,))
-            return dict(cursor.fetchone())
+            record = dict(cursor.fetchone())
+            if enqueue is not None:
+                enqueue({
+                    "id": task_id,
+                    "url": source_url or "",
+                    "platform": "local_upload",
+                })
+            return record
 
     def get_admitted_local_upload_by_task(
         self, task_id: str
@@ -864,29 +884,6 @@ class CacheManager:
             )
             if cursor.rowcount != 1:
                 raise ValueError("local upload does not exist")
-
-    def cancel_local_upload_acceptance(
-        self, upload_id: str, task_id: str, error_code: str
-    ) -> None:
-        """Undo the durable draft if the one-shot in-memory queue handoff fails."""
-        with self._get_cursor() as cursor:
-            cursor.execute("BEGIN IMMEDIATE")
-            cursor.execute(
-                """UPDATE local_uploads
-                   SET state = 'receiving', root_task_id = NULL, media_id = NULL,
-                       view_token = NULL, expires_at = NULL, media_path = NULL,
-                       byte_size = NULL, sha256 = NULL, error_code = ?
-                   WHERE upload_id = ? AND root_task_id = ? AND state = 'accepted'""",
-                (error_code, upload_id, task_id),
-            )
-            if cursor.rowcount != 1:
-                raise RuntimeError("cannot cancel missing local upload acceptance")
-            cursor.execute(
-                "DELETE FROM task_status WHERE task_id = ? AND status = 'queued'",
-                (task_id,),
-            )
-            if cursor.rowcount != 1:
-                raise RuntimeError("cannot remove unqueued local upload root")
 
     def get_local_upload_by_id(self, upload_id: str) -> Optional[Dict[str, Any]]:
         with self._get_cursor() as cursor:

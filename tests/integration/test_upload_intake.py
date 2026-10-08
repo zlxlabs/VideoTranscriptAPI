@@ -461,10 +461,79 @@ def test_queue_full_has_no_success_receipt_or_dispatch(upload_client, monkeypatc
     assert runtime._upload_reserved_bytes == {}
 
 
-def test_sql_commit_failure_rolls_back_root_and_never_queues(upload_client, monkeypatch):
+def test_http_queue_handoff_precedes_durable_acceptance_commit(upload_client, monkeypatch):
+    client, runtime, _body_reads, _worker_calls, worker_results = upload_client
+    monkeypatch.setenv("VTA_UPLOADS_ENABLED", "true")
+    key = _key()
+    connection_path = runtime.config["storage"]["cache_dir"] + "/cache.db"
+    observed = []
+    original_put = runtime.task_queue.put_nowait
+
+    def observe_handoff(item):
+        connection = sqlite3.connect(connection_path, timeout=1)
+        connection.row_factory = sqlite3.Row
+        upload = connection.execute(
+            "SELECT state, root_task_id, view_token FROM local_uploads WHERE owner_user_id=? AND idempotency_key=?",
+            ("alice", key),
+        ).fetchone()
+        root = connection.execute(
+            "SELECT status FROM task_status WHERE task_id=?", (item["id"],)
+        ).fetchone()
+        connection.close()
+        observed.append((dict(upload) if upload else None, dict(root) if root else None, dict(item)))
+        original_put(item)
+
+    monkeypatch.setattr(runtime.task_queue, "put_nowait", observe_handoff)
+    response = _post(client, key, PRODUCER_METADATA, RAW_PRODUCER_BYTES, "queue-order")
+
+    assert response.status_code == 202
+    assert observed == [(
+        {"state": "receiving", "root_task_id": None, "view_token": None},
+        None,
+        {
+            "id": response.json()["task_id"],
+            "url": PRODUCER_METADATA["source_url"],
+            "platform": "local_upload",
+        },
+    )]
+    assert runtime.cache_manager.get_local_upload_by_owner_key("alice", key)["state"] == "accepted"
+    assert worker_results.get(timeout=2)["task_id"] == response.json()["task_id"]
+    _wait_for_worker_release(runtime)
+
+
+def test_sql_commit_failure_leaves_stale_queue_item_for_dispatcher_to_drop(upload_client, monkeypatch):
     client, runtime, body_reads, worker_calls, _ = upload_client
     monkeypatch.setenv("VTA_UPLOADS_ENABLED", "true")
     cache = runtime.cache_manager
+    queued_payloads = []
+    queue_observations = []
+    original_put = runtime.task_queue.put_nowait
+    database = runtime.config["storage"]["cache_dir"] + "/cache.db"
+
+    def observe_real_queue_payload(item):
+        connection = sqlite3.connect(database, timeout=1)
+        connection.row_factory = sqlite3.Row
+        upload = connection.execute(
+            "SELECT state, root_task_id FROM local_uploads WHERE owner_user_id=? AND idempotency_key=?",
+            ("alice", key),
+        ).fetchone()
+        root = connection.execute(
+            "SELECT status FROM task_status WHERE task_id=?", (item["id"],)
+        ).fetchone()
+        connection.close()
+        queue_observations.append((dict(upload) if upload else None, dict(root) if root else None))
+        queued_payloads.append(dict(item))
+        original_put(item)
+
+    monkeypatch.setattr(runtime.task_queue, "put_nowait", observe_real_queue_payload)
+    submitted = []
+    original_submit = runtime.executor.submit
+
+    def observe_submit(*args, **kwargs):
+        submitted.append((args, kwargs))
+        return original_submit(*args, **kwargs)
+
+    monkeypatch.setattr(runtime.executor, "submit", observe_submit)
 
     @contextmanager
     def fail_root_commit():
@@ -498,7 +567,14 @@ def test_sql_commit_failure_rolls_back_root_and_never_queues(upload_client, monk
     response = _post(client, key, PRODUCER_METADATA, RAW_PRODUCER_BYTES, "commit-failure")
     assert response.status_code == 500
     assert body_reads.get("commit-failure", 0) > 0
+    assert len(queued_payloads) == 1, "producer must publish one item before the failed commit"
+    payload = queued_payloads[0]
+    assert payload["url"] == PRODUCER_METADATA["source_url"]
+    assert payload["platform"] == "local_upload"
+    assert queue_observations == [({"state": "receiving", "root_task_id": None}, None)]
+    client.portal.call(runtime.task_queue.join)
     assert runtime.task_queue.qsize() == 0
+    assert submitted == [], "dispatcher must drop uncommitted queue payload before executor.submit"
     record = cache.get_local_upload_by_owner_key("alice", key)
     assert record["state"] == "receiving"
     assert record["root_task_id"] is None
@@ -617,3 +693,109 @@ def test_lost_202_receipt_retry_queries_original_without_requeue(upload_client, 
     assert body_reads.get("receipt-retry", 0) == 0
     assert len(worker_calls) == 1
     assert runtime.task_queue.qsize() == 0
+
+
+def _expired_receiving_fixture(tmp_path):
+    epoch_ms = int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)
+    created = datetime.datetime.fromtimestamp(epoch_ms / 1000, datetime.timezone.utc)
+    key = f"{epoch_ms}-{uuid.uuid4()}"
+    manager = CacheManager(str(tmp_path / "cache"))
+    temp_dir = tmp_path / "temp"
+    source = temp_dir / "task_probe" / "upload-source.bin"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"real accepted source bytes")
+    intent = manager.register_local_upload(
+        owner_user_id="alice",
+        idempotency_key=key,
+        retention="30d",
+        intent_metadata={"filename": "clip.mp4"},
+        now=created + datetime.timedelta(seconds=1),
+    )
+    manager.set_local_upload_receiving_path(intent["upload_id"], str(source))
+    return manager, temp_dir, source, intent, key, created
+
+
+def _accept_probe_intent(manager, intent, source, created):
+    return manager.accept_local_upload(
+        intent["upload_id"],
+        media_id="upload_probe_media",
+        task_id="task_probe_root",
+        filename="clip.mp4",
+        request_metadata={"filename": "clip.mp4"},
+        media_path=str(source),
+        byte_size=26,
+        sha256="a" * 64,
+        now=created + datetime.timedelta(hours=24, seconds=-1),
+    )
+
+
+def test_receiving_cleanup_rechecks_after_accept_wins_and_preserves_owned_file(
+    tmp_path, monkeypatch
+):
+    manager, temp_dir, source, intent, key, created = _expired_receiving_fixture(tmp_path)
+    candidate_selected = threading.Event()
+    allow_recheck = threading.Event()
+    parse_timestamp = CacheManager._upload_key_timestamp
+
+    def pause_cleanup_after_candidate(candidate_key):
+        if candidate_key == key and threading.current_thread() is not threading.main_thread():
+            candidate_selected.set()
+            if not allow_recheck.wait(timeout=5):
+                raise TimeoutError("test did not release cleanup candidate")
+        return parse_timestamp(candidate_key)
+
+    monkeypatch.setattr(CacheManager, "_upload_key_timestamp", staticmethod(pause_cleanup_after_candidate))
+    cleanup_now = created + datetime.timedelta(hours=24, seconds=2)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        cleanup = executor.submit(
+            manager.cleanup_expired_local_upload_receiving, str(temp_dir), now=cleanup_now
+        )
+        assert candidate_selected.wait(timeout=5), "cleanup did not select expired receiving row"
+        accepted = _accept_probe_intent(manager, intent, source, created)
+        allow_recheck.set()
+        cleanup_count = cleanup.result(timeout=5)
+
+    durable = manager.get_admitted_local_upload_by_task(accepted["root_task_id"])
+    assert cleanup_count == 0
+    assert durable is not None and durable["state"] == "accepted"
+    assert source.exists(), "an accepted media mapping must retain its owned source file"
+    assert source.read_bytes() == b"real accepted source bytes"
+
+
+def test_receiving_cleanup_retires_before_unlink_and_accept_loses(tmp_path, monkeypatch):
+    manager, temp_dir, source, intent, key, created = _expired_receiving_fixture(tmp_path)
+    unlink_started = threading.Event()
+    allow_unlink = threading.Event()
+    original_unlink = Path.unlink
+
+    def pause_retired_path_unlink(path, *args, **kwargs):
+        if path == source and threading.current_thread() is not threading.main_thread():
+            unlink_started.set()
+            if not allow_unlink.wait(timeout=5):
+                raise TimeoutError("test did not release retired file unlink")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", pause_retired_path_unlink)
+    cleanup_now = created + datetime.timedelta(hours=24, seconds=2)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        cleanup = executor.submit(
+            manager.cleanup_expired_local_upload_receiving, str(temp_dir), now=cleanup_now
+        )
+        assert unlink_started.wait(timeout=5), "cleanup did not reach retired source unlink"
+        retired_receipt = manager.get_local_upload_by_id(intent["upload_id"])
+        accepted = None
+        accept_error = None
+        try:
+            accepted = _accept_probe_intent(manager, intent, source, created)
+        except ValueError as exc:
+            accept_error = str(exc)
+        allow_unlink.set()
+        cleanup_count = cleanup.result(timeout=5)
+
+    assert retired_receipt is None, "unlink is authorized only after SQLite retired the receiving row"
+    assert accepted is None and accept_error is not None
+    assert cleanup_count == 1
+    assert not source.exists()
+    with manager._get_cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM task_status")
+        assert cursor.fetchone()[0] == 0
