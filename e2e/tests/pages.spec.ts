@@ -26,11 +26,14 @@ function observeBrowser(page: Page): void {
 test.beforeEach(async ({ page, request }) => {
   if (!baseURL) throw new Error('VTA_BROWSER_PORT must be set by the browser test runner');
   observeBrowser(page);
+  page.context().on('page', observeBrowser);
   await resetBackend(request, baseURL);
 });
 
 test.afterEach(async ({ page }) => {
-  expect(browserErrors.get(page) ?? []).toEqual([]);
+  for (const observedPage of page.context().pages()) {
+    expect(browserErrors.get(observedPage) ?? []).toEqual([]);
+  }
 });
 
 test('submission page sends selected URL and shows the accepted task', async ({ page }) => {
@@ -78,6 +81,14 @@ test('public reading page displays transcript and opens a working text export', 
   const rawExport = page.getByTitle('导出校对文本（纯文本）');
   await expect(rawExport).toHaveAttribute('href', '/view/browser-fixture-view?raw=calibrated');
   await rawExport.click();
+  await expect(page.locator('body')).toContainText('隔离浏览器夹具中的正文，验证公开阅读与导出。');
+
+  await page.goto('/view/browser-fixture-view');
+  await page.locator('.export-links-details summary').click();
+  const htmlExport = page.getByTitle('导出校对文本（HTML 页面）');
+  await expect(htmlExport).toHaveAttribute('href', '/view/browser-fixture-view?page=calibrated');
+  await htmlExport.click();
+  await expect(page.getByRole('heading', { name: '浏览器回归示例' })).toBeVisible();
   await expect(page.locator('body')).toContainText('隔离浏览器夹具中的正文，验证公开阅读与导出。');
 });
 

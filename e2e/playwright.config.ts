@@ -7,6 +7,7 @@ const baseURL = `http://127.0.0.1:${port}`;
 export default defineConfig({
   testDir: './tests',
   testMatch: '**/*.spec.ts',
+  outputDir: './node_modules/.cache/playwright-test-results',
   fullyParallel: false,
   forbidOnly: true,
   retries: 0,
