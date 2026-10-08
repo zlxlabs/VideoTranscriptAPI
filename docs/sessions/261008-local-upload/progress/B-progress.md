@@ -51,7 +51,7 @@ implementing；完成第一份独立可运行单元：bounded metadata decoder �
 
 ### 当前阶段
 
-implementing；固定H0上固化四个真实AssertionError红测，完成最小顺序修复。H1 narrow+A/URL回归已绿，本段准备作为H1小提交推送；全量make test未跑。
+implementing；H1最小顺序修复已提交并push至原PR分支，随后完成窄测、A/URL回归及全量make test。PR保持draft，CI/独立审查由lead托管。
 
 ### 本段结论（≤3句）
 
@@ -65,8 +65,10 @@ implementing；固定H0上固化四个真实AssertionError红测，完成最小�
 - 真实测试位于`tests/integration/test_upload_intake.py`：队列put hook用独立SQLite连接观察未提交receiving/root-none和实际payload；commit fault时实际queue收到payload，真实dispatcher drain后没有PROCESSING/executor submit/ASR；cleanup/accept两顺序均使用真实临时SQLite与文件字节，Pause仅位于测试fixture。
 - H0红验命令：`uv run --frozen pytest -q tests/integration/test_upload_intake.py::test_http_queue_handoff_precedes_durable_acceptance_commit tests/integration/test_upload_intake.py::test_sql_commit_failure_leaves_stale_queue_item_for_dispatcher_to_drop tests/integration/test_upload_intake.py::test_receiving_cleanup_rechecks_after_accept_wins_and_preserves_owned_file tests/integration/test_upload_intake.py::test_receiving_cleanup_retires_before_unlink_and_accept_loses`；H0四项均以AssertionError显示期望receiving/null或文件存在、实际accepted/root或文件已删；H1同四项4 passed。
 - H1窄测`uv run --frozen pytest -q tests/unit/test_upload_routes.py tests/unit/test_upload_dispatch.py tests/integration/test_upload_intake.py`：35个测试点通过；另含A store/Resolver、URL API/history、runtime及maintenance的回归命令退出0。
-- 当前增量242行左右，仅原scope内7个文件；已先保存H0红验日志与受控两个文件顺序测试，接下来按显式路径小提交并push。
+- H1代码提交`5b1f3526fa958deffd704ba43cbc13be47db95df`已push；四个H0红测在H1已绿，H1末尾窄测+A/URL回归退出0。
+- 按红验安全要求，在代码已提交后分别临时把enqueue移到SQL commit之后、把unlink移到SQLite retirement之前；对应producer/consumer断言各自以AssertionError变红，恢复单个顺序后各自绿。变异输出记录在`/tmp/vta-upload-H1-r3-mutation.log`及`/tmp/vta-upload-H1-cleanup-mutation.log`。
+- H1 `make test` 与 `uv run --frozen pytest -q -rs tests` 均exit0；3个skip均因`tests/unit/test_capswriter_samples_total_contract.py`缺少真实preflight fixture。完整结果记录在`/tmp/vta-upload-H1-dlg-20261008-151543-50422d-*`。
 
 ### 下一步唯一动作
 
-提交并push H1增量；提交后针对R3 handoff与cleanup退休两个predicate做最小负向断言验证并恢复，再跑有界完整make test、核对clean/远端PR head。不得ready/merge。
+push本进度证据并写终态报告；PR保持draft交lead做H0..H1增量review和CI，不ready/merge。

@@ -50,6 +50,7 @@ Resolver 每次新请求都查独立上传记录并核对开关、撤销和截�
 | 不变量 | 实现入口 | 锁定测试 |
 |---|---|---|
 | owner/key 唯一、窗口/时钟偏差、metadata conflict、旧 receipt 查询与过窗拒绝 | `cache_manager.py::register_local_upload` | `tests/unit/test_local_upload_policy.py`（临时真实 SQLite，含并发登记） |
+| root/accepted+一次put_nowait提交顺序、commit失败stale item拒绝、过期receiving retirement与源文件所有权的两个真实顺序 | `cache_manager.py::accept_local_upload/cleanup_expired_local_upload_receiving`、`api/services/transcription.py::process_task_queue` | `tests/integration/test_upload_intake.py::test_http_queue_handoff_precedes_durable_acceptance_commit`、`test_sql_commit_failure_leaves_stale_queue_item_for_dispatcher_to_drop`、`test_receiving_cleanup_rechecks_after_accept_wins_and_preserves_owned_file`、`test_receiving_cleanup_retires_before_unlink_and_accept_loses` |
 | root `view_token=''`、独立 `upload_` token；blank 与上传 token 不走旧别名 | `cache_manager.py::accept_local_upload/get_task_by_view_token`、`audit.py::check_view_token_ownership` | `test_upload_task_uses_blank_legacy_column_and_separate_upload_token`、Resolver 与 ownership 用例 |
 | success/failed 首终态固定 30 天；never 不到期；撤销 write-once | `cache_manager.py::update_task_status/revoke_local_upload` | `test_root_terminal_sets_fixed_30_day_expiry_for_success_and_failure`、`test_never_expiry_and_revocation_are_write_once` |
 | Resolver 对 active 30d/never 读真实缓存；missing/off/revoked/expired 不读；`UPLOAD_DISABLED` 可 grep | `view_token_resolver.py::_local_upload_task_info` | `test_resolver_reads_active_upload_and_denies_disabled_revoked_or_expired`、`test_upload_progress_token_resolves_before_30_day_terminal_clock` |
