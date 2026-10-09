@@ -9,8 +9,9 @@ services:
     container_name: video-transcript-api
     environment:
       - TZ=Asia/Shanghai
-    # 可观测 DSN 只经 env_file 注入 os.environ（不挂载、不进 git）。
-    # 缺 ops.env 也能起（SDK fail-open）。DSN 绝不写进 config.jsonc。
+    # 部署环境值只经 env_file 注入 os.environ，不随 config/data 卷恢复。
+    # VTA_UPLOADS_ENABLED 缺失、空值或非精确小写 true 时保持关闭；不得为诊断而开启。
+    # 可观测 DSN 也只经 env_file 注入；缺 ops.env 仍可启动，DSN 绝不写入 config.jsonc。
     env_file:
       - path: ops.env
         required: false

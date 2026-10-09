@@ -77,13 +77,22 @@ def inspect_sample(path: Path, ffprobe: str = "ffprobe") -> dict[str, float | in
         for item in streams
     ):
         raise CheckFailure("sample_has_no_media_stream")
-    try:
-        duration_seconds = float(duration)
-    except (TypeError, ValueError) as exc:
-        raise CheckFailure("sample_duration_unknown") from exc
+    duration_seconds = float(duration)
     if not math.isfinite(duration_seconds) or duration_seconds <= 0:
         raise CheckFailure("sample_duration_invalid")
     return {"bytes": path.stat().st_size, "duration_seconds": duration_seconds}
+
+
+def sample_limit_status(sample: dict[str, float | int], config: dict[str, Any]) -> str:
+    valid, _state = valid_upload_limits(config)
+    if not valid:
+        return "unknown_limits"
+    limits = config["storage"]["upload_limits"]
+    if sample["bytes"] > limits["max_file_mib"] * 1024 * 1024:
+        return "exceeds_file_limit"
+    if sample["duration_seconds"] > limits["max_media_hours"] * 3600:
+        return "exceeds_duration_limit"
+    return "within_declared_limits"
 
 
 def compatibility_status(repo: Path, source_sha: str | None) -> str:
@@ -137,19 +146,35 @@ def run_check(args: argparse.Namespace) -> int:
     config = load_and_validate_config(args.config)
     limits_ok, limits_state = valid_upload_limits(config)
     print(f"upload_limits={limits_state}")
+    limits = config.get("storage", {}).get("upload_limits")
+    if limits_ok:
+        print(
+            "configured_limits="
+            f"max_file_mib:{limits['max_file_mib']}_"
+            f"max_media_hours:{limits['max_media_hours']}_"
+            f"receive_concurrency:{limits['receive_concurrency']}_"
+            f"upload_temp_budget_mib:{limits['upload_temp_budget_mib']}"
+        )
 
     data_path = Path(args.data_dir)
     if not data_path.is_dir():
         raise CheckFailure("data_dir_not_directory")
     disk = shutil.disk_usage(data_path)
     print(f"data_disk_free_bytes={disk.free}")
+    reserve_state = "unknown_limits"
+    if limits_ok:
+        budget_bytes = int(limits["upload_temp_budget_mib"] * 1024 * 1024)
+        safety_margin = max(1024 * 1024, budget_bytes // 20)
+        reserve_state = "sufficient" if disk.free >= budget_bytes + safety_margin else "insufficient"
+    print(f"configured_temp_reserve={reserve_state}")
 
     sample_state = "not_supplied"
     if args.sample:
         sample = inspect_sample(Path(args.sample), args.ffprobe)
         print(f"sample_bytes={sample['bytes']}")
         print(f"sample_duration_seconds={sample['duration_seconds']:.3f}")
-        sample_state = "measured"
+        sample_state = sample_limit_status(sample, config)
+        print(f"sample_limit_check={sample_state}")
 
     compose_path = Path(args.compose)
     env_source = deployment_env_source(compose_path)
@@ -170,6 +195,10 @@ def run_check(args: argparse.Namespace) -> int:
     ]
     if not limits_ok:
         blocked_reasons.append("four limits are not positive finite values")
+    if reserve_state == "insufficient":
+        blocked_reasons.append("configured upload temporary reserve exceeds available space")
+    if sample_state.startswith("exceeds_"):
+        blocked_reasons.append("sample exceeds its configured upload limit")
     if sample_state == "not_supplied":
         blocked_reasons.append("no local media sample was measured")
     print("UPLOAD_ENABLE_BLOCKED: " + "; ".join(blocked_reasons))

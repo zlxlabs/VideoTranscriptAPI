@@ -7,6 +7,8 @@ services:
     container_name: video-transcript-api
     environment:
       - TZ=Asia/Shanghai
+    # .env 是部署域环境源，位于 data/config 卷外；恢复数据库不得覆盖此处的关闭开关。
+    # 缺失 VTA_UPLOADS_ENABLED 或值不是精确小写 true 时保持关闭。
     env_file:
       - .env
     ports:
