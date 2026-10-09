@@ -331,6 +331,7 @@ async def get_history(
                     "request_time": row.get("root_completed_at") or row.get("root_created_at"),
                     "api_key_masked": api_key_masked,
                     "view_token": None,
+                    "upload_view_token": row.get("view_token") if active else None,
                     "title": row.get("root_title") or row.get("filename") or "本地上传",
                     "author": None,
                     "platform": "local_upload",
