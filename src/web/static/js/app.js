@@ -27,6 +27,7 @@ let webhookSaveTimer = null;
 let currentMode = 'url';
 let selectedUploadFile = null;
 let uploadCapabilities = null;
+let uploadCapabilitiesIdentity = null;
 let currentUploadIntent = null;
 let isUploading = false;
 
@@ -100,6 +101,7 @@ function handleHomepageAuthStorageEvent(event) {
     ].includes(event && event.key)) return;
     const tokenInput = document.getElementById('bearer-token');
     if (tokenInput) tokenInput.value = authStorage.readAuthToken() || '';
+    checkUploadCapabilities();
     UIManager.updateSubmitButton();
 }
 
@@ -408,7 +410,7 @@ class APIManager {
         });
 
         if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
+            const errorData = await response.json();
             throw new Error(errorData.message || errorData.detail || `HTTP ${response.status}`);
         }
 
@@ -441,7 +443,7 @@ class APIManager {
         });
 
         if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
+            const errorData = await response.json();
             const error = new Error(errorData.message || errorData.detail || `HTTP ${response.status}`);
             error.status = response.status;
             error.data = errorData;
@@ -462,7 +464,7 @@ class APIManager {
         });
 
         if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
+            const errorData = await response.json();
             const error = new Error(errorData.message || errorData.detail || `HTTP ${response.status}`);
             error.status = response.status;
             throw error;
@@ -488,7 +490,7 @@ class APIManager {
         });
 
         if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
+            const errorData = await response.json();
             const error = new Error(errorData.message || errorData.detail || `HTTP ${response.status}`);
             error.status = response.status;
             throw error;
@@ -844,12 +846,18 @@ class UIManager {
 
         if (currentMode === 'upload') {
             let fileValid = Boolean(selectedUploadFile);
+            const uploadEnabled = Boolean(
+                uploadCapabilities &&
+                uploadCapabilities.enabled === true &&
+                uploadCapabilities.limits &&
+                typeof uploadCapabilities.limits.max_file_mib === 'number' &&
+                uploadCapabilities.limits.max_file_mib > 0
+            );
             if (selectedUploadFile && uploadCapabilities && uploadCapabilities.limits && uploadCapabilities.limits.max_file_mib) {
                 if (selectedUploadFile.size > uploadCapabilities.limits.max_file_mib * 1024 * 1024) {
                     fileValid = false;
                 }
             }
-            const uploadEnabled = uploadCapabilities ? (uploadCapabilities.enabled !== false) : true;
             const canSubmit = fileValid && token && !isUploading && uploadEnabled;
 
             btn.disabled = !canSubmit;
@@ -1227,15 +1235,17 @@ function buildUploadMetadata(file, options = {}) {
  */
 function encodeUploadMetadata(metadata) {
     const jsonStr = JSON.stringify(metadata);
+    const EncoderClass = typeof TextEncoder !== 'undefined'
+        ? TextEncoder
+        : (typeof globalThis !== 'undefined' && globalThis.TextEncoder ? globalThis.TextEncoder : null);
+    if (!EncoderClass) {
+        throw new Error('TextEncoder is not supported in this environment');
+    }
+    const bytes = new EncoderClass().encode(jsonStr);
     let binary = '';
-    if (typeof TextEncoder !== 'undefined') {
-        const bytes = new TextEncoder().encode(jsonStr);
-        const len = bytes.byteLength;
-        for (let i = 0; i < len; i++) {
-            binary += String.fromCharCode(bytes[i]);
-        }
-    } else {
-        binary = unescape(encodeURIComponent(jsonStr));
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(bytes[i]);
     }
     return btoa(binary)
         .replace(/\+/g, '-')
@@ -1248,15 +1258,13 @@ function encodeUploadMetadata(metadata) {
  */
 function generateUploadIdempotencyKey() {
     const epoch = Date.now();
-    let uuid;
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-        uuid = crypto.randomUUID();
-    } else {
-        uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-            const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
-            return v.toString(16);
-        });
+    const cryptoObj = typeof crypto !== 'undefined'
+        ? crypto
+        : (typeof globalThis !== 'undefined' && globalThis.crypto ? globalThis.crypto : null);
+    if (!cryptoObj || typeof cryptoObj.randomUUID !== 'function') {
+        throw new Error('crypto.randomUUID is not supported in this environment');
     }
+    const uuid = cryptoObj.randomUUID();
     return `${epoch}-${uuid}`;
 }
 
@@ -1395,30 +1403,66 @@ function switchMode(mode) {
 async function checkUploadCapabilities() {
     if (typeof document === 'undefined' || typeof fetch === 'undefined') return;
     if (typeof window !== 'undefined' && window.location && (!window.location.protocol || !window.location.protocol.startsWith('http'))) return;
+
     const authStorage = requireAuthStorage();
     const token = authStorage && authStorage.readAuthToken();
-    if (!token) return;
     const banner = document.getElementById('upload-disabled-banner');
     const hint = document.getElementById('upload-limits-hint');
+    if (!token) {
+        uploadCapabilities = null;
+        uploadCapabilitiesIdentity = null;
+        if (banner) banner.hidden = true;
+        if (hint) hint.textContent = '';
+        if (typeof UIManager !== 'undefined') UIManager.updateSubmitButton();
+        return;
+    }
+
+    if (uploadCapabilitiesIdentity !== token) {
+        uploadCapabilities = null;
+        uploadCapabilitiesIdentity = null;
+        if (typeof UIManager !== 'undefined') {
+            UIManager.updateSubmitButton();
+        }
+    }
+
+    const requestIdentity = token;
     try {
         const caps = await APIManager.getUploadCapabilities();
         if (typeof document === 'undefined') return;
-        uploadCapabilities = caps;
-        const banner = document.getElementById('upload-disabled-banner');
-        const hint = document.getElementById('upload-limits-hint');
-        if (caps && caps.enabled === false) {
-            if (banner) banner.hidden = false;
-        } else {
+        if (authStorage.readAuthToken() !== requestIdentity) return;
+
+        const isFiniteLimit = caps && caps.limits && typeof caps.limits.max_file_mib === 'number' && caps.limits.max_file_mib > 0;
+        if (caps && caps.enabled === true && isFiniteLimit) {
+            uploadCapabilities = caps;
+            uploadCapabilitiesIdentity = requestIdentity;
             if (banner) banner.hidden = true;
-            if (hint && caps && caps.limits) {
+            if (hint) {
                 hint.textContent = `最大支持 ${caps.limits.max_file_mib} MiB，最多 ${caps.limits.max_media_hours} 小时`;
+            }
+        } else {
+            uploadCapabilities = { enabled: false };
+            uploadCapabilitiesIdentity = requestIdentity;
+            if (banner) {
+                banner.hidden = false;
+                banner.textContent = '服务端当前已禁用本地音视频文件上传功能。';
             }
         }
     } catch (err) {
-        console.warn('获取上传功能配置失败:', err);
-    }
-    if (typeof document !== 'undefined' && typeof UIManager !== 'undefined') {
-        UIManager.updateSubmitButton();
+        if (authStorage.readAuthToken() !== requestIdentity) return;
+        uploadCapabilities = { enabled: false, error: err.message };
+        uploadCapabilitiesIdentity = requestIdentity;
+        if (banner) {
+            banner.hidden = false;
+            banner.textContent = (err.message && err.message.includes('401'))
+                ? '访问令牌未授权使用上传服务。'
+                : `无法获取上传服务配置: ${err.message || '网络异常'}`;
+        }
+    } finally {
+        if (authStorage.readAuthToken() === requestIdentity) {
+            if (typeof document !== 'undefined' && typeof UIManager !== 'undefined') {
+                UIManager.updateSubmitButton();
+            }
+        }
     }
 }
 
@@ -1499,12 +1543,12 @@ async function submitUploadForm(event) {
         return;
     }
 
-    if (uploadCapabilities && uploadCapabilities.enabled === false) {
-        UIManager.showStatus('error', '上传服务未开启', '当前服务端已关闭本地文件上传能力');
+    if (!uploadCapabilities || uploadCapabilities.enabled !== true) {
+        UIManager.showStatus('error', '上传服务未开启', '当前服务端已关闭本地文件上传能力或尚未完成配置探测');
         return;
     }
 
-    if (uploadCapabilities && uploadCapabilities.limits && uploadCapabilities.limits.max_file_mib) {
+    if (uploadCapabilities.limits && uploadCapabilities.limits.max_file_mib) {
         if (selectedUploadFile.size > uploadCapabilities.limits.max_file_mib * 1024 * 1024) {
             UIManager.showStatus('error', '文件超出限制', `文件大小超出上限 ${uploadCapabilities.limits.max_file_mib} MiB`);
             return;
@@ -1520,39 +1564,52 @@ async function submitUploadForm(event) {
         return;
     }
 
-    if (!currentUploadIntent || currentUploadIntent.file !== selectedUploadFile) {
+    const fileSnapshot = selectedUploadFile;
+    const metadataSnapshot = buildUploadMetadata(fileSnapshot);
+    const metaSignature = `${fileSnapshot.name}:${fileSnapshot.size}:${fileSnapshot.lastModified}:${metadataSnapshot.title}:${metadataSnapshot.source_url}:${metadataSnapshot.retention}:${JSON.stringify(metadataSnapshot.processing_options)}`;
+
+    if (!currentUploadIntent || currentUploadIntent.file !== fileSnapshot || currentUploadIntent.metaSignature !== metaSignature) {
         currentUploadIntent = {
-            file: selectedUploadFile,
-            idempotencyKey: generateUploadIdempotencyKey()
+            file: fileSnapshot,
+            metadata: metadataSnapshot,
+            metaSignature: metaSignature,
+            idempotencyKey: generateUploadIdempotencyKey(),
+            pendingVerification: false
         };
     }
 
-    const { idempotencyKey } = currentUploadIntent;
-    const metadata = buildUploadMetadata(selectedUploadFile);
-
+    const intentSnapshot = currentUploadIntent;
     isUploading = true;
     UIManager.updateSubmitButton();
-    UIManager.showStatus('loading', '正在上传音视频文件...', '请稍候，文件正在传输并提交受理');
 
     let receipt = null;
     try {
-        receipt = await APIManager.submitUpload(selectedUploadFile, idempotencyKey, metadata);
+        if (intentSnapshot.pendingVerification) {
+            UIManager.showStatus('loading', '正在核实上传受理状态...', '未重复发送文件，正在查询回执');
+            receipt = await APIManager.getUploadReceipt(intentSnapshot.idempotencyKey);
+        } else {
+            UIManager.showStatus('loading', '正在上传音视频文件...', '请稍候，文件正在传输并提交受理');
+            receipt = await APIManager.submitUpload(fileSnapshot, intentSnapshot.idempotencyKey, metadataSnapshot);
+        }
     } catch (err) {
-        if (err.status) {
+        const isClientRejection = err.status && err.status >= 400 && err.status < 500;
+        if (isClientRejection) {
+            currentUploadIntent = null;
             isUploading = false;
             UIManager.updateSubmitButton();
             UIManager.showStatus('error', '上传失败', err.message || `HTTP ${err.status}`);
             return;
         }
 
-        // 网络未知异常：走 receipt-only 查询，不重发 body
-        UIManager.showStatus('loading', '网络连接异常，正在核实受理状态...', '未重复发送文件，正在查询回执');
+        // 网络异常或 5xx 异常：服务端可能在报错前已受理（如通知阶段 500），保留 key 并查询回执
+        intentSnapshot.pendingVerification = true;
+        UIManager.showStatus('loading', '服务响应异常，正在核实受理状态...', '未重复发送文件，正在按回执核实状态');
         try {
-            receipt = await APIManager.getUploadReceipt(idempotencyKey);
+            receipt = await APIManager.getUploadReceipt(intentSnapshot.idempotencyKey);
         } catch (receiptErr) {
             isUploading = false;
             UIManager.updateSubmitButton();
-            UIManager.showStatus('error', '上传状态未知且查询失败', `网络异常，且未能通过回执核实状态: ${receiptErr.message}`);
+            UIManager.showStatus('error', '上传状态待核实', `网络或服务异常（${err.message || err.status || '未知'}），且核实回执失败: ${receiptErr.message}。请稍后重试核实状态。`);
             return;
         }
     } finally {
@@ -1560,14 +1617,19 @@ async function submitUploadForm(event) {
         UIManager.updateSubmitButton();
     }
 
-    if (receipt) {
+    if (!receipt) {
+        return;
+    }
+
+    if (receipt.state === 'accepted') {
+        currentUploadIntent = null;
         const taskData = {
             task_id: receipt.task_id,
             view_token: receipt.view_token,
             upload_id: receipt.upload_id,
             source: 'upload',
-            title: metadata.title || selectedUploadFile.name,
-            original_text: metadata.source_url || '',
+            title: metadataSnapshot.title || fileSnapshot.name,
+            original_text: metadataSnapshot.source_url || '',
             retention: receipt.retention,
             share_active: receipt.share_active
         };
@@ -1593,7 +1655,26 @@ async function submitUploadForm(event) {
             }, 3000);
         }
 
-        clearUploadFile();
+        if (selectedUploadFile === fileSnapshot) {
+            clearUploadFile();
+        }
+    } else if (receipt.state === 'receiving') {
+        intentSnapshot.pendingVerification = true;
+        let statusMessage = '文件已接收，等待排队受理...';
+        let statusDetails = `上传ID: ${escapeHTML(receipt.upload_id)}<br>` +
+            `状态: ${escapeHTML(receipt.state)}<br>` +
+            '当前任务仍在接收处理中，尚未生成正式任务ID，请稍后核实。';
+        UIManager.showStatus('loading', statusMessage, statusDetails);
+    } else if (receipt.state === 'failed') {
+        currentUploadIntent = null;
+        let statusMessage = '上传处理失败';
+        let statusDetails = `上传ID: ${escapeHTML(receipt.upload_id)}<br>` +
+            `状态: ${escapeHTML(receipt.state)}<br>` +
+            `错误: ${escapeHTML(receipt.error_code || '处理异常')}`;
+        UIManager.showStatus('error', statusMessage, statusDetails);
+    } else {
+        intentSnapshot.pendingVerification = true;
+        UIManager.showStatus('error', '上传状态未知', `回执返回状态: ${escapeHTML(receipt.state || '空')}`);
     }
 }
 

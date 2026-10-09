@@ -179,9 +179,11 @@ test('history page filters upload tasks, displays retention and share state, and
   await expect(row.locator('.task-author')).toContainText('30天保留');
   await expect(row.locator('.task-author')).toContainText('分享中');
 
-  // Verify stop share button is visible
+  // Capture stop share button and token before revoking
   const stopShareBtn = row.locator('.btn-stop-share');
   await expect(stopShareBtn).toBeVisible();
+  const token = await row.getAttribute('data-vt');
+  expect(token).toBeTruthy();
 
   // Set up dialog confirmation
   page.once('dialog', async (dialog) => {
@@ -198,9 +200,102 @@ test('history page filters upload tasks, displays retention and share state, and
   await expect(row.locator('.btn-stop-share')).toHaveCount(0);
 
   // Assert backend revoked state directly via API
-  const token = await row.getAttribute('data-vt');
-  if (token) {
-    const viewRes = await request.get(`${baseURL}/view/${token}`);
-    expect(viewRes.status()).toBe(404);
-  }
+  const viewRes = await request.get(`${baseURL}/view/${token}`);
+  expect(viewRes.status()).toBe(404);
 });
+
+test('mobile viewport and drop zone file selection submits identical metadata and raw bytes', async ({ page, request }) => {
+  await page.setViewportSize({ width: 375, height: 667 });
+  await page.goto('/add_task_by_web');
+  await page.locator('#advanced-toggle').click();
+  await page.locator('#bearer-token').fill('browser-fixture-token');
+  await page.locator('#mode-tab-upload').click();
+
+  const fileBytes = Buffer.from('小屏拖拽上传测试内容', 'utf-8');
+  const expectedSha256 = createHash('sha256').update(fileBytes).digest('hex');
+
+  await page.locator('#upload-file-input').setInputFiles({
+    name: '小屏录音.mp3',
+    mimeType: 'audio/mp3',
+    buffer: fileBytes,
+  });
+
+  await page.locator('#upload-title').fill('移动端小屏标题');
+  await page.locator('#submit-btn').click();
+
+  await expect(page.locator('#status-content')).toContainText('文件上传成功，任务已受理！');
+
+  const lastUploadRes = await request.get(`${baseURL}/__e2e__/last-upload`);
+  expect(lastUploadRes.status()).toBe(200);
+  const lastUpload = await lastUploadRes.json();
+  expect(lastUpload.actual_byte_length).toBe(fileBytes.length);
+  expect(lastUpload.raw_bytes_sha256).toBe(expectedSha256);
+  expect(lastUpload.filename).toBe('小屏录音.mp3');
+  expect(lastUpload.title).toBe('移动端小屏标题');
+});
+
+test('upload in flight: selecting replacement file binds original snapshot to upload and preserves replacement file', async ({ page, request }) => {
+  await page.goto('/add_task_by_web');
+  await page.locator('#advanced-toggle').click();
+  await page.locator('#bearer-token').fill('browser-fixture-token');
+  await page.locator('#mode-tab-upload').click();
+
+  const file1Bytes = Buffer.from('第一份音频内容-原意图', 'utf-8');
+  const file1Sha256 = createHash('sha256').update(file1Bytes).digest('hex');
+
+  await page.locator('#upload-file-input').setInputFiles({
+    name: '原文件.mp3',
+    mimeType: 'audio/mp3',
+    buffer: file1Bytes,
+  });
+
+  // Pause the POST request via page.route
+  let continueRoute: () => void = () => {};
+  const routePromise = new Promise<void>((resolve) => {
+    continueRoute = resolve;
+  });
+
+  await page.route('**/api/uploads', async (route) => {
+    if (route.request().method() === 'POST') {
+      await routePromise;
+      await route.continue();
+    } else {
+      await route.continue();
+    }
+  });
+
+  // Trigger submit
+  await page.locator('#submit-btn').click();
+
+  // While in flight, select a second file
+  const file2Bytes = Buffer.from('第二份音频内容-新文件', 'utf-8');
+  await page.locator('#upload-file-input').setInputFiles({
+    name: '替换新文件.mp4',
+    mimeType: 'video/mp4',
+    buffer: file2Bytes,
+  });
+
+  // Now resume the original POST
+  continueRoute();
+
+  // Wait for submission to complete
+  await expect(page.locator('#status-content')).toContainText('文件上传成功，任务已受理！');
+
+  // Assert backend received file1 snapshot
+  const lastUploadRes = await request.get(`${baseURL}/__e2e__/last-upload`);
+  expect(lastUploadRes.status()).toBe(200);
+  const lastUpload = await lastUploadRes.json();
+  expect(lastUpload.filename).toBe('原文件.mp3');
+  expect(lastUpload.raw_bytes_sha256).toBe(file1Sha256);
+
+  // Assert replacement file is still selected and visible in UI
+  const fileInfo = page.locator('#upload-file-info');
+  await expect(fileInfo).toBeVisible();
+  await expect(page.locator('#upload-file-name')).toHaveText('替换新文件.mp4');
+
+  // Assert local task history has file1 title
+  const historyItem = page.locator('#history-list .history-item').first();
+  await expect(historyItem).toBeVisible();
+  await expect(historyItem.locator('.history-title')).toHaveText('原文件.mp3');
+});
+

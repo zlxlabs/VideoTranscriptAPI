@@ -18,12 +18,18 @@ function decodeBase64Url(str) {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
-async function installIndexPage({ token = 'test-token', capabilities = null } = {}) {
+const originalFetch = globalThis.fetch;
+
+async function installIndexPage({ token = 'test-token', capabilities = undefined } = {}) {
   dom = new JSDOM(indexSource, {
     url: 'https://vta.test/add_task_by_web',
     runScripts: 'outside-only',
   });
   const { window } = dom;
+  window.TextEncoder = globalThis.TextEncoder;
+  if (!window.crypto) {
+    Object.defineProperty(window, 'crypto', { value: globalThis.crypto, configurable: true });
+  }
   dom.window.HTMLElement.prototype.scrollIntoView = vi.fn();
   window.matchMedia = vi.fn((media) => ({
     matches: false,
@@ -32,7 +38,7 @@ async function installIndexPage({ token = 'test-token', capabilities = null } = 
     removeEventListener: vi.fn(),
   }));
 
-  const caps = capabilities || {
+  const caps = capabilities !== undefined ? capabilities : {
     enabled: true,
     default_retention: '30d',
     retention_options: ['30d', 'never'],
@@ -43,9 +49,13 @@ async function installIndexPage({ token = 'test-token', capabilities = null } = 
       upload_temp_budget_mib: 500,
     },
   };
+  dom.caps = caps;
 
   window.fetch = vi.fn(async (url, options = {}) => {
     if (typeof url === 'string' && url.includes('/api/uploads/capabilities')) {
+      if (!caps) {
+        throw new Error('Capabilities 401 / unavailable');
+      }
       return {
         ok: true,
         status: 200,
@@ -58,6 +68,7 @@ async function installIndexPage({ token = 'test-token', capabilities = null } = 
       json: async () => ({ code: 200, data: {} }),
     };
   });
+  globalThis.fetch = vi.fn((url, options) => window.fetch(url, options));
 
   window.eval(authSource);
   if (token) {
@@ -65,9 +76,9 @@ async function installIndexPage({ token = 'test-token', capabilities = null } = 
   }
   window.eval(appSource);
 
-  await new Promise((resolve) => {
-    window.addEventListener('DOMContentLoaded', resolve, { once: true });
-  });
+  if (token && caps && window.checkUploadCapabilities) {
+    await window.checkUploadCapabilities();
+  }
 
   // Allow microtasks and timers
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -75,6 +86,7 @@ async function installIndexPage({ token = 'test-token', capabilities = null } = 
 
 afterEach(() => {
   vi.clearAllTimers();
+  globalThis.fetch = originalFetch;
   dom?.window?.close();
   vi.restoreAllMocks();
 });
@@ -252,6 +264,9 @@ describe('local upload frontend logic', () => {
 
     let uploadPostCalls = 0;
     window.fetch = vi.fn(async (url, options = {}) => {
+      if (typeof url === 'string' && url.includes('/api/uploads/capabilities')) {
+        return { ok: true, status: 200, json: async () => dom.caps };
+      }
       if (typeof url === 'string' && url.endsWith('/api/uploads') && options.method === 'POST') {
         uploadPostCalls += 1;
         // simulate delay
@@ -294,6 +309,9 @@ describe('local upload frontend logic', () => {
     let queryKeyCalled = null;
 
     window.fetch = vi.fn(async (url, options = {}) => {
+      if (typeof url === 'string' && url.includes('/api/uploads/capabilities')) {
+        return { ok: true, status: 200, json: async () => dom.caps };
+      }
       if (typeof url === 'string' && url.endsWith('/api/uploads') && options.method === 'POST') {
         postCount += 1;
         throw new TypeError('NetworkError: Failed to fetch');
@@ -323,6 +341,165 @@ describe('local upload frontend logic', () => {
     expect(postCount).toBe(1);
     expect(queryKeyCalled).toBeTruthy();
     expect(dom.window.document.getElementById('status-content').textContent).toContain('任务已受理');
+  });
+
+  it('binds snapshot to in-flight upload: history uses snapshot name and does not clear replacement file', async () => {
+    await installIndexPage();
+    const { window } = dom;
+
+    const file1 = new window.File(['first-content'], 'first-file.wav', { type: 'audio/wav' });
+    window.selectUploadFile(file1);
+
+    let resolvePost;
+    const postPromise = new Promise((resolve) => { resolvePost = resolve; });
+
+    window.fetch = vi.fn(async (url, options = {}) => {
+      if (typeof url === 'string' && url.includes('/api/uploads/capabilities')) {
+        return { ok: true, status: 200, json: async () => dom.caps };
+      }
+      if (typeof url === 'string' && url.endsWith('/api/uploads') && options.method === 'POST') {
+        await postPromise;
+        return {
+          ok: true,
+          status: 202,
+          json: async () => ({
+            upload_id: 'up-snapshot-1',
+            state: 'accepted',
+            task_id: 'task-snapshot-1',
+            view_token: 'upload_view_snapshot',
+            retention: '30d',
+            expires_at: null,
+            share_active: true,
+            error_code: null,
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+
+    const submitPromise = window.submitUploadForm(new window.Event('submit', { cancelable: true }));
+
+    // While upload is in flight, user selects a replacement file
+    const file2 = new window.File(['second-content'], 'replacement-file.wav', { type: 'audio/wav' });
+    window.selectUploadFile(file2);
+
+    resolvePost();
+    await submitPromise;
+
+    const history = window.TaskHistoryManager.getHistory();
+    expect(history.length).toBe(1);
+    expect(history[0].title).toBe('first-file.wav');
+
+    // Replacement file should NOT be cleared
+    const fileInfo = dom.window.document.getElementById('upload-file-info');
+    expect(fileInfo.hidden).toBe(false);
+    expect(dom.window.document.getElementById('upload-file-name').textContent).toBe('replacement-file.wav');
+  });
+
+  it('handles receiving receipt by showing in-progress status without writing to history or clearing file', async () => {
+    await installIndexPage();
+    const { window } = dom;
+
+    const file = new window.File(['content'], 'receiving.wav', { type: 'audio/wav' });
+    window.selectUploadFile(file);
+
+    window.fetch = vi.fn(async (url, options = {}) => {
+      if (typeof url === 'string' && url.includes('/api/uploads/capabilities')) {
+        return { ok: true, status: 200, json: async () => dom.caps };
+      }
+      if (typeof url === 'string' && url.endsWith('/api/uploads') && options.method === 'POST') {
+        return {
+          ok: true,
+          status: 202,
+          json: async () => ({
+            upload_id: 'up-rec',
+            state: 'receiving',
+            task_id: null,
+            view_token: null,
+            retention: '30d',
+            expires_at: null,
+            share_active: false,
+            error_code: null,
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+
+    await window.submitUploadForm(new window.Event('submit', { cancelable: true }));
+
+    const statusContent = dom.window.document.getElementById('status-content').textContent;
+    expect(statusContent).not.toContain('任务已受理！');
+    expect(statusContent).toContain('receiving');
+
+    // No task in history
+    expect(window.TaskHistoryManager.getHistory().length).toBe(0);
+
+    // File not cleared
+    const fileInfo = dom.window.document.getElementById('upload-file-info');
+    expect(fileInfo.hidden).toBe(false);
+  });
+
+  it('queries receipt on HTTP 500 and prevents second POST body on repeated submission', async () => {
+    await installIndexPage();
+    const { window } = dom;
+
+    const file = new window.File(['content-500'], 'committed-500.wav', { type: 'audio/wav' });
+    window.selectUploadFile(file);
+
+    let postCount = 0;
+    let queryCount = 0;
+
+    window.fetch = vi.fn(async (url, options = {}) => {
+      if (typeof url === 'string' && url.includes('/api/uploads/capabilities')) {
+        return { ok: true, status: 200, json: async () => dom.caps };
+      }
+      if (typeof url === 'string' && url.endsWith('/api/uploads') && options.method === 'POST') {
+        postCount += 1;
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ detail: 'notification exception after commit' }),
+        };
+      }
+      if (typeof url === 'string' && url.includes('/api/uploads/by-idempotency-key/')) {
+        queryCount += 1;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            upload_id: 'up-500-committed',
+            state: 'accepted',
+            task_id: 'task-500',
+            view_token: 'view_500',
+            retention: '30d',
+            expires_at: null,
+            share_active: true,
+            error_code: null,
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+
+    await window.submitUploadForm(new window.Event('submit', { cancelable: true }));
+
+    expect(postCount).toBe(1);
+    expect(queryCount).toBe(1);
+    expect(dom.window.document.getElementById('status-content').textContent).toContain('任务已受理');
+  });
+
+  it('disables submit button when capabilities are unresolved (fail-closed)', async () => {
+    await installIndexPage({ token: 'test-token', capabilities: null });
+    const { window } = dom;
+    const { document } = window;
+    document.getElementById('mode-tab-upload').click();
+
+    const file = new window.File(['bytes'], 'test.wav', { type: 'audio/wav' });
+    window.selectUploadFile(file);
+
+    const submitBtn = document.getElementById('submit-btn');
+    expect(submitBtn.disabled).toBe(true);
   });
 
   it('renders upload history item with retention, share badge, and stop share button', async () => {

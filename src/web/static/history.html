@@ -1168,7 +1168,7 @@ async function apiFetch(url, params = {}, requestGeneration = privateRequestGene
             showStatus('err', '访问令牌无效');
             throw new Error('401');
         }
-        const body = await res.json().catch(() => ({}));
+        const body = await res.json();
         if (requestGeneration !== privateRequestGeneration) throw createSupersededPrivateHistoryError();
         if (!res.ok) {
             throw new Error(body.detail || body.message || `HTTP ${res.status}`);
