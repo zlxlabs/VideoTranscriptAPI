@@ -2,8 +2,8 @@
 lane: local-upload
 id: M4
 slug: web
-status: 未开始
-owner: delegate implementer dlg-20261008-094534-0fd910
+status: 阻塞
+owner: lead
 order: 4
 priority: 中
 depends_on: [local-upload/M1, local-upload/M2, local-upload/M3]
@@ -13,7 +13,7 @@ merged_pr: null
 # 里程碑进度：local-upload/M4：上传、回执与本人历史网页
 
 - **预期产出**：原生单文件 picker/drop、metadata headers、期限选择、真实 receipt/处理中/结果状态与本人 history source filter。
-- **当前范围**：D 卡；不得从 mock-only fixture 发明 wire 形状，不改旧 URL 任务页面规则。
+- **当前范围**：D 卡；不得从 mock-only fixture 发明 wire 形状，不改旧 URL 任务页面规则。D 尚未开始：Gate Hub #1393 仍 OPEN，真实 UI registry 尚无 `has_ui: true`；SOP 要求先登记再派 UI，当前不得跨仓代改。U 浏览器底座 PR #200 已合并不等于 M4 网页完成。
 - **关键决策**：沿用设计文件中的 HTTP 字段；默认30天、长期显式选择 never；进度继续走既有 task API；source URL 仅展示，不 fetch。
 - **推进前必须拿到的证据**：
   - [ ] 浏览器/harness 调用真实 API，断言 producer 发出的 raw Blob 字节、headers 和完整服务端 receipt；保留实际请求 fixture。
