@@ -985,9 +985,9 @@ async function loadFilterOptions(requestGeneration = privateRequestGeneration) {
         if (requestGeneration !== privateRequestGeneration) return;
         if (res.code === 200 && res.data) {
             filterOptions = {
-                webhooks: res.data.webhooks || [],
-                platforms: res.data.platforms || [],
-                authors: res.data.authors || [],
+                webhooks: res.data.webhooks,
+                platforms: res.data.platforms,
+                authors: res.data.authors,
             };
             currentMasked = res.data.api_key_masked || '';
             populateFilterDropdowns();

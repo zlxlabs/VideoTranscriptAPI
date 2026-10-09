@@ -1566,12 +1566,11 @@ async function submitUploadForm(event) {
 
     const fileSnapshot = selectedUploadFile;
     const metadataSnapshot = buildUploadMetadata(fileSnapshot);
-    const metaSignature = `${fileSnapshot.name}:${fileSnapshot.size}:${fileSnapshot.lastModified}:${metadataSnapshot.title}:${metadataSnapshot.source_url}:${metadataSnapshot.retention}:${JSON.stringify(metadataSnapshot.processing_options)}`;
+    const metaSignature = JSON.stringify(metadataSnapshot);
 
     if (!currentUploadIntent || currentUploadIntent.file !== fileSnapshot || currentUploadIntent.metaSignature !== metaSignature) {
         currentUploadIntent = {
             file: fileSnapshot,
-            metadata: metadataSnapshot,
             metaSignature: metaSignature,
             idempotencyKey: generateUploadIdempotencyKey(),
             pendingVerification: false
@@ -1586,31 +1585,34 @@ async function submitUploadForm(event) {
     try {
         if (intentSnapshot.pendingVerification) {
             UIManager.showStatus('loading', '正在核实上传受理状态...', '未重复发送文件，正在查询回执');
-            receipt = await APIManager.getUploadReceipt(intentSnapshot.idempotencyKey);
+            try {
+                receipt = await APIManager.getUploadReceipt(intentSnapshot.idempotencyKey);
+            } catch (getErr) {
+                UIManager.showStatus('error', '上传状态待核实', `核实回执失败（${getErr.message || getErr.status || '未知'}），当前尚未取得回执记录。请稍后重试核实状态。`);
+                return;
+            }
         } else {
             UIManager.showStatus('loading', '正在上传音视频文件...', '请稍候，文件正在传输并提交受理');
-            receipt = await APIManager.submitUpload(fileSnapshot, intentSnapshot.idempotencyKey, metadataSnapshot);
-        }
-    } catch (err) {
-        const isClientRejection = err.status && err.status >= 400 && err.status < 500;
-        if (isClientRejection) {
-            currentUploadIntent = null;
-            isUploading = false;
-            UIManager.updateSubmitButton();
-            UIManager.showStatus('error', '上传失败', err.message || `HTTP ${err.status}`);
-            return;
-        }
+            try {
+                receipt = await APIManager.submitUpload(fileSnapshot, intentSnapshot.idempotencyKey, metadataSnapshot);
+            } catch (postErr) {
+                const isClientRejection = postErr.status && postErr.status >= 400 && postErr.status < 500;
+                if (isClientRejection) {
+                    currentUploadIntent = null;
+                    UIManager.showStatus('error', '上传失败', postErr.message || `HTTP ${postErr.status}`);
+                    return;
+                }
 
-        // 网络异常或 5xx 异常：服务端可能在报错前已受理（如通知阶段 500），保留 key 并查询回执
-        intentSnapshot.pendingVerification = true;
-        UIManager.showStatus('loading', '服务响应异常，正在核实受理状态...', '未重复发送文件，正在按回执核实状态');
-        try {
-            receipt = await APIManager.getUploadReceipt(intentSnapshot.idempotencyKey);
-        } catch (receiptErr) {
-            isUploading = false;
-            UIManager.updateSubmitButton();
-            UIManager.showStatus('error', '上传状态待核实', `网络或服务异常（${err.message || err.status || '未知'}），且核实回执失败: ${receiptErr.message}。请稍后重试核实状态。`);
-            return;
+                // POST 5xx 或网络/解析异常：保留原 key，仅在初次错误后核实一次
+                intentSnapshot.pendingVerification = true;
+                UIManager.showStatus('loading', '服务响应异常，正在核实受理状态...', '未重复发送文件，正在按回执核实状态');
+                try {
+                    receipt = await APIManager.getUploadReceipt(intentSnapshot.idempotencyKey);
+                } catch (receiptErr) {
+                    UIManager.showStatus('error', '上传状态待核实', `服务或网络响应异常（${postErr.message || postErr.status || '未知'}），初次核实回执未确认: ${receiptErr.message}。请稍后重试核实状态。`);
+                    return;
+                }
+            }
         }
     } finally {
         isUploading = false;

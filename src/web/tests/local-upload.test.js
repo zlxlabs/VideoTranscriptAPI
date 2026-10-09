@@ -489,6 +489,57 @@ describe('local upload frontend logic', () => {
     expect(dom.window.document.getElementById('status-content').textContent).toContain('任务已受理');
   });
 
+  it('preserves key on POST 500 then GET 404, queries get with same key, and differentiates colon variations', async () => {
+    await installIndexPage();
+    const { window } = dom;
+    const file = new window.File(['content'], 'test.mp4', { type: 'video/mp4' });
+    window.selectUploadFile(file);
+
+    let postKeys = [];
+    let getKeys = [];
+    let meta = [];
+    window.fetch = vi.fn(async (url, opts = {}) => {
+      if (url.includes('/capabilities')) return { ok: true, status: 200, json: async () => dom.caps };
+      if (url.endsWith('/api/uploads') && opts.method === 'POST') {
+        postKeys.push(opts.headers['Idempotency-Key']);
+        meta.push(decodeBase64Url(opts.headers['X-Upload-Metadata']));
+        return { ok: false, status: 500, json: async () => ({ detail: 'err' }) };
+      }
+      if (url.includes('/by-idempotency-key/')) {
+        getKeys.push(decodeURIComponent(url.split('/by-idempotency-key/')[1]));
+        return { ok: false, status: 404, json: async () => ({ detail: 'not found' }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+
+    window.document.getElementById('upload-title').value = 'T';
+    window.document.getElementById('upload-source-url').value = 'https://example.com/a:b';
+    await window.submitUploadForm(new window.Event('submit', { cancelable: true }));
+
+    expect(postKeys.length).toBe(1);
+    expect(getKeys.length).toBe(1);
+    expect(getKeys[0]).toBe(postKeys[0]);
+
+    // 2nd click: GET only with same key, no second POST
+    await window.submitUploadForm(new window.Event('submit', { cancelable: true }));
+    expect(postKeys.length).toBe(1);
+    expect(getKeys.length).toBe(2);
+    expect(getKeys[1]).toBe(postKeys[0]);
+
+    // Colon parameter variation: creates new key and distinct metadata
+    window.document.getElementById('upload-title').value = 'T:b';
+    window.document.getElementById('upload-source-url').value = 'https://example.com/a';
+    await window.submitUploadForm(new window.Event('submit', { cancelable: true }));
+
+    expect(postKeys.length).toBe(2);
+    expect(postKeys[1]).not.toBe(postKeys[0]);
+    expect(meta[0].title).toBe('T');
+    expect(meta[0].source_url).toBe('https://example.com/a:b');
+    expect(meta[1].title).toBe('T:b');
+    expect(meta[1].source_url).toBe('https://example.com/a');
+  });
+
+
   it('disables submit button when capabilities are unresolved (fail-closed)', async () => {
     await installIndexPage({ token: 'test-token', capabilities: null });
     const { window } = dom;
@@ -547,7 +598,7 @@ describe('local upload frontend logic', () => {
           }),
         };
       }
-      return { ok: true, status: 200, json: async () => ({ code: 200, data: {} }) };
+      return { ok: true, status: 200, json: async () => ({ code: 200, data: { webhooks: [], platforms: [], authors: [] } }) };
     });
 
     window.eval(authSource);
@@ -606,7 +657,7 @@ describe('local upload frontend logic', () => {
           }),
         };
       }
-      return { ok: true, status: 200, json: async () => ({ code: 200, data: {} }) };
+      return { ok: true, status: 200, json: async () => ({ code: 200, data: { webhooks: [], platforms: [], authors: [] } }) };
     });
 
     window.eval(authSource);

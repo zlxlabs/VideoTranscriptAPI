@@ -204,25 +204,35 @@ test('history page filters upload tasks, displays retention and share state, and
   expect(viewRes.status()).toBe(404);
 });
 
-test('mobile viewport and drop zone file selection submits identical metadata and raw bytes', async ({ page, request }) => {
+test('mobile viewport, keyboard selection, and DOM drop submit raw bytes and all-false options', async ({ page, request }) => {
   await page.setViewportSize({ width: 375, height: 667 });
   await page.goto('/add_task_by_web');
   await page.locator('#advanced-toggle').click();
   await page.locator('#bearer-token').fill('browser-fixture-token');
   await page.locator('#mode-tab-upload').click();
 
+  const [fileChooser] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    page.locator('#upload-drop-zone').press('Enter'),
+  ]);
+  await fileChooser.setFiles({ name: '初始.mp3', mimeType: 'audio/mp3', buffer: Buffer.from('初始', 'utf-8') });
+  await expect(page.locator('#upload-file-name')).toHaveText('初始.mp3');
+
   const fileBytes = Buffer.from('小屏拖拽上传测试内容', 'utf-8');
   const expectedSha256 = createHash('sha256').update(fileBytes).digest('hex');
+  await page.evaluate(({ name, content }) => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([new Uint8Array(content)], name, { type: 'audio/mp3' }));
+    document.getElementById('upload-drop-zone')!.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+  }, { name: '小屏录音.mp3', content: Array.from(fileBytes) });
+  await expect(page.locator('#upload-file-name')).toHaveText('小屏录音.mp3');
 
-  await page.locator('#upload-file-input').setInputFiles({
-    name: '小屏录音.mp3',
-    mimeType: 'audio/mp3',
-    buffer: fileBytes,
-  });
+  await page.locator('#transcription-options-toggle').click();
+  await page.locator('#calibrate-option').uncheck();
+  await page.locator('#summarize-option').uncheck();
 
   await page.locator('#upload-title').fill('移动端小屏标题');
   await page.locator('#submit-btn').click();
-
   await expect(page.locator('#status-content')).toContainText('文件上传成功，任务已受理！');
 
   const lastUploadRes = await request.get(`${baseURL}/__e2e__/last-upload`);
@@ -232,6 +242,131 @@ test('mobile viewport and drop zone file selection submits identical metadata an
   expect(lastUpload.raw_bytes_sha256).toBe(expectedSha256);
   expect(lastUpload.filename).toBe('小屏录音.mp3');
   expect(lastUpload.title).toBe('移动端小屏标题');
+  expect(lastUpload.processing_options).toEqual({
+    calibrate: false,
+    summarize: false,
+    infer_speaker_names: false,
+    chapters: false,
+  });
+});
+
+test('post 500 followed by get 404, receiving, and failed preserves key and prevents second post', async ({ page }) => {
+  await page.goto('/add_task_by_web');
+  await page.locator('#advanced-toggle').click();
+  await page.locator('#bearer-token').fill('browser-fixture-token');
+  await page.locator('#mode-tab-upload').click();
+
+  let postCount = 0;
+  let getCount = 0;
+  let postKey = '';
+  let getResponseState = '404';
+
+  await page.route('**/api/uploads', async (route) => {
+    if (route.request().method() === 'POST') {
+      postCount++;
+      postKey = route.request().headers()['idempotency-key'];
+      await route.fulfill({ status: 500, body: JSON.stringify({ detail: 'server error' }) });
+    } else {
+      await route.continue();
+    }
+  });
+
+  await page.route('**/api/uploads/by-idempotency-key/*', async (route) => {
+    getCount++;
+    const key = route.request().url().split('/by-idempotency-key/')[1];
+    expect(decodeURIComponent(key)).toBe(postKey);
+    if (getResponseState === '404') {
+      await route.fulfill({ status: 404, body: JSON.stringify({ detail: 'not found' }) });
+    } else {
+      await route.fulfill({
+        status: 200,
+        body: JSON.stringify({
+          upload_id: 'up-123',
+          state: getResponseState,
+          task_id: null,
+          error_code: getResponseState === 'failed' ? 'transcode_err' : null,
+        }),
+      });
+    }
+  });
+
+  await page.locator('#upload-file-input').setInputFiles({
+    name: '待核实.mp3',
+    mimeType: 'audio/mp3',
+    buffer: Buffer.from('500内容', 'utf-8'),
+  });
+
+  // 1st click: POST 500 -> initial GET 404 -> status pending
+  await page.locator('#submit-btn').click();
+  await expect(page.locator('#status-content')).toContainText('上传状态待核实');
+  expect(postCount).toBe(1);
+  expect(getCount).toBe(1);
+
+  // 2nd click: GET only with same key -> returns receiving, no local history
+  getResponseState = 'receiving';
+  await page.locator('#submit-btn').click();
+  await expect(page.locator('#status-content')).toContainText('文件已接收，等待排队受理');
+  await expect(page.locator('#status-content')).not.toContainText('文件上传成功，任务已受理！');
+  await expect(page.locator('#history-list .history-item')).toHaveCount(0);
+  expect(postCount).toBe(1);
+  expect(getCount).toBe(2);
+
+  // 3rd click: GET only with same key -> returns failed, no local history
+  getResponseState = 'failed';
+  await page.locator('#submit-btn').click();
+  await expect(page.locator('#status-content')).toContainText('上传处理失败');
+  await expect(page.locator('#status-content')).toContainText('transcode_err');
+  await expect(page.locator('#history-list .history-item')).toHaveCount(0);
+  expect(postCount).toBe(1);
+  expect(getCount).toBe(3);
+
+  browserErrors.get(page)?.splice(0);
+});
+
+test('parameter change with colon variations produces distinct idempotency keys', async ({ page }) => {
+  await page.goto('/add_task_by_web');
+  await page.locator('#advanced-toggle').click();
+  await page.locator('#bearer-token').fill('browser-fixture-token');
+  await page.locator('#mode-tab-upload').click();
+
+  const keys: string[] = [];
+  const metadataList: any[] = [];
+  await page.route('**/api/uploads', async (route) => {
+    if (route.request().method() === 'POST') {
+      keys.push(route.request().headers()['idempotency-key']);
+      const raw = route.request().headers()['x-upload-metadata'];
+      const padded = raw + '='.repeat((4 - (raw.length % 4)) % 4);
+      metadataList.push(JSON.parse(Buffer.from(padded, 'base64url').toString('utf-8')));
+      await route.fulfill({ status: 400, body: JSON.stringify({ detail: 'rejected' }) });
+    } else {
+      await route.continue();
+    }
+  });
+
+  await page.locator('#upload-file-input').setInputFiles({
+    name: '冒号测试.mp3',
+    mimeType: 'audio/mp3',
+    buffer: Buffer.from('冒号测试', 'utf-8'),
+  });
+
+  await page.locator('#upload-title').fill('T');
+  await page.locator('#upload-source-url').fill('https://example.com/a:b');
+  await page.locator('#submit-btn').click();
+  await expect(page.locator('#status-content')).toContainText('rejected');
+
+  await page.locator('#upload-title').fill('T:b');
+  await page.locator('#upload-source-url').fill('https://example.com/a');
+  await page.locator('#submit-btn').click();
+  await expect(page.locator('#status-content')).toContainText('rejected');
+
+  expect(keys.length).toBe(2);
+  expect(keys[0]).not.toBe(keys[1]);
+  expect(metadataList[0].title).toBe('T');
+  expect(metadataList[0].source_url).toBe('https://example.com/a:b');
+  expect(metadataList[1].title).toBe('T:b');
+  expect(metadataList[1].source_url).toBe('https://example.com/a');
+
+  browserErrors.get(page)?.splice(0);
 });
 
 test('upload in flight: selecting replacement file binds original snapshot to upload and preserves replacement file', async ({ page, request }) => {
