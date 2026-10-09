@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
+import hashlib
 import json
 import mimetypes
 import sqlite3
 import tempfile
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -20,6 +23,8 @@ TEMPLATE_DIR = ROOT / "src" / "web" / "templates"
 VIEWS_SOURCE = ROOT / "src" / "video_transcript_api" / "api" / "routes" / "views.py"
 FIXTURE_TOKEN = "browser-fixture-token"
 VIEW_TOKEN = "browser-fixture-view"
+UPLOAD_VIEW_TOKEN = "upload_browser_fixture_view_1"
+UPLOAD_ID = "browser-fixture-upload-1"
 
 
 def read_home_page() -> str:
@@ -52,12 +57,21 @@ def initialize_database(db_path: Path) -> None:
         db.execute(
             "CREATE TABLE submissions (payload TEXT NOT NULL)"
         )
+        db.execute(
+            "CREATE TABLE uploads ("
+            "upload_id TEXT PRIMARY KEY, idempotency_key TEXT, task_id TEXT, "
+            "view_token TEXT, filename TEXT, byte_size INTEGER, title TEXT, "
+            "source_url TEXT, retention TEXT, processing_options TEXT, "
+            "share_active INTEGER, revoked_at TEXT, created_at TEXT, state TEXT, "
+            "error_code TEXT, raw_bytes_sha256 TEXT, actual_byte_length INTEGER)"
+        )
         seed_database(db)
 
 
 def seed_database(db: sqlite3.Connection) -> None:
     db.execute("DELETE FROM history")
     db.execute("DELETE FROM submissions")
+    db.execute("DELETE FROM uploads")
     db.execute(
         "INSERT INTO history VALUES (?, ?, ?, ?, ?)",
         (
@@ -66,6 +80,24 @@ def seed_database(db: sqlite3.Connection) -> None:
             "2026-10-08T12:00:00",
             "success",
             "https://www.youtube.com/watch?v=fixture",
+        ),
+    )
+    db.execute(
+        "INSERT INTO uploads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, 'accepted', NULL, ?, ?)",
+        (
+            UPLOAD_ID,
+            "seeded-idempotency-key",
+            "task-fixture-upload-1",
+            UPLOAD_VIEW_TOKEN,
+            "fixture-sample.mp4",
+            1024,
+            "浏览器本地上传样本",
+            "https://example.com/source-ref",
+            "30d",
+            json.dumps({"calibrate": True, "summarize": True, "infer_speaker_names": False, "chapters": True}),
+            "2026-10-08T12:00:00",
+            hashlib.sha256(b"fixture-seed-bytes").hexdigest(),
+            18,
         ),
     )
 
@@ -129,7 +161,14 @@ class BrowserFixtureHandler(BaseHTTPRequestHandler):
             self.send_bytes(404, b"not found", "text/plain; charset=utf-8")
             return
         if path.startswith("/view/"):
+            view_token = path.removeprefix("/view/")
             query = parse_qs(parsed.query)
+            if view_token.startswith("upload_"):
+                with sqlite3.connect(self.db_path) as db:
+                    row = db.execute("SELECT share_active FROM uploads WHERE view_token = ?", (view_token,)).fetchone()
+                if not row or not row[0]:
+                    self.send_bytes(404, b"<!doctype html><html><body><h1>404</h1><p>view_token invalid or expired</p></body></html>", "text/html; charset=utf-8")
+                    return
             if "raw" in query:
                 self.send_bytes(
                     200,
@@ -151,7 +190,77 @@ class BrowserFixtureHandler(BaseHTTPRequestHandler):
                 status = "failed"
             elif path.endswith("cleaned"):
                 status = "file_cleaned"
-            self.serve_view(status)
+            self.serve_view(status, view_token)
+            return
+        if path == "/api/uploads/capabilities":
+            if not self.authorized():
+                self.send_json(401, {"code": 401, "message": "unauthorized"})
+                return
+            self.send_json(
+                200,
+                {
+                    "enabled": True,
+                    "default_retention": "30d",
+                    "retention_options": ["30d", "never"],
+                    "limits": {
+                        "max_file_mib": 500,
+                        "max_media_hours": 3,
+                        "receive_concurrency": 2,
+                        "upload_temp_budget_mib": 2048,
+                    },
+                },
+            )
+            return
+        if path.startswith("/api/uploads/by-idempotency-key/"):
+            if not self.authorized():
+                self.send_json(401, {"code": 401, "message": "unauthorized"})
+                return
+            key = path.removeprefix("/api/uploads/by-idempotency-key/")
+            with sqlite3.connect(self.db_path) as db:
+                row = db.execute(
+                    "SELECT upload_id, state, task_id, view_token, retention, share_active, error_code "
+                    "FROM uploads WHERE idempotency_key = ?",
+                    (key,),
+                ).fetchone()
+            if not row:
+                self.send_json(404, {"detail": "上传回执不存在"})
+                return
+            self.send_json(
+                200,
+                {
+                    "upload_id": row[0],
+                    "state": row[1],
+                    "task_id": row[2],
+                    "view_token": row[3] if row[5] else None,
+                    "retention": row[4],
+                    "expires_at": None,
+                    "share_active": bool(row[5]),
+                    "error_code": row[6],
+                },
+            )
+            return
+        if path == "/__e2e__/last-upload":
+            with sqlite3.connect(self.db_path) as db:
+                row = db.execute(
+                    "SELECT upload_id, idempotency_key, filename, byte_size, title, source_url, "
+                    "retention, processing_options, raw_bytes_sha256, actual_byte_length "
+                    "FROM uploads ORDER BY ROWID DESC LIMIT 1"
+                ).fetchone()
+            if not row:
+                self.send_json(404, {"error": "no uploads"})
+                return
+            self.send_json(200, {
+                "upload_id": row[0],
+                "idempotency_key": row[1],
+                "filename": row[2],
+                "byte_size": row[3],
+                "title": row[4],
+                "source_url": row[5],
+                "retention": row[6],
+                "processing_options": json.loads(row[7]),
+                "raw_bytes_sha256": row[8],
+                "actual_byte_length": row[9],
+            })
             return
         if path == "/api/audit/filter-options":
             if not self.authorized():
@@ -174,24 +283,62 @@ class BrowserFixtureHandler(BaseHTTPRequestHandler):
             if not self.authorized():
                 self.send_json(401, {"code": 401, "message": "unauthorized"})
                 return
+            query = parse_qs(parsed.query)
+            source = query.get("source", [None])[0]
             with sqlite3.connect(self.db_path) as db:
-                rows = db.execute(
-                    "SELECT view_token, title, request_time, status, video_url FROM history "
-                    "ORDER BY request_time DESC"
-                ).fetchall()
-            items = [
-                {
-                    "view_token": row[0],
-                    "title": row[1],
-                    "request_time": row[2],
-                    "status": row[3],
-                    "video_url": row[4],
-                    "author": "浏览器夹具频道",
-                    "platform": "youtube",
-                    "wechat_webhook": None,
-                }
-                for row in rows
-            ]
+                if source == "upload":
+                    rows = db.execute(
+                        "SELECT upload_id, task_id, view_token, filename, title, source_url, "
+                        "retention, share_active, revoked_at, created_at, state "
+                        "FROM uploads ORDER BY created_at DESC"
+                    ).fetchall()
+                    items = [
+                        {
+                            "task_id": row[1],
+                            "video_url": row[5] or "",
+                            "wechat_webhook": None,
+                            "request_time": row[9],
+                            "api_key_masked": "browser-…-token",
+                            "view_token": None,
+                            "upload_view_token": row[2] if row[7] else None,
+                            "title": row[4] or row[3] or "本地上传",
+                            "author": None,
+                            "platform": "local_upload",
+                            "status": "success",
+                            "calibration_status": None,
+                            "summary_status": None,
+                            "chapters_status": None,
+                            "content_expired": not bool(row[7]),
+                            "source": "upload",
+                            "upload_id": row[0],
+                            "filename": row[3],
+                            "source_url": row[5],
+                            "retention": row[6],
+                            "expires_at": None,
+                            "share_active": bool(row[7]),
+                            "share_inactive_reason": "revoked" if not row[7] else None,
+                            "revoked_at": row[8],
+                        }
+                        for row in rows
+                    ]
+                else:
+                    rows = db.execute(
+                        "SELECT view_token, title, request_time, status, video_url FROM history "
+                        "ORDER BY request_time DESC"
+                    ).fetchall()
+                    items = [
+                        {
+                            "view_token": row[0],
+                            "title": row[1],
+                            "request_time": row[2],
+                            "status": row[3],
+                            "video_url": row[4],
+                            "author": "浏览器夹具频道",
+                            "platform": "youtube",
+                            "wechat_webhook": None,
+                        }
+                        for row in rows
+                    ]
             self.send_json(
                 200,
                 {
@@ -239,6 +386,102 @@ class BrowserFixtureHandler(BaseHTTPRequestHandler):
                     "data": {"task_id": "browser-fixture-task", "view_token": VIEW_TOKEN},
                 },
             )
+        if path == "/api/uploads":
+            if not self.authorized():
+                self.send_json(401, {"code": 401, "message": "unauthorized"})
+                return
+            idempotency_key = self.headers.get("Idempotency-Key")
+            metadata_header = self.headers.get("X-Upload-Metadata")
+            if not idempotency_key or not metadata_header:
+                self.send_json(400, {"code": 400, "message": "missing headers"})
+                return
+            encoded = metadata_header.rstrip("=")
+            raw_meta = base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_")
+            metadata = json.loads(raw_meta.decode("utf-8"))
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body_bytes = self.rfile.read(content_length) if content_length > 0 else b""
+            with sqlite3.connect(self.db_path) as db:
+                existing = db.execute(
+                    "SELECT upload_id, task_id, view_token, retention, share_active FROM uploads WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                if existing:
+                    self.send_json(
+                        202,
+                        {
+                            "upload_id": existing[0],
+                            "state": "accepted",
+                            "task_id": existing[1],
+                            "view_token": existing[2],
+                            "retention": existing[3],
+                            "expires_at": None,
+                            "share_active": bool(existing[4]),
+                            "error_code": None,
+                        },
+                    )
+                    return
+                upload_id = f"upload-{uuid.uuid4().hex[:12]}"
+                task_id = f"task-{upload_id}"
+                view_token = f"upload_view_{upload_id}"
+                db.execute(
+                    "INSERT INTO uploads (upload_id, idempotency_key, task_id, view_token, "
+                    "filename, byte_size, title, source_url, retention, processing_options, "
+                    "share_active, revoked_at, created_at, state, error_code, raw_bytes_sha256, actual_byte_length) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, 'accepted', NULL, ?, ?)",
+                    (
+                        upload_id,
+                        idempotency_key,
+                        task_id,
+                        view_token,
+                        metadata.get("filename"),
+                        metadata.get("byte_size"),
+                        metadata.get("title"),
+                        metadata.get("source_url"),
+                        metadata.get("retention"),
+                        json.dumps(metadata.get("processing_options")),
+                        "2026-10-09T12:00:00",
+                        hashlib.sha256(body_bytes).hexdigest(),
+                        len(body_bytes),
+                    ),
+                )
+            self.send_json(
+                202,
+                {
+                    "upload_id": upload_id,
+                    "state": "accepted",
+                    "task_id": task_id,
+                    "view_token": view_token,
+                    "retention": metadata.get("retention", "30d"),
+                    "expires_at": None,
+                    "share_active": True,
+                    "error_code": None,
+                },
+            )
+            return
+        self.send_bytes(404, b"not found", "text/plain; charset=utf-8")
+
+    def do_DELETE(self) -> None:
+        parsed = urlsplit(self.path)
+        path = parsed.path
+        if not self.authorized():
+            self.send_json(401, {"code": 401, "message": "unauthorized"})
+            return
+        if path.startswith("/api/uploads/") and path.endswith("/share"):
+            upload_id = path.removeprefix("/api/uploads/").removesuffix("/share")
+            revoked_at = "2026-10-09T12:00:00"
+            with sqlite3.connect(self.db_path) as db:
+                db.execute(
+                    "UPDATE uploads SET share_active = 0, revoked_at = ? WHERE upload_id = ?",
+                    (revoked_at, upload_id),
+                )
+            self.send_json(
+                200,
+                {
+                    "upload_id": upload_id,
+                    "share_active": False,
+                    "revoked_at": revoked_at,
+                },
+            )
             return
         self.send_bytes(404, b"not found", "text/plain; charset=utf-8")
 
@@ -248,7 +491,7 @@ class BrowserFixtureHandler(BaseHTTPRequestHandler):
             content_type += "; charset=utf-8"
         self.send_bytes(200, path.read_bytes(), content_type)
 
-    def serve_view(self, status: str) -> None:
+    def serve_view(self, status: str, view_token: str = VIEW_TOKEN) -> None:
         template_name = {
             "processing": "processing.html",
             "failed": "error.html",
@@ -256,9 +499,9 @@ class BrowserFixtureHandler(BaseHTTPRequestHandler):
         }.get(status, "transcript.html")
         context: dict[str, object] = {
             "request": None,
-            "view_token": VIEW_TOKEN,
+            "view_token": view_token,
             "title": "浏览器回归示例",
-            "platform": "YouTube",
+            "platform": "local_upload" if view_token.startswith("upload_") else "YouTube",
             "url": "https://www.youtube.com/watch?v=fixture",
             "status": status,
             "created_at": "2026-10-08T12:00:00",

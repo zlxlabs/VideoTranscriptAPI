@@ -502,6 +502,13 @@
     <!-- 过滤栏 -->
     <div class="filter-bar" id="filterBar" style="display:none">
         <div class="filter-group">
+            <label>来源</label>
+            <select id="filterSource" onchange="serializeFiltersToURL(); applyFilter()">
+                <option value="url">链接转录</option>
+                <option value="upload">本地音视频</option>
+            </select>
+        </div>
+        <div class="filter-group">
             <label>开始日期</label>
             <input type="date" id="filterStartDate">
         </div>
@@ -696,6 +703,8 @@ function resetPrivateHistoryState() {
         const element = document.getElementById(id);
         if (element) element.value = '';
     });
+    const sourceEl = document.getElementById('filterSource');
+    if (sourceEl) sourceEl.value = 'url';
     const status = document.getElementById('filterStatus');
     if (status) status.value = 'success';
     const read = document.getElementById('filterRead');
@@ -845,6 +854,7 @@ function serializeFiltersToURL() {
     const get = id => document.getElementById(id)?.value.trim() || '';
 
     const q         = get('filterQ');
+    const source    = get('filterSource');
     const startDate = get('filterStartDate');
     const endDate   = get('filterEndDate');
     const webhook   = get('filterWebhook');
@@ -854,6 +864,7 @@ function serializeFiltersToURL() {
     const read      = get('filterRead');
 
     if (q)         params.set('q', q);
+    if (source && source !== 'url') params.set('source', source);
     if (startDate) params.set('start_date', startDate);
     if (endDate)   params.set('end_date', endDate);
     // webhook 含密钥，不写入 URL
@@ -875,6 +886,7 @@ function loadFiltersFromURL() {
         if (val !== null) { const el = document.getElementById(id); if (el) el.value = val; }
     };
     set('filterQ',          'q');
+    set('filterSource',     'source');
     set('filterStartDate',  'start_date');
     set('filterEndDate',    'end_date');
     // webhook 不从 URL 读取
@@ -971,8 +983,12 @@ async function loadFilterOptions(requestGeneration = privateRequestGeneration) {
     try {
         const res = await apiFetch('/api/audit/filter-options', {}, requestGeneration);
         if (requestGeneration !== privateRequestGeneration) return;
-        if (res.code === 200) {
-            filterOptions = res.data;
+        if (res.code === 200 && res.data) {
+            filterOptions = {
+                webhooks: res.data.webhooks || [],
+                platforms: res.data.platforms || [],
+                authors: res.data.authors || [],
+            };
             currentMasked = res.data.api_key_masked || '';
             populateFilterDropdowns();
             loadFiltersFromURL();   // 恢复 URL 里的过滤条件（必须在下拉填充后）
@@ -1091,6 +1107,7 @@ document.addEventListener('click', () => {
 // ===================== 过滤 =====================
 function applyFilter() { serializeFiltersToURL(); loadHistory(0); }
 function resetFilter() {
+    document.getElementById('filterSource').value = 'url';
     document.getElementById('filterStartDate').value = '';
     document.getElementById('filterEndDate').value = '';
     document.getElementById('filterWebhook').value = '';
@@ -1121,20 +1138,26 @@ function changePage(delta) {
 }
 
 // ===================== API 请求 =====================
-async function apiFetch(url, params = {}, requestGeneration = privateRequestGeneration) {
+async function apiFetch(url, params = {}, requestGeneration = privateRequestGeneration, method = 'GET') {
     const authStorage = requireHistoryAuth();
     if (!authStorage) throw new Error(HISTORY_AUTH_ERROR);
     if (requestGeneration !== privateRequestGeneration) throw createSupersededPrivateHistoryError();
-    const qs = new URLSearchParams(params).toString();
+    const qs = method === 'GET' ? new URLSearchParams(params).toString() : '';
     const fullUrl = qs ? `${url}?${qs}` : url;
     const requestSnapshot = authStorage.snapshotAuthToken();
     const controller = new AbortController();
     privateRequestControllers.add(controller);
     try {
-        const res = await fetch(fullUrl, {
+        const fetchOptions = {
+            method,
             headers: authStorage.buildAuthHeaders(),
             signal: controller.signal
-        });
+        };
+        if (method !== 'GET' && params && Object.keys(params).length > 0) {
+            fetchOptions.headers['Content-Type'] = 'application/json';
+            fetchOptions.body = JSON.stringify(params);
+        }
+        const res = await fetch(fullUrl, fetchOptions);
         if (requestGeneration !== privateRequestGeneration) throw createSupersededPrivateHistoryError();
         if (res.status === 401) {
             const cleared = authStorage.clearAuthTokenIfMatch(requestSnapshot);
@@ -1145,12 +1168,54 @@ async function apiFetch(url, params = {}, requestGeneration = privateRequestGene
             showStatus('err', '访问令牌无效');
             throw new Error('401');
         }
-        const body = await res.json();
+        const body = await res.json().catch(() => ({}));
         if (requestGeneration !== privateRequestGeneration) throw createSupersededPrivateHistoryError();
+        if (!res.ok) {
+            throw new Error(body.detail || body.message || `HTTP ${res.status}`);
+        }
         return body;
     } finally {
         privateRequestControllers.delete(controller);
     }
+}
+
+/**
+ * 停止上传内容的公开分享
+ */
+async function stopShare(uploadId) {
+    if (!uploadId) return;
+    const confirmed = confirm('确认关闭公开分享？关闭后将停止后续阅读、导出与重新处理，但不立即擦除正文，也不取消在途处理与通知。');
+    if (!confirmed) return;
+
+    try {
+        await apiFetch(`/api/uploads/${encodeURIComponent(uploadId)}/share`, {}, privateRequestGeneration, 'DELETE');
+        showStatus('ok', '已停止公开分享');
+        const btn = document.querySelector(`.btn-stop-share[data-upload-id="${uploadId}"]`);
+        if (btn) {
+            const row = btn.closest('.task-row');
+            btn.remove();
+            if (row) {
+                row.classList.add('unclickable');
+                row.removeAttribute('data-vt');
+                row.removeAttribute('onclick');
+                const authorCell = row.querySelector('.task-author');
+                if (authorCell) {
+                    const badge = authorCell.querySelector('.task-status-badge');
+                    if (badge) {
+                        badge.className = 'task-status-badge status-failed';
+                        badge.style.background = '';
+                        badge.style.color = '';
+                        badge.textContent = '已停止分享';
+                    }
+                }
+            }
+        }
+    } catch (err) {
+        showStatus('err', '停止分享失败: ' + (err.message || '未知错误'));
+    }
+}
+if (typeof window !== 'undefined') {
+    window.stopShare = stopShare;
 }
 
 // 缓存客户端过滤后的全量数据（仅已读/未读过滤激活时使用）
@@ -1170,6 +1235,7 @@ async function fetchHistory(requestGeneration = privateRequestGeneration) {
         params.offset = currentPage * PAGE_SIZE;
     }
 
+    const source    = document.getElementById('filterSource')?.value || 'url';
     const startDate = document.getElementById('filterStartDate').value;
     const endDate   = document.getElementById('filterEndDate').value;
     const webhook   = document.getElementById('filterWebhook').value;
@@ -1178,6 +1244,7 @@ async function fetchHistory(requestGeneration = privateRequestGeneration) {
     const status    = document.getElementById('filterStatus').value;
     const q = document.getElementById('filterQ')?.value.trim() || '';
 
+    if (source)    params.source = source;
     if (startDate) params.start_date = startDate;
     if (endDate)   params.end_date = endDate;
     if (webhook)   params.webhook = webhook;
@@ -1253,6 +1320,76 @@ function renderList(items) {
 }
 
 function buildRow(item, readSet) {
+    if (item.source === 'upload') {
+        const isCompleted = item.status === 'success';
+        const activeToken = item.upload_view_token;
+        const canClick = Boolean(isCompleted && activeToken && item.share_active);
+        const isRead = Boolean(canClick && activeToken && readSet.has(activeToken));
+
+        const time = item.request_time
+            ? item.request_time.replace('T', ' ').slice(0, 16)
+            : '—';
+
+        const displayTitle = item.title || item.filename || '本地上传';
+        const retentionLabel = item.retention === 'never' ? '永久保留' : (item.retention === '30d' ? '30天保留' : (item.retention || '30天保留'));
+
+        let shareBadge = '';
+        if (item.share_active) {
+            shareBadge = '<span class="task-status-badge status-processing" style="background:var(--success-bg); color:var(--success-text);">分享中</span>';
+        } else if (item.share_inactive_reason === 'expired') {
+            shareBadge = '<span class="task-status-badge status-unknown">已到期</span>';
+        } else {
+            shareBadge = '<span class="task-status-badge status-failed">已停止分享</span>';
+        }
+
+        const titleHtml = `
+            <div class="task-title">${esc(displayTitle)}</div>
+            <div class="task-author" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                ${item.filename ? `<span>📁 ${esc(item.filename)}</span>` : ''}
+                <span>⏱️ ${esc(retentionLabel)}</span>
+                ${shareBadge}
+                ${item.source_url ? `<span title="${esc(item.source_url)}">🌐 来源链接</span>` : ''}
+            </div>
+        `;
+
+        const classes = ['task-row'];
+        if (isRead) classes.push('read');
+        if (!canClick) classes.push('unclickable');
+
+        const vtAttr = canClick ? `data-vt="${esc(activeToken)}"` : '';
+        const clickHandler = canClick
+            ? `onclick="openTask('${esc(activeToken)}', this)"`
+            : '';
+
+        const checkboxHtml = canClick
+            ? `<input type="checkbox" class="row-checkbox" onclick="event.stopPropagation()">`
+            : `<span></span>`;
+
+        let actionHtml = `<div class="task-platform">📁 本地上传</div>`;
+        if (item.share_active && item.upload_id) {
+            actionHtml = `
+                <div style="display:flex; flex-direction:column; gap:4px; align-items:center;">
+                    <div class="task-platform">📁 本地上传</div>
+                    <button type="button" class="btn btn-ghost btn-stop-share"
+                            style="font-size:0.7rem; padding:2px 8px; color:var(--error-text); border-color:var(--error-border); white-space:nowrap;"
+                            data-upload-id="${esc(item.upload_id)}"
+                            onclick="event.stopPropagation(); stopShare('${esc(item.upload_id)}')">
+                        停止分享
+                    </button>
+                </div>
+            `;
+        }
+
+        return `
+            <div class="${classes.join(' ')}" ${vtAttr} ${clickHandler}>
+                ${!isRead && canClick ? '<div class="read-dot"></div>' : ''}
+                ${checkboxHtml}
+                <div class="task-time">${esc(time)}</div>
+                <div class="task-title-cell">${titleHtml}</div>
+                ${actionHtml}
+            </div>`;
+    }
+
     const isCompleted = item.status === 'success';
     const isRead = isCompleted && item.view_token && readSet.has(item.view_token);
     const canClick = isCompleted && item.view_token;

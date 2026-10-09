@@ -19,6 +19,149 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
     <link rel="stylesheet" href="/static/css/styles.css">
+    <style>
+        .mode-tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+            border-bottom: 1px solid var(--border-primary);
+            padding-bottom: 8px;
+        }
+        .mode-tab {
+            padding: 8px 16px;
+            border: 1px solid var(--border-primary);
+            border-radius: 8px;
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 0.95rem;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            min-height: 44px;
+        }
+        .mode-tab:hover {
+            border-color: var(--accent-primary);
+            color: var(--text-primary);
+        }
+        .mode-tab.active {
+            background: var(--accent-primary);
+            border-color: var(--accent-primary);
+            color: #ffffff;
+            font-weight: 600;
+        }
+        .upload-disabled-banner {
+            background: var(--error-bg);
+            border: 1px solid var(--error-border);
+            color: var(--error-text);
+            padding: 10px 14px;
+            border-radius: 8px;
+            margin-bottom: 14px;
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+        .upload-privacy-notice {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-primary);
+            border-radius: 8px;
+            padding: 10px 14px;
+            margin-bottom: 14px;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+        .upload-drop-zone {
+            border: 2px dashed var(--border-secondary);
+            border-radius: 12px;
+            padding: 24px 16px;
+            text-align: center;
+            background: var(--bg-secondary);
+            cursor: pointer;
+            transition: border-color 0.2s ease, background-color 0.2s ease;
+            outline: none;
+        }
+        .upload-drop-zone:hover, .upload-drop-zone:focus-visible, .upload-drop-zone.dragover {
+            border-color: var(--accent-primary);
+            background: var(--bg-tertiary);
+        }
+        .drop-zone-prompt {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+        }
+        .drop-zone-icon {
+            font-size: 2rem;
+        }
+        .drop-zone-text {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        .drop-zone-hint {
+            font-size: 0.8rem;
+            color: var(--text-tertiary);
+        }
+        .upload-file-info {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 10px 14px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-primary);
+            border-radius: 8px;
+            text-align: left;
+        }
+        .upload-file-icon {
+            font-size: 1.5rem;
+        }
+        .upload-file-meta {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        .upload-file-name {
+            font-weight: 600;
+            font-size: 0.9rem;
+            color: var(--text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .upload-file-size {
+            font-size: 0.8rem;
+            color: var(--text-tertiary);
+        }
+        .btn-clear {
+            background: none;
+            border: none;
+            color: var(--text-tertiary);
+            font-size: 1.2rem;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 4px;
+            line-height: 1;
+        }
+        .btn-clear:hover {
+            color: var(--error-text);
+            background: var(--bg-secondary);
+        }
+        .retention-options {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 6px;
+        }
+        .retention-radio-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.9rem;
+            color: var(--text-primary);
+            cursor: pointer;
+        }
+    </style>
 </head>
 <body>
     <div class="container">
@@ -39,25 +182,97 @@
 
         <main class="main-content">
             <form id="transcribe-form" class="form-container">
-                <!-- URL输入区域 -->
-                <div class="form-group share-input-group">
-                    <label for="share-content" class="form-label">
-                        📋 粘贴分享内容或视频链接
-                    </label>
-                    <textarea
-                        id="share-content"
-                        class="form-textarea"
-                        placeholder="粘贴链接或完整分享文案"
-                        rows="3"
-                        autocapitalize="sentences"
-                        spellcheck="true"
-                        aria-describedby="input-feedback">
-                    </textarea>
-                    <p id="input-feedback" class="input-feedback" role="status"
-                       aria-live="polite" hidden></p>
+                <!-- 提交模式切换：链接转录 / 本地音视频 -->
+                <div class="mode-tabs" role="tablist" aria-label="转录方式">
+                    <button type="button" role="tab" id="mode-tab-url" class="mode-tab active" aria-selected="true" aria-controls="url-mode-panel">🔗 链接转录</button>
+                    <button type="button" role="tab" id="mode-tab-upload" class="mode-tab" aria-selected="false" aria-controls="upload-mode-panel">📁 本地音视频</button>
+                </div>
 
-                    <!-- URL识别结果：仅在找到链接时显示 -->
-                    <div id="url-preview" class="url-preview" aria-live="polite" hidden></div>
+                <!-- URL 模式面板 -->
+                <div id="url-mode-panel" class="mode-panel">
+                    <!-- URL输入区域 -->
+                    <div class="form-group share-input-group">
+                        <label for="share-content" class="form-label">
+                            📋 粘贴分享内容或视频链接
+                        </label>
+                        <textarea
+                            id="share-content"
+                            class="form-textarea"
+                            placeholder="粘贴链接或完整分享文案"
+                            rows="3"
+                            autocapitalize="sentences"
+                            spellcheck="true"
+                            aria-describedby="input-feedback">
+                        </textarea>
+                        <p id="input-feedback" class="input-feedback" role="status"
+                           aria-live="polite" hidden></p>
+
+                        <!-- URL识别结果：仅在找到链接时显示 -->
+                        <div id="url-preview" class="url-preview" aria-live="polite" hidden></div>
+                    </div>
+                </div>
+
+                <!-- 本地音视频上传面板 -->
+                <div id="upload-mode-panel" class="mode-panel" hidden>
+                    <!-- 上传未开启/不可用警告条 -->
+                    <div id="upload-disabled-banner" class="upload-disabled-banner" role="alert" hidden>
+                        <span>⚠️ 本地上传服务当前未开启或暂不可用</span>
+                    </div>
+
+                    <!-- 公开只读与外部处理提示 -->
+                    <div class="upload-privacy-notice" role="note">
+                        ℹ️ 提示：上传的音视频将通过外部语音识别引擎转录，并通过 AI 模型进行智能校对与总结；转录完成将生成公开只读分享链接，请勿上传包含个人敏感隐私的内容。
+                    </div>
+
+                    <!-- 文件选择与拖拽区域 -->
+                    <div class="form-group">
+                        <label class="form-label">📁 选择或拖入音视频文件</label>
+                        <div id="upload-drop-zone" class="upload-drop-zone" tabindex="0" role="button" aria-label="点击或拖拽选择音视频文件">
+                            <input type="file" id="upload-file-input" accept="audio/*,video/*" style="display:none">
+                            <div class="drop-zone-prompt" id="drop-zone-prompt">
+                                <span class="drop-zone-icon">📤</span>
+                                <span class="drop-zone-text">点击选择 或 将音视频文件拖至此处</span>
+                                <span class="drop-zone-hint" id="upload-limits-hint">支持常见音频与视频格式</span>
+                            </div>
+                            <div id="upload-file-info" class="upload-file-info" hidden>
+                                <span class="upload-file-icon">🎬</span>
+                                <div class="upload-file-meta">
+                                    <span id="upload-file-name" class="upload-file-name"></span>
+                                    <span id="upload-file-size" class="upload-file-size"></span>
+                                </div>
+                                <button type="button" id="upload-file-clear" class="btn-clear" aria-label="取消已选文件">✕</button>
+                            </div>
+                        </div>
+                        <p id="upload-input-feedback" class="input-feedback" role="status" aria-live="polite" hidden></p>
+                    </div>
+
+                    <!-- 选填标题 -->
+                    <div class="form-group">
+                        <label for="upload-title" class="form-label">📌 标题（选填）</label>
+                        <input type="text" id="upload-title" class="form-input" maxlength="200" placeholder="选填，最多200字，留空自动提取文件名">
+                    </div>
+
+                    <!-- 选填来源链接 -->
+                    <div class="form-group">
+                        <label for="upload-source-url" class="form-label">🌐 来源链接（选填）</label>
+                        <input type="url" id="upload-source-url" class="form-input" maxlength="2048" placeholder="选填，http(s) 链接，仅展示不抓取">
+                    </div>
+
+                    <!-- 保留期限 -->
+                    <div class="form-group retention-group">
+                        <label class="form-label">⏱️ 内容保留期限</label>
+                        <div class="retention-options">
+                            <label class="retention-radio-label">
+                                <input type="radio" name="upload-retention" value="30d" checked>
+                                <span>30天保留（默认，转录终态起算）</span>
+                            </label>
+                            <label class="retention-radio-label">
+                                <input type="radio" name="upload-retention" value="never">
+                                <span>永久保留（每次新选文件重置）</span>
+                            </label>
+                        </div>
+                        <small class="form-help">保留期限从转录终态（成功/失败）起算；到期或停止分享后链接失效</small>
+                    </div>
                 </div>
 
                 <!-- 高频选项入口：摘要常驻，说明按需展开 -->
@@ -75,6 +290,20 @@
                             <label for="speaker-recognition" class="checkbox-label">
                                 启用说话人识别
                                 <span class="checkbox-desc">适用于多人对话、访谈等场景</span>
+                            </label>
+                        </div>
+                        <div class="checkbox-group" style="margin-top: 10px;">
+                            <input type="checkbox" id="calibrate-option" class="form-checkbox" checked>
+                            <label for="calibrate-option" class="checkbox-label">
+                                启用 AI 智能校对
+                                <span class="checkbox-desc">使用 LLM 修复语音识别中的错别字与断句</span>
+                            </label>
+                        </div>
+                        <div class="checkbox-group" style="margin-top: 10px;">
+                            <input type="checkbox" id="summarize-option" class="form-checkbox" checked>
+                            <label for="summarize-option" class="checkbox-label">
+                                启用内容总结与章节
+                                <span class="checkbox-desc">生成全文摘要、重点回顾与章节大纲</span>
                             </label>
                         </div>
                     </div>
