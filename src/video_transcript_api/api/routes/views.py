@@ -6,6 +6,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
@@ -250,7 +251,8 @@ def _build_text_metadata_header(view_data: Dict[str, Any], export_type: str) -> 
         "transcript": "原始转录",
     }
 
-    title = view_data.get("title", "未命名")
+    raw_title = view_data.get("title", "未命名")
+    title = re.sub(r"[\r\n\t]+", " ", str(raw_title)) if raw_title else "未命名"
     platform = view_data.get("platform", "unknown")
     source_url = view_data.get("url", "")
     content_type_cn = type_map.get(export_type, export_type)
@@ -272,11 +274,54 @@ def _build_text_metadata_header(view_data: Dict[str, Any], export_type: str) -> 
     return "\n".join(lines)
 
 
+def _safe_header_value(value: str) -> str:
+    """对自由文本进行 HTTP 响应头安全编码.
+
+    编码规则:
+    1. 值完全落在 0x20-0x7E、首字符与末字符均非空格/Tab、且不含 '%' 时原样输出；
+    2. 否则整体进行 UTF-8 百分号编码 (urllib.parse.quote(..., safe=""))；
+    3. 编码后头值上限 512 字节，在编码器内按字符边界截断原始值后编码（截断后先剥尾随空白再编码）。
+    """
+    if not value:
+        return ""
+
+    max_bytes = 512
+
+    def is_clean_ascii(s: str) -> bool:
+        if not s:
+            return True
+        if s[0] in (" ", "\t") or s[-1] in (" ", "\t"):
+            return False
+        if "%" in s:
+            return False
+        return all(0x20 <= ord(c) <= 0x7E for c in s)
+
+    # 1. 原样输出分支
+    if is_clean_ascii(value):
+        if len(value.encode("ascii")) <= max_bytes:
+            return value
+        return value[:max_bytes].rstrip(" \t")
+
+    # 2. 整体 UTF-8 百分号编码分支
+    high = min(len(value), max_bytes)
+    low = 1
+    best = ""
+    while low <= high:
+        mid = (low + high) // 2
+        cand = value[:mid].rstrip(" \t\r\n")
+        encoded = quote(cand, safe="")
+        if len(encoded.encode("ascii")) <= max_bytes:
+            best = encoded
+            low = mid + 1
+        else:
+            high = mid - 1
+    return best
+
+
 def _build_metadata_headers(view_data: Dict[str, Any], export_type: str) -> dict:
     """生成纯文本导出的 HTTP 自定义响应头.
 
-    HTTP 响应头仅支持 Latin-1 编码，因此对包含非 ASCII 字符的值
-    使用 RFC 5987 的 UTF-8'' 编码格式。
+    遵循 HTTP 头安全纪律，值经 _safe_header_value 安全编码.
 
     Args:
         view_data: 页面数据字典
@@ -285,8 +330,6 @@ def _build_metadata_headers(view_data: Dict[str, Any], export_type: str) -> dict
     Returns:
         包含自定义响应头的字典
     """
-    from urllib.parse import quote
-
     type_map = {
         "calibrated": "calibrated",
         "summary": "summary",
@@ -298,14 +341,6 @@ def _build_metadata_headers(view_data: Dict[str, Any], export_type: str) -> dict
     platform = view_data.get("platform", "unknown")
     source_url = view_data.get("url", "")
     content_type = type_map.get(export_type, export_type)
-
-    def _safe_header_value(value: str) -> str:
-        """将非 ASCII 值进行 URL 编码，确保 HTTP 头兼容性."""
-        try:
-            value.encode("latin-1")
-            return value
-        except UnicodeEncodeError:
-            return quote(value, safe="")
 
     headers = {
         "X-Document-Title": _safe_header_value(title),
@@ -451,7 +486,9 @@ def _build_page_html(
 </html>"""
 
 
-def handle_page_export(view_data: Dict[str, Any], export_type: str) -> Response:
+def handle_page_export(
+    view_data: Dict[str, Any], export_type: str, view_token: Optional[str] = None
+) -> Response:
     """处理 ?page= 模式导出请求，返回完整 HTML 页面.
 
     与 ?raw= 返回纯文本不同，此模式返回包含完整 meta 标签的 HTML 页面，
@@ -536,7 +573,7 @@ def handle_page_export(view_data: Dict[str, Any], export_type: str) -> Response:
     body_html = render_markdown_to_html(content)
 
     # 7. 构建完整 HTML 页面
-    vt = view_data.get("view_token", "unknown")[:20]
+    vt = (view_token or view_data.get("view_token") or "unknown")[:20]
     logger.info(f"Page export: type={export_type}, view_token={vt}")
 
     page_html = _build_page_html(view_data, export_type, body_html)
@@ -629,7 +666,9 @@ def generate_download_filename(title: str, platform: str, content_type: str) -> 
     return f"{safe_title}-{content_name}-{platform_name}.txt"
 
 
-def handle_raw_export(view_data: Dict[str, Any], export_type: str) -> Response:
+def handle_raw_export(
+    view_data: Dict[str, Any], export_type: str, view_token: Optional[str] = None
+) -> Response:
     """
     处理 Raw 模式导出请求（GitHub Raw 模式）
 
@@ -722,7 +761,7 @@ def handle_raw_export(view_data: Dict[str, Any], export_type: str) -> Response:
         )
 
     # 6. 返回纯文本响应，附带元数据头
-    vt = view_data.get("view_token", "unknown")[:20]
+    vt = (view_token or view_data.get("view_token") or "unknown")[:20]
     logger.info(f"Raw export: type={export_type}, view_token={vt}")
 
     # 在正文顶部添加 YAML front matter 元数据
@@ -856,11 +895,12 @@ async def export_content(view_token: str, export_type: str, request: Request):
             **custom_headers,
         }
 
+        vt = (view_token or view_data.get("view_token") or "unknown")[:20]
         logger.info(
             "导出文件: {}, 文件名: {}, view_token: {}",
             export_type,
             filename,
-            view_data.get("view_token", "unknown")[:20],
+            vt,
         )
 
         return Response(
@@ -1438,11 +1478,15 @@ async def view_transcript(
 
         # 如果请求导出原始文件（GitHub Raw 模式）
         if raw:
-            return await asyncio.to_thread(handle_raw_export, view_data, raw)
+            return await asyncio.to_thread(
+                handle_raw_export, view_data, raw, view_token
+            )
 
         # 如果请求 HTML 页面导出（爬虫友好模式）
         if page:
-            return await asyncio.to_thread(handle_page_export, view_data, page)
+            return await asyncio.to_thread(
+                handle_page_export, view_data, page, view_token
+            )
 
         if view_data.get("created_at"):
             view_data["created_at_display"] = format_datetime_for_display(
