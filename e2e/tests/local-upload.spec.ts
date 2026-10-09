@@ -6,12 +6,23 @@ const baseURL = process.env.VTA_BROWSER_PORT
   ? `http://127.0.0.1:${process.env.VTA_BROWSER_PORT}`
   : '';
 const browserErrors = new WeakMap<Page, string[]>();
+const expectedHttpErrors = new WeakMap<Page, { method: string; path: string; status: number; observed: boolean; consoleSeen: boolean }[]>();
+
+function expectHttpError(page: Page, method: string, path: string, status: number): void {
+  expectedHttpErrors.get(page)?.push({ method, path, status, observed: false, consoleSeen: false });
+}
 
 function observeBrowser(page: Page): void {
   const errors: string[] = [];
   browserErrors.set(page, errors);
+  expectedHttpErrors.set(page, []);
   page.on('console', (message) => {
-    if (message.type() === 'error') errors.push(`console: ${message.text()}`);
+    if (message.type() === 'error') {
+      const status = Number(message.text().match(/status of (\d+)/)?.[1]), location = message.location().url, path = location ? new URL(location).pathname : '';
+      const match = (expectedHttpErrors.get(page) ?? []).find((item) => !item.consoleSeen && item.path === path && item.status === status);
+      if (match) match.consoleSeen = true;
+      else errors.push(`console: ${message.text()}`);
+    }
   });
   page.on('pageerror', (error) => errors.push(`pageerror: ${error.message}`));
   page.on('requestfailed', (request) => {
@@ -19,7 +30,16 @@ function observeBrowser(page: Page): void {
   });
   page.on('response', (response) => {
     if (response.status() >= 400) {
-      errors.push(`HTTP ${response.status()}: ${response.request().method()} ${response.url()}`);
+      const request = response.request();
+      const path = new URL(response.url()).pathname;
+      const expected = expectedHttpErrors.get(page) ?? [];
+      const match = expected.findIndex((item) =>
+        !item.observed && item.method === request.method() && item.path === path && item.status === response.status());
+      if (match !== -1) {
+        expected[match].observed = true;
+      } else {
+        errors.push(`HTTP ${response.status()}: ${request.method()} ${response.url()}`);
+      }
     }
   });
 }
@@ -33,6 +53,7 @@ test.beforeEach(async ({ page, request }) => {
 
 test.afterEach(async ({ page }) => {
   for (const observedPage of page.context().pages()) {
+    expect(expectedHttpErrors.get(observedPage)?.every((item) => item.observed)).toBe(true);
     expect(browserErrors.get(observedPage) ?? []).toEqual([]);
   }
 });
@@ -257,14 +278,15 @@ test('post 500 followed by get 404, receiving, and failed preserves key and prev
   await page.locator('#mode-tab-upload').click();
 
   let postCount = 0;
-  let getCount = 0;
   let postKey = '';
+  const getKeys: string[] = [];
   let getResponseState = '404';
 
   await page.route('**/api/uploads', async (route) => {
     if (route.request().method() === 'POST') {
       postCount++;
       postKey = route.request().headers()['idempotency-key'];
+      expectHttpError(page, 'POST', '/api/uploads', 500);
       await route.fulfill({ status: 500, body: JSON.stringify({ detail: 'server error' }) });
     } else {
       await route.continue();
@@ -272,10 +294,12 @@ test('post 500 followed by get 404, receiving, and failed preserves key and prev
   });
 
   await page.route('**/api/uploads/by-idempotency-key/*', async (route) => {
-    getCount++;
-    const key = route.request().url().split('/by-idempotency-key/')[1];
+    const request = route.request();
+    const key = new URL(request.url()).pathname.split('/by-idempotency-key/')[1];
+    getKeys.push(decodeURIComponent(key));
     expect(decodeURIComponent(key)).toBe(postKey);
     if (getResponseState === '404') {
+      expectHttpError(page, 'GET', new URL(request.url()).pathname, 404);
       await route.fulfill({ status: 404, body: JSON.stringify({ detail: 'not found' }) });
     } else {
       await route.fulfill({
@@ -300,16 +324,20 @@ test('post 500 followed by get 404, receiving, and failed preserves key and prev
   await page.locator('#submit-btn').click();
   await expect(page.locator('#status-content')).toContainText('上传状态待核实');
   expect(postCount).toBe(1);
-  expect(getCount).toBe(1);
 
-  // 2nd click: GET only with same key -> returns receiving, no local history
+  await page.locator('#submit-btn').click();
+  expect(getKeys).toHaveLength(2);
+
+  await page.locator('#submit-btn').click();
+  await expect(page.locator('#status-content')).toContainText('上传状态待核实');
+  expect(postCount).toBe(1);
+  expect(getKeys).toHaveLength(3);
+
   getResponseState = 'receiving';
   await page.locator('#submit-btn').click();
   await expect(page.locator('#status-content')).toContainText('文件已接收，等待排队受理');
   await expect(page.locator('#status-content')).not.toContainText('文件上传成功，任务已受理！');
   await expect(page.locator('#history-list .history-item')).toHaveCount(0);
-  expect(postCount).toBe(1);
-  expect(getCount).toBe(2);
 
   // 3rd click: GET only with same key -> returns failed, no local history
   getResponseState = 'failed';
@@ -318,9 +346,7 @@ test('post 500 followed by get 404, receiving, and failed preserves key and prev
   await expect(page.locator('#status-content')).toContainText('transcode_err');
   await expect(page.locator('#history-list .history-item')).toHaveCount(0);
   expect(postCount).toBe(1);
-  expect(getCount).toBe(3);
-
-  browserErrors.get(page)?.splice(0);
+  expect(getKeys).toEqual(Array(5).fill(postKey));
 });
 
 test('parameter change with colon variations produces distinct idempotency keys', async ({ page }) => {
@@ -329,44 +355,74 @@ test('parameter change with colon variations produces distinct idempotency keys'
   await page.locator('#bearer-token').fill('browser-fixture-token');
   await page.locator('#mode-tab-upload').click();
 
-  const keys: string[] = [];
-  const metadataList: any[] = [];
+  const fileBytes = Buffer.from('冒号碰撞原始文件字节', 'utf-8');
+  const expectedSha256 = createHash('sha256').update(fileBytes).digest('hex');
+  const uploads: { key: string; metadata: any; bodySha256: string; headers: Record<string, string> }[] = [];
+  const getKeys: string[] = [];
   await page.route('**/api/uploads', async (route) => {
     if (route.request().method() === 'POST') {
-      keys.push(route.request().headers()['idempotency-key']);
-      const raw = route.request().headers()['x-upload-metadata'];
-      const padded = raw + '='.repeat((4 - (raw.length % 4)) % 4);
-      metadataList.push(JSON.parse(Buffer.from(padded, 'base64url').toString('utf-8')));
-      await route.fulfill({ status: 400, body: JSON.stringify({ detail: 'rejected' }) });
+      const request = route.request();
+      const headers = request.headers();
+      const raw = headers['x-upload-metadata'];
+      const body = request.postDataBuffer();
+      expect(body).not.toBeNull();
+      uploads.push({
+        key: headers['idempotency-key'],
+        metadata: JSON.parse(Buffer.from(raw, 'base64url').toString('utf-8')),
+        bodySha256: createHash('sha256').update(body!).digest('hex'),
+        headers,
+      });
+      if (uploads.length === 1) {
+        expectHttpError(page, 'POST', '/api/uploads', 500);
+        await route.fulfill({ status: 500, body: JSON.stringify({ detail: 'server error' }) });
+      } else {
+        await route.fulfill({
+          status: 202,
+          body: JSON.stringify({ upload_id: 'up-collision', state: 'receiving', task_id: null, error_code: null }),
+        });
+      }
     } else {
       await route.continue();
     }
+  });
+  await page.route('**/api/uploads/by-idempotency-key/*', async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    getKeys.push(decodeURIComponent(path.split('/by-idempotency-key/')[1]));
+    expectHttpError(page, 'GET', path, 404);
+    await route.fulfill({ status: 404, body: JSON.stringify({ detail: 'not found' }) });
   });
 
   await page.locator('#upload-file-input').setInputFiles({
     name: '冒号测试.mp3',
     mimeType: 'audio/mp3',
-    buffer: Buffer.from('冒号测试', 'utf-8'),
+    buffer: fileBytes,
   });
 
   await page.locator('#upload-title').fill('T');
-  await page.locator('#upload-source-url').fill('https://example.com/a:b');
+  await page.locator('#upload-source-url').fill('https://example.com/path:https://example.org');
   await page.locator('#submit-btn').click();
-  await expect(page.locator('#status-content')).toContainText('rejected');
+  await expect(page.locator('#status-content')).toContainText('上传状态待核实');
+  expect(uploads).toHaveLength(1);
 
-  await page.locator('#upload-title').fill('T:b');
-  await page.locator('#upload-source-url').fill('https://example.com/a');
+  await page.locator('#upload-title').fill('T:https://example.com/path');
+  await page.locator('#upload-source-url').fill('https://example.org');
   await page.locator('#submit-btn').click();
-  await expect(page.locator('#status-content')).toContainText('rejected');
+  await expect(page.locator('#status-content')).toContainText(/文件已接收，等待排队受理|上传失败/);
 
-  expect(keys.length).toBe(2);
-  expect(keys[0]).not.toBe(keys[1]);
-  expect(metadataList[0].title).toBe('T');
-  expect(metadataList[0].source_url).toBe('https://example.com/a:b');
-  expect(metadataList[1].title).toBe('T:b');
-  expect(metadataList[1].source_url).toBe('https://example.com/a');
-
-  browserErrors.get(page)?.splice(0);
+  expect(uploads).toHaveLength(2);
+  expect(uploads[1].key).not.toBe(uploads[0].key);
+  expect(uploads.map((upload) => upload.bodySha256)).toEqual([expectedSha256, expectedSha256]);
+  expect(uploads.map((upload) => [upload.headers.authorization, upload.headers['content-type']])).toEqual([['Bearer browser-fixture-token', 'application/octet-stream'], ['Bearer browser-fixture-token', 'application/octet-stream']]);
+  const processingOptions = { calibrate: true, summarize: true, infer_speaker_names: false, chapters: true };
+  const expectedMetadata = [
+    { filename: '冒号测试.mp3', byte_size: fileBytes.length, title: 'T', source_url: 'https://example.com/path:https://example.org', retention: '30d', processing_options: processingOptions },
+    { filename: '冒号测试.mp3', byte_size: fileBytes.length, title: 'T:https://example.com/path', source_url: 'https://example.org', retention: '30d', processing_options: processingOptions },
+  ];
+  expect(uploads.map((upload) => upload.metadata)).toEqual(expectedMetadata);
+  expect(getKeys).toEqual([uploads[0].key]);
+  await expect(page.locator('#status-content')).toContainText('文件已接收，等待排队受理');
+  await expect(page.locator('#history-list .history-item')).toHaveCount(0);
 });
 
 test('upload in flight: selecting replacement file binds original snapshot to upload and preserves replacement file', async ({ page, request }) => {
@@ -433,4 +489,3 @@ test('upload in flight: selecting replacement file binds original snapshot to up
   await expect(historyItem).toBeVisible();
   await expect(historyItem.locator('.history-title')).toHaveText('原文件.mp3');
 });
-

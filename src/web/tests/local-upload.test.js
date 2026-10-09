@@ -489,21 +489,30 @@ describe('local upload frontend logic', () => {
     expect(dom.window.document.getElementById('status-content').textContent).toContain('任务已受理');
   });
 
-  it('preserves key on POST 500 then GET 404, queries get with same key, and differentiates colon variations', async () => {
+  it('keeps an unknown upload intent separate from metadata with a colliding colon signature', async () => {
     await installIndexPage();
     const { window } = dom;
     const file = new window.File(['content'], 'test.mp4', { type: 'video/mp4' });
     window.selectUploadFile(file);
 
-    let postKeys = [];
-    let getKeys = [];
-    let meta = [];
+    const postKeys = [];
+    const postBodies = [];
+    const getKeys = [];
+    const metadata = [];
     window.fetch = vi.fn(async (url, opts = {}) => {
       if (url.includes('/capabilities')) return { ok: true, status: 200, json: async () => dom.caps };
       if (url.endsWith('/api/uploads') && opts.method === 'POST') {
         postKeys.push(opts.headers['Idempotency-Key']);
-        meta.push(decodeBase64Url(opts.headers['X-Upload-Metadata']));
-        return { ok: false, status: 500, json: async () => ({ detail: 'err' }) };
+        postBodies.push(opts.body);
+        metadata.push(decodeBase64Url(opts.headers['X-Upload-Metadata']));
+        if (postKeys.length === 1) {
+          return { ok: false, status: 500, json: async () => ({ detail: 'server error' }) };
+        }
+        return {
+          ok: true,
+          status: 202,
+          json: async () => ({ upload_id: 'up-collision', state: 'receiving', task_id: null, error_code: null }),
+        };
       }
       if (url.includes('/by-idempotency-key/')) {
         getKeys.push(decodeURIComponent(url.split('/by-idempotency-key/')[1]));
@@ -512,31 +521,31 @@ describe('local upload frontend logic', () => {
       return { ok: true, status: 200, json: async () => ({}) };
     });
 
-    window.document.getElementById('upload-title').value = 'T';
-    window.document.getElementById('upload-source-url').value = 'https://example.com/a:b';
+    const title = window.document.getElementById('upload-title');
+    const source = window.document.getElementById('upload-source-url');
+    title.value = 'T';
+    source.value = 'https://example.com/path:https://example.org';
     await window.submitUploadForm(new window.Event('submit', { cancelable: true }));
 
     expect(postKeys.length).toBe(1);
-    expect(getKeys.length).toBe(1);
-    expect(getKeys[0]).toBe(postKeys[0]);
+    expect(getKeys).toEqual([postKeys[0]]);
+    expect(dom.window.document.getElementById('status-content').textContent).toContain('上传状态待核实');
 
-    // 2nd click: GET only with same key, no second POST
-    await window.submitUploadForm(new window.Event('submit', { cancelable: true }));
-    expect(postKeys.length).toBe(1);
-    expect(getKeys.length).toBe(2);
-    expect(getKeys[1]).toBe(postKeys[0]);
-
-    // Colon parameter variation: creates new key and distinct metadata
-    window.document.getElementById('upload-title').value = 'T:b';
-    window.document.getElementById('upload-source-url').value = 'https://example.com/a';
+    title.value = 'T:https://example.com/path';
+    source.value = 'https://example.org';
     await window.submitUploadForm(new window.Event('submit', { cancelable: true }));
 
     expect(postKeys.length).toBe(2);
     expect(postKeys[1]).not.toBe(postKeys[0]);
-    expect(meta[0].title).toBe('T');
-    expect(meta[0].source_url).toBe('https://example.com/a:b');
-    expect(meta[1].title).toBe('T:b');
-    expect(meta[1].source_url).toBe('https://example.com/a');
+    expect(postBodies.every((body) => body === file)).toBe(true);
+    expect(getKeys).toEqual([postKeys[0]]);
+    expect(metadata.map(({ title, source_url }) => [title, source_url])).toEqual([
+      ['T', 'https://example.com/path:https://example.org'],
+      ['T:https://example.com/path', 'https://example.org'],
+    ]);
+    expect(dom.window.document.getElementById('status-content').textContent).toContain('文件已接收，等待排队受理');
+    expect(dom.window.document.getElementById('status-content').textContent).not.toContain('任务已受理！');
+    expect(window.TaskHistoryManager.getHistory()).toHaveLength(0);
   });
 
 
