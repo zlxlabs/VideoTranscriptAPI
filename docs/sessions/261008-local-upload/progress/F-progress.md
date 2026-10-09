@@ -27,3 +27,10 @@
 - **本段结论**：新测试先在 H0 `de3ff7b6671418ae7746649ef2167d5778c790ef` 官方 scratch 以真实 AssertionError 红：临时仓 HEAD 由 `git rev-parse HEAD` 取得，minimum SHA 对象缺失，raw `git merge-base --is-ancestor` 实返 128，旧 helper 错报 incompatible。H1 修复后 narrow 12 passed；scratch 中 `make test` 与 `PYTEST_ADDOPTS=-rs make test` 均 exit 0，后者 3821 passed/3 skipped/0 failed，skip 为真实 CapsWriter preflight fixture unavailable。
 - **关键决策与否决方案**：严格映射 Git 返回码 `0→safe-lineage`、`1→incompatible`、其它查询错误→已有 `unknown`；保留未解析 source→unknown，既有真实 A safe-lineage 与 pre-A incompatible 对照不变。不增状态、catch、fallback、重试或包装层；测试用真实一次提交仓和真实 producer argv，不mock subprocess。
 - **下一步唯一动作**：提交并推送这三处修复到原 PR #208，核对远端/clean 后交 lead。
+
+## 2026-10-09 · F-R1 验收与交接
+
+- **当前阶段**：修复已提交并推送原分支，commit `d193b4c56848169e5f3a0fedb2365d4c41b66640`；PR #208 仍 OPEN/DRAFT、remote head 匹配。
+- **本段结论**：H0 AssertionError 红、H1 窄测 12 passed、全量 exit 0（3821 passed/3 skipped/0 failed）均在新 scratch；唯一 skip 为 `tests/unit/test_capswriter_samples_total_contract.py:61` 缺真实 preflight fixture。隔离 Git producer SHA `0b21ae0e9cc5b5c89a9aa7ebd768e0dd733d7b87`，raw query argv 使用 minimum `6af391d20edab8dfd8b320ce6b91d4d19e3260e2` 返回 128 `fatal: Not a valid commit name`，H1 consumer 返回 `unknown`。
+- **关键决策与否决方案**：实现目录曾被一次未显式 `cd` 的独立 Python/Git fixture 诊断命令误用；仅创建/删除 `/tmp` Git fixture，之后同一 query 已在新 H1 scratch 重复。实现树中 mtime早于本续派的 `.venv`/`data`/`.pytest_cache` 已只采样元数据、未读内容且因来源未证保留；所有 pytest/Narrow/make 均只在 scratch执行。修复未读写生产/他树，PR保持draft。
+- **下一步唯一动作**：交 Pi lead 做正式 hosted CI 与独立 review，维持 PR draft、不ready/merge。
