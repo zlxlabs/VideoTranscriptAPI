@@ -130,9 +130,9 @@ def _register_state_inspector(app, run_dir: Path, upstreams: LoopbackUpstreams) 
             rows = [dict(row) for row in cursor.fetchall()]
 
         for row in rows:
-            row["request_metadata"] = json.loads(row["request_metadata"] or "{}")
+            row["request_metadata"] = json.loads(row["request_metadata"])
             row["task_processing_options"] = json.loads(
-                row["task_processing_options"] or "{}"
+                row["task_processing_options"]
             )
             media_path = Path(row["media_path"]) if row["media_path"] else None
             row["media_exists"] = bool(media_path and media_path.is_file())
