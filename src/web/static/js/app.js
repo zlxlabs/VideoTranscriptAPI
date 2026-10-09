@@ -24,6 +24,12 @@ let authStorageErrorShown = false;
 let currentTask = null;
 let isAdvancedSettingsExpanded = false;
 let webhookSaveTimer = null;
+let currentMode = 'url';
+let selectedUploadFile = null;
+let uploadCapabilities = null;
+let uploadCapabilitiesIdentity = null;
+let currentUploadIntent = null;
+let isUploading = false;
 
 /**
  * 通用URL提取正则表达式
@@ -95,6 +101,7 @@ function handleHomepageAuthStorageEvent(event) {
     ].includes(event && event.key)) return;
     const tokenInput = document.getElementById('bearer-token');
     if (tokenInput) tokenInput.value = authStorage.readAuthToken() || '';
+    checkUploadCapabilities();
     UIManager.updateSubmitButton();
 }
 
@@ -123,23 +130,27 @@ function buildHistoryItemHTML(task) {
     const timeStr = escapeHTML(new Date(task.timestamp).toLocaleString('zh-CN'));
     const originalTextPreview = task.original_text ?
         (task.original_text.length > 100 ? task.original_text.substring(0, 100) + '...' : task.original_text) : '';
+    const isUpload = task.source === 'upload';
+    const retentionBadge = task.retention ? `<span class="feature-tag">• 保留: ${escapeHTML(task.retention)}</span>` : '';
     return `
         <div class="history-info">
             <div class="history-title">${escapeHTML(task.title)}</div>
             ${originalTextPreview ? `
                 <div class="history-original-text">
-                    <span class="original-text-label">原始内容：</span>
+                    <span class="original-text-label">${isUpload ? '来源链接：' : '原始内容：'}</span>
                     <span class="original-text-content">${escapeHTML(originalTextPreview)}</span>
                 </div>
             ` : ''}
-            <div class="history-url">${escapeHTML(task.url)}</div>
+            ${task.url ? `<div class="history-url">${escapeHTML(task.url)}</div>` : ''}
             <div class="history-meta">
                 <span>${timeStr}</span>
+                ${isUpload ? '<span class="feature-tag">• 本地上传</span>' : ''}
                 ${task.useSpeakerRecognition ? '<span class="feature-tag">• 说话人识别</span>' : ''}
+                ${retentionBadge}
             </div>
         </div>
         <div class="history-actions">
-            <button class="history-btn history-copy-btn" data-url="${escapeHTML(task.url)}">📋 复制</button>
+            ${task.url ? `<button class="history-btn history-copy-btn" data-url="${escapeHTML(task.url)}">📋 复制</button>` : ''}
             <a class="history-btn" href="/view/${escapeHTML(task.view_token || task.id)}" target="_blank">👁️ 查看</a>
             <button class="history-btn delete-btn history-delete-btn" data-task-id="${escapeHTML(task.id)}">🗑️ 删除</button>
         </div>
@@ -387,6 +398,106 @@ class APIManager {
 
         return await response.json();
     }
+
+    /**
+     * 获取上传功能配置
+     */
+    static async getUploadCapabilities() {
+        const authStorage = requireAuthStorage();
+        const headers = authStorage ? authStorage.buildAuthHeaders() : {};
+        const response = await fetch('/api/uploads/capabilities', {
+            headers
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.message || errorData.detail || `HTTP ${response.status}`);
+        }
+
+        return await response.json();
+    }
+
+    /**
+     * 提交本地音视频上传
+     */
+    static async submitUpload(file, idempotencyKey, metadata) {
+        const authStorage = requireAuthStorage();
+        const token = authStorage && authStorage.readAuthToken();
+
+        if (!token) {
+            throw new Error(authStorage ? '请先设置访问令牌' : AUTH_STORAGE_ERROR_MESSAGE);
+        }
+
+        const encodedMetadata = encodeUploadMetadata(metadata);
+        const headers = {
+            'Content-Type': 'application/octet-stream',
+            'Idempotency-Key': idempotencyKey,
+            'X-Upload-Metadata': encodedMetadata,
+            ...authStorage.buildAuthHeaders()
+        };
+
+        const response = await fetch('/api/uploads', {
+            method: 'POST',
+            headers,
+            body: file
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            const error = new Error(errorData.message || errorData.detail || `HTTP ${response.status}`);
+            error.status = response.status;
+            error.data = errorData;
+            throw error;
+        }
+
+        return await response.json();
+    }
+
+    /**
+     * 根据 Idempotency-Key 查询上传回执
+     */
+    static async getUploadReceipt(idempotencyKey) {
+        const authStorage = requireAuthStorage();
+        const headers = authStorage ? authStorage.buildAuthHeaders() : {};
+        const response = await fetch(`/api/uploads/by-idempotency-key/${encodeURIComponent(idempotencyKey)}`, {
+            headers
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            const error = new Error(errorData.message || errorData.detail || `HTTP ${response.status}`);
+            error.status = response.status;
+            throw error;
+        }
+
+        return await response.json();
+    }
+
+    /**
+     * 停止上传内容的公开分享
+     */
+    static async stopUploadShare(uploadId) {
+        const authStorage = requireAuthStorage();
+        const token = authStorage && authStorage.readAuthToken();
+
+        if (!token) {
+            throw new Error(authStorage ? '请先设置访问令牌' : AUTH_STORAGE_ERROR_MESSAGE);
+        }
+
+        const response = await fetch(`/api/uploads/${encodeURIComponent(uploadId)}/share`, {
+            method: 'DELETE',
+            headers: authStorage.buildAuthHeaders()
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            const error = new Error(errorData.message || errorData.detail || `HTTP ${response.status}`);
+            error.status = response.status;
+            throw error;
+        }
+
+        return await response.json();
+    }
 }
 
 /**
@@ -404,16 +515,20 @@ class TaskHistoryManager {
             const newTask = {
                 id: taskData.task_id,
                 view_token: taskData.view_token,
-                url: taskData.url,
+                upload_id: taskData.upload_id || null,
+                source: taskData.source || 'url',
+                url: taskData.url || '',
                 original_text: taskData.original_text || '',
-                title: taskData.title || this.extractTitleFromURL(taskData.url),
+                title: taskData.title || (taskData.url ? this.extractTitleFromURL(taskData.url) : '本地上传'),
                 timestamp: Date.now(),
                 useSpeakerRecognition: taskData.use_speaker_recognition || false,
+                retention: taskData.retention || null,
+                share_active: taskData.share_active !== undefined ? taskData.share_active : true,
                 status: 'submitted'
             };
 
-            // 基于URL去重：相同URL只保留最新的记录
-            const existingUrlIndex = history.findIndex(task => task.url === newTask.url);
+            // 基于URL去重：仅当URL非空时相同URL才去重保留最新
+            const existingUrlIndex = newTask.url ? history.findIndex(task => task.url === newTask.url) : -1;
             let isDuplicate = false;
             let oldTask = null;
             
@@ -533,9 +648,9 @@ class TaskHistoryManager {
             item.innerHTML = buildHistoryItemHTML(task);
 
             const copyBtn = item.querySelector('.history-copy-btn');
-            copyBtn.addEventListener('click', () => copyToClipboard(copyBtn.dataset.url));
+            if (copyBtn) copyBtn.addEventListener('click', () => copyToClipboard(copyBtn.dataset.url));
             const deleteBtn = item.querySelector('.history-delete-btn');
-            deleteBtn.addEventListener('click', () => TaskHistoryManager.deleteTask(deleteBtn.dataset.taskId));
+            if (deleteBtn) deleteBtn.addEventListener('click', () => TaskHistoryManager.deleteTask(deleteBtn.dataset.taskId));
 
             list.appendChild(item);
         });
@@ -708,6 +823,7 @@ class UIManager {
      * 更新提交按钮状态
      */
     static updateSubmitButton() {
+        if (typeof document === 'undefined') return;
         const btn = document.getElementById('submit-btn');
         if (!btn) return;
         const btnIcon = btn.querySelector('.btn-icon');
@@ -721,7 +837,6 @@ class UIManager {
             return;
         }
 
-        const selectedURL = getSelectedURL();
         const token = StorageManager.get(APP_CONFIG.STORAGE_KEYS.BEARER_TOKEN);
         const authPrompt = document.getElementById('auth-missing-prompt');
 
@@ -729,6 +844,38 @@ class UIManager {
             authPrompt.hidden = Boolean(token);
         }
 
+        if (currentMode === 'upload') {
+            let fileValid = Boolean(selectedUploadFile);
+            const uploadEnabled = Boolean(
+                uploadCapabilities &&
+                uploadCapabilities.enabled === true &&
+                uploadCapabilities.limits &&
+                typeof uploadCapabilities.limits.max_file_mib === 'number' &&
+                uploadCapabilities.limits.max_file_mib > 0
+            );
+            if (selectedUploadFile && uploadCapabilities && uploadCapabilities.limits && uploadCapabilities.limits.max_file_mib) {
+                if (selectedUploadFile.size > uploadCapabilities.limits.max_file_mib * 1024 * 1024) {
+                    fileValid = false;
+                }
+            }
+            const canSubmit = fileValid && token && !isUploading && uploadEnabled;
+
+            btn.disabled = !canSubmit;
+
+            if (isUploading) {
+                btnIcon.textContent = '⏳';
+                btnText.textContent = '上传中...';
+            } else if (!selectedUploadFile) {
+                btnIcon.textContent = '📁';
+                btnText.textContent = '开始上传';
+            } else {
+                btnIcon.textContent = '🚀';
+                btnText.textContent = '开始上传';
+            }
+            return;
+        }
+
+        const selectedURL = getSelectedURL();
         const canSubmit = selectedURL && token && !currentTask;
         
         btn.disabled = !canSubmit;
@@ -1040,6 +1187,500 @@ async function submitTranscription(event) {
 }
 
 /**
+ * 格式化文件大小
+ */
+function formatBytes(bytes) {
+    if (!bytes || bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+/**
+ * 构建上传元数据（恰六个字段）
+ */
+function buildUploadMetadata(file, options = {}) {
+    const titleVal = options.title !== undefined ? options.title : (typeof document !== 'undefined' ? document.getElementById('upload-title')?.value : '');
+    const sourceUrlVal = options.sourceUrl !== undefined ? options.sourceUrl : (typeof document !== 'undefined' ? document.getElementById('upload-source-url')?.value : '');
+    const retentionVal = options.retention || getUploadRetention();
+
+    const processingOptions = options.processingOptions || {
+        calibrate: typeof document !== 'undefined' ? (document.getElementById('calibrate-option')?.checked ?? true) : true,
+        summarize: typeof document !== 'undefined' ? (document.getElementById('summarize-option')?.checked ?? true) : true,
+        infer_speaker_names: typeof document !== 'undefined' ? (document.getElementById('speaker-recognition')?.checked ?? false) : false,
+        chapters: typeof document !== 'undefined' ? (document.getElementById('summarize-option')?.checked ?? true) : true,
+    };
+
+    const cleanTitle = (typeof titleVal === 'string' && titleVal.trim()) ? titleVal.trim().slice(0, 200) : null;
+    const cleanSource = (typeof sourceUrlVal === 'string' && sourceUrlVal.trim()) ? sourceUrlVal.trim().slice(0, 2048) : null;
+
+    return {
+        filename: file.name,
+        byte_size: file.size,
+        title: cleanTitle,
+        source_url: cleanSource,
+        retention: retentionVal,
+        processing_options: {
+            calibrate: Boolean(processingOptions.calibrate),
+            summarize: Boolean(processingOptions.summarize),
+            infer_speaker_names: Boolean(processingOptions.infer_speaker_names),
+            chapters: Boolean(processingOptions.chapters),
+        }
+    };
+}
+
+/**
+ * base64url UTF-8 编码
+ */
+function encodeUploadMetadata(metadata) {
+    const jsonStr = JSON.stringify(metadata);
+    const EncoderClass = typeof TextEncoder !== 'undefined'
+        ? TextEncoder
+        : (typeof globalThis !== 'undefined' && globalThis.TextEncoder ? globalThis.TextEncoder : null);
+    if (!EncoderClass) {
+        throw new Error('TextEncoder is not supported in this environment');
+    }
+    const bytes = new EncoderClass().encode(jsonStr);
+    let binary = '';
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary)
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+}
+
+/**
+ * 生成 Idempotency-Key (epoch_ms-UUID)
+ */
+function generateUploadIdempotencyKey() {
+    const epoch = Date.now();
+    const cryptoObj = typeof crypto !== 'undefined'
+        ? crypto
+        : (typeof globalThis !== 'undefined' && globalThis.crypto ? globalThis.crypto : null);
+    if (!cryptoObj || typeof cryptoObj.randomUUID !== 'function') {
+        throw new Error('crypto.randomUUID is not supported in this environment');
+    }
+    const uuid = cryptoObj.randomUUID();
+    return `${epoch}-${uuid}`;
+}
+
+/**
+ * 获取选中的保留期限
+ */
+function getUploadRetention() {
+    if (typeof document === 'undefined') return '30d';
+    const radio = document.querySelector('input[name="upload-retention"]:checked');
+    return radio ? radio.value : '30d';
+}
+
+/**
+ * 选择音视频文件
+ */
+function selectUploadFile(file) {
+    if (!file) return;
+    selectedUploadFile = file;
+    currentUploadIntent = null; // 新选文件重置意图
+
+    // 每次新选文件重置保留期限为 30d
+    const defaultRetention = (uploadCapabilities && uploadCapabilities.default_retention) || '30d';
+    if (typeof document !== 'undefined') {
+        const retentionRadios = document.querySelectorAll('input[name="upload-retention"]');
+        retentionRadios.forEach(r => {
+            r.checked = (r.value === defaultRetention);
+        });
+
+        const dropZonePrompt = document.getElementById('drop-zone-prompt');
+        const fileInfo = document.getElementById('upload-file-info');
+        const fileName = document.getElementById('upload-file-name');
+        const fileSize = document.getElementById('upload-file-size');
+        const feedback = document.getElementById('upload-input-feedback');
+
+        if (dropZonePrompt) dropZonePrompt.hidden = true;
+        if (fileInfo) fileInfo.hidden = false;
+        if (fileName) fileName.textContent = file.name;
+        if (fileSize) fileSize.textContent = formatBytes(file.size);
+
+        let sizeError = null;
+        if (uploadCapabilities && uploadCapabilities.limits && uploadCapabilities.limits.max_file_mib) {
+            const maxBytes = uploadCapabilities.limits.max_file_mib * 1024 * 1024;
+            if (file.size > maxBytes) {
+                sizeError = `文件大小 (${formatBytes(file.size)}) 超出限制 (${uploadCapabilities.limits.max_file_mib} MiB)`;
+            }
+        }
+
+        if (feedback) {
+            if (sizeError) {
+                feedback.textContent = sizeError;
+                feedback.hidden = false;
+            } else {
+                feedback.textContent = '';
+                feedback.hidden = true;
+            }
+        }
+    }
+
+    if (typeof UIManager !== 'undefined') {
+        UIManager.updateSubmitButton();
+    }
+}
+
+/**
+ * 清除已选文件
+ */
+function clearUploadFile() {
+    selectedUploadFile = null;
+    currentUploadIntent = null;
+    if (typeof document !== 'undefined') {
+        const fileInput = document.getElementById('upload-file-input');
+        if (fileInput) fileInput.value = '';
+
+        const dropZonePrompt = document.getElementById('drop-zone-prompt');
+        const fileInfo = document.getElementById('upload-file-info');
+        const feedback = document.getElementById('upload-input-feedback');
+
+        if (dropZonePrompt) dropZonePrompt.hidden = false;
+        if (fileInfo) fileInfo.hidden = true;
+        if (feedback) {
+            feedback.textContent = '';
+            feedback.hidden = true;
+        }
+    }
+
+    if (typeof UIManager !== 'undefined') {
+        UIManager.updateSubmitButton();
+    }
+}
+
+/**
+ * 切换转录模式 (url / upload)
+ */
+function switchMode(mode) {
+    currentMode = mode;
+    if (typeof document !== 'undefined') {
+        const urlTab = document.getElementById('mode-tab-url');
+        const uploadTab = document.getElementById('mode-tab-upload');
+        const urlPanel = document.getElementById('url-mode-panel');
+        const uploadPanel = document.getElementById('upload-mode-panel');
+
+        if (mode === 'upload') {
+            if (urlTab) {
+                urlTab.classList.remove('active');
+                urlTab.setAttribute('aria-selected', 'false');
+            }
+            if (uploadTab) {
+                uploadTab.classList.add('active');
+                uploadTab.setAttribute('aria-selected', 'true');
+            }
+            if (urlPanel) urlPanel.hidden = true;
+            if (uploadPanel) uploadPanel.hidden = false;
+            checkUploadCapabilities();
+        } else {
+            if (uploadTab) {
+                uploadTab.classList.remove('active');
+                uploadTab.setAttribute('aria-selected', 'false');
+            }
+            if (urlTab) {
+                urlTab.classList.add('active');
+                urlTab.setAttribute('aria-selected', 'true');
+            }
+            if (uploadPanel) uploadPanel.hidden = true;
+            if (urlPanel) urlPanel.hidden = false;
+        }
+    }
+
+    if (typeof UIManager !== 'undefined') {
+        UIManager.updateSubmitButton();
+    }
+}
+
+/**
+ * 检查上传功能配置
+ */
+async function checkUploadCapabilities() {
+    if (typeof document === 'undefined' || typeof fetch === 'undefined') return;
+    if (typeof window !== 'undefined' && window.location && (!window.location.protocol || !window.location.protocol.startsWith('http'))) return;
+
+    const authStorage = requireAuthStorage();
+    const token = authStorage && authStorage.readAuthToken();
+    const banner = document.getElementById('upload-disabled-banner');
+    const hint = document.getElementById('upload-limits-hint');
+    if (!token) {
+        uploadCapabilities = null;
+        uploadCapabilitiesIdentity = null;
+        if (banner) banner.hidden = true;
+        if (hint) hint.textContent = '';
+        if (typeof UIManager !== 'undefined') UIManager.updateSubmitButton();
+        return;
+    }
+
+    if (uploadCapabilitiesIdentity !== token) {
+        uploadCapabilities = null;
+        uploadCapabilitiesIdentity = null;
+        if (typeof UIManager !== 'undefined') {
+            UIManager.updateSubmitButton();
+        }
+    }
+
+    const requestIdentity = token;
+    try {
+        const caps = await APIManager.getUploadCapabilities();
+        if (typeof document === 'undefined') return;
+        if (authStorage.readAuthToken() !== requestIdentity) return;
+
+        const isFiniteLimit = caps && caps.limits && typeof caps.limits.max_file_mib === 'number' && caps.limits.max_file_mib > 0;
+        if (caps && caps.enabled === true && isFiniteLimit) {
+            uploadCapabilities = caps;
+            uploadCapabilitiesIdentity = requestIdentity;
+            if (banner) banner.hidden = true;
+            if (hint) {
+                hint.textContent = `最大支持 ${caps.limits.max_file_mib} MiB，最多 ${caps.limits.max_media_hours} 小时`;
+            }
+        } else {
+            uploadCapabilities = { enabled: false };
+            uploadCapabilitiesIdentity = requestIdentity;
+            if (banner) {
+                banner.hidden = false;
+                banner.textContent = '服务端当前已禁用本地音视频文件上传功能。';
+            }
+        }
+    } catch (err) {
+        if (authStorage.readAuthToken() !== requestIdentity) return;
+        uploadCapabilities = { enabled: false, error: err.message };
+        uploadCapabilitiesIdentity = requestIdentity;
+        if (banner) {
+            banner.hidden = false;
+            banner.textContent = (err.message && err.message.includes('401'))
+                ? '访问令牌未授权使用上传服务。'
+                : `无法获取上传服务配置: ${err.message || '网络异常'}`;
+        }
+    } finally {
+        if (authStorage.readAuthToken() === requestIdentity) {
+            if (typeof document !== 'undefined' && typeof UIManager !== 'undefined') {
+                UIManager.updateSubmitButton();
+            }
+        }
+    }
+}
+
+/**
+ * 设置拖拽区域
+ */
+function setupUploadDropZone() {
+    if (typeof document === 'undefined') return;
+    const dropZone = document.getElementById('upload-drop-zone');
+    const fileInput = document.getElementById('upload-file-input');
+    const clearBtn = document.getElementById('upload-file-clear');
+
+    if (!dropZone || !fileInput) return;
+
+    dropZone.addEventListener('click', (e) => {
+        if (e.target === clearBtn || (clearBtn && clearBtn.contains(e.target))) {
+            return;
+        }
+        fileInput.click();
+    });
+
+    dropZone.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            fileInput.click();
+        }
+    });
+
+    dropZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        dropZone.classList.add('dragover');
+    });
+
+    dropZone.addEventListener('dragleave', () => {
+        dropZone.classList.remove('dragover');
+    });
+
+    dropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropZone.classList.remove('dragover');
+        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            selectUploadFile(e.dataTransfer.files[0]);
+        }
+    });
+
+    fileInput.addEventListener('change', (e) => {
+        if (e.target.files && e.target.files.length > 0) {
+            selectUploadFile(e.target.files[0]);
+        }
+    });
+
+    if (clearBtn) {
+        clearBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            clearUploadFile();
+        });
+    }
+}
+
+/**
+ * 提交文件上传表单
+ */
+async function submitUploadForm(event) {
+    if (event && event.preventDefault) event.preventDefault();
+
+    if (isUploading) {
+        return;
+    }
+
+    if (!selectedUploadFile) {
+        const feedback = document.getElementById('upload-input-feedback');
+        if (feedback) {
+            feedback.textContent = '请先选择一个音视频文件。';
+            feedback.hidden = false;
+        }
+        UIManager.showStatus('error', '请先选择文件', '点击或拖拽选择本地音视频文件后重试');
+        setTimeout(UIManager.hideStatus, 5000);
+        return;
+    }
+
+    if (!uploadCapabilities || uploadCapabilities.enabled !== true) {
+        UIManager.showStatus('error', '上传服务未开启', '当前服务端已关闭本地文件上传能力或尚未完成配置探测');
+        return;
+    }
+
+    if (uploadCapabilities.limits && uploadCapabilities.limits.max_file_mib) {
+        if (selectedUploadFile.size > uploadCapabilities.limits.max_file_mib * 1024 * 1024) {
+            UIManager.showStatus('error', '文件超出限制', `文件大小超出上限 ${uploadCapabilities.limits.max_file_mib} MiB`);
+            return;
+        }
+    }
+
+    const token = StorageManager.get(APP_CONFIG.STORAGE_KEYS.BEARER_TOKEN);
+    if (!token) {
+        const authPrompt = document.getElementById('auth-missing-prompt');
+        if (authPrompt) authPrompt.hidden = false;
+        UIManager.showStatus('error', '请先设置访问令牌', '点击“去设置”展开访问令牌输入框');
+        setTimeout(UIManager.hideStatus, 5000);
+        return;
+    }
+
+    const fileSnapshot = selectedUploadFile;
+    const metadataSnapshot = buildUploadMetadata(fileSnapshot);
+    const metaSignature = JSON.stringify(metadataSnapshot);
+
+    if (!currentUploadIntent || currentUploadIntent.file !== fileSnapshot || currentUploadIntent.metaSignature !== metaSignature) {
+        currentUploadIntent = {
+            file: fileSnapshot,
+            metaSignature: metaSignature,
+            idempotencyKey: generateUploadIdempotencyKey(),
+            pendingVerification: false
+        };
+    }
+
+    const intentSnapshot = currentUploadIntent;
+    isUploading = true;
+    UIManager.updateSubmitButton();
+
+    let receipt = null;
+    try {
+        if (intentSnapshot.pendingVerification) {
+            UIManager.showStatus('loading', '正在核实上传受理状态...', '未重复发送文件，正在查询回执');
+            try {
+                receipt = await APIManager.getUploadReceipt(intentSnapshot.idempotencyKey);
+            } catch (getErr) {
+                UIManager.showStatus('error', '上传状态待核实', `核实回执失败（${getErr.message || getErr.status || '未知'}），当前尚未取得回执记录。请稍后重试核实状态。`);
+                return;
+            }
+        } else {
+            UIManager.showStatus('loading', '正在上传音视频文件...', '请稍候，文件正在传输并提交受理');
+            try {
+                receipt = await APIManager.submitUpload(fileSnapshot, intentSnapshot.idempotencyKey, metadataSnapshot);
+            } catch (postErr) {
+                const isClientRejection = postErr.status && postErr.status >= 400 && postErr.status < 500;
+                if (isClientRejection) {
+                    currentUploadIntent = null;
+                    UIManager.showStatus('error', '上传失败', postErr.message || `HTTP ${postErr.status}`);
+                    return;
+                }
+
+                // POST 5xx 或网络/解析异常：保留原 key，仅在初次错误后核实一次
+                intentSnapshot.pendingVerification = true;
+                UIManager.showStatus('loading', '服务响应异常，正在核实受理状态...', '未重复发送文件，正在按回执核实状态');
+                try {
+                    receipt = await APIManager.getUploadReceipt(intentSnapshot.idempotencyKey);
+                } catch (receiptErr) {
+                    UIManager.showStatus('error', '上传状态待核实', `服务或网络响应异常（${postErr.message || postErr.status || '未知'}），初次核实回执未确认: ${receiptErr.message}。请稍后重试核实状态。`);
+                    return;
+                }
+            }
+        }
+    } finally {
+        isUploading = false;
+        UIManager.updateSubmitButton();
+    }
+
+    if (!receipt) {
+        return;
+    }
+
+    if (receipt.state === 'accepted') {
+        currentUploadIntent = null;
+        const taskData = {
+            task_id: receipt.task_id,
+            view_token: receipt.view_token,
+            upload_id: receipt.upload_id,
+            source: 'upload',
+            title: metadataSnapshot.title || fileSnapshot.name,
+            original_text: metadataSnapshot.source_url || '',
+            retention: receipt.retention,
+            share_active: receipt.share_active
+        };
+        TaskHistoryManager.addTask(taskData);
+
+        const isStandalone = (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
+            || (typeof window !== 'undefined' && window.navigator && window.navigator.standalone === true);
+
+        let statusMessage = '文件上传成功，任务已受理！';
+        let statusDetails = `上传ID: ${escapeHTML(receipt.upload_id)}<br>` +
+            (receipt.task_id ? `任务ID: ${escapeHTML(receipt.task_id)}<br>` : '') +
+            `状态: ${escapeHTML(receipt.state)}<br>` +
+            (receipt.expires_at ? `保留至: ${escapeHTML(receipt.expires_at)}<br>` : '') +
+            (receipt.view_token ? `<a href="/view/${escapeHTML(receipt.view_token)}" target="${isStandalone ? '_self' : '_blank'}" style="color: #667eea; text-decoration: underline;">点击查看转录结果与进度</a>` : '');
+
+        UIManager.showStatus('success', statusMessage, statusDetails);
+
+        if (!isStandalone && receipt.view_token) {
+            setTimeout(() => {
+                if (typeof window !== 'undefined' && window.open) {
+                    window.open(`/view/${receipt.view_token}`, '_blank');
+                }
+            }, 3000);
+        }
+
+        if (selectedUploadFile === fileSnapshot) {
+            clearUploadFile();
+        }
+    } else if (receipt.state === 'receiving') {
+        intentSnapshot.pendingVerification = true;
+        let statusMessage = '文件已接收，等待排队受理...';
+        let statusDetails = `上传ID: ${escapeHTML(receipt.upload_id)}<br>` +
+            `状态: ${escapeHTML(receipt.state)}<br>` +
+            '当前任务仍在接收处理中，尚未生成正式任务ID，请稍后核实。';
+        UIManager.showStatus('loading', statusMessage, statusDetails);
+    } else if (receipt.state === 'failed') {
+        currentUploadIntent = null;
+        let statusMessage = '上传处理失败';
+        let statusDetails = `上传ID: ${escapeHTML(receipt.upload_id)}<br>` +
+            `状态: ${escapeHTML(receipt.state)}<br>` +
+            `错误: ${escapeHTML(receipt.error_code || '处理异常')}`;
+        UIManager.showStatus('error', statusMessage, statusDetails);
+    } else {
+        intentSnapshot.pendingVerification = true;
+        UIManager.showStatus('error', '上传状态未知', `回执返回状态: ${escapeHTML(receipt.state || '空')}`);
+    }
+}
+
+/**
  * 页面初始化
  */
 function initializePage() {
@@ -1078,7 +1719,25 @@ function initializePage() {
     previewContainer.hidden = true;
     
     const form = document.getElementById('transcribe-form');
-    form.addEventListener('submit', submitTranscription);
+    form.addEventListener('submit', (e) => {
+        if (currentMode === 'upload') {
+            submitUploadForm(e);
+        } else {
+            submitTranscription(e);
+        }
+    });
+
+    // 模式切换
+    const urlTab = document.getElementById('mode-tab-url');
+    const uploadTab = document.getElementById('mode-tab-upload');
+    if (urlTab) urlTab.addEventListener('click', () => switchMode('url'));
+    if (uploadTab) uploadTab.addEventListener('click', () => switchMode('upload'));
+
+    // 设置上传拖拽与点击选择
+    setupUploadDropZone();
+
+    // 预检上传功能开关
+    checkUploadCapabilities();
     
     const advancedToggle = document.getElementById('advanced-toggle');
     advancedToggle.addEventListener('click', UIManager.toggleAdvancedSettings);
@@ -1106,6 +1765,7 @@ function initializePage() {
             e.target.value = StorageManager.get(APP_CONFIG.STORAGE_KEYS.BEARER_TOKEN) || '';
             UIManager.showStatus('error', '访问令牌保存失败', '仍使用当前访问令牌');
         }
+        checkUploadCapabilities();
         UIManager.updateSubmitButton();
     });
 
@@ -1161,6 +1821,18 @@ if (typeof document !== 'undefined') {
 // 导出全局函数供HTML使用
 if (typeof window !== 'undefined') {
     window.copyToClipboard = copyToClipboard;
+    window.buildUploadMetadata = buildUploadMetadata;
+    window.encodeUploadMetadata = encodeUploadMetadata;
+    window.generateUploadIdempotencyKey = generateUploadIdempotencyKey;
+    window.selectUploadFile = selectUploadFile;
+    window.clearUploadFile = clearUploadFile;
+    window.getUploadRetention = getUploadRetention;
+    window.switchMode = switchMode;
+    window.checkUploadCapabilities = checkUploadCapabilities;
+    window.submitUploadForm = submitUploadForm;
+    window.APIManager = APIManager;
+    window.UIManager = UIManager;
+    window.TaskHistoryManager = TaskHistoryManager;
 }
 
 // 导出纯函数供 vitest（CJS，经 createRequire 加载）
@@ -1170,8 +1842,19 @@ if (typeof module !== 'undefined' && module.exports) {
         buildHistoryItemHTML,
         StorageManager,
         APIManager,
+        UIManager,
+        TaskHistoryManager,
         getAuthStorage,
         disableProtectedActions,
         AUTH_STORAGE_ERROR_MESSAGE,
+        buildUploadMetadata,
+        encodeUploadMetadata,
+        generateUploadIdempotencyKey,
+        selectUploadFile,
+        clearUploadFile,
+        getUploadRetention,
+        switchMode,
+        checkUploadCapabilities,
+        submitUploadForm,
     };
 }

@@ -557,10 +557,24 @@ def test_upload_history_filters_owner_before_page_limit(lifecycle_client):
     assert data["total"] == 2
     assert [item["upload_id"] for item in data["items"]] == [newer["upload_id"]]
     assert data["items"][0]["title"] == "Alice newer"
+    assert data["items"][0]["view_token"] is None
+    assert data["items"][0]["upload_view_token"] == newer["view_token"]
+    assert data["items"][0]["share_active"] is True
+    root_task = cache.get_task_by_id(newer["root_task_id"])
+    assert root_task["view_token"] == ""
+
     mismatched_platform = client.get(
         "/api/audit/history?source=upload&platform=youtube&status=all"
     )
     assert mismatched_platform.json()["data"]["total"] == 0
+
+    cache.revoke_local_upload(newer["upload_id"])
+    revoked_resp = client.get("/api/audit/history?source=upload&status=all&limit=1&offset=0")
+    revoked_item = revoked_resp.json()["data"]["items"][0]
+    assert revoked_item["share_active"] is False
+    assert revoked_item["upload_view_token"] is None
+    assert revoked_item["view_token"] is None
+    assert revoked_item["share_inactive_reason"] == "revoked"
 
 
 def test_dispatcher_uses_real_transcriber_then_cleans_owned_media_before_llm(
