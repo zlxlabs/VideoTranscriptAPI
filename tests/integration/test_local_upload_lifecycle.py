@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import concurrent.futures
+from contextlib import contextmanager
 import datetime
 import hashlib
 import json
@@ -72,7 +73,7 @@ def lifecycle_client(tmp_path, monkeypatch):
 
 def _make_upload(
     cache, *, owner="alice", media_name=None, title="上传标题",
-    include_summary=True, retention="never",
+    include_summary=True, retention="never", complete=True,
 ):
     now = datetime.datetime.now(datetime.timezone.utc)
     key = f"{int(now.timestamp() * 1000)}-{uuid.uuid4()}"
@@ -124,13 +125,14 @@ def _make_upload(
         chapters_status=ChaptersStatus.GENERATED,
         notes_status=NotesStatus.FAILED,
     )
-    cache.update_task_status(
-        upload["root_task_id"],
-        "success",
-        platform="local_upload",
-        media_id=media_id,
-        title=title,
-    )
+    if complete:
+        cache.update_task_status(
+            upload["root_task_id"],
+            "success",
+            platform="local_upload",
+            media_id=media_id,
+            title=title,
+        )
     return cache.get_local_upload_by_id(upload["upload_id"])
 
 
@@ -424,14 +426,37 @@ def test_public_read_summary_exports_and_owner_history_close_without_content_byp
     client, cache, _llm_queue, user = lifecycle_client
     upload = _make_upload(cache, title="Private owner title")
     token = upload["view_token"]
-
-    raw = client.get(f"/view/{token}?raw=transcript")
-    page = client.get(f"/view/{token}?page=transcript")
-    export = client.get(f"/export/{token}/transcript")
+    cache.save_llm_result(
+        platform="local_upload", media_id=upload["media_id"],
+        use_speaker_recognition=False, llm_type="calibrated",
+        content="A calibrated public body.",
+    )
+    cache.save_llm_result(
+        platform="local_upload", media_id=upload["media_id"],
+        use_speaker_recognition=False, llm_type="notes",
+        content="A detailed public note.",
+    )
+    cache.save_llm_status(
+        platform="local_upload", media_id=upload["media_id"],
+        use_speaker_recognition=False, notes_status=NotesStatus.GENERATED,
+    )
+    content_by_type = {
+        "calibrated": "A calibrated public body.",
+        "summary": "A real public summary.",
+        "notes": "A detailed public note.",
+        "transcript": "actual transcript body",
+    }
+    default_view = client.get(f"/view/{token}")
+    assert default_view.status_code == 200
+    assert "A calibrated public body." in default_view.text
+    for export_type, content in content_by_type.items():
+        raw = client.get(f"/view/{token}?raw={export_type}")
+        page = client.get(f"/view/{token}?page={export_type}")
+        export = client.get(f"/export/{token}/{export_type}")
+        assert raw.status_code == 200 and content in raw.text
+        assert page.status_code == 200 and content in page.text
+        assert export.status_code == 200 and content in export.text
     summary = client.get(f"/api/audit/summary?view_token={token}")
-    assert raw.status_code == 200 and "actual transcript body" in raw.text
-    assert page.status_code == 200 and "actual transcript body" in page.text
-    assert export.status_code == 200 and "actual transcript body" in export.text
     assert summary.status_code == 200
     assert summary.json()["data"]["summary"] == "A real public summary."
 
@@ -464,19 +489,32 @@ def test_public_read_summary_exports_and_owner_history_close_without_content_byp
     assert expired_item["share_active"] is False
     assert expired_item["share_inactive_reason"] == "expired"
     assert "summary" not in closed_item and "transcript" not in closed_item
-    assert client.get(f"/view/{token}?raw=transcript").status_code == 404
-    assert client.get(f"/view/{token}?page=transcript").status_code == 404
-    assert client.get(f"/export/{token}/transcript").status_code == 404
+    for export_type, content in content_by_type.items():
+        for selector in ("raw", "page"):
+            denied = client.get(f"/view/{token}?{selector}={export_type}")
+            assert denied.status_code == 404
+            assert content not in denied.text
+        denied_export = client.get(f"/export/{token}/{export_type}")
+        assert denied_export.status_code == 404
+        assert content not in denied_export.text
+    closed_default = client.get(f"/view/{token}")
+    assert closed_default.status_code == 200
+    assert "A calibrated public body." not in closed_default.text
     assert client.get(f"/api/audit/summary?view_token={token}").status_code == 404
     for endpoint in ("/api/recalibrate", "/api/resummarize", "/api/generate_notes"):
         assert client.post(endpoint, json={"view_token": token}).status_code == 404
 
 
+@pytest.mark.parametrize(
+    "endpoint", ["/api/recalibrate", "/api/resummarize", "/api/generate_notes"]
+)
 def test_reprocess_admission_holds_sqlite_order_against_concurrent_close(
-    lifecycle_client, monkeypatch,
+    lifecycle_client, monkeypatch, endpoint,
 ):
     client, cache, llm_queue, _user = lifecycle_client
-    upload = _make_upload(cache, title="Concurrent close source")
+    upload = _make_upload(
+        cache, title="Concurrent close source", include_summary=False
+    )
     original_admit = tasks_routes._admit_upload_reprocess
     admission_paused = threading.Event()
     release_admission = threading.Event()
@@ -503,7 +541,7 @@ def test_reprocess_admission_holds_sqlite_order_against_concurrent_close(
     try:
         admission = executor.submit(
             client.post,
-            "/api/recalibrate",
+            endpoint,
             json={"view_token": upload["view_token"]},
         )
         assert admission_paused.wait(timeout=3)
@@ -531,6 +569,232 @@ def test_reprocess_admission_holds_sqlite_order_against_concurrent_close(
     assert child["media_id"] == upload["media_id"]
     assert cache.get_local_upload_by_id(upload["upload_id"])["revoked_at"] is not None
     assert llm_queue.qsize() == 1
+
+
+@pytest.mark.parametrize(
+    "endpoint", ["/api/recalibrate", "/api/resummarize", "/api/generate_notes"]
+)
+def test_reprocess_snapshot_before_close_is_rejected_by_fresh_transaction(
+    lifecycle_client, monkeypatch, endpoint,
+):
+    client, cache, llm_queue, _user = lifecycle_client
+    upload = _make_upload(
+        cache, title="Close before admission", include_summary=False
+    )
+    cache_loaded = threading.Event()
+    release_request = threading.Event()
+    original_resolve = ViewTokenResolver.get_cache_by_view_token
+
+    def pause_after_initial_resolution(resolver, view_token):
+        data = original_resolve(resolver, view_token)
+        if data and data.get("platform") == "local_upload":
+            cache_loaded.set()
+            if not release_request.wait(timeout=5):
+                raise TimeoutError("test did not release the pre-admission snapshot")
+        return data
+
+    monkeypatch.setattr(
+        ViewTokenResolver,
+        "get_cache_by_view_token",
+        pause_after_initial_resolution,
+    )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(
+            client.post,
+            endpoint,
+            json={"view_token": upload["view_token"]},
+        )
+        assert cache_loaded.wait(timeout=5)
+        revoked = cache.revoke_local_upload(upload["upload_id"])
+        release_request.set()
+        response = pending.result(timeout=10)
+
+    assert revoked["revoked_at"]
+    assert response.status_code == 404
+    with cache._get_cursor() as cursor:
+        cursor.execute(
+            """SELECT COUNT(*) FROM task_status
+               WHERE platform = 'local_upload' AND media_id = ? AND task_id != ?""",
+            (upload["media_id"], upload["root_task_id"]),
+        )
+        assert cursor.fetchone()[0] == 0
+    assert llm_queue.empty()
+
+
+@pytest.mark.parametrize("order", ["publish-before-revoke", "revoke-before-publish"])
+def test_terminal_publish_and_revoke_are_both_write_once(
+    lifecycle_client, monkeypatch, order,
+):
+    client, cache, _llm_queue, _user = lifecycle_client
+    upload = _make_upload(
+        cache,
+        title="Terminal publication race",
+        retention="30d",
+        complete=False,
+    )
+    publish_reached_gate = threading.Event()
+    release_publish = threading.Event()
+    original_update = cache.update_task_status
+
+    def controlled_terminal_publish(*args, **kwargs):
+        if order == "revoke-before-publish":
+            publish_reached_gate.set()
+            if not release_publish.wait(timeout=5):
+                raise TimeoutError("test did not release terminal publication")
+            return original_update(*args, **kwargs)
+        result = original_update(*args, **kwargs)
+        publish_reached_gate.set()
+        if not release_publish.wait(timeout=5):
+            raise TimeoutError("test did not release terminal publication")
+        return result
+
+    monkeypatch.setattr(cache, "update_task_status", controlled_terminal_publish)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        publication = executor.submit(
+            cache.update_task_status,
+            upload["root_task_id"],
+            "success",
+            platform="local_upload",
+            media_id=upload["media_id"],
+            title="Terminal publication race",
+        )
+        assert publish_reached_gate.wait(timeout=5)
+        revoked = cache.revoke_local_upload(upload["upload_id"])
+        release_publish.set()
+        assert publication.result(timeout=10) is True
+
+    final = cache.get_local_upload_by_id(upload["upload_id"])
+    assert final["revoked_at"] == revoked["revoked_at"]
+    assert final["terminal_at"]
+    assert final["expires_at"]
+    assert cache.get_task_by_id(upload["root_task_id"])["status"] == "success"
+    transcript = (
+        cache._get_file_path("local_upload", upload["media_id"])
+        / "transcript_capswriter.txt"
+    )
+    assert transcript.read_text(encoding="utf-8") == "actual transcript body"
+    denied = client.get(f"/view/{upload['view_token']}?raw=transcript")
+    assert denied.status_code == 404
+    assert "actual transcript body" not in denied.text
+
+
+@pytest.mark.parametrize("order", ["publish-before-cleanup", "cleanup-before-publish"])
+def test_active_upload_cleanup_and_cache_publish_preserve_body_in_both_orders(
+    lifecycle_client, monkeypatch, order,
+):
+    _client, cache, _llm_queue, _user = lifecycle_client
+    upload = _make_upload(
+        cache, title="Cleanup publication race", retention="30d"
+    )
+    expiration_before = upload["expires_at"]
+    old_updated_at = (
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    with cache._get_cursor() as cursor:
+        cursor.execute(
+            "UPDATE video_cache SET updated_at = ? WHERE platform = ? AND media_id = ?",
+            (old_updated_at, "local_upload", upload["media_id"]),
+        )
+
+    role = threading.local()
+    original_media_lock = cache.media_lock
+    original_get_cursor = cache._get_cursor
+    first_locked = threading.Event()
+    release_first = threading.Event()
+    candidate_snapshot = threading.Event()
+    release_candidate_snapshot = threading.Event()
+    publisher_started = threading.Event()
+
+    @contextmanager
+    def observe_cleanup_candidates():
+        with original_get_cursor() as cursor:
+            class CursorProxy:
+                last_sql = ""
+
+                def execute(self, sql, parameters=()):
+                    self.last_sql = sql
+                    return cursor.execute(sql, parameters)
+
+                def fetchall(self):
+                    rows = cursor.fetchall()
+                    if (
+                        getattr(role, "name", None) == "cleanup"
+                        and "SELECT id, platform, media_id, files_loc" in self.last_sql
+                    ):
+                        candidate_snapshot.set()
+                        if order == "publish-before-cleanup" and not release_candidate_snapshot.wait(timeout=5):
+                            raise TimeoutError("test did not release the cleanup candidate snapshot")
+                    return rows
+
+                def __getattr__(self, name):
+                    return getattr(cursor, name)
+
+            yield CursorProxy()
+
+    monkeypatch.setattr(cache, "_get_cursor", observe_cleanup_candidates)
+
+    @contextmanager
+    def controlled_media_lock(platform, media_id, timeout=None):
+        current = getattr(role, "name", None)
+        with original_media_lock(platform, media_id, timeout=timeout):
+            if (order == "publish-before-cleanup" and current == "publisher") or (
+                order == "cleanup-before-publish" and current == "cleanup"
+            ):
+                first_locked.set()
+                if not release_first.wait(timeout=5):
+                    raise TimeoutError("test did not release the first cache-lock owner")
+            yield
+
+    monkeypatch.setattr(cache, "media_lock", controlled_media_lock)
+
+    def publish_cache():
+        role.name = "publisher"
+        publisher_started.set()
+        return cache.save_cache(
+            platform="local_upload",
+            url="https://source.example.test/media?id=7",
+            media_id=upload["media_id"],
+            use_speaker_recognition=False,
+            transcript_data="published after the cleanup candidate snapshot",
+            transcript_type="capswriter",
+            title="Cleanup publication race",
+            author="",
+            description="",
+        )
+
+    def clean_cache():
+        role.name = "cleanup"
+        return cache.cleanup_old_cache(days=1)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        first_operation = publish_cache if order == "publish-before-cleanup" else clean_cache
+        second_operation = clean_cache if order == "publish-before-cleanup" else publish_cache
+        first = executor.submit(first_operation)
+        assert first_locked.wait(timeout=5)
+        second = executor.submit(second_operation)
+        if order == "publish-before-cleanup":
+            assert candidate_snapshot.wait(timeout=5)
+            release_candidate_snapshot.set()
+        else:
+            assert publisher_started.wait(timeout=5)
+        release_first.set()
+        results = (first.result(timeout=10), second.result(timeout=10))
+
+    cleanup_count = next(result for result in results if isinstance(result, int))
+    publish_result = next(result for result in results if isinstance(result, dict))
+    assert cleanup_count == 0
+    assert publish_result["media_id"] == upload["media_id"]
+    transcript = (
+        cache._get_file_path("local_upload", upload["media_id"])
+        / "transcript_capswriter.txt"
+    )
+    assert transcript.read_text(encoding="utf-8") == (
+        "published after the cleanup candidate snapshot"
+    )
+    final = cache.get_local_upload_by_id(upload["upload_id"])
+    assert final["root_task_id"] == upload["root_task_id"]
+    assert final["media_id"] == upload["media_id"]
+    assert final["expires_at"] == expiration_before
 
 
 def test_upload_history_filters_owner_before_page_limit(lifecycle_client):
