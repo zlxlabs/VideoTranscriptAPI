@@ -72,17 +72,11 @@ def test_public_read_and_expiry_both_controlled_orders(public_upload_client, mon
     expiration = datetime.datetime.fromisoformat(upload["expires_at"]).replace(
         tzinfo=datetime.timezone.utc
     )
-    before_expiration = expiration - datetime.timedelta(seconds=1)
-    at_expiration = expiration
-    decisions = 0
+    clock = {"now": expiration - datetime.timedelta(seconds=1)}
 
-    def pause_after_real_authorization(row):
-        nonlocal decisions
-        decisions += 1
-        result = check_share(
-            row, now=before_expiration if decisions == 1 else at_expiration
-        )
-        if decisions == 1:
+    def pause_after_real_authorization(row, now=None):
+        result = check_share(row, now=clock["now"])
+        if result:
             loaded_upload.set()
             if not continue_read.wait(timeout=5):
                 raise TimeoutError("test did not release the authorized read")
@@ -92,6 +86,9 @@ def test_public_read_and_expiry_both_controlled_orders(public_upload_client, mon
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         in_flight_read = executor.submit(client.get, f"/view/{token}?raw=transcript")
         assert loaded_upload.wait(timeout=5), "public route did not authorize the read"
+        clock["now"] = expiration
+        assert clock["now"] >= expiration
+        assert not in_flight_read.done(), "authorized read finished before the shared clock crossed expiry"
         continue_read.set()
         response = in_flight_read.result(timeout=5)
 

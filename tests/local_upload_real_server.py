@@ -120,6 +120,8 @@ def _register_state_inspector(app, run_dir: Path, upstreams: LoopbackUpstreams) 
                           u.root_task_id, u.media_id, u.view_token, u.filename,
                           t.title AS title, u.source_url, u.retention, u.expires_at,
                           u.revoked_at, u.media_path, u.byte_size, u.sha256,
+                          u.request_metadata,
+                          t.processing_options AS task_processing_options,
                           t.status AS root_status, t.platform AS task_platform,
                           t.view_token AS legacy_task_token, t.completed_at
                    FROM local_uploads u JOIN task_status t ON t.task_id = u.root_task_id
@@ -128,6 +130,10 @@ def _register_state_inspector(app, run_dir: Path, upstreams: LoopbackUpstreams) 
             rows = [dict(row) for row in cursor.fetchall()]
 
         for row in rows:
+            row["request_metadata"] = json.loads(row["request_metadata"] or "{}")
+            row["task_processing_options"] = json.loads(
+                row["task_processing_options"] or "{}"
+            )
             media_path = Path(row["media_path"]) if row["media_path"] else None
             row["media_exists"] = bool(media_path and media_path.is_file())
             if row["media_exists"]:

@@ -167,9 +167,19 @@ test.afterAll(async () => {
 
 test('Chromium uploads raw media through production API, worker, shared ASR/LLM, history, read, notification, and owner revoke', async ({ page, request }, testInfo) => {
   const browserErrors: string[] = [];
+  const unexpectedNetwork: string[] = [];
   page.on('pageerror', (error) => browserErrors.push(error.message));
   page.on('console', (message) => {
     if (message.type() === 'error') browserErrors.push(message.text());
+  });
+  page.on('requestfailed', (failed) => {
+    const path = new URL(failed.url()).pathname;
+    unexpectedNetwork.push(`${failed.method()} ${path} ${failed.failure()?.errorText ?? 'failed'}`);
+  });
+  page.on('response', (response) => {
+    if (response.status() < 400) return;
+    const path = new URL(response.url()).pathname;
+    unexpectedNetwork.push(`${response.request().method()} ${path} ${response.status()}`);
   });
 
   const wavBytes = makeWav();
@@ -255,6 +265,8 @@ test('Chromium uploads raw media through production API, worker, shared ASR/LLM,
   expect(accepted.byte_size).toBe(wavBytes.length);
   expect(accepted.sha256).toBe(expectedDigest);
   expect(accepted.media_sha256).toBe(expectedDigest);
+  expect(accepted.request_metadata).toEqual(metadata);
+  expect(accepted.task_processing_options).toEqual(metadata.processing_options);
   const storedBytes = await readFile(accepted.media_path);
   expect(storedBytes).toEqual(producerBytes);
   const ffprobeCall = beforeAsrReply.ffprobe_calls.find((call: any) => call.argv.at(-1) === accepted.media_path);
@@ -369,4 +381,14 @@ test('Chromium uploads raw media through production API, worker, shared ASR/LLM,
   expect(revoked.revoked_at).toBeTruthy();
   expect(revoked.root_status).toBe('success');
   expect(browserErrors).toEqual([]);
+  const expectedPageAborts = [
+    'GET /api/audit/filter-options net::ERR_ABORTED',
+    'GET /api/audit/history net::ERR_ABORTED',
+  ];
+  expect(
+    unexpectedNetwork.filter((entry) => expectedPageAborts.includes(entry)).length,
+  ).toBeGreaterThanOrEqual(2);
+  expect(
+    unexpectedNetwork.filter((entry) => !expectedPageAborts.includes(entry)),
+  ).toEqual([]);
 });
