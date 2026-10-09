@@ -235,6 +235,63 @@ def _wait_for_terminal(db_path: Path, task_ids: list[str], process: subprocess.P
     raise ExperimentFailure("sandbox_tasks_did_not_reach_terminal_state")
 
 
+def _sandbox_log_tail(*paths: Path, max_bytes: int = 4096) -> str:
+    chunks: list[str] = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        data = path.read_bytes()
+        if not data:
+            continue
+        chunks.append(data[-max_bytes:].decode("utf-8", errors="replace"))
+    return "\n".join(chunks)
+
+
+def _wait_for_sandbox_api(
+    process: subprocess.Popen,
+    *,
+    base_url: str,
+    token: str,
+    log_paths: tuple[Path, ...],
+    timeout_seconds: float = 30.0,
+    interval_seconds: float = 0.2,
+) -> None:
+    parsed = urlparse(base_url)
+    deadline = time.monotonic() + timeout_seconds
+    last_error = "no_probe_attempt"
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            tail = _sandbox_log_tail(*log_paths)
+            raise ExperimentFailure(
+                f"sandbox_api_failed_to_start returncode={process.returncode} log_tail={tail!r}"
+            )
+        try:
+            connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=1)
+            try:
+                connection.request(
+                    "GET",
+                    "/api/uploads/capabilities",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                readiness = connection.getresponse()
+                body = readiness.read()
+            finally:
+                connection.close()
+            if readiness.status == 200 and json.loads(body).get("enabled") is True:
+                return
+            last_error = f"http_{readiness.status}"
+        except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
+            last_error = f"{type(exc).__name__}:{exc}"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(interval_seconds, remaining))
+    tail = _sandbox_log_tail(*log_paths)
+    raise ExperimentFailure(
+        f"sandbox_api_not_ready timeout_seconds={timeout_seconds} last_error={last_error} log_tail={tail!r}"
+    )
+
+
 def run_experiment(duration_seconds: int) -> int:
     if duration_seconds < 1 or duration_seconds > 30:
         raise ExperimentFailure("duration_seconds_must_be_between_1_and_30")
@@ -305,23 +362,19 @@ def run_experiment(duration_seconds: int) -> int:
                     stderr=subprocess.STDOUT,
                 )
                 cleanup.callback(_stop_process, process)
-                time.sleep(2)
-                if process.poll() is not None:
-                    raise ExperimentFailure("sandbox_api_failed_to_start")
 
                 base_url = f"http://127.0.0.1:{api_port}"
-                parsed = urlparse(base_url)
-                connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
-                connection.request(
-                    "GET",
-                    "/api/uploads/capabilities",
-                    headers={"Authorization": "Bearer sandbox-token-never-use-outside-this-run"},
+                _wait_for_sandbox_api(
+                    process,
+                    base_url=base_url,
+                    token="sandbox-token-never-use-outside-this-run",
+                    log_paths=(
+                        service_log_path,
+                        root / "data" / "logs" / "sandbox-api.log",
+                    ),
+                    timeout_seconds=30.0,
+                    interval_seconds=0.2,
                 )
-                readiness = connection.getresponse()
-                capabilities = json.loads(readiness.read())
-                connection.close()
-                if readiness.status != 200 or capabilities.get("enabled") is not True:
-                    raise ExperimentFailure("sandbox_upload_receiver_not_ready")
 
                 starts = threading.Barrier(3)
                 data_temp = root / "data" / "temp"
