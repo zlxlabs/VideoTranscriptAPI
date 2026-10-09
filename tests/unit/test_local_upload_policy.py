@@ -1,6 +1,7 @@
 """Real SQLite contracts for the local-upload safety baseline."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
@@ -157,13 +158,43 @@ def test_real_sqlite_upload_identity_owner_key_and_intent_window(cm):
         )
 
 
-def test_concurrent_same_owner_key_creates_one_sqlite_receipt(cm):
+@pytest.mark.parametrize("winner", ["request-a", "request-b"])
+def test_concurrent_same_owner_key_creates_one_sqlite_receipt(cm, monkeypatch, winner):
     now = datetime.now(timezone.utc)
     key = _intent_key(now)
-    start = threading.Barrier(2)
+    first_read = threading.Event()
+    second_begin = threading.Event()
+    release_first = threading.Event()
+    warm_connections = threading.Barrier(2)
+    role = threading.local()
+    original_get_cursor = cm._get_cursor
 
-    def register():
-        start.wait(timeout=5)
+    @contextmanager
+    def controlled_cursor():
+        with original_get_cursor() as cursor:
+            class CursorProxy:
+                def execute(self, sql, parameters=()):
+                    if sql == "BEGIN IMMEDIATE" and getattr(role, "name", None) != winner:
+                        second_begin.set()
+                    result = cursor.execute(sql, parameters)
+                    if (
+                        "SELECT * FROM local_uploads WHERE owner_user_id" in sql
+                        and getattr(role, "name", None) == winner
+                    ):
+                        first_read.set()
+                        if not release_first.wait(timeout=5):
+                            raise TimeoutError("same-intent winner did not release its SQLite transaction")
+                    return result
+
+                def __getattr__(self, name):
+                    return getattr(cursor, name)
+
+            yield CursorProxy()
+
+    monkeypatch.setattr(cm, "_get_cursor", controlled_cursor)
+
+    def register(name):
+        role.name = name
         return cm.register_local_upload(
             owner_user_id="alice",
             idempotency_key=key,
@@ -173,11 +204,25 @@ def test_concurrent_same_owner_key_creates_one_sqlite_receipt(cm):
         )
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(register)
-        second = pool.submit(register)
-        records = [first.result(timeout=10), second.result(timeout=10)]
+        def warm_connection():
+            cm._get_connection()
+            warm_connections.wait(timeout=5)
 
-    assert records[0]["upload_id"] == records[1]["upload_id"]
+        warmed = [pool.submit(warm_connection) for _ in range(2)]
+        for future in warmed:
+            future.result(timeout=10)
+        first = pool.submit(register, winner)
+        assert first_read.wait(timeout=5)
+        loser = "request-b" if winner == "request-a" else "request-a"
+        second = pool.submit(register, loser)
+        assert second_begin.wait(timeout=5)
+        release_first.set()
+        winner_record = first.result(timeout=10)
+        loser_record = second.result(timeout=10)
+
+    assert winner_record["_created"] is True
+    assert loser_record["_created"] is False
+    assert winner_record["upload_id"] == loser_record["upload_id"]
     with cm._get_cursor() as cursor:
         cursor.execute(
             "SELECT COUNT(*) FROM local_uploads WHERE owner_user_id = ? AND idempotency_key = ?",

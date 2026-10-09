@@ -48,6 +48,10 @@ loopback 与 Unix 域套接字放行，真实外网测试仍应放在 `tests/man
 
 本地上传安全基线：`tests/unit/test_local_upload_policy.py` 用临时 SQLite、真实 `ViewTokenResolver` 与 cache/task cleanup 消费者验证 owner/key 幂等、blank legacy token 隔离、`upload_` token、固定终态期限、write-once 撤销、开关关闭后的拒读与有效成果保护；另启动真实 Python 子进程消费同一 SQLite，验证缺省关闭与显式环境开关。C 生命周期与真实 worker 回归运行：
 
+本地上传 B1–B16 的代码、断言、真实 producer 与清理边界索引见
+[`docs/testing/local-upload-contracts.md`](../docs/testing/local-upload-contracts.md)。其中未验证的生产容量、
+真实恢复域和旧镜像不代表已通过。
+
 ```bash
 uv run --frozen pytest -q tests/unit/test_upload_worker.py tests/integration/test_local_upload_lifecycle.py tests/unit/test_notification_e2e_delivery.py tests/unit/test_capswriter_contract.py
 ```
