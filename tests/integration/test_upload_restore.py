@@ -143,7 +143,7 @@ def test_snapshot_restore_keeps_external_gate_off_and_protects_long_result(tmp_p
     enabled = _resolver_process(restored_cache, upload["view_token"], enabled=True)
     assert enabled.returncode == 0, enabled.stderr
     assert "RESULT=success" in enabled.stdout
-    assert f"BODY={expected_transcript_bytes.decode('utf-8')}" in enabled.stdout
+    assert f"BODY={expected_transcript_bytes.decode('utf-8')}" in enabled.stdout.splitlines()
 
     invalid_token = "invalid-restored-view-token"
     assert invalid_token != upload["view_token"]
