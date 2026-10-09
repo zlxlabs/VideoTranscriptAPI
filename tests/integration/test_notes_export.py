@@ -77,6 +77,17 @@ def test_view_raw_notes_exports_generated_artifact(tmp_path, monkeypatch):
 
         assert response.status_code == 200
         assert response.headers["x-content-type"] == "notes"
-        assert "## Chapter" in response.body.decode("utf-8")
+        assert response.headers["x-document-title"] == "Notes export"
+        import h11
+        h11.Response(
+            status_code=200,
+            headers=[
+                (k.encode("latin-1"), v.encode("latin-1"))
+                for k, v in response.headers.items()
+            ],
+        )
+        body_text = response.body.decode("utf-8")
+        assert "Title: Notes export" in body_text
+        assert "## Chapter" in body_text
     finally:
         manager.close()
