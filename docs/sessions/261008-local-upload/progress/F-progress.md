@@ -20,3 +20,10 @@
 - **本段结论**：两次 `make test` 均 exit 0，`PYTEST_ADDOPTS=-rs make test` 明确为 3,820 passed、3 skipped、0 failed（仅 `test_capswriter_samples_total_contract.py:61` 因真实 preflight fixture 不可用）；新增窄测 11 passed。clean-tree容量探针与真实 preflight均在最终实现 SHA `d33808...` 上执行；容量记录为 synthetic observation，preflight在 gate=true但限额/恢复/ingress未知时退出2并打印 `UPLOAD_ENABLE_BLOCKED`。测试生成的 data/log/cache、`.pytest_cache`、175 MiB本地 `.venv` 与 Python caches 已按本树初始 absent 状态采样后清理，最终工作树 clean。
 - **关键决策与否决方案**：继承红因派发时 `gh api` 基线不可用，标记“未能判定”；本卡开发期红均为修正后的断言/fixture/脚本契约错误，最终全量无新红。未执行真实 systemd、生产服务/ingress/磁盘/ASR/备份恢复；未知项不改写为 passed，不改 GOALS/M6生产检查，不启用开关。
 - **下一步唯一动作**：把 draft PR #208 与验证/blocked条件交 Pi lead，等待其正式 CI、独立审查与后续授权。
+
+## 2026-10-09 · F-R1 ancestry 错误态修复
+
+- **当前阶段**：repairing；仅运维 CLI 的 Git ancestry 非零映射、实际 Git unit 回归及本进度记录有改动，未提交。
+- **本段结论**：新测试先在 H0 `de3ff7b6671418ae7746649ef2167d5778c790ef` 官方 scratch 以真实 AssertionError 红：临时仓 HEAD 由 `git rev-parse HEAD` 取得，minimum SHA 对象缺失，raw `git merge-base --is-ancestor` 实返 128，旧 helper 错报 incompatible。H1 修复后 narrow 12 passed；scratch 中 `make test` 与 `PYTEST_ADDOPTS=-rs make test` 均 exit 0，后者 3821 passed/3 skipped/0 failed，skip 为真实 CapsWriter preflight fixture unavailable。
+- **关键决策与否决方案**：严格映射 Git 返回码 `0→safe-lineage`、`1→incompatible`、其它查询错误→已有 `unknown`；保留未解析 source→unknown，既有真实 A safe-lineage 与 pre-A incompatible 对照不变。不增状态、catch、fallback、重试或包装层；测试用真实一次提交仓和真实 producer argv，不mock subprocess。
+- **下一步唯一动作**：提交并推送这三处修复到原 PR #208，核对远端/clean 后交 lead。

@@ -124,7 +124,11 @@ def compatibility_status(repo: Path, source_sha: str | None) -> str:
         text=True,
         timeout=10,
     )
-    return "safe-lineage" if ancestor.returncode == 0 else "incompatible"
+    if ancestor.returncode == 0:
+        return "safe-lineage"
+    if ancestor.returncode == 1:
+        return "incompatible"
+    return "unknown"
 
 
 def deployment_env_source(compose_path: Path) -> str:

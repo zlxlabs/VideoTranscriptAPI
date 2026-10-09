@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import subprocess
 import pytest
 
 from scripts.ops import local_upload_check
@@ -61,6 +62,50 @@ def test_compatibility_uses_real_commit_ancestry_not_sha_text():
     assert local_upload_check.compatibility_status(
         repo, "38b299468daaf309608f46ffe1c59886b0922c04"
     ) == "incompatible"
+
+
+def test_missing_minimum_commit_query_is_unknown_from_real_git(tmp_path, monkeypatch):
+    repo = tmp_path / "source-repository"
+    repo.mkdir()
+    isolated_gitconfig = tmp_path / "gitconfig"
+    isolated_gitconfig.write_text("")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(isolated_gitconfig))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    minimum_sha = local_upload_check.MINIMUM_SAFE_SHA
+
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Upload Ops Fixture"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "fixture@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "commit.gpgsign", "false"], check=True)
+    (repo / "producer.txt").write_bytes(b"real source commit fixture\\n")
+    subprocess.run(["git", "-C", str(repo), "add", "--", "producer.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "--quiet", "-m", "fixture source"], check=True)
+
+    producer = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    source_sha = producer.stdout.strip()
+    assert len(source_sha) == 40
+    int(source_sha, 16)
+
+    absent_minimum = subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "-e", f"{minimum_sha}^{{commit}}"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert absent_minimum.returncode == 128
+    actual_query = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", minimum_sha, source_sha],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert actual_query.returncode == 128
+    assert local_upload_check.compatibility_status(repo, source_sha) == "unknown"
 
 
 def test_ffprobe_subprocess_receives_sample_path_and_json_contract(tmp_path, monkeypatch):
