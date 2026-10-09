@@ -179,7 +179,7 @@ https://your-domain.com/export/{view_token}/{type}   # type: calibrated/summary/
 | 404 | 该类型文件不存在（如未启用总结 / 说话人识别） | 放弃该类型 |
 | 410 | 文件已被清理 | 需重新提交任务 |
 
-> 纯文本响应顶部带 `---` 包裹的元数据头（Title / Platform / Type / Source / Export-Date），并通过 `X-Document-Title`、`X-Platform` 等响应头透出（非 ASCII 用 RFC 5987 编码）。
+> 纯文本响应顶部带 `---` 包裹的元数据头（Title / Platform / Type / Source / Export-Date），并通过 `X-Document-Title`、`X-Platform` 等响应头透出（值完全由可打印 ASCII 字符构成、首尾无空格/Tab 且不含 `%` 时原样输出；否则整体采用 UTF-8 百分号编码，且编码后长度上限为 512 字节）。
 
 ---
 
