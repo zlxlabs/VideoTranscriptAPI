@@ -72,3 +72,34 @@ Resolver 运行时来源 SHA-256：CacheManager `082210a0aacfda08fa22ed13512bdb6
 - 最小后续范围仅是一次有界现场：提供能创建无外网 network namespace 且 loopback 可用的官方 runner，在该环境使用新的 H1 scratch 与离线 venv，按上表原序列执行六次，并在每次只采白名单 PID/phase/地址/时间差/进程退出与 stop callback 后状态。若仍不能提供 namespace，停止在已知环境阻塞，不把宿主网络当替代品、不改生产、不扩展候选机制。
 - 不改代码、不修复测试、不新增 seam；A 证据不能替代完整独审。M4/M5、真实生产容量/恢复域/授权仍未知，上传生产开关保持关闭。
 - 唯一仓库产物：`docs/sessions/261008-local-upload/diagnosis/F-local-consumers.md`。本报告的源证据 SHA 是 H1；最终报告提交 SHA、push remote/ref 与 clean 状态由派发结果回执记录，避免在被提交文件中写入会自我循环的 commit SHA。
+
+## Task14续采样：环境参数修正与B实测
+
+- 本章是本轮续采样，不改写首部 `delegate-outcome: failed` 或旧 B 的 `0/6`：旧数分母属于前一次 `unshare -n` 环境阻塞事实；本轮新分母另列。A 已完成，本轮没有重跑 A。
+- 本次实际 systemd 消费上下文：euid=1000，cgroup 中 unit 为 `delegate-dlg-20261009-053645-cba701.service`，dispatch 环境匹配本 id。官方 H1 scratch manifest：`$HOME/scratchpad/vt-RTkpnQ/worktree`，SHA=H1、669 tracked files；data/liveconfig/.venv/.pytest_cache/config/config.jsonc 均缺席，无 symlink/外链，与 main/原工作树 tracked inode 交集均为 0。独立 venv 使用 `uv sync --frozen --offline`，Python 3.11.15。路径约定：`$SCRATCH` 指该 H1 scratch，`$EVIDENCE` 指本轮隔离临时域，`$TMP` 指各次 CLI 自有 TemporaryDirectory。
+- 唯一一次修正后的 namespace 命令：`env -i ... unshare --user --map-root-user --net /usr/bin/bash "$EVIDENCE/namespace_sequence.sh"`。namespace 内 UID 映射为 0；`ip link set lo up` 后仅有 lo，地址只有 127.0.0.1/8 和 ::1/128；IPv4、IPv6 route 查询均为空。用户+网络 namespace 在本次真实 systemd unit 成功建立；旧 `unshare -n` EPERM 不能代表此结果。`strace` 未调用，六次 producer 都在此隔离 namespace 中启动或尝试启动。
+- 冷序列按 CLI→pytest 交替各 3 次，duration=20；运行总耗时约 10.409 秒（各命令实测 elapsed 相加），没有重试。第 1 次为无 sitecustomize 的原 CLI；第 2–6 次加载临时观测模块。`VTA_DIAG` 观测代码只在本次外部临时域，不改 H1 source；但其对 Python import 的实际影响如下，故不能把失败混成软件结论。
+
+| 次序 | 实际命令/模式 | outer PID | 退出码 / elapsed | producer 与结论 |
+| ---: | --- | ---: | --- | --- |
+| 1 | `.venv/bin/python scripts/perf/local_upload_capacity.py --duration-seconds 20`（无 instrumentation） | 1144377 | 0 / 4.878s | 完成一次真实容量实验；API child 1144706，见下方 payload/时序 |
+| 2 | `.venv/bin/pytest -q --basetemp=$EVIDENCE/pytest-tmp/run2-pytest tests/integration/test_upload_restore.py::test_local_capacity_probe_exercises_real_http_payload_and_loopback_overlap` | 1144829 | 4 / 1.213s | conftest import 阶段被观测代码打断；未运行目标 test、未 spawn API |
+| 3 | 同次序 1（instrumented） | 1144886 | 1 / 1.161s | Python import `TypeError`；未 spawn API |
+| 4 | 同次序 2（instrumented） | 1144911 | 4 / 0.978s | 同次序 2；未运行目标 test、未 spawn API |
+| 5 | 同次序 1（instrumented） | 1144995 | 1 / 1.161s | 同次序 3；未 spawn API |
+| 6 | 同次序 2（instrumented） | 1145052 | 4 / 1.018s | 同次序 2；未运行目标 test、未 spawn API |
+
+### 本轮唯一完整 CLI 运行（#1）
+
+- 实际 CLI argv：`$SCRATCH/.venv/bin/python $SCRATCH/scripts/perf/local_upload_capacity.py --duration-seconds 20`。outer 环境为 `env -i` 白名单：PATH、HOME、LANG、LC_ALL、TZ、`TMPDIR=$EVIDENCE/tmp/run1-cli`、`UV_CACHE_DIR=$HOME/.cache/uv`、`UV_OFFLINE=1`、VTA_DIAG_RUN_ID/VTA_DIAG_T0/VTA_DIAG_EVENT_FILE；实际 PATH 为 `/usr/bin:/bin:$HOME/.local/bin`。未注入 sitecustomize/PYTHONPATH。脚本启动自己的 `main.py --start --config <sandbox-config.json>`，cwd=$SCRATCH。
+- API child 实际 argv：`[$SCRATCH/.venv/bin/python, $SCRATCH/main.py, --start, --config, $TMP/local-upload-capacity-vmgqtky_/sandbox-config.json]`；PID=1144706。实际 child env key/value 白名单：PATH、HOME、LANG、LC_ALL、TZ、`PYTHONPATH=$SCRATCH/src`、`VTAPI_USERS_JSON=$TMP/.../sandbox-users.json`、`VTA_UPLOADS_ENABLED=true`；没有凭据值输出。配置实际读到 5,700 bytes，SHA-256 `621cad4b5a383a5c4ab86b17145aa155e5784e2aabb343906e06a1a0c5bc7f15`；安全字段 `api.host=127.0.0.1`、`api.port=45423`、`capswriter.server_url=ws://127.0.0.1:45315`。仅记录字节数/hash/白名单字段，没有打印配置内容。
+- 启动顺序的外部观测：CLI spawn 为 elapsed=0；API child 首次从 `/proc` 观察到在 1.654s；约 child 首见后 1.952s（CLI elapsed=3.606s）child PID 仍存在且 `127.0.0.1:45423` 为 LISTEN；CLI elapsed=3.659s 观察到首条到该 API port 的 ESTABLISHED TCP。未 instrument 该次的 HTTP 方法/path/response status 或源码 `process.poll()` 返回值；但 CLI 后续真实输出含 `raw_http_receipts=2_of_2`、`controlled_url_upload_overlap=confirmed`、`UPLOAD_ENABLE_BLOCKED`，因此该次原 CLI 自身完成了其 capabilities/上传断言路径。单次成功不证明稳定。
+- CLI 总 elapsed=4.878s 后，API PID 在 observer 的 `/proc` 检查中已不存在；这是 outer 退出后的状态，不等于直接观测到 stop callback。此无 instrumentation 运行没有捕到 `_stop_process` callback 的 after-event/returncode，故不宣称 callback 已调用或以哪个退出码回收；也不把请求前 child 存活解释成退出后泄漏。
+
+### 观测器失败与证据边界
+
+- 第 2–6 次的临时 `sitecustomize` 把 `subprocess.Popen` 类替换成函数。五次都只产生 `observer_loaded` 事件；CLI 3/5 在导入期间报 `TypeError: function() argument 'code' must be code, not str`，pytest 2/4/6 在 conftest import 阶段报同一 TypeError，退出码分别为上表所列；都没有 API child、config、listen、capabilities request 或 callback 事件。这是本次观测器改变了 import 行为的真实失败，不是原 CLI/pytest 软件结果。未读取 conftest 内容，也不推断具体依赖内部根因。
+- 六次都已消耗；遵守不重跑规则。新分母为 6 次调用，其中 1 次有效 CLI 观察完成，另外 5 次观测器失败且没有抵达 producer。不能把它写成六次原样候选测试，也不能声称六次全绿/全红。
+- 所有实际业务 producer 仍来自原 H1 CLI/test node，临时观测仅在 `$EVIDENCE`；但 namespace sequence 在六次结束后，汇总器因结果结构缺 `service_log_types` 报 `KeyError`，导致 wrapper 退出码 82，脚本末尾预设的 source-diff 命令未执行。该错误发生在六次结果落盘之后，不改其退出码。未对 H1 源文件做写入；不过本轮不能声称末尾 source-diff 检查已通过。
+- 结论：参数修正后的 user+net namespace 在真实 unit 可用；原候选有一条完整 CLI 成功样本，观察到 2 秒附近已有 loopback listener，之后确有本机 TCP 连接，outer 退出后 PID 不存在。但 request path/status、真实 `poll()`、callback after 未直接采集；其余 5 次被 observer 失真。启动敏感性根因仍未定，不能借一条成功反证其他失败。
+- 本 Task14 到此停止，不再探 namespace、不重跑六次、不切换 runner。新的最小决策是 lead 判断是否另发独立 instrumentation 修正任务；本章不是修复或独审。生产容量、恢复域、M4/M5 和授权继续 unknown，生产上传仍关闭。
