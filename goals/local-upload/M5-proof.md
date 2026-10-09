@@ -3,7 +3,7 @@ lane: local-upload
 id: M5
 slug: proof
 status: 未开始
-owner: delegate implementer dlg-20261008-094534-0fd910
+owner: lead
 order: 5
 priority: 高
 depends_on: [local-upload/M1, local-upload/M2, local-upload/M3, local-upload/M4]
@@ -13,7 +13,7 @@ merged_pr: null
 # 里程碑进度：local-upload/M5：全链路安全与兼容性证明
 
 - **预期产出**：从真实 HTTP producer 到 owned bytes、task/queue、既有处理链、Resolver、公正文、本人 history 与 cleanup 的端到端证据。
-- **当前范围**：E 卡；整理方案、helper 单测或邻侧 response 不算实际消费证明。
+- **当前范围**：E 卡，依赖 M4 完整网页行为与真实 API producer；M4 尚受 UI registry 登记阻塞，因此 M5 尚未开始。整理方案、helper 单测或邻侧 response 不算实际消费证明。
 - **关键决策**：每项不变式必须指向真实生产代码与能被 mutation 打红的测试；跨文件/进程边界保存 producer 实际 payload。
 - **推进前必须拿到的证据**：
   - [ ] 真 FastAPI、临时 SQLite/文件系统、真实 dispatcher、Resolver 与现有 consumer；断言 HTTP/body、subprocess argv/env、写入文件等实际 producer 输出。

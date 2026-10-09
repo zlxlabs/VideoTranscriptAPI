@@ -3,11 +3,11 @@ lane: local-upload
 id: M3
 slug: worker
 status: 已完成
-owner: delegate implementer dlg-20261008-181551-f0aaf6
+owner: lead
 order: 3
 priority: 高
 depends_on: [local-upload/M1, local-upload/M2]
-merged_pr: null
+merged_pr: 207
 ---
 
 # 里程碑进度：local-upload/M3：本地输入进入既有转录 worker
@@ -20,4 +20,4 @@ merged_pr: null
   - [x] `tests/unit/test_capswriter_contract.py` 锁 invalid producer contract；`test_upload_worker.py` 锁具名失败状态；终态成功/失败/启动孤儿、子任务迟到写、撤销/到期与受理竞态均由 SQLite/HTTP 消费者测试覆盖。
   - [x] queue/数据库/ASR 失败以现有 worker 失败与 `UPLOAD_PROCESSING_FAILED` 显式可见；临时目录删除失败不再被 local-upload 路径吞掉；未新增重试、fallback 或第二状态机。
   - [x] 环境测试在裸 shell（变量未设）及 dispatch 专属 transient systemd unit（显式 false，测试同时通过真子进程验证缺省拒读/显式启用）；未触碰生产配置/服务。Hosted CI 结论由 lead 按任务卡取证，draft 状态不计作门禁通过。
-- **完成条件**：真实处理者消费的是接收器写出的媒体与选项，阶段与 URL 路径保持一致；正文资格和任务进度分离。
+- **完成条件**：真实处理者消费的是接收器写出的媒体与选项，阶段与 URL 路径保持一致；正文资格和任务进度分离。M3/C 实现已随 PR #207 合并（merge commit `0ae4bffe911fa93bb858d24fd173aee602af9c0b`）；run `37864605980`/attempt 1 的 run conclusion 与 `gate / primary` job conclusion 均为 SUCCESS。该代码审查与 CI 不证明生产质量、容量、恢复或启用授权。
