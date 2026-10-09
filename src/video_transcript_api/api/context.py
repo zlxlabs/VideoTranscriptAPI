@@ -1046,12 +1046,14 @@ class RuntimeContext:
         import shutil
 
         with self._upload_budget_guard:
-            current = sum(self._upload_reserved_bytes.values())
+            previous = self._upload_reserved_bytes.get(task_id, 0)
+            current = sum(self._upload_reserved_bytes.values()) - previous
             if current + byte_count > budget_bytes:
                 return False
             free_bytes = shutil.disk_usage(temp_dir).free
             safety_margin = max(1024 * 1024, budget_bytes // 20)
-            if free_bytes < byte_count + safety_margin:
+            additional_bytes = max(0, byte_count - previous)
+            if free_bytes < additional_bytes + safety_margin:
                 return False
             self._upload_reserved_bytes[task_id] = byte_count
             return True

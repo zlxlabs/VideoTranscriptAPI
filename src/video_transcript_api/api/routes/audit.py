@@ -250,6 +250,7 @@ async def get_history(
     author: Optional[str] = Query(None, description="频道/作者过滤，支持逗号分隔多选"),
     q: Optional[str] = Query(None, description="关键词搜索：匹配标题、频道名、视频URL"),
     status: Optional[str] = Query(None, description="任务状态过滤，默认只显示 success（已完成）"),
+    source: Optional[str] = Query(None, description="来源过滤: upload/url"),
     limit: int = Query(20, ge=1, le=10000, description="每页条数，客户端已读过滤时传大值"),
     offset: int = Query(0, ge=0, description="分页偏移"),
     user_info: dict = Depends(verify_token),
@@ -262,6 +263,108 @@ async def get_history(
     api_key = user_info.get("api_key", "")
     api_key_masked = audit_logger._mask_api_key(api_key)
     user_id = user_info.get("user_id")
+    if source not in (None, "upload", "url"):
+        raise HTTPException(status_code=400, detail="source 仅支持 upload 或 url")
+    if source == "upload":
+        effective_status = _normalize_history_status(status)
+
+        def _run_upload_query():
+            cache = get_cache_manager()
+            conditions = ["u.owner_user_id = ?", "u.state = 'accepted'"]
+            params = [user_id]
+            if platform and platform != "local_upload":
+                conditions.append("0")
+            if webhook or (author and author.strip()):
+                conditions.append("0")
+            timestamp = "COALESCE(t.completed_at, t.created_at, u.created_at)"
+            if start_date:
+                conditions.append(f"{timestamp} >= ?")
+                params.append(f"{start_date} 00:00:00")
+            if end_date:
+                conditions.append(f"{timestamp} <= ?")
+                params.append(f"{end_date} 23:59:59")
+            if effective_status != "all":
+                conditions.append("t.status = ?")
+                params.append(effective_status)
+            if q and q.strip():
+                pattern = f"%{q.strip()}%"
+                conditions.append(
+                    "(COALESCE(u.title, '') LIKE ? OR COALESCE(u.filename, '') LIKE ? "
+                    "OR COALESCE(u.source_url, '') LIKE ?)"
+                )
+                params.extend([pattern, pattern, pattern])
+            where_clause = " AND ".join(conditions)
+            with cache._get_cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT COUNT(*) FROM local_uploads u
+                        JOIN task_status t ON t.task_id = u.root_task_id
+                        WHERE {where_clause}""",
+                    params,
+                )
+                total = cursor.fetchone()[0]
+                cursor.execute(
+                    f"""SELECT u.*, t.status AS root_status,
+                               t.title AS root_title,
+                               t.created_at AS root_created_at,
+                               t.completed_at AS root_completed_at
+                        FROM local_uploads u
+                        JOIN task_status t ON t.task_id = u.root_task_id
+                        WHERE {where_clause}
+                        ORDER BY {timestamp} DESC, u.upload_id
+                        LIMIT ? OFFSET ?""",
+                    params + [limit, offset],
+                )
+                rows = [dict(row) for row in cursor.fetchall()]
+            items = []
+            for row in rows:
+                active = cache.local_upload_share_is_active(row)
+                if row.get("revoked_at") is not None:
+                    inactive_reason = "revoked"
+                elif row.get("expires_at") is not None and not active:
+                    inactive_reason = "expired"
+                else:
+                    inactive_reason = None
+                items.append({
+                    "task_id": row["root_task_id"],
+                    "video_url": row.get("source_url") or "",
+                    "wechat_webhook": None,
+                    "request_time": row.get("root_completed_at") or row.get("root_created_at"),
+                    "api_key_masked": api_key_masked,
+                    "view_token": None,
+                    "title": row.get("root_title") or row.get("filename") or "本地上传",
+                    "author": None,
+                    "platform": "local_upload",
+                    "status": row["root_status"],
+                    "calibration_status": None,
+                    "summary_status": None,
+                    "chapters_status": None,
+                    "content_expired": not active,
+                    "source": "upload",
+                    "upload_id": row["upload_id"],
+                    "filename": row.get("filename"),
+                    "source_url": row.get("source_url"),
+                    "retention": row["retention"],
+                    "expires_at": row.get("expires_at"),
+                    "share_active": active,
+                    "share_inactive_reason": inactive_reason,
+                    "revoked_at": row.get("revoked_at"),
+                })
+            return total, items
+
+        try:
+            total, items = await asyncio.to_thread(_run_upload_query)
+        except sqlite3.OperationalError as exc:
+            logger.error("upload history query failed: {}", exc)
+            raise HTTPException(status_code=503, detail="上传历史查询失败")
+        except Exception as exc:
+            logger.exception("upload history query failed: {}", exc)
+            raise HTTPException(status_code=500, detail=f"上传历史查询失败: {exc}")
+        return TranscribeResponse(
+            code=200,
+            message="获取历史记录成功",
+            data={"items": items, "total": total, "limit": limit,
+                  "offset": offset, "api_key_masked": api_key_masked},
+        )
 
     # 租户边界用 user_id 精确匹配，而非截断后的 api_key_masked（只保留前
     # 4/后 4 位，不同 key 长度相同时可能碰撞，会让 A 看到 B 的历史记录——
@@ -363,6 +466,11 @@ async def get_history(
 
     conditions: list = []
     params: list = []
+
+    if source == "url":
+        # URL history keeps the legacy query semantics but must not count local
+        # upload roots; filter in SQL before COUNT/LIMIT/OFFSET.
+        conditions.append("(platform IS NULL OR platform != 'local_upload')")
 
     if webhook:
         conditions.append("wechat_webhook = ?")
@@ -764,10 +872,17 @@ async def get_task_summary(
     user_id = user_info.get("user_id")
     cache_manager = get_cache_manager()
 
-    # 通过 view_token 查任务信息（同步 SQLite 调用，线程池执行）
-    task_info = await asyncio.to_thread(cache_manager.get_task_by_view_token, view_token)
-    if not task_info:
-        raise HTTPException(status_code=404, detail="任务不存在")
+    # upload_ capability 只从分享记录读取，绝不走旧 task_status.view_token 别名。
+    if view_token.startswith("upload_"):
+        task_info = await asyncio.to_thread(
+            ViewTokenResolver(cache_manager)._local_upload_task_info, view_token
+        )
+        if not task_info:
+            raise HTTPException(status_code=404, detail="任务不存在或分享已关闭")
+    else:
+        task_info = await asyncio.to_thread(cache_manager.get_task_by_view_token, view_token)
+        if not task_info:
+            raise HTTPException(status_code=404, detail="任务不存在")
 
     # 校验归属：task_info 中暂无 user_id，通过 audit_log 反查（租户边界用
     # user_id，不用可能碰撞的 api_key_masked，见云端 CI codex gate）。
@@ -786,7 +901,7 @@ async def get_task_summary(
     # NULL），因此天然会落到"有记录但不属于当前调用方"的拒绝分支，行为
     # 仍是安全的 fail-closed，不需要特殊分支。
     task_id = task_info.get("task_id")
-    if task_id:
+    if task_id and not view_token.startswith("upload_"):
         # 归属判定逻辑（本地 codex review 第 8 轮 K1 抽成模块级
         # check_view_token_ownership，供 routes/tasks.py::recalibrate 复用
         # 同一套判定——见该函数的完整 docstring）。

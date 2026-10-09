@@ -46,7 +46,13 @@ uv run pytest tests/deployment
 默认门禁会阻断指向非 loopback 地址的 AF_INET/AF_INET6 出站连接；DNS 解析、
 loopback 与 Unix 域套接字放行，真实外网测试仍应放在 `tests/manual/`。
 
-本地上传安全基线：`tests/unit/test_local_upload_policy.py` 用临时 SQLite、真实 `ViewTokenResolver` 与 cache/task cleanup 消费者验证 owner/key 幂等、blank legacy token 隔离、`upload_` token、固定终态期限、write-once 撤销、开关关闭后的拒读与有效成果保护；另启动真实 Python 子进程消费同一 SQLite，验证缺省关闭与显式环境开关。B 接收回归运行：
+本地上传安全基线：`tests/unit/test_local_upload_policy.py` 用临时 SQLite、真实 `ViewTokenResolver` 与 cache/task cleanup 消费者验证 owner/key 幂等、blank legacy token 隔离、`upload_` token、固定终态期限、write-once 撤销、开关关闭后的拒读与有效成果保护；另启动真实 Python 子进程消费同一 SQLite，验证缺省关闭与显式环境开关。C 生命周期与真实 worker 回归运行：
+
+```bash
+uv run --frozen pytest -q tests/unit/test_upload_worker.py tests/integration/test_local_upload_lifecycle.py tests/unit/test_notification_e2e_delivery.py tests/unit/test_capswriter_contract.py
+```
+
+`test_local_upload_lifecycle.py` 以真实 FastAPI/SQLite/CacheManager 路由贯通三种重处理 owner gate、分享撤销与到期、public raw/page/export/summary、过滤后分页和撤销竞态；另用真实 `process_task_queue`、`process_transcription`、`Transcriber` 及隔离 CapsWriter 文件 producer 断言实际输入字节/时长/媒体映射、上传源文件在 LLM 前清理和 public output。`test_upload_worker.py` 锁定 named `UPLOAD_PROCESSING_FAILED` 与 dispatcher 使用持久映射。`test_notification_e2e_delivery.py` 贯通真实 router/channel/FIFO 到最终 HTTP JSON payload，验证 upload capability、用户标题、本地来源标签、完整总结/回执次序且不泄服务器路径。生产 ASR、真实凭据与真实通知均未调用。B 接收回归运行：
 
 ```bash
 uv run --frozen pytest -q tests/unit/test_upload_routes.py tests/unit/test_upload_dispatch.py tests/integration/test_upload_intake.py

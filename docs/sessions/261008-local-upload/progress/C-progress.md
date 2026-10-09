@@ -1,0 +1,48 @@
+## 2026-10-09 · 首个 worker 单元
+
+- **当前阶段**：implementing；首个独立 worker 单元已通过，尚未提交其余 C 增量。
+- **本段结论**：新增真实 dispatcher→持久 admission/media mapping→共享转录函数单元，断言映射文件字节、任务 id、媒体 id 和处理选项；`uv run --frozen pytest -q tests/unit/test_upload_worker.py` 通过。
+- **关键决策与已否决方案**：转录输入严格由 SQLite 映射提供，队列 URL 只作展示值；沿用 B 已持久化的处理选项，不加 URL 下载或新处理入口。
+- **下一步唯一动作**：提交并推送该单元，然后继续生命周期与终态期限实现。
+
+## 2026-10-09 · worker 生命周期、终态与公开消费
+
+- **当前阶段**：implementing；本地上传 ASR/LLM 路径、终态锚点、读取/重处理、历史与通知生产者已接通并有真实 SQLite/dispatcher 测试，尚未全量验收。
+- **本段结论**：root 首次 success/failed/启动孤儿失败固定写入 `terminal_at`/期限；真实 `process_task_queue → process_transcription → Transcriber → LLM` fixture 断言实际文件字节、映射、选项、原媒体在 LLM 前删除、公开成果与最终通知，三重处理路由与读写关闭顺序也被集成测试锁定。
+- **关键决策与已否决方案**：保留 B 的持久 media-path 字段契约，仅删除源文件与任务临时目录；child 旧 token 列恒为空，授权在 `BEGIN IMMEDIATE` 中随 child INSERT 再核验，撤销不取消已受理工作或移除已发通知。
+- **下一步唯一动作**：运行任务卡 Narrow-Verify 与 `make test`，检查差异后提交推送并交 lead 接 CI。
+
+## 2026-10-09 · 本地验收完成
+
+- **当前阶段**：implementing；Narrow-Verify 37 passed，`make test` 全量入口通过（3 skipped）；本地裸 shell 与 dispatch 专属 transient systemd unit 的真实子进程环境探针通过，Hosted CI 由 lead 后续取证。
+- **本段结论**：HTTP upload accepted 通知、终态补发到最终 HTTP JSON、三条 owner 重处理路由、全部 public body/summary 出口、历史过滤/期限原因、terminal clock write-once 与真实 worker/ASR 接线均由新增测试覆盖；当前分支待提交推送。
+- **关键决策与已否决方案**：不改已合并 B 的持久 admission/media-path 契约；public token 仅用于上传记录和临时投递副本，root/child task 与 audit alias 仍为空。
+- **下一步唯一动作**：提交并推送本卡分支的 C 实现，保持 PR draft，由 lead 接管 hosted CI / 独立审查。
+
+## 2026-10-09 · C-Fix1 并发清理顺序回归
+
+- **当前阶段**：implementing；只改既有生命周期集成测试，尚未在原 C 树执行运行时测试。
+- **本段结论**：按 `C-r1-verdict.md` 的真实 producer 脚本，将 dispatcher 生命周期测试改为消费者与 producer 并发，LLM coordinator `process` 入口观察源文件、task dir 与 ASR 输出是否存在；目标断言为进入 LLM 前均不存在。
+- **关键决策与已否决方案**：事件屏障停在真实 `llm_queue.put` 与真实消费者 `process` 入口，不增加生产锁/event/state；Transcriber workspace 与上传 task temp 分开，避免测试替生产环境掩盖 ASR 输出落点。
+- **下一步唯一动作**：提交这条回归测试后，在固定 H0 的新空 scratch 中确认 assertion 红，再修生产交接顺序。
+
+## 2026-10-09 · 修正 LLM handoff 前清理
+
+- **当前阶段**：implementing；H0 scratch 中并发消费者已触发真实 `AssertionError`，生产顺序修复已写入但尚未运行 H1 scratch 绿验。
+- **本段结论**：CapsWriter 上传输出重定向到任务临时目录；共享 `_handoff_to_llm_stage` 仅对 `local_upload` 在 CALIBRATING 更新/队列发布前删除整个 source/audio/ASR task dir，保留既有 finally 幂等收尾。
+- **关键决策与已否决方案**：不在 queue put 后等待消费者、不引新锁/event/state/interface；失败清理会在任何 publish 前直接抛出，因此不能让 LLM 先消费再报错。
+- **下一步唯一动作**：将生产顺序修正单独 commit/push，再在新空 scratch 验证 H1 绿、H0 反向顺序变异红，并运行关联 Narrow-Verify。
+
+## 2026-10-09 · C-Fix1 隔离复验完成
+
+- **当前阶段**：implementing；H1 worker 并发探针、H0 与 H1 顺序变异红验、固定 H1 scratch 全量 `make test` 均已执行；Hosted CI/新独审仍由 lead 接管。
+- **本段结论**：H0 的实际 LLM `process` 入口见源/ASR 文件存在并红；H1 清理提前及 ASR 输出 task-dir 重定向后，同一消费者入口三类产物均不存在。空 scratch 的 `make test` 通过且原 C 树 28 个 ignored data 文件前后 manifest/hash 完全一致。
+- **关键决策与已否决方案**：scratch checkout 预态确认 config/data/logs/.venv 全缺失、源文件 inode 独立；只在这个沙盒允许 Makefile 合成配置/data，不碰原 C 树旧数据或生产设置。
+- **下一步唯一动作**：将本进度条目与 Fix1 实现提交推送至 PR #206，保持 draft，由 lead 组织 H0..H1 独审与 Hosted CI。
+
+## 2026-10-09 · H0 红验与最小生产修正
+
+- **当前阶段**：implementing；H0 并发探针已在独立空 scratch 中以 `AssertionError` 红，生产修正已落盘，待 push 后做 H1 scratch 验证。
+- **本段结论**：H0 真实消费者 `NoModelWork.process` 观察到 `source_exists=True`；修正把上传 CapsWriter 输出放进任务临时目录，并在共享 handoff helper 的 CALIBRATING/queue publish 前执行现有幂等清理。
+- **关键决策与已否决方案**：不等队列消费后再清理、不加锁/等待器/生产状态；只有 `platform=local_upload` 走提前清理，URL 链路保持原顺序。
+- **下一步唯一动作**：提交推送此最小顺序修正，然后用新空 scratch 验证 H1 与反向顺序变异，并在 scratch 跑全量 make test。

@@ -4,10 +4,12 @@ The router, channels, third-party webhook managers, FIFO consumers and JSON
 payload producers are real. Only the final external HTTP POST is replaced.
 """
 
+import datetime
 import json
 import re
 import sqlite3
 import threading
+import uuid
 
 import pytest
 from wecom_notifier import FeishuNotifier, WeComNotifier
@@ -194,6 +196,31 @@ def _assert_ordered_summary_receipt(delivery, task_id, original_url, view_token)
             assert channel_records[-1][1]["card"]["header"]["title"]["content"] == receipt.splitlines()[0]
 
 
+def test_accepted_upload_link_reaches_final_http_payload_with_public_capability(
+    delivery,
+):
+    view_token = "upload_public-capability-fixture"
+    delivery["router"].send_view_link(
+        title=TITLE,
+        view_token=view_token,
+        original_url="https://source.example.test/watch?id=9",
+        source_label="本地上传",
+        task_id="task_abcdef0123456789",
+        webhooks={"wechat": WECHAT_WEBHOOK, "feishu": FEISHU_WEBHOOK},
+    )
+    records = _wait_payloads(delivery, 2)
+    expected_url = f"{BASE_URL}/view/{view_token}"
+    assert len(records) == 2
+    for url, payload in records:
+        content = _payload_content(url, payload)
+        assert TITLE in content
+        assert expected_url in content
+        assert "本地上传" in content
+        assert "https://source.example.test/watch" in content
+        assert "fakepath" not in content
+        assert "server-owned" not in content
+
+
 @pytest.mark.parametrize("entry_point", ["inline", "replay"])
 def test_success_snapshot_reaches_final_http_payloads_in_order(
     cm, delivery, entry_point,
@@ -271,6 +298,84 @@ def test_process_transcription_notify_via_reaches_both_real_channels(
     assert row["status"] == TaskStatus.SUCCESS
     _assert_ordered_summary_receipt(delivery, task_id, original_url, row["view_token"])
     assert cm.is_terminal_notification_pending(task_id) is False
+
+
+def test_local_upload_terminal_producer_sends_public_share_url_and_source_label(
+    cm, delivery, monkeypatch,
+):
+    monkeypatch.setattr(f"{RENDERING_MODULE}.get_base_url", lambda: BASE_URL)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    key = f"{int(now.timestamp() * 1000)}-{uuid.uuid4()}"
+    intent = cm.register_local_upload(
+        owner_user_id="alice", idempotency_key=key, retention="never",
+        intent_metadata={"filename": "clip.mp4", "title": TITLE},
+    )
+    media_id = f"upload_{uuid.uuid4().hex}"
+    root_task_id = cm.generate_task_id()
+    upload = cm.accept_local_upload(
+        intent["upload_id"],
+        media_id=media_id,
+        task_id=root_task_id,
+        filename="clip.mp4",
+        title=TITLE,
+        source_url="https://source.example.test/watch?id=7",
+        request_metadata={"filename": "clip.mp4", "title": TITLE},
+        media_path="/not-in-notification/persistent/source.mp4",
+        byte_size=42,
+        sha256="a" * 64,
+    )
+    cm.save_cache(
+        platform="local_upload",
+        url="https://source.example.test/watch?id=7",
+        media_id=media_id,
+        use_speaker_recognition=False, transcript_data="upload transcript",
+        transcript_type="capswriter", title=TITLE, author="", description="",
+    )
+    child_task_id = cm.generate_task_id()
+    with cm._get_cursor() as cursor:
+        cursor.execute(
+            """INSERT INTO task_status
+               (task_id, view_token, url, platform, media_id, status, submitted_by)
+               VALUES (?, '', '', 'local_upload', ?, 'queued', 'alice')""",
+            (child_task_id, media_id),
+        )
+    cm.update_task_status(root_task_id, TaskStatus.PROCESSING)
+    cm.update_task_status(child_task_id, TaskStatus.PROCESSING)
+    assert finalize_terminal_status_and_notify(
+        child_task_id,
+        TaskStatus.SUCCESS,
+        title=TITLE,
+        terminal_snapshot=SNAPSHOT,
+        cache_manager=cm,
+        defer_delivery=True,
+    ) is True
+    cm.revoke_local_upload(upload["upload_id"])
+
+    deliver_pending_terminal_notifications(cm, router=delivery["router"])
+
+    records = _wait_payloads(delivery, 4)
+    expected_url = f"{BASE_URL}/view/{upload['view_token']}"
+    for channel_records in (
+        [record for record in records if "qyapi.weixin.qq.com" in record[0]],
+        [record for record in records if "open.feishu.cn" in record[0]],
+    ):
+        contents = [_payload_content(url, payload) for url, payload in channel_records]
+        assert len(contents) == 2
+        full_message, receipt = contents
+        assert TITLE in full_message and TITLE in receipt
+        assert expected_url in full_message and expected_url in receipt
+        assert "本地上传" in receipt
+        assert "原始地址：https://source.example.test/watch" in receipt
+        assert PERSISTED_SUMMARY in full_message
+        assert "第一段含 重点、链接文本 和中文。" in receipt
+        assert "persistent/source.mp4" not in "\n".join(contents)
+        assert "upload transcript" not in "\n".join(contents)
+    assert cm.get_task_by_id(root_task_id)["view_token"] == ""
+    assert cm.get_task_by_id(child_task_id)["view_token"] == ""
+    stored = cm.get_local_upload_by_id(upload["upload_id"])
+    assert stored["view_token"] == upload["view_token"]
+    assert stored["terminal_at"] is None
+    assert stored["expires_at"] is None
 
 
 def test_failed_terminal_sends_one_failure_payload_per_channel(cm, delivery):

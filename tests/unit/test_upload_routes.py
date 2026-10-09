@@ -153,7 +153,8 @@ def test_cache_manager_adds_upload_mapping_columns_to_existing_a_schema(tmp_path
     columns = {row[1] for row in connection.execute("PRAGMA table_info(local_uploads)")}
     connection.close()
     assert {
-        "filename", "source_url", "request_metadata", "media_path", "byte_size", "sha256"
+        "filename", "source_url", "request_metadata", "media_path", "byte_size",
+        "sha256", "terminal_at",
     } <= columns
 
 

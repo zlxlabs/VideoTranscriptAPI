@@ -16,6 +16,7 @@ from src.video_transcript_api.api.routes.audit import check_view_token_ownership
 from src.video_transcript_api.api.services import view_token_resolver as resolver_module
 from src.video_transcript_api.api.services.view_token_resolver import ViewTokenResolver
 from src.video_transcript_api.cache.cache_manager import CacheManager
+from src.video_transcript_api.utils.logging.audit_logger import AuditLogger
 from src.video_transcript_api.utils.tempfile_manager import TempFileManager
 
 
@@ -72,6 +73,19 @@ def _old_time(days=400):
     return (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
+
+
+def _freeze_cache_clock(monkeypatch, now):
+    import src.video_transcript_api.cache.cache_manager as cache_module
+
+    original_datetime = cache_module.datetime.datetime
+
+    class FrozenDateTime(original_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(cache_module.datetime, "datetime", FrozenDateTime)
 
 
 def test_real_sqlite_upload_identity_owner_key_and_intent_window(cm):
@@ -225,22 +239,82 @@ def test_root_terminal_sets_fixed_30_day_expiry_for_success_and_failure(cm):
         stored = cm.get_local_upload_by_id(upload["upload_id"])
         with cm._get_cursor() as cursor:
             cursor.execute(
-                "SELECT datetime(completed_at, '+30 days') FROM task_status WHERE task_id = ?",
+                "SELECT completed_at, datetime(completed_at, '+30 days') "
+                "FROM task_status WHERE task_id = ?",
                 (upload["root_task_id"],),
             )
-            expected = cursor.fetchone()[0]
+            completed_at, expected = cursor.fetchone()
+        assert stored["terminal_at"] == completed_at
         assert stored["expires_at"] == expected
 
         # Subsequent task writes, including late updates, cannot extend the
         # root's original expiry because terminal task state is write-once.
+        terminal_at = stored["terminal_at"]
         cm.update_task_status(upload["root_task_id"], "failed", error_message="late")
-        assert cm.get_local_upload_by_id(upload["upload_id"])["expires_at"] == expected
+        current = cm.get_local_upload_by_id(upload["upload_id"])
+        assert current["terminal_at"] == terminal_at
+        assert current["expires_at"] == expected
+        with pytest.raises(sqlite3.IntegrityError, match="terminal clock is write-once"):
+            with cm._get_cursor() as cursor:
+                cursor.execute(
+                    "UPDATE local_uploads SET expires_at = '2000-01-01 00:00:00' "
+                    "WHERE upload_id = ?",
+                    (upload["upload_id"],),
+                )
+
+
+def test_upload_root_and_child_audit_snapshots_keep_legacy_alias_blank(tmp_path):
+    manager = CacheManager(str(tmp_path / "cache"))
+    audit = AuditLogger(str(tmp_path / "audit.db"))
+    manager.audit_logger = audit
+    upload = _accepted_upload(manager, retention="never")
+    _finish_with_transcript(manager, upload)
+    child_id = manager.generate_task_id()
+    with manager._get_cursor() as cursor:
+        cursor.execute(
+            """INSERT INTO task_status
+               (task_id, view_token, url, platform, media_id, status, submitted_by)
+               VALUES (?, '', '', 'local_upload', ?, 'processing', 'alice')""",
+            (child_id, upload["media_id"]),
+        )
+    manager.update_task_status(
+        child_id, "success", platform="local_upload", media_id=upload["media_id"]
+    )
+
+    connection = sqlite3.connect(audit.db_path)
+    rows = connection.execute(
+        "SELECT task_id, view_token FROM task_audit_snapshots WHERE task_id IN (?, ?)",
+        (upload["root_task_id"], child_id),
+    ).fetchall()
+    connection.close()
+    manager.close()
+
+    assert {row[0] for row in rows} == {upload["root_task_id"], child_id}
+    assert all(token in (None, "") for _, token in rows)
+    assert all(token != upload["view_token"] for _, token in rows)
+
+
+def test_startup_orphan_failure_anchors_upload_terminal_clock_once(cm):
+    upload = _accepted_upload(cm, retention="30d")
+
+    assert cm.recover_orphaned_tasks() == 1
+
+    root = cm.get_task_by_id(upload["root_task_id"])
+    stored = cm.get_local_upload_by_id(upload["upload_id"])
+    assert root["status"] == "failed"
+    assert stored["terminal_at"] == root["completed_at"]
+    assert stored["expires_at"] is not None
+    original_terminal_at = stored["terminal_at"]
+    cm.update_task_status(upload["root_task_id"], "failed", error_message="late recovery")
+    assert cm.get_local_upload_by_id(upload["upload_id"])["terminal_at"] == original_terminal_at
 
 
 def test_never_expiry_and_revocation_are_write_once(cm):
     upload = _accepted_upload(cm, retention="never")
     _finish_with_transcript(cm, upload)
-    assert cm.get_local_upload_by_id(upload["upload_id"])["expires_at"] is None
+    stored = cm.get_local_upload_by_id(upload["upload_id"])
+    assert stored["terminal_at"] is not None
+    assert stored["expires_at"] is None
 
     first_time = datetime(2026, 10, 8, 9, 0, tzinfo=timezone.utc)
     later_time = first_time + timedelta(days=3)
@@ -336,17 +410,13 @@ def test_resolver_reads_active_upload_and_denies_disabled_revoked_or_expired(cm,
     cm.revoke_local_upload(long["upload_id"])
     assert resolver.get_view_data_by_token(long["view_token"]) is None
 
-    with cm._get_cursor() as cursor:
-        cursor.execute(
-            "UPDATE local_uploads SET expires_at = ? WHERE upload_id = ?",
-            (_old_time(31), short["upload_id"]),
-        )
-    assert resolver.get_view_data_by_token(short["view_token"]) is None
     expired_record = cm.get_local_upload_by_view_token(short["view_token"])
     exactly_expired = datetime.strptime(
         expired_record["expires_at"], "%Y-%m-%d %H:%M:%S"
     ).replace(tzinfo=timezone.utc)
     assert cm.local_upload_share_is_active(expired_record, exactly_expired) is False
+    _freeze_cache_clock(monkeypatch, exactly_expired + timedelta(seconds=1))
+    assert resolver.get_view_data_by_token(short["view_token"]) is None
 
 
 def test_cleanup_protects_active_upload_cache_even_when_feature_is_disabled(cm, monkeypatch):
@@ -363,22 +433,23 @@ def test_cleanup_protects_active_upload_cache_even_when_feature_is_disabled(cm, 
         assert cm.get_cache("local_upload", upload["media_id"]) is not None
 
 
-def test_cleanup_reclaims_revoked_or_expired_upload_cache(cm):
+def test_cleanup_reclaims_revoked_or_expired_upload_cache(cm, monkeypatch):
     revoked = _accepted_upload(cm, retention="never")
     _finish_with_transcript(cm, revoked)
     cm.revoke_local_upload(revoked["upload_id"])
 
     expired = _accepted_upload(cm, retention="30d")
     _finish_with_transcript(cm, expired)
+    expired_record = cm.get_local_upload_by_id(expired["upload_id"])
+    expiration = datetime.strptime(
+        expired_record["expires_at"], "%Y-%m-%d %H:%M:%S"
+    ).replace(tzinfo=timezone.utc)
     with cm._get_cursor() as cursor:
-        cursor.execute(
-            "UPDATE local_uploads SET expires_at = ? WHERE upload_id = ?",
-            (_old_time(31), expired["upload_id"]),
-        )
         cursor.execute(
             "UPDATE video_cache SET updated_at = ? WHERE platform = 'local_upload'",
             (_old_time(),),
         )
+    _freeze_cache_clock(monkeypatch, expiration + timedelta(seconds=1))
 
     assert cm.cleanup_old_cache(days=1) == 2
     assert cm.get_cache("local_upload", revoked["media_id"]) is None
