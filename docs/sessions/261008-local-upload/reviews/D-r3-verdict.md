@@ -2,7 +2,7 @@
 # D-r3 独立审查记录
 
 - 固定审查对象：`bd7510ac698dc6d7a9da7843460c79830de75fdf..a5e7836ce5547f448c92aac53a5af4d65041cdc7`。
-- `failure-visibility: skipped`
+failure-visibility: skipped
 - 软件严重度：未评估；没有形成软件 finding，也不能据此判为 clean。
 - 交付阻断：本轮独立审查未完成，D 的审查验收状态不可判定。
 
