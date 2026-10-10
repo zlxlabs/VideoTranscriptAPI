@@ -179,9 +179,9 @@ _HOME_HTML = """\
             <a href="https://mp.weixin.qq.com/s/w8VnWJcUp5VkD5J-fYCUrg" target="_blank" rel="noopener" style="color: #667eea; text-decoration: none;">📖 开发契机和玩法分享</a>
         </p>
         <p class="footer">
-            Powered by <a href="https://github.com/zj1123581321/VideoTranscriptAPI" target="_blank" rel="noopener">VideoTranscriptAPI</a>
+            Powered by <a href="https://github.com/zlxlabs/VideoTranscriptAPI" target="_blank" rel="noopener">VideoTranscriptAPI</a>
             · Open Source ·
-            <a href="https://github.com/zj1123581321/VideoTranscriptAPI" target="_blank" rel="noopener">☆ Star on GitHub</a>
+            <a href="https://github.com/zlxlabs/VideoTranscriptAPI" target="_blank" rel="noopener">☆ Star on GitHub</a>
         </p>
     </div>
 </body>
