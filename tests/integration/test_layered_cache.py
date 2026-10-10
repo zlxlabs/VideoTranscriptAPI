@@ -997,6 +997,55 @@ class TestLayeredCacheMatrix:
         seed_segments = queued[0].get("timeline_segments")
         assert seed_segments == expected_disk_segments
         assert compute_notes_anchor_fingerprint(seed_segments) == expected_fingerprint
+        # load_segments seed must also carry its real kind through the handoff.
+        assert queued[0].get("timeline_segments_kind") == "segments"
+
+    def test_chapters_seed_dialogs_handoff_carries_real_kind(
+        self, monkeypatch, patch_runtime, tmp_path
+    ):
+        """Issue #227 last broken link: when the chapters seed handed off via
+        llm_task["timeline_segments"] comes from cached structured dialogs,
+        the real kind must travel with it (timeline_segments_kind) instead of
+        being relabeled "segments" by llm_ops branch 1. The notes reader
+        reproduces the anchor from the kind label, so a wrong label makes it
+        read the wrong file and fail the fingerprint check (production:
+        task_61b56024, 518 dialogs vs 556 segments)."""
+        cache_dir = tmp_path / "cache_dialogs"
+        cache_dir.mkdir(parents=True)
+        dialogs = [
+            {"speaker": "A", "start_time": 0.0, "end_time": 1.5, "text": "d1"},
+            {"speaker": "B", "start_time": 1.5, "end_time": 3.0, "text": "d2"},
+        ]
+        (cache_dir / "llm_processed.json").write_text(
+            json.dumps({"dialogs": dialogs}), encoding="utf-8"
+        )
+        expected_fingerprint = compute_notes_anchor_fingerprint(dialogs)
+
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "file_path": str(cache_dir),
+            "llm_calibrated": "calibrated text",
+            "llm_summary": "summary text",
+            "llm_processed": {"dialogs": dialogs},
+            "llm_status": {
+                "calibration_status": CalibrationStatus.FULL,
+                "summary_status": SummaryStatus.GENERATED,
+                "chapters_status": ChaptersStatus.FAILED,
+            },
+        }
+
+        result, queued = _run(
+            monkeypatch, patch_runtime, cache_data,
+            {"calibrate": False, "summarize": False, "chapters": True,
+             "infer_speaker_names": False},
+        )
+
+        assert result["status"] == "success"
+        assert len(queued) == 1
+        seed_segments = queued[0].get("timeline_segments")
+        assert seed_segments == dialogs
+        assert queued[0].get("timeline_segments_kind") == "cached_dialogs"
+        assert compute_notes_anchor_fingerprint(seed_segments) == expected_fingerprint
 
 
 
