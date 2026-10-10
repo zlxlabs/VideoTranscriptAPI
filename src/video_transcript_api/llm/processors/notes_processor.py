@@ -117,28 +117,39 @@ def load_notes_source_segments(
     ``dialogs``/``cached_dialogs`` sources use ``llm_processed.json``.  A
     ``segments`` source uses the shared ``load_segments`` adapter, preserving
     the plain-text path's normalized list and original index order.
+
+    A declared ``source_kind`` is reproduced exactly: if the cache no longer
+    holds that anchor, the lookup fails as ``(None, None)`` instead of silently
+    substituting the other source, which would make notes hash a different
+    anchor than chapters did (#227).  Only a product carrying no label at all
+    falls back to probing ``dialogs`` then ``segments``.
     """
     cache_path = Path(cache_dir)
     normalized_kind = (source_kind or "").lower()
-    wants_dialogs = normalized_kind in {
+
+    processed = _read_json_file(cache_path / "llm_processed.json")
+    dialogs = processed.get("dialogs") if processed else None
+    dialogs_source = dialogs if isinstance(dialogs, list) and dialogs else None
+
+    if normalized_kind in {
         "dialogs",
         "cached_dialogs",
         "structured",
         "plain_structured",
-    }
-    wants_segments = normalized_kind in {"segments", "timeline"}
+    }:
+        return (dialogs_source, "dialogs") if dialogs_source is not None else (None, None)
 
-    processed = _read_json_file(cache_path / "llm_processed.json")
-    dialogs = processed.get("dialogs") if processed else None
-    if (wants_dialogs or not wants_segments) and isinstance(dialogs, list) and dialogs:
-        return dialogs, "dialogs"
+    if normalized_kind in {"segments", "timeline"}:
+        segments = load_segments(cache_path)
+        if isinstance(segments, list) and segments:
+            return segments, "segments"
+        return None, None
 
+    if dialogs_source is not None:
+        return dialogs_source, "dialogs"
     segments = load_segments(cache_path)
     if isinstance(segments, list) and segments:
         return segments, "segments"
-
-    if not wants_segments and isinstance(dialogs, list) and dialogs:
-        return dialogs, "dialogs"
     return None, None
 
 
