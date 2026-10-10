@@ -31,7 +31,17 @@ git push origin vA.B.C
 
 tag 命名固定 `v` 前缀 + 三段版本号，供下一次取材命令引用。
 
-### 3. 构建与部署
+### 3. 建 GitHub Release
+
+仓库是 public，GitHub Releases 页对外可见。打完 tag 后由发版人手动建 Release：tag 名与 git tag 一致（`vA.B.C`），body 从 `CHANGELOG.md` 对应版本条目摘取（单一生成源，禁止另写一份）。把 `## [A.B.C]` 条目正文写入临时文件后执行：
+
+```sh
+gh release create vA.B.C --title "vA.B.C" --notes-file notes.md
+```
+
+临时文件用完即删，不要提交。
+
+### 4. 构建与部署
 
 按现有镜像流程：`docker/push_to_ghcr.sh` 在干净工作树上构建并推送 `ghcr.io/zj1123581321/video-transcript-api:<sha12>`，随后 `docker/pull_and_deploy.sh <镜像引用>` 以不可变 digest 部署到目标机。
 
