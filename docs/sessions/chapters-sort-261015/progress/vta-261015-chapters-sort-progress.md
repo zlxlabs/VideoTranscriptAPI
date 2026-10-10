@@ -29,3 +29,13 @@ Task-Id: VideoTranscriptAPI-20261015-01（dispatch dlg-20261010-101342-e71d15）
   单点锁定，任何 caller 都无法绕过（锁定决策 4）；skipped_*/disabled 状态不清旧
   error（轴表只约束 GENERATED 清除，扩大清空范围属超卡面行为变更，报告里备注）。
 - 下一步唯一动作：写 CHANGELOG Fixed 条目，跑 make test 全量门禁，写报告。
+
+## 里程碑 3：收尾（CHANGELOG + 全量门禁）
+
+- 当前阶段：验收中（A/B 已提交并各自红验通过，CHANGELOG 已写，全量门禁已过）
+- 本段结论：CHANGELOG 新增 [Unreleased] Fixed 两条（排序归一化、chapters_error 落盘）。
+  make test 全量门禁 exit=0（TMPDIR=/tmp；默认 TMP 下 test_unix_domain_socket_is_not_blocked
+  因本 worktree 根路径 88 字符致 mkdtemp socket 路径超 AF_UNIX 108 字节限制而失败，
+  该测试文件自 2026-10-02 d9f2e2c6 未变，属环境性继承红，与本次改动无关）。
+- 关键决策与已否决方案：无
+- 下一步唯一动作：写 report.md 交验收。
