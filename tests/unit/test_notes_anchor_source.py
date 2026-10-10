@@ -1,15 +1,14 @@
-"""Chapter anchor source truth: writer label must reproduce the reader's load.
+"""Chapter anchor source truth: the writer label must reproduce the reader's load.
 
 Production shape reproduced here (#227): a cache directory holding BOTH the
 structured ``llm_processed.json`` dialogs and the raw ``transcript_funasr.json``
 segments, where a chapters-only re-generation anchors on the cached dialogs.
 
-The invariant locked by these tests: the anchor fingerprint stored in a
-``chapters_status=GENERATED`` product equals the fingerprint the notes reader
-recomputes from that same cache directory under the repaired resolution rule.
-A label that only records "what the input looked like" (queue seed shape) makes
-the reader load the other source, which is exactly the production failure
-(product 518 anchors / reader 556 segments -> fingerprint mismatch).
+Locked invariant: the anchor fingerprint stored in a ``chapters_status=GENERATED``
+product equals the fingerprint the notes reader recomputes from that same cache
+directory under the repaired resolution rule.  A label recording only "what the
+seed input looked like" sends the reader to the other source -- exactly the
+production failure (product 518 anchors / reader 556 segments).
 """
 
 from __future__ import annotations
@@ -195,87 +194,63 @@ def _write_chapters_product(cache_dir: Path, result: Dict[str, Any]) -> Dict[str
     return payload
 
 
+def _resolve_production_seed(monkeypatch, cache_dir: Path):
+    """Run llm_ops' real input gradient against the two coexisting sources."""
+    monkeypatch.setattr(llm_ops, "cache_manager", _FileBackedCacheManager(cache_dir))
+    return llm_ops._resolve_chapters_timeline_segments(
+        llm_task={},
+        platform="bilibili",
+        media_id="BV1fcHD6cEw3",
+        use_speaker_recognition=False,
+    )
+
+
+def _produce_chapters_product(monkeypatch, cache_dir: Path) -> Dict[str, Any]:
+    """Full chapters-only round on a production-shaped cache; returns the product."""
+    _write_production_cache(cache_dir)
+    seed, seed_kind = _resolve_production_seed(monkeypatch, cache_dir)
+
+    coordinator = LLMCoordinator(_coordinator_config(), str(cache_dir))
+    coordinator.chapters_processor = ChaptersProcessor(
+        llm_client=FakeChaptersClient(CHAPTER_OUTLINE),
+        config=LLMConfig.from_dict(_coordinator_config()),
+    )
+    result = _run_chapters_round(
+        coordinator, seed_segments=seed, seed_kind=seed_kind
+    )
+    return _write_chapters_product(cache_dir, result)
+
+
 class TestCachedDialogsSeedAnchorsNotesReader:
     """Production scenario: cached dialogs seed, both sources coexist."""
 
     def test_seed_resolution_prefers_cached_dialogs(self, monkeypatch, tmp_path):
         _write_production_cache(tmp_path)
-        monkeypatch.setattr(llm_ops, "cache_manager", _FileBackedCacheManager(tmp_path))
-
-        seed, seed_kind = llm_ops._resolve_chapters_timeline_segments(
-            llm_task={},
-            platform="bilibili",
-            media_id="BV1fcHD6cEw3",
-            use_speaker_recognition=False,
-        )
+        seed, seed_kind = _resolve_production_seed(monkeypatch, tmp_path)
 
         assert seed_kind == "cached_dialogs"
         assert seed == DIALOGS
 
-    def test_generated_product_reloads_the_same_anchor_in_notes_reader(
+    def test_product_label_reloads_the_same_anchor_and_notes_succeed(
         self, monkeypatch, tmp_path
     ):
-        _write_production_cache(tmp_path)
-        monkeypatch.setattr(llm_ops, "cache_manager", _FileBackedCacheManager(tmp_path))
-        seed, seed_kind = llm_ops._resolve_chapters_timeline_segments(
-            llm_task={},
-            platform="bilibili",
-            media_id="BV1fcHD6cEw3",
-            use_speaker_recognition=False,
-        )
-
-        coordinator = LLMCoordinator(_coordinator_config(), str(tmp_path))
-        coordinator.chapters_processor = ChaptersProcessor(
-            llm_client=FakeChaptersClient(CHAPTER_OUTLINE),
-            config=LLMConfig.from_dict(_coordinator_config()),
-        )
-
-        result = _run_chapters_round(
-            coordinator, seed_segments=seed, seed_kind=seed_kind
-        )
-        payload = _write_chapters_product(tmp_path, result)
+        payload = _produce_chapters_product(monkeypatch, tmp_path)
+        source = payload["source"]
 
         # The writer must name the source it actually anchored on, and the two
         # available sources must be distinguishable (otherwise this test would
         # pass no matter which one the reader picked).
-        assert payload["source"]["kind"] == "cached_dialogs"
-        assert payload["source"]["segment_count"] == len(DIALOGS)
+        assert source["kind"] == "cached_dialogs"
+        assert source["segment_count"] == len(DIALOGS)
         assert len(load_segments(tmp_path)) != len(DIALOGS)
-        assert (
-            compute_notes_anchor_fingerprint(load_segments(tmp_path))
-            != payload["source"]["fingerprint"]
+        assert compute_notes_anchor_fingerprint(load_segments(tmp_path)) != (
+            source["fingerprint"]
         )
 
-        anchor, anchor_kind = load_notes_source_segments(
-            tmp_path, payload["source"]["kind"]
-        )
+        anchor, anchor_kind = load_notes_source_segments(tmp_path, source["kind"])
         assert anchor_kind == "dialogs"
         assert anchor == DIALOGS
-        assert (
-            compute_notes_anchor_fingerprint(anchor) == payload["source"]["fingerprint"]
-        )
-
-    def test_notes_generation_succeeds_against_cached_dialogs_anchor(
-        self, monkeypatch, tmp_path
-    ):
-        _write_production_cache(tmp_path)
-        monkeypatch.setattr(llm_ops, "cache_manager", _FileBackedCacheManager(tmp_path))
-        seed, seed_kind = llm_ops._resolve_chapters_timeline_segments(
-            llm_task={},
-            platform="bilibili",
-            media_id="BV1fcHD6cEw3",
-            use_speaker_recognition=False,
-        )
-
-        coordinator = LLMCoordinator(_coordinator_config(), str(tmp_path))
-        coordinator.chapters_processor = ChaptersProcessor(
-            llm_client=FakeChaptersClient(CHAPTER_OUTLINE),
-            config=LLMConfig.from_dict(_coordinator_config()),
-        )
-        payload = _write_chapters_product(
-            tmp_path,
-            _run_chapters_round(coordinator, seed_segments=seed, seed_kind=seed_kind),
-        )
+        assert compute_notes_anchor_fingerprint(anchor) == source["fingerprint"]
 
         client = FakeNotesClient(["notes one", "notes two", "notes three"])
         notes_result = NotesProcessor(client, _notes_config()).process(
@@ -284,7 +259,7 @@ class TestCachedDialogsSeedAnchorsNotesReader:
 
         assert notes_result.status is NotesStatus.GENERATED, notes_result.error
         assert notes_result.text
-        assert notes_result.fingerprint == payload["source"]["fingerprint"]
+        assert notes_result.fingerprint == source["fingerprint"]
         assert len(client.calls) == 3
 
     def test_handle_llm_task_passes_the_resolved_seed_kind(self, monkeypatch):
@@ -292,20 +267,13 @@ class TestCachedDialogsSeedAnchorsNotesReader:
         captured: Dict[str, Any] = {}
 
         mock_cache_manager = MagicMock()
-        mock_cache_manager.get_cache.return_value = {
-            "llm_processed": {"dialogs": DIALOGS},
-        }
-        mock_cache_manager.media_lock.return_value.__enter__ = MagicMock(
-            return_value=None
-        )
-        mock_cache_manager.media_lock.return_value.__exit__ = MagicMock(
-            return_value=False
-        )
+        mock_cache_manager.get_cache.return_value = {"llm_processed": {"dialogs": DIALOGS}}
+        mock_cache_manager.media_lock.return_value.__enter__ = MagicMock(return_value=None)
+        mock_cache_manager.media_lock.return_value.__exit__ = MagicMock(return_value=False)
         mock_cache_manager.invalidate_llm_status.return_value = {}
-        mock_cache_manager.save_llm_result.return_value = True
-        mock_cache_manager.save_llm_status.return_value = True
         mock_cache_manager.get_task_by_id.return_value = {"view_token": "tok"}
-        mock_cache_manager.update_task_status.return_value = True
+        for _writer in ("save_llm_result", "save_llm_status", "update_task_status"):
+            getattr(mock_cache_manager, _writer).return_value = True
 
         mock_coordinator = MagicMock()
         mock_coordinator.process = lambda **kwargs: captured.update(kwargs) or {
@@ -315,9 +283,8 @@ class TestCachedDialogsSeedAnchorsNotesReader:
             "models_used": {},
         }
 
-        queue = MagicMock()
         router = MagicMock()
-        monkeypatch.setattr(llm_ops, "llm_task_queue", queue)
+        monkeypatch.setattr(llm_ops, "llm_task_queue", MagicMock())
         monkeypatch.setattr(llm_ops, "cache_manager", mock_cache_manager)
         monkeypatch.setattr(llm_ops, "llm_coordinator", mock_coordinator)
         monkeypatch.setattr(llm_ops, "get_notification_router", lambda: router)
