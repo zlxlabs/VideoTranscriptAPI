@@ -79,6 +79,13 @@ test('public reading page displays transcript and opens a working text export', 
   await expect(ossBar.locator('a[href="https://github.com/zlxlabs/VideoTranscriptAPI"]')).toBeVisible();
   await expect(ossBar.locator('a[href="https://x.com/bylixing"]')).toBeVisible();
 
+  // Assert oss-bar does not overflow in 375px mobile viewport
+  await page.setViewportSize({ width: 375, height: 667 });
+  await expect(ossBar).toContainText('张立行');
+  const isNotOverflowing = await ossBar.evaluate((el) => el.scrollWidth <= el.clientWidth);
+  expect(isNotOverflowing).toBe(true);
+  await page.setViewportSize({ width: 1280, height: 720 });
+
   await expect(page.locator('#calibrated-content-block')).toContainText(
     '隔离浏览器夹具中的正文，验证公开阅读与导出。');
   const exportMenu = page.locator('.export-links-details');

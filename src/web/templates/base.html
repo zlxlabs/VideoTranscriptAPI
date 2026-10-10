@@ -877,23 +877,6 @@
             transition: background 0.3s ease, border-color 0.3s ease, color 0.3s ease;
         }
 
-        .oss-bar-desc {
-            display: inline-flex;
-            align-items: center;
-        }
-
-        .oss-bar-desc-desktop {
-            display: inline;
-        }
-
-        .oss-bar-desc-mobile {
-            display: none;
-        }
-
-        .oss-bar-author-label {
-            display: inline;
-        }
-
         .oss-bar-sep {
             opacity: 0.6;
             user-select: none;
@@ -933,18 +916,6 @@
             }
 
             .oss-bar::-webkit-scrollbar {
-                display: none;
-            }
-
-            .oss-bar-desc-desktop {
-                display: none;
-            }
-
-            .oss-bar-desc-mobile {
-                display: inline;
-            }
-
-            .oss-bar-author-label {
                 display: none;
             }
 
@@ -1135,25 +1106,22 @@
 </head>
 <body>
     <div class="container">
-        <div class="oss-bar" role="banner" aria-label="开源项目信息">
-            <span class="oss-bar-desc">
-                <span class="oss-bar-desc-desktop">本页由开源项目 VideoTranscriptAPI 生成，可自行部署</span>
-                <span class="oss-bar-desc-mobile">开源项目</span>
-            </span>
-            <span class="oss-bar-sep" aria-hidden="true">·</span>
-            <a href="https://github.com/zlxlabs/VideoTranscriptAPI" class="oss-bar-link" target="_blank" rel="noopener" aria-label="GitHub 开源仓库">
+        <div class="oss-bar" aria-label="开源项目信息">
+            <span>由开源项目 </span>
+            <a href="https://github.com/zlxlabs/VideoTranscriptAPI" class="oss-bar-link" target="_blank" rel="noopener" title="开源，可自行部署" aria-label="GitHub 开源仓库 VideoTranscriptAPI">
                 <svg class="oss-bar-icon" viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
                     <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
                 </svg>
-                <span>GitHub ↗</span>
+                <span>VideoTranscriptAPI</span>
             </a>
+            <span> 生成</span>
             <span class="oss-bar-sep" aria-hidden="true">·</span>
-            <a href="https://x.com/bylixing" class="oss-bar-link" target="_blank" rel="noopener" aria-label="作者 X 账号">
-                <span class="oss-bar-author-label">作者 </span>
+            <span>by </span>
+            <a href="https://x.com/bylixing" class="oss-bar-link" target="_blank" rel="noopener" title="在 X 上关注 @bylixing" aria-label="作者张立行的 X 账号 @bylixing">
                 <svg class="oss-bar-icon" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
                     <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 24.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
                 </svg>
-                <span>@bylixing</span>
+                <span>张立行</span>
             </a>
         </div>
         <div class="header">
