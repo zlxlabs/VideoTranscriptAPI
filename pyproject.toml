@@ -1,6 +1,6 @@
 [project]
 name = "video-transcript-api"
-version = "0.1.0"
+version = "1.0.0"
 description = "基于Python的视频转录API服务，支持从多个平台下载视频并转录为文字"
 requires-python = ">=3.11"
 dependencies = [
