@@ -4454,7 +4454,7 @@ wheels = [
 
 [[package]]
 name = "video-transcript-api"
-version = "0.1.0"
+version = "1.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "beautifulsoup4" },
