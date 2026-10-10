@@ -15,6 +15,7 @@
   密度、同名合并）都在本地代码里做，不依赖 LLM 自我把关。
 """
 
+import bisect
 import hashlib
 import json
 import math
@@ -627,6 +628,33 @@ def _build_retry_hint(validation_error: str) -> str:
     return flattened[:_RETRY_HINT_TRUNCATE_TO] + "…"
 
 
+def _count_moved_entries(chapters: List[Dict[str, Any]]) -> int:
+    """统计按 start_seg 排序后位置会变化的章节条数（逐位与排序结果比较）。
+
+    仅用于乱序归一化时的观测统计（进 warning），不参与任何判定。
+    """
+    sorted_segs = sorted(c["start_seg"] for c in chapters)
+    return sum(
+        1 for c, target in zip(chapters, sorted_segs) if c["start_seg"] != target
+    )
+
+
+def _longest_increasing_subsequence(values: List[int]) -> int:
+    """严格递增最长子序列（LIS）长度，O(n log n) patience 实现。
+
+    调用方传入的 start_seg 已去重（值互异），严格递增与非降等价。
+    仅用于乱序归一化时的观测统计（进 warning），不参与任何判定。
+    """
+    tails: List[int] = []
+    for value in values:
+        pos = bisect.bisect_left(tails, value)
+        if pos == len(tails):
+            tails.append(value)
+        else:
+            tails[pos] = value
+    return len(tails)
+
+
 def _validate_and_normalize_start_segs(
     raw_chapters: Any,
     survived_indices: List[int],
@@ -641,8 +669,14 @@ def _validate_and_normalize_start_segs(
        下标可能不连续（中间的下标对应被过滤掉的条目），区间校验会放行一个
        "数值上在范围内、但实际已被过滤掉"的下标（见 `Chapter` 类文档的锚点
        偏移问题），必须严格按幸存下标集合的成员关系校验。
-    2. 按 start_seg 去重（保留首次出现），去重后的序列必须严格递增
-    3. 去重后若首项 start_seg 不是幸存下标里最小的那个，钳制为最小幸存下标
+    2. 按 start_seg 去重（保留首次出现）；去重后若非严格递增，按 start_seg
+       排序归一化（打 warning 留观测数据）而**不**判失败——数组的排列顺序
+       只是 start_seg 取值集合的冗余表示，模型按主题弧线而非时间序排列数组
+       时，各章 (title, gist, start_seg) 的配对与锚点仍然正确，整体判死会
+       把可救数据全部丢弃（生产事故：BV1fcHD6cEw3 两次因乱序 FAILED，用户
+       视图页无章节目录）。排序确实改变顺序时打 warning，内容含被移动章节
+       数与 LIS 长度，为未来评估「排序后 gist-区间错配」是否出现留样本。
+    3. 排序后若首项 start_seg 不是幸存下标里最小的那个，钳制为最小幸存下标
        （覆盖开头；这是自动修正，不算校验失败）——同样不能再硬编码钳制为字面
        量 0：0 本身就可能已被过滤掉，不在幸存下标集合里。
     4. title、gist 必须是非空字符串（strip 后非空）——曾经缺失/非字符串/空白值
@@ -741,11 +775,24 @@ def _validate_and_normalize_start_segs(
         seen.add(item["start_seg"])
         deduped.append(item)
 
-    # 去重后必须严格递增
-    for prev, curr in zip(deduped, deduped[1:]):
-        if curr["start_seg"] <= prev["start_seg"]:
-            seq = [d["start_seg"] for d in deduped]
-            return None, f"start_seg sequence not strictly increasing after dedup: {seq}"
+    # 去重后非严格递增：排序归一化，不判失败（理由见 docstring 第 2 条）。
+    # 排序必须稳定且只按 start_seg 比较键——值互异（已去重），sorted 的结果
+    # 唯一确定；(title, gist, start_seg) 整体随元素移动，配对不变。已升序
+    # 的输入不排序、不打 warning，行为与归一化之前完全一致。
+    is_sorted = all(
+        curr["start_seg"] > prev["start_seg"]
+        for prev, curr in zip(deduped, deduped[1:])
+    )
+    if not is_sorted:
+        moved = _count_moved_entries(deduped)
+        lis_len = _longest_increasing_subsequence([d["start_seg"] for d in deduped])
+        logger.warning(
+            f"[CHAPTERS] start_seg sequence not strictly increasing after dedup; "
+            f"normalizing by sorting: moved {moved}/{len(deduped)} chapters, "
+            f"LIS {lis_len}/{len(deduped)}, "
+            f"before {[d['start_seg'] for d in deduped]}"
+        )
+        deduped.sort(key=lambda c: c["start_seg"])
 
     # 首项若不是最小幸存下标，钳制为最小幸存下标（覆盖开头，不算失败）。
     # 不能钳制为字面量 0——0 本身可能已被入口过滤掉、不在幸存下标集合里。

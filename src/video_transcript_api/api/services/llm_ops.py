@@ -1983,6 +1983,13 @@ def _save_llm_results(
         or stats.get("chapters_source_kind")
         or "none"
     )
+    # chapters_error：章节层失败原因原文（协调器把它写进 stats["chapters_error"]，
+    # GENERATED 时为 None、FAILED 时为 ChaptersResult.error）。顶层优先、stats 兼底，
+    # 两者都没有则视为本轮无失败信息（None → save_llm_status 合并语义不更新；
+    # generated 状态下的旧错误清除由 save_llm_status 内部强制完成）。
+    chapters_error = result_dict.get("chapters_error")
+    if chapters_error is None:
+        chapters_error = stats.get("chapters_error")
 
     # 保存 LLM 模型配置到数据库
     if models_used:
@@ -2391,6 +2398,20 @@ def _save_llm_results(
             if effective_chapters_status is not None
             else old_llm_status.get("chapters_status")
         )
+        # chapters_error 回填（与上面 final_* 同构，三分支语义）：
+        # 1) 本轮尝试章节层（effective 非 None）→ 用本轮值；GENERATED 时本轮值
+        #    为 None，旧错误清除由 cache_manager 内部 GENERATED⇒pop 强制完成，
+        #    此处不变动该不变式；
+        # 2) 本轮未触碰章节层（resummarize / generate_notes 等）→ 回填旧值：
+        #    上面 write-ahead 撤销已删除磁盘旧状态文件，此处若传 None，
+        #    save_llm_status 的合并语义无旧值可保，历史失败诊断会被静默丢失，
+        #    违反「FAILED 时 llm_status.json 含 chapters_error」的落盘契约；
+        # 3) 旧值缺失（存量数据无 chapters_error 字段）→ None，与现状一致。
+        final_chapters_error = (
+            chapters_error
+            if effective_chapters_status is not None
+            else old_llm_status.get("chapters_error")
+        )
 
         if calibrated_saved or summary_saved:
             def record_saved_artifact(layer: str, filename: str) -> Optional[dict]:
@@ -2465,6 +2486,7 @@ def _save_llm_results(
             "calibration_stats": final_calibration_stats,
             "summary_status": final_summary_status,
             "chapters_status": final_chapters_status,
+            "chapters_error": final_chapters_error,
         }
         if final_artifact_provenance or old_artifact_provenance is not None:
             status_updates["artifact_provenance"] = final_artifact_provenance

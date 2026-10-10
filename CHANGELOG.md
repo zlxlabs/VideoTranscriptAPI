@@ -5,6 +5,13 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 发版步骤见 [docs/release-process.md](docs/release-process.md)。
 
+## [Unreleased]
+
+### Fixed
+
+- 章节目录：模型按主题弧线而非时间序返回章节时（每章时间锚点正确），章节层不再整体失败，改为按时间排序归一化（排序改变顺序时记入日志，含错位数与 LIS 统计）。此前此类输出会导致整个视频无章节目录（生产事故：BV1fcHD6cEw3）。
+- 章节生成失败原因现在落盘到任务状态的 llm_status.json（chapters_error 字段），不再只出现在服务日志里；补跑成功后旧失败原因自动清除。
+
 ## [1.0.0] - 2026-10-10
 
 首个版本基线，不追认历史。本条概括基线时点的对外能力与近期变更。

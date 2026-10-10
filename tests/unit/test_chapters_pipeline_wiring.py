@@ -186,6 +186,137 @@ class TestSaveLlmResultsChapters:
             == ChaptersStatus.GENERATED
         )
 
+        assert result["chapters_status"] == ChaptersStatus.GENERATED
+        assert (
+            mock_cm.save_llm_status.call_args.kwargs["chapters_status"]
+            == ChaptersStatus.GENERATED
+        )
+
+    def test_failed_passes_chapters_error_to_save_llm_status(self, monkeypatch):
+        """FAILED layer must carry ChaptersResult.error into save_llm_status so
+        the failure reason lands in llm_status.json (not only in app.log).
+        Production incident task_1f8a978a: the reason was invisible on disk."""
+        mock_cm = self._patch_cm(monkeypatch)
+        llm_ops._save_llm_results(
+            task_id="t-cherr-failed",
+            platform="youtube",
+            media_id="m1",
+            use_speaker_recognition=False,
+            result_dict=self._base_result(
+                chapters_status=ChaptersStatus.FAILED,
+                chapters=[],
+                chapters_error="Semantic validation failed after retry: boom",
+            ),
+            calibrate_only=False,
+            processing_options=normalize_processing_options(
+                {"chapters": True, "summarize": True}
+            ),
+        )
+        kwargs = mock_cm.save_llm_status.call_args.kwargs
+        assert kwargs["chapters_status"] == ChaptersStatus.FAILED
+        assert kwargs["chapters_error"] == (
+            "Semantic validation failed after retry: boom"
+        )
+
+    def test_chapters_error_falls_back_to_stats(self, monkeypatch):
+        """Coordinator writes the error into stats["chapters_error"]; a result_dict
+        without a top-level key must still pick it up from stats."""
+        mock_cm = self._patch_cm(monkeypatch)
+        llm_ops._save_llm_results(
+            task_id="t-cherr-stats",
+            platform="youtube",
+            media_id="m1",
+            use_speaker_recognition=False,
+            result_dict=self._base_result(
+                chapters_status=ChaptersStatus.FAILED,
+                chapters=[],
+                stats={
+                    "calibration_status": "full",
+                    "chapters_error": "from coordinator stats",
+                },
+            ),
+            calibrate_only=False,
+            processing_options=normalize_processing_options(
+                {"chapters": True, "summarize": True}
+            ),
+        )
+        kwargs = mock_cm.save_llm_status.call_args.kwargs
+        assert kwargs["chapters_error"] == "from coordinator stats"
+
+    def test_generated_passes_none_error(self, monkeypatch):
+        """GENERATED round carries no error (chapters_error=None); clearing the
+        stale failure reason is enforced inside save_llm_status, keyed on the
+        generated status itself."""
+        mock_cm = self._patch_cm(monkeypatch)
+        llm_ops._save_llm_results(
+            task_id="t-cherr-gen",
+            platform="youtube",
+            media_id="m1",
+            use_speaker_recognition=False,
+            result_dict=self._base_result(
+                chapters_status=ChaptersStatus.GENERATED,
+                chapters=[
+                    {
+                        "index": 0,
+                        "title": "Intro",
+                        "gist": "Hello",
+                        "start_seg": 0,
+                        "end_seg": 2,
+                        "start_time": 0.0,
+                        "end_time": 10.0,
+                    }
+                ],
+                chapters_fingerprint="fp1",
+                chapters_segment_count=3,
+                chapters_source_kind="segments",
+            ),
+            calibrate_only=False,
+            processing_options=normalize_processing_options(
+                {"chapters": True, "summarize": True}
+            ),
+        )
+        kwargs = mock_cm.save_llm_status.call_args.kwargs
+        assert kwargs["chapters_status"] == ChaptersStatus.GENERATED
+        assert kwargs["chapters_error"] is None
+
+    def test_untouched_layer_refills_stale_chapters_error(self, monkeypatch):
+        """Layer-untouched round (resummarize / generate_notes) must refill the
+        historical chapters_error. invalidate_llm_status is write-ahead: the old
+        llm_status.json is already gone when save_llm_status merges, so passing
+        the raw round value (None) silently drops the persisted failure
+        diagnostic while the refilled chapters_status stays FAILED."""
+        old = {
+            "chapters_status": ChaptersStatus.FAILED,
+            "chapters_error": "stale semantic validation failure",
+        }
+        snapshot = {
+            "file_path": "/tmp/cache/x",
+            "llm_chapters": {"chapters": [{"title": "Old"}]},
+            "llm_status": old,
+        }
+        mock_cm = self._patch_cm(monkeypatch, snapshot=snapshot, old_status=old)
+        result = llm_ops._save_llm_results(
+            task_id="t-cherr-refill",
+            platform="youtube",
+            media_id="m1",
+            use_speaker_recognition=False,
+            result_dict=self._base_result(
+                chapters_status=None,
+                chapters=[],
+            ),
+            calibrate_only=False,
+            processing_options={
+                "calibrate": False,
+                "summarize": True,
+                "infer_speaker_names": False,
+                "chapters": False,
+            },
+        )
+        assert result["chapters_status"] is None
+        kwargs = mock_cm.save_llm_status.call_args.kwargs
+        assert kwargs["chapters_status"] == ChaptersStatus.FAILED
+        assert kwargs["chapters_error"] == "stale semantic validation failure"
+
     def test_skipped_does_not_write_chapters_file(self, monkeypatch):
         mock_cm = self._patch_cm(monkeypatch)
         llm_ops._save_llm_results(

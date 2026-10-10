@@ -2,7 +2,9 @@
 
 Covers the full processing pipeline: gating (short / no-timeline / too-long),
 happy-path generation, semantic-validation retry (out-of-range index,
-duplicate index, non-increasing index), first-index clamping, structural
+duplicate index), start_seg sort normalization (non-increasing order is
+sorted into shape instead of failing; sort stats warning), first-index
+clamping, structural
 validation (chapter count bounds), density warning, adjacent-same-title
 merging, None-time tolerance, "HH:MM:SS" string time parsing, fingerprint
 stability, and exhausted-retry failure.
@@ -881,6 +883,10 @@ class TestHappyPath(ChaptersProcessorTestBase):
 
 
 class TestSemanticRetry(ChaptersProcessorTestBase):
+    """Semantic-validation retry: out-of-range index, duplicate index (dedup),
+    blank title/gist. NOTE: non-increasing ORDER is no longer a validation
+    failure -- it is normalized by sorting (see TestStartSegSortNormalization)."""
+
     def test_out_of_range_index_retries_then_succeeds(self):
         segments = make_segments(10)
         bad = mock_llm_response([
@@ -902,31 +908,27 @@ class TestSemanticRetry(ChaptersProcessorTestBase):
         retry_call_kwargs = self.llm_client.call.call_args_list[1][1]
         self.assertIn("out of range", retry_call_kwargs["user_prompt"].lower())
 
-    def test_duplicate_index_retry_still_bad_fails(self):
-        """A literal duplicate start_seg that, even after dedup (keep-first), still
-        leaves a non-increasing tail must fail -- and stay failed if the retry
-        repeats the same mistake."""
+    def test_duplicate_index_dedup_then_sort_normalized(self):
+        """A literal duplicate start_seg is dropped by dedup (keep-first); if the
+        remaining sequence is non-increasing it is sorted into order instead of
+        failing -- no retry needed (sort normalization, not a validation error)."""
         segments = make_segments(10)
-        bad1 = mock_llm_response([
+        raw = mock_llm_response([
             {"title": "A", "gist": "g", "start_seg": 0},
             {"title": "B", "gist": "g", "start_seg": 5},
-            {"title": "B2", "gist": "g", "start_seg": 5},  # duplicate of B's start_seg
-            {"title": "C", "gist": "g", "start_seg": 3},   # dedup -> [0,5,3]: not increasing
+            {"title": "B2", "gist": "g", "start_seg": 5},  # duplicate of B's start_seg, dropped
+            {"title": "C", "gist": "g", "start_seg": 3},   # dedup -> [0,5,3]: sorted -> [0,3,5]
         ])
-        bad2 = mock_llm_response([
-            {"title": "A", "gist": "g", "start_seg": 0},
-            {"title": "B", "gist": "g", "start_seg": 6},
-            {"title": "B2", "gist": "g", "start_seg": 6},  # duplicate again
-            {"title": "C", "gist": "g", "start_seg": 4},   # dedup -> [0,6,4]: still not increasing
-        ])
-        self.llm_client.call.side_effect = [bad1, bad2]
+        self.llm_client.call.return_value = raw
 
         result = self.processor.process(segments=segments, title="T")
 
-        self.assertEqual(result.status, ChaptersStatus.FAILED)
-        self.assertIsNotNone(result.error)
-        self.assertEqual(self.llm_client.call.call_count, 2)
-        self.assertEqual(result.chapters, [])
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual(self.llm_client.call.call_count, 1)  # no retry
+        self.assertEqual([c.start_seg for c in result.chapters], [0, 3, 5])
+        # (title, gist, start_seg) pairing must survive the sort
+        self.assertEqual(result.chapters[1].title, "C")
+        self.assertEqual(result.chapters[2].title, "B")
 
     def test_pure_duplicate_collapses_without_retry(self):
         """A duplicate start_seg that fully resolves to an increasing sequence after
@@ -945,22 +947,25 @@ class TestSemanticRetry(ChaptersProcessorTestBase):
         self.assertEqual(len(result.chapters), 2)
         self.llm_client.call.assert_called_once()
 
-    def test_non_increasing_retries_then_succeeds(self):
+    def test_non_increasing_sorted_without_retry(self):
+        """Non-increasing start_seg order is normalized by sorting (single LLM
+        call, no retry) -- the sequence is a redundant representation of the
+        start_seg value set, not a semantic violation."""
         segments = make_segments(10)
-        bad = mock_llm_response([
+        raw = mock_llm_response([
             {"title": "A", "gist": "g", "start_seg": 5},
             {"title": "B", "gist": "g", "start_seg": 2},  # decreasing
         ])
-        good = mock_llm_response([
-            {"title": "A", "gist": "g", "start_seg": 0},
-            {"title": "B", "gist": "g", "start_seg": 5},
-        ])
-        self.llm_client.call.side_effect = [bad, good]
+        self.llm_client.call.return_value = raw
 
         result = self.processor.process(segments=segments, title="T")
 
         self.assertEqual(result.status, ChaptersStatus.GENERATED)
-        self.assertEqual(self.llm_client.call.call_count, 2)
+        self.assertEqual(self.llm_client.call.call_count, 1)
+        # [5, 2] sorts to [2, 5]; first chapter is then clamped 2 -> 0
+        self.assertEqual([c.start_seg for c in result.chapters], [0, 5])
+        self.assertEqual(result.chapters[0].title, "B")
+        self.assertEqual(result.chapters[1].title, "A")
 
     def test_first_index_above_zero_is_clamped_without_retry(self):
         segments = make_segments(10)
@@ -986,6 +991,130 @@ class TestSemanticRetry(ChaptersProcessorTestBase):
         self.assertEqual(result.status, ChaptersStatus.FAILED)
         self.assertIsNotNone(result.error)
         self.assertEqual(result.chapters, [])
+
+
+class TestStartSegSortNormalization(ChaptersProcessorTestBase):
+    """Non-increasing start_seg order is normalized by sorting instead of failing.
+
+    Regression tests for the production incident on BV1fcHD6cEw3 (task
+    task_1f8a978a541f40ba8ffe47b0d01e15cf): the fallback model returned
+    chapters ordered by topic arc instead of time; every start_seg anchor was
+    correct but the whole layer was judged FAILED twice, leaving the user
+    without a chapter list. The array order is a redundant representation of
+    the start_seg value set, so sorting is a safe salvage.
+    """
+
+    # Real attempt-2 start_seg sequence from the production incident (17
+    # chapters, all unique and within surviving indices).
+    PRODUCTION_SEQUENCE = [
+        0, 22, 41, 50, 90, 155, 168, 222, 343, 371, 306, 378, 361, 303,
+        436, 464, 486,
+    ]
+
+    def _production_chapters(self):
+        return [
+            {"title": f"Chapter {seg}", "gist": f"gist {i}", "start_seg": seg}
+            for i, seg in enumerate(self.PRODUCTION_SEQUENCE)
+        ]
+
+    def test_production_out_of_order_sample_normalized(self):
+        segments = make_segments(500, text_repeat=1)
+        self.llm_client.call.return_value = mock_llm_response(
+            self._production_chapters()
+        )
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual(self.llm_client.call.call_count, 1)  # no retry
+        self.assertEqual(len(result.chapters), 17)
+        starts = [c.start_seg for c in result.chapters]
+        self.assertEqual(starts, sorted(starts))
+        # (title, gist, start_seg) pairing must survive the sort
+        self.assertEqual(
+            {(c.title, c.gist, c.start_seg) for c in result.chapters},
+            {(d["title"], d["gist"], d["start_seg"])
+             for d in self._production_chapters()},
+        )
+
+    def test_production_sample_derives_consistent_end_segs(self):
+        """After sorting, _derive_end_segs must produce contiguous non-overlapping
+        intervals covering the whole timeline (surviving indices are contiguous
+        here, so end_seg = next start_seg - 1, last end = last index)."""
+        segments = make_segments(500, text_repeat=1)
+        self.llm_client.call.return_value = mock_llm_response(
+            self._production_chapters()
+        )
+
+        result = self.processor.process(segments=segments, title="T")
+
+        chapters = result.chapters
+        for prev, curr in zip(chapters, chapters[1:]):
+            self.assertEqual(prev.end_seg + 1, curr.start_seg)  # contiguous
+        self.assertEqual(chapters[-1].end_seg, 499)  # last surviving index
+
+    def test_out_of_order_logs_moved_and_lis_stats(self):
+        segments = make_segments(500, text_repeat=1)
+        self.llm_client.call.return_value = mock_llm_response(
+            self._production_chapters()
+        )
+
+        with patch(
+            "video_transcript_api.llm.processors.chapters_processor.logger"
+        ) as mock_logger:
+            result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        warning_messages = [
+            str(call.args[0]) for call in mock_logger.warning.call_args_list
+        ]
+        sort_warnings = [m for m in warning_messages if "normalizing by sorting" in m]
+        self.assertEqual(len(sort_warnings), 1)
+        # 6 of 17 positions change; LIS of the production sequence is 14/17
+        self.assertIn("moved 6/17", sort_warnings[0])
+        self.assertIn("LIS 14/17", sort_warnings[0])
+
+    def test_sorted_input_keeps_behavior_unchanged(self):
+        """Already-sorted input: no sort warning, original order kept, no retry.
+        Behavior must be identical to pre-normalization HEAD."""
+        segments = make_segments(10)
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 0},
+            {"title": "B", "gist": "g", "start_seg": 5},
+            {"title": "C", "gist": "g", "start_seg": 8},
+        ])
+
+        with patch(
+            "video_transcript_api.llm.processors.chapters_processor.logger"
+        ) as mock_logger:
+            result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual(self.llm_client.call.call_count, 1)
+        self.assertEqual([c.start_seg for c in result.chapters], [0, 5, 8])
+        warning_messages = [
+            str(call.args[0]) for call in mock_logger.warning.call_args_list
+        ]
+        self.assertFalse(
+            any("normalizing by sorting" in m for m in warning_messages),
+            f"sorted input must not trigger the sort warning, got: {warning_messages}",
+        )
+
+    def test_sort_then_clamp_first_chapter(self):
+        """Sorting happens before first-index clamping: after sorting, if the first
+        chapter still starts above the smallest surviving index, it is clamped."""
+        segments = make_segments(10)
+        self.llm_client.call.return_value = mock_llm_response([
+            {"title": "A", "gist": "g", "start_seg": 5},
+            {"title": "B", "gist": "g", "start_seg": 2},
+            {"title": "C", "gist": "g", "start_seg": 8},
+        ])
+
+        result = self.processor.process(segments=segments, title="T")
+
+        self.assertEqual(result.status, ChaptersStatus.GENERATED)
+        self.assertEqual([c.start_seg for c in result.chapters], [0, 5, 8])
+        self.assertEqual(result.chapters[0].title, "B")  # clamped from 2 to 0
 
 
 class TestTitleGistValidation(ChaptersProcessorTestBase):
