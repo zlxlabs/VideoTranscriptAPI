@@ -1775,6 +1775,87 @@ class TestSaveLLMStatus:
         assert "llm_status" not in result
 
 
+class TestSaveLLMStatusChaptersError:
+    """chapters_error persistence contract (production incident
+    task_1f8a978a541f40ba8ffe47b0d01e15cf): the chapters failure reason used
+    to live only in app.log, invisible in llm_status.json. It must now be
+    persisted on FAILED, and explicitly cleared when a later re-run reaches
+    GENERATED (a stale error next to a generated status would be a new silent
+    contradiction)."""
+
+    def _write(self, cm, **kwargs):
+        return cm.save_llm_status(
+            platform="youtube", media_id="vid1",
+            use_speaker_recognition=False, **kwargs,
+        )
+
+    def _status_data(self, cache_dir):
+        files = list(cache_dir.rglob("llm_status.json"))
+        assert len(files) == 1
+        return json.loads(files[0].read_text(encoding="utf-8"))
+
+    def test_failed_status_persists_chapters_error(self, cm, cache_dir):
+        _save_sample_capswriter(cm)
+        self._write(
+            cm,
+            chapters_status="failed",
+            chapters_error="Semantic validation failed after retry: ...",
+        )
+        data = self._status_data(cache_dir)
+        assert data["chapters_status"] == "failed"
+        assert data["chapters_error"] == (
+            "Semantic validation failed after retry: ..."
+        )
+
+    def test_generated_after_failed_clears_stale_error(self, cm, cache_dir):
+        """Re-run reaching GENERATED must not leave the old failure reason in
+        llm_status.json (jq must read null / key absent)."""
+        _save_sample_capswriter(cm)
+        self._write(
+            cm,
+            chapters_status="failed",
+            chapters_error="Semantic validation failed after retry: ...",
+        )
+        self._write(cm, chapters_status="generated")  # re-run, no error passed
+        data = self._status_data(cache_dir)
+        assert data["chapters_status"] == "generated"
+        assert "chapters_error" not in data
+
+    def test_generated_forces_clear_even_if_error_passed(self, cm, cache_dir):
+        """The invariant lives in save_llm_status: a caller mistakenly passing
+        an error alongside generated status cannot produce the contradiction."""
+        _save_sample_capswriter(cm)
+        self._write(
+            cm,
+            chapters_status="failed",
+            chapters_error="Semantic validation failed after retry: ...",
+        )
+        self._write(
+            cm,
+            chapters_status="generated",
+            chapters_error="stale mistake",
+        )
+        data = self._status_data(cache_dir)
+        assert data["chapters_status"] == "generated"
+        assert "chapters_error" not in data
+
+    def test_untouched_layers_preserve_status_and_error(self, cm, cache_dir):
+        """A call that touches neither chapters field (e.g. recalibrate-only)
+        must preserve both the old status and the old error unchanged."""
+        _save_sample_capswriter(cm)
+        self._write(
+            cm,
+            chapters_status="failed",
+            chapters_error="Semantic validation failed after retry: ...",
+        )
+        self._write(cm, summary_status="generated")
+        data = self._status_data(cache_dir)
+        assert data["chapters_status"] == "failed"
+        assert data["chapters_error"] == (
+            "Semantic validation failed after retry: ..."
+        )
+
+
 class TestInvalidateLLMStatus:
     """Tests for invalidate_llm_status: the write-ahead revocation primitive
     _save_llm_results (llm_ops.py, S1 PR3 review hardening) calls before

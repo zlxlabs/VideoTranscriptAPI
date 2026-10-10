@@ -1983,6 +1983,13 @@ def _save_llm_results(
         or stats.get("chapters_source_kind")
         or "none"
     )
+    # chapters_error：章节层失败原因原文（协调器把它写进 stats["chapters_error"]，
+    # GENERATED 时为 None、FAILED 时为 ChaptersResult.error）。顶层优先、stats 兼底，
+    # 两者都没有则视为本轮无失败信息（None → save_llm_status 合并语义不更新；
+    # generated 状态下的旧错误清除由 save_llm_status 内部强制完成）。
+    chapters_error = result_dict.get("chapters_error")
+    if chapters_error is None:
+        chapters_error = stats.get("chapters_error")
 
     # 保存 LLM 模型配置到数据库
     if models_used:
@@ -2465,6 +2472,7 @@ def _save_llm_results(
             "calibration_stats": final_calibration_stats,
             "summary_status": final_summary_status,
             "chapters_status": final_chapters_status,
+            "chapters_error": chapters_error,
         }
         if final_artifact_provenance or old_artifact_provenance is not None:
             status_updates["artifact_provenance"] = final_artifact_provenance
