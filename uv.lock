@@ -4535,7 +4535,7 @@ requires-dist = [
     { name = "watchdog", specifier = ">=6.0.0" },
     { name = "websocket-client", specifier = "==1.5.1" },
     { name = "websockets", specifier = ">=13.0" },
-    { name = "wecom-notifier", specifier = ">=0.3.1" },
+    { name = "wecom-notifier", specifier = ">=0.3.2" },
     { name = "youtube-transcript-api", specifier = ">=1.2.3" },
     { name = "yt-dlp", extras = ["default"], specifier = ">=2025.12.8" },
     { name = "zlx-ops-sdk", specifier = ">=0.1,<0.2" },
@@ -4630,15 +4630,15 @@ wheels = [
 
 [[package]]
 name = "wecom-notifier"
-version = "0.3.1"
+version = "0.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "loguru" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4d/50/7536121f0f9b479e2f8ad6de30d0dc3b10ef8d0b6c0f754b0b97a6ee7705/wecom_notifier-0.3.1.tar.gz", hash = "sha256:898461c049c9f7b911394d76e99d0beb681b0e941547a427489f8b96e2775d78", size = 84827, upload-time = "2026-01-31T13:32:30.125Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/95/2b/1619f4a19cb96540407bb480b5dd37631399b4c2b46cc144e3a4dd58abb3/wecom_notifier-0.3.2.tar.gz", hash = "sha256:17559ceb7d968349a796ccd947136930ebb3315e4fab62b44932240a006411d0", size = 91936, upload-time = "2026-10-08T12:26:12.049Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/73/64/486583a57fae810b0fc3e2c2a7912d8b37689851e2d5e8c1a73d6d12144b/wecom_notifier-0.3.1-py3-none-any.whl", hash = "sha256:7ee97770c7f25aaa42689a612f3c4a35d1dffbedc5e87f4229f1d1c2a36e62eb", size = 79302, upload-time = "2026-01-31T13:32:28.099Z" },
+    { url = "https://files.pythonhosted.org/packages/59/27/7bcbb7b8eb04278081826a9ce3d251e8a8d435eded1d89d6ca7abdbe7b8c/wecom_notifier-0.3.2-py3-none-any.whl", hash = "sha256:293348c70151ad9827772830f4eac21d672a23dc41ec843969f813dc7f019531", size = 86572, upload-time = "2026-10-08T12:26:10.213Z" },
 ]
 
 [[package]]
