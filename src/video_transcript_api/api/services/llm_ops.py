@@ -732,6 +732,7 @@ def _handle_llm_task(llm_task: dict):
                         speaker_count_hint=llm_task.get("cached_speaker_count"),
                         skip_chapters=skip_chapters_for_coordinator,
                         timeline_segments=timeline_segments_seed,
+                        timeline_segments_kind=chapters_seed_kind,
                     )
 
                 # 适配返回格式

@@ -141,6 +141,7 @@ class LLMCoordinator:
         contradiction_scan: Optional[bool] = None,
         skip_chapters: bool = False,
         timeline_segments: Optional[List[Dict]] = None,
+        timeline_segments_kind: Optional[str] = None,
     ) -> Dict:
         """处理文本（统一入口）
 
@@ -173,6 +174,10 @@ class LLMCoordinator:
             timeline_segments: 章节输入（dialogs 或原始 segments 列表）。由
                 llm_ops 按输入梯度解析后传入，保持 llm/ 包不依赖 cache 读盘。
                 None/空时 processor 会诚实返回 SKIPPED_NO_TIMELINE。
+            timeline_segments_kind: timeline_segments 的真实来源标签（调用方
+                已解析的事实，如 ``cached_dialogs`` / ``segments``）。标签会原样
+                写进 llm_chapters.json 的 source.kind，notes reader 据此精确复现
+                同一份锚点数据，缺失才默认按原始 segments 形态处理。
 
         Returns:
             处理结果字典:
@@ -314,7 +319,14 @@ class LLMCoordinator:
         else:
             logger.info("Step 3/3: Chapters generation")
             chapters_input = timeline_segments
-            chapters_source_kind = "segments" if timeline_segments else "none"
+            # notes_anchor_kind_truth: source.kind 必须是「实际喂给 chapters 的
+            # 锚点数据」的真实来源，而不是「入参长什么样」。调用方 llm_ops 按输入
+            # 梯度解析种子时已经知道它是缓存 dialogs 还是原始 segments，这里直接
+            # 采用调用方的事实；本轮 structured dialogs 覆盖种子时改写为 dialogs。
+            # 两者都是真实锚点，notes reader 才能据此精确复现（#227）。
+            chapters_source_kind = (
+                (timeline_segments_kind or "segments") if timeline_segments else "none"
+            )
             structured_for_chapters = calibration_result.get("structured_data")
             if isinstance(structured_for_chapters, dict):
                 dialogs = structured_for_chapters.get("dialogs")
