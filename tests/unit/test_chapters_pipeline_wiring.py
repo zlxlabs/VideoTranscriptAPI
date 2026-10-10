@@ -279,6 +279,44 @@ class TestSaveLlmResultsChapters:
         assert kwargs["chapters_status"] == ChaptersStatus.GENERATED
         assert kwargs["chapters_error"] is None
 
+    def test_untouched_layer_refills_stale_chapters_error(self, monkeypatch):
+        """Layer-untouched round (resummarize / generate_notes) must refill the
+        historical chapters_error. invalidate_llm_status is write-ahead: the old
+        llm_status.json is already gone when save_llm_status merges, so passing
+        the raw round value (None) silently drops the persisted failure
+        diagnostic while the refilled chapters_status stays FAILED."""
+        old = {
+            "chapters_status": ChaptersStatus.FAILED,
+            "chapters_error": "stale semantic validation failure",
+        }
+        snapshot = {
+            "file_path": "/tmp/cache/x",
+            "llm_chapters": {"chapters": [{"title": "Old"}]},
+            "llm_status": old,
+        }
+        mock_cm = self._patch_cm(monkeypatch, snapshot=snapshot, old_status=old)
+        result = llm_ops._save_llm_results(
+            task_id="t-cherr-refill",
+            platform="youtube",
+            media_id="m1",
+            use_speaker_recognition=False,
+            result_dict=self._base_result(
+                chapters_status=None,
+                chapters=[],
+            ),
+            calibrate_only=False,
+            processing_options={
+                "calibrate": False,
+                "summarize": True,
+                "infer_speaker_names": False,
+                "chapters": False,
+            },
+        )
+        assert result["chapters_status"] is None
+        kwargs = mock_cm.save_llm_status.call_args.kwargs
+        assert kwargs["chapters_status"] == ChaptersStatus.FAILED
+        assert kwargs["chapters_error"] == "stale semantic validation failure"
+
     def test_skipped_does_not_write_chapters_file(self, monkeypatch):
         mock_cm = self._patch_cm(monkeypatch)
         llm_ops._save_llm_results(
