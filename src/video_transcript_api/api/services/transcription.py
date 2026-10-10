@@ -1705,8 +1705,6 @@ def process_transcription(
                     processed.get("dialogs"), list
                 ) and processed["dialogs"]:
                     timeline_segments_seed = processed["dialogs"]
-                elif isinstance(cache_data.get("segments"), list) and cache_data["segments"]:
-                    timeline_segments_seed = cache_data["segments"]
                 else:
                     file_path = cache_data.get("file_path")
                     if file_path:
