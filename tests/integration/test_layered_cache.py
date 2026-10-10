@@ -35,6 +35,10 @@ from video_transcript_api.utils.llm_status import (
     ChaptersStatus,
     SummaryStatus,
 )
+from video_transcript_api.llm.processors.notes_processor import (
+    compute_notes_anchor_fingerprint,
+)
+from video_transcript_api.transcriber.segments import load_segments
 
 
 class DummyQueue:
@@ -942,6 +946,58 @@ class TestLayeredCacheMatrix:
         }
         # 重新校对必须喂原始转录文本，而不是那份未经确认的 calibrated 产物。
         assert task["transcript"] == "RAW uncalibrated transcript"
+
+    def test_chapters_seed_uses_load_segments_isomorphic_with_notes_reader(
+        self, monkeypatch, patch_runtime, tmp_path
+    ):
+        """Issue #227: chapters timeline seed for segments backfill must use
+        transcriber.segments.load_segments(cache_dir) rather than in-memory
+        cache_data['segments'], ensuring anchor fingerprint isomorphism."""
+        cache_dir = tmp_path / "cache_entry"
+        cache_dir.mkdir(parents=True)
+        disk_raw = {
+            "segments": [
+                {"start_time": 0.0, "end_time": 1.5, "text": "seg 1", "speaker": "0"},
+                {"start_time": 1.5, "end_time": 3.0, "text": "seg 2", "speaker": "1"},
+            ]
+        }
+        (cache_dir / "transcript_funasr.json").write_text(json.dumps(disk_raw), encoding="utf-8")
+        expected_disk_segments = load_segments(cache_dir)
+        expected_fingerprint = compute_notes_anchor_fingerprint(expected_disk_segments)
+
+        divergent_segments = [
+            {"start_time": 0.0, "end_time": 1.5, "text": "seg 1", "speaker": "Speaker 0"},
+            {"start_time": 1.5, "end_time": 3.0, "text": "seg 2", "speaker": "Speaker 1"},
+        ]
+        assert compute_notes_anchor_fingerprint(divergent_segments) != expected_fingerprint
+
+        cache_data = {
+            **BASE_CACHE_DATA,
+            "file_path": str(cache_dir),
+            "use_speaker_recognition": True,
+            "transcript_type": "funasr",
+            "transcript_data": disk_raw,
+            "segments": divergent_segments,
+            "llm_calibrated": "calibrated text",
+            "llm_summary": "summary text",
+            "llm_status": {
+                "calibration_status": CalibrationStatus.FULL,
+                "summary_status": SummaryStatus.GENERATED,
+                "chapters_status": ChaptersStatus.FAILED,
+            },
+        }
+
+        result, queued = _run(
+            monkeypatch, patch_runtime, cache_data,
+            {"calibrate": False, "summarize": False, "chapters": True, "infer_speaker_names": False},
+        )
+
+        assert result["status"] == "success"
+        assert len(queued) == 1
+        seed_segments = queued[0].get("timeline_segments")
+        assert seed_segments == expected_disk_segments
+        assert compute_notes_anchor_fingerprint(seed_segments) == expected_fingerprint
+
 
 
 class TestFullHitMirrorsCacheStatusOnTaskRow:
