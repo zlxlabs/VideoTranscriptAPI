@@ -74,6 +74,11 @@ test('history query renders a seeded task and opening it marks it read', async (
 
 test('public reading page displays transcript and opens a working text export', async ({ page }) => {
   await page.goto('/view/browser-fixture-view');
+  const ossBar = page.locator('.oss-bar');
+  await expect(ossBar).toBeVisible();
+  await expect(ossBar.locator('a[href="https://github.com/zlxlabs/VideoTranscriptAPI"]')).toBeVisible();
+  await expect(ossBar.locator('a[href="https://x.com/bylixing"]')).toBeVisible();
+
   await expect(page.locator('#calibrated-content-block')).toContainText(
     '隔离浏览器夹具中的正文，验证公开阅读与导出。');
   const exportMenu = page.locator('.export-links-details');
