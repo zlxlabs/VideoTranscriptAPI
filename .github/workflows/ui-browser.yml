@@ -18,6 +18,7 @@ jobs:
       - uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
+          prune-cache: false
       - name: Install Python dependencies
         run: uv sync --frozen
 
