@@ -694,6 +694,25 @@ class TestResolveChaptersTimeline:
         assert segs[0]["text"] == "a"
         mock_cm.get_cache.assert_not_called()
 
+    def test_task_timeline_segments_kind_passthrough(self, monkeypatch):
+        """Issue #227 last broken link: the kind recorded by transcription at
+        seed-resolve time must survive the llm_task handoff instead of being
+        relabeled "segments" by branch 1."""
+        mock_cm = MagicMock()
+        monkeypatch.setattr(llm_ops, "cache_manager", mock_cm)
+        segs, kind = llm_ops._resolve_chapters_timeline_segments(
+            llm_task={
+                "timeline_segments": [{"text": "d0", "start_time": 0}],
+                "timeline_segments_kind": "cached_dialogs",
+            },
+            platform="youtube",
+            media_id="m",
+            use_speaker_recognition=False,
+        )
+        assert kind == "cached_dialogs"
+        assert segs[0]["text"] == "d0"
+        mock_cm.get_cache.assert_not_called()
+
     def test_uses_cached_dialogs(self, monkeypatch):
         mock_cm = MagicMock()
         mock_cm.get_cache.return_value = {

@@ -98,7 +98,9 @@ def _resolve_chapters_timeline_segments(
     This-round structured dialogs are preferred *inside* the coordinator after
     calibration. Here we only resolve what llm_ops can see before process():
 
-      1. Explicit llm_task["timeline_segments"] (layered handoff / tests)
+      1. Explicit llm_task["timeline_segments"] (layered handoff / tests); the
+         real source kind recorded at seed-resolve time travels in
+         llm_task["timeline_segments_kind"] (legacy callers default "segments")
       2. Cached llm_processed.json dialogs
       3. Cached raw segments (get_cache["segments"] or load_segments)
       4. None → coordinator/processor returns SKIPPED_NO_TIMELINE
@@ -109,7 +111,10 @@ def _resolve_chapters_timeline_segments(
     """
     task_segments = llm_task.get("timeline_segments")
     if isinstance(task_segments, list) and task_segments:
-        return task_segments, "segments"
+        # The kind label must match the seed's actual source (issue #227):
+        # transcription records it at resolve time; fall back to "segments"
+        # for legacy callers/tests that pass a bare list.
+        return task_segments, llm_task.get("timeline_segments_kind") or "segments"
 
     if platform and media_id:
         get_cache = getattr(cache_manager, "get_cache", None)

@@ -1699,12 +1699,14 @@ def process_transcription(
             # need backfill: prefer cached dialogs / segments so coordinator
             # does not depend on re-running calibration for timeline.
             timeline_segments_seed = None
+            timeline_segments_kind = None
             if need_chapters:
                 processed = cache_data.get("llm_processed") or {}
                 if isinstance(processed, dict) and isinstance(
                     processed.get("dialogs"), list
                 ) and processed["dialogs"]:
                     timeline_segments_seed = processed["dialogs"]
+                    timeline_segments_kind = "cached_dialogs"
                 else:
                     file_path = cache_data.get("file_path")
                     if file_path:
@@ -1712,6 +1714,8 @@ def process_transcription(
                             from ...transcriber.segments import load_segments
 
                             timeline_segments_seed = load_segments(file_path)
+                            if timeline_segments_seed:
+                                timeline_segments_kind = "segments"
                         except Exception as segs_exc:
                             logger.warning(
                                 f"load_segments for chapters handoff failed: {segs_exc}"
@@ -1748,6 +1752,8 @@ def process_transcription(
             }
             if timeline_segments_seed is not None:
                 handoff_payload["timeline_segments"] = timeline_segments_seed
+                if timeline_segments_kind:
+                    handoff_payload["timeline_segments_kind"] = timeline_segments_kind
 
             handoff_failure = _handoff_to_llm_stage(
                 task_id,
