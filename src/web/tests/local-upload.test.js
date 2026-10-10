@@ -152,6 +152,23 @@ describe('local upload frontend logic', () => {
     expect(key).toMatch(/^\d+-[0-9a-fA-F-]+$/);
   });
 
+  it('still generates epoch_ms-UUID keys when crypto.randomUUID is unavailable (plain HTTP origin)', async () => {
+    await installIndexPage();
+    const { window } = dom;
+
+    const originalCrypto = window.crypto;
+    Object.defineProperty(window, 'crypto', {
+      configurable: true,
+      value: { getRandomValues: (array) => originalCrypto.getRandomValues(array) },
+    });
+    try {
+      const key = window.generateUploadIdempotencyKey();
+      expect(key).toMatch(/^\d+-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    } finally {
+      Object.defineProperty(window, 'crypto', { configurable: true, value: originalCrypto });
+    }
+  });
+
   it('switches between URL mode and Upload mode without breaking URL transcription', async () => {
     await installIndexPage();
     const { document } = dom.window;
