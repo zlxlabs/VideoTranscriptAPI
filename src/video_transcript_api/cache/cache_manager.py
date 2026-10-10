@@ -1996,9 +1996,9 @@ class CacheManager:
         calibration_stats: Optional[Dict[str, Any]] = None,
         summary_status: Optional[str] = None,
         chapters_status: Optional[str] = None,
-        chapters_error: Optional[str] = None,
         notes_status: Optional[str] = None,
         artifact_provenance: Optional[Dict[str, Any]] = None,
+        chapters_error: Optional[str] = None,
     ) -> Dict[str, Any]:
         """写入/合并 llm_status.json（"诚实状态模型"统一落盘文件）。
 
@@ -2018,11 +2018,11 @@ class CacheManager:
                 None 表示不更新（保留旧值，见上方合并语义说明）
             chapters_status: ChaptersStatus 取值（generated/skipped_short/
                 skipped_no_timeline/failed/pending/disabled），None 表示不更新
+            artifact_provenance: 校对/总结来源记录；None 表示不更新，空字典表示清除
+                整个可选记录，非空字典在同一次原子状态写入中替换旧记录
             chapters_error: 章节层失败原因原文（ChaptersResult.error），None 表示
                 不更新；此外 chapters_status=generated 时无论是否传入都会强制
                 清空旧 chapters_error（见下方合并逻辑注释）
-            artifact_provenance: 校对/总结来源记录；None 表示不更新，空字典表示清除
-                整个可选记录，非空字典在同一次原子状态写入中替换旧记录
 
         Returns:
             dict: 锁内完成写入后的完整合并快照
