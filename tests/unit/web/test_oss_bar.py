@@ -97,6 +97,13 @@ class TestTopOssBarPresenceAndPlacement:
         snippet = html[container_idx + len(container_tag):bar_idx].strip()
         assert snippet == "<div", f"Expected only div tag before class=\"oss-bar\", got: {snippet!r}"
 
+    def test_oss_bar_has_no_role_banner(self):
+        html = _render_transcript()
+        bar_opening = re.search(r'<div[^>]*class="oss-bar"[^>]*>', html)
+        assert bar_opening is not None
+        assert 'role="banner"' not in bar_opening.group(0), "Expected .oss-bar not to have role=\"banner\""
+        assert 'aria-label="开源项目信息"' in bar_opening.group(0)
+
 
 class TestTopOssBarLinkAttributesAndIcons:
     """Verify link security attributes, accessibility labels, and inline SVGs."""
@@ -112,7 +119,8 @@ class TestTopOssBarLinkAttributesAndIcons:
         gh_tag = match_gh.group(0)
         assert 'target="_blank"' in gh_tag
         assert 'rel="noopener"' in gh_tag
-        assert "aria-label=" in gh_tag
+        assert 'title="开源，可自行部署"' in gh_tag
+        assert 'aria-label="GitHub 开源仓库 VideoTranscriptAPI"' in gh_tag
 
         x_pattern = re.compile(
             r'<a[^>]+href="' + re.escape(X_URL) + r'"[^>]*>', re.IGNORECASE
@@ -122,7 +130,30 @@ class TestTopOssBarLinkAttributesAndIcons:
         x_tag = match_x.group(0)
         assert 'target="_blank"' in x_tag
         assert 'rel="noopener"' in x_tag
-        assert "aria-label=" in x_tag
+        assert 'title="在 X 上关注 @bylixing"' in x_tag
+        assert 'aria-label="作者张立行的 X 账号 @bylixing"' in x_tag
+
+    def test_link_inner_visible_text(self):
+        html = _render_transcript()
+        gh_match = re.search(
+            r'<a[^>]+href="' + re.escape(GITHUB_URL) + r'"[^>]*>(.*?)</a>',
+            html,
+            re.DOTALL,
+        )
+        assert gh_match is not None, "GitHub link not found"
+        gh_inner = re.sub(r'<svg.*?</svg>', '', gh_match.group(1), flags=re.DOTALL)
+        gh_text = re.sub(r'<[^>]+>', '', gh_inner).strip()
+        assert gh_text == "VideoTranscriptAPI"
+
+        x_match = re.search(
+            r'<a[^>]+href="' + re.escape(X_URL) + r'"[^>]*>(.*?)</a>',
+            html,
+            re.DOTALL,
+        )
+        assert x_match is not None, "X link not found"
+        x_inner = re.sub(r'<svg.*?</svg>', '', x_match.group(1), flags=re.DOTALL)
+        x_text = re.sub(r'<[^>]+>', '', x_inner).strip()
+        assert x_text == "张立行"
 
     def test_inline_svg_icons_used_without_emojis(self):
         html = _render_transcript()
@@ -136,23 +167,40 @@ class TestTopOssBarLinkAttributesAndIcons:
 
 
 class TestTopOssBarResponsiveStyling:
-    """Ensure media query <=640px and desktop/mobile text classes exist."""
+    """Ensure unified visible text across viewports and responsive touch targets."""
 
-    def test_desktop_and_mobile_text_elements_present(self):
+    def test_unified_oss_bar_visible_text(self):
         html = _render_transcript()
-        assert "oss-bar-desc-desktop" in html
-        assert "本页由开源项目 VideoTranscriptAPI 生成，可自行部署" in html
-        assert "oss-bar-desc-mobile" in html
-        assert "开源项目" in html
-        assert "GitHub ↗" in html
-        assert "@bylixing" in html
+        match = re.search(r'<div[^>]*class="oss-bar"[^>]*>(.*?)</div>', html, re.DOTALL)
+        assert match is not None, "oss-bar element not found"
+        without_svg = re.sub(r'<svg.*?</svg>', '', match.group(1), flags=re.DOTALL)
+        visible_text = re.sub(r'<[^>]+>', '', without_svg)
+        normalized = re.sub(r'\s+', ' ', visible_text).strip()
+        assert normalized == "由开源项目 VideoTranscriptAPI 生成 · by 张立行"
+
+    def test_no_legacy_text_or_desktop_mobile_switching_classes(self):
+        html = _render_transcript()
+        match = re.search(r'<div[^>]*class="oss-bar"[^>]*>(.*?)</div>', html, re.DOTALL)
+        assert match is not None, "oss-bar element not found"
+        without_svg = re.sub(r'<svg.*?</svg>', '', match.group(1), flags=re.DOTALL)
+        visible_text = re.sub(r'<[^>]+>', '', without_svg)
+
+        assert "@bylixing" not in visible_text
+        assert "GitHub ↗" not in visible_text
+        assert "本页由开源项目" not in visible_text
+        assert "可自行部署" not in visible_text
+
+        for class_name in ["oss-bar-desc-desktop", "oss-bar-desc-mobile", "oss-bar-author-label"]:
+            assert class_name not in html
 
     def test_media_query_and_touch_target_in_styles(self):
         base_html = (TEMPLATES_DIR / "base.html").read_text(encoding="utf-8")
         assert "@media (max-width: 640px)" in base_html
-        assert ".oss-bar-desc-desktop" in base_html
-        assert ".oss-bar-desc-mobile" in base_html
         assert "min-height: 32px" in base_html
+        assert "white-space: nowrap" in base_html
+        assert ".oss-bar-desc-desktop" not in base_html
+        assert ".oss-bar-desc-mobile" not in base_html
+        assert ".oss-bar-author-label" not in base_html
 
 
 class TestNoLegacyRepoUrlsInWebAssets:
