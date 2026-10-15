@@ -94,9 +94,10 @@ class TestSpeakerMappingSchema:
     """Tests for the speaker mapping JSON Schema."""
 
     def test_top_level_structure(self):
+        # schema_version=2：candidates 必填（证据裁决，card-vta-261015-speaker-evidence）
         _assert_json_schema_object(
             SPEAKER_MAPPING_SCHEMA,
-            ["speaker_mapping", "confidence", "reasoning"],
+            ["speaker_mapping", "confidence", "candidates", "reasoning"],
         )
         assert SPEAKER_MAPPING_SCHEMA["additionalProperties"] is False
 
@@ -112,6 +113,16 @@ class TestSpeakerMappingSchema:
 
     def test_reasoning_is_string(self):
         assert SPEAKER_MAPPING_SCHEMA["properties"]["reasoning"]["type"] == "string"
+
+    def test_candidates_items_require_quote_and_type(self):
+        """candidates[label] 是数组，每项必须带 name/evidence_type/evidence_quote。"""
+        items = SPEAKER_MAPPING_SCHEMA["properties"]["candidates"][
+            "additionalProperties"
+        ]["items"]
+        assert items["type"] == "object"
+        for field in ("name", "evidence_type", "evidence_quote"):
+            assert field in items["properties"]
+            assert field in items["required"]
 
 
 # ============================================================
@@ -719,13 +730,29 @@ class TestPromptsSchemaReExports:
         assert isinstance(UNIFIED_VALIDATION_SCHEMA, dict)
 
     def test_prompts_speaker_mapping_schema_structure(self):
-        """prompts.schemas.speaker_mapping should have correct top-level structure."""
-        from src.video_transcript_api.llm.prompts.schemas.speaker_mapping import SPEAKER_MAPPING_SCHEMA
+        """prompts.schemas.speaker_mapping should have correct top-level structure.
+
+        schema_version=2（证据裁决）：candidates 必填，每个候选必须带
+        name/evidence_type/evidence_quote（card-vta-261015-speaker-evidence）。
+        """
+        from src.video_transcript_api.llm.prompts.schemas.speaker_mapping import (
+            SPEAKER_MAPPING_SCHEMA,
+            SPEAKER_MAPPING_SCHEMA_VERSION,
+            SPEAKER_EVIDENCE_TYPES,
+        )
         _assert_json_schema_object(
             SPEAKER_MAPPING_SCHEMA,
-            ["speaker_mapping", "confidence", "reasoning"],
+            ["speaker_mapping", "confidence", "candidates", "reasoning"],
         )
         assert SPEAKER_MAPPING_SCHEMA["additionalProperties"] is False
+        assert SPEAKER_MAPPING_SCHEMA_VERSION == 2
+        candidate_items = SPEAKER_MAPPING_SCHEMA["properties"]["candidates"][
+            "additionalProperties"
+        ]["items"]
+        assert candidate_items["required"] == ["name", "evidence_type", "evidence_quote"]
+        assert set(candidate_items["properties"]["evidence_type"]["enum"]) == set(
+            SPEAKER_EVIDENCE_TYPES
+        )
 
     def test_prompts_validation_schema_structure(self):
         """prompts.schemas.validation should have correct top-level structure."""
