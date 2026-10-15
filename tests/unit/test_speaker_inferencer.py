@@ -38,14 +38,31 @@ def _make_inferencer(**kwargs):
     )
 
 
-def _mock_llm_response(speaker_mapping, confidence, reasoning="because"):
+def _mock_llm_response(speaker_mapping, confidence, reasoning="because", candidates=None):
     response = MagicMock()
-    response.structured_output = {
+    structured = {
         "speaker_mapping": speaker_mapping,
         "confidence": confidence,
         "reasoning": reasoning,
     }
+    if candidates is not None:
+        structured["candidates"] = candidates
+    response.structured_output = structured
     return response
+
+
+def _auto_candidates(mapping_quotes):
+    """按 {label: [(name, quote), ...]} 快速构造通过核对的 dialog_address 候选。
+
+    quote 必须是该 label 采样文本的逐字子串（调用方负责）。
+    """
+    return {
+        label: [
+            {"name": name, "evidence_type": "dialog_address", "evidence_quote": quote}
+            for name, quote in pairs
+        ]
+        for label, pairs in mapping_quotes.items()
+    }
 
 
 class TestPerSpeakerSampling(unittest.TestCase):
@@ -96,27 +113,91 @@ class TestPerSpeakerSampling(unittest.TestCase):
 
 
 class TestSamplingCaps(unittest.TestCase):
-    """Per-speaker sample count and char-budget caps must be enforced."""
+    """Per-speaker sample count and char-budget caps must be enforced.
+
+    card-vta-261015-speaker-evidence：发言量 top2 的说话人配额加额到
+    8 条/1200 字符，因此 cap 断言针对**非 top2**的说话人（构造第三个
+    发言量最少的 speaker 使其落在加额之外）。
+    """
 
     def test_sample_count_cap(self):
+        # C 说话最少（1 条）→ 落在 top2 之外，配额仍是构造参数 2 条。
         inferencer = _make_inferencer(samples_per_speaker=2, max_chars_per_speaker=10000)
-        dialogs = [_make_dialog("A", f"line {i}", start_time=float(i)) for i in range(10)]
+        dialogs = [
+            *[ _make_dialog("A", f"a line {i}", start_time=float(i)) for i in range(10) ],
+            *[ _make_dialog("B", f"b line {i}", start_time=100.0 + i) for i in range(10) ],
+            *[ _make_dialog("C", f"c line {i}", start_time=200.0 + i) for i in range(1) ],
+        ]
 
-        samples = inferencer._extract_sample_dialogs(dialogs, ["A"])
+        samples = inferencer._extract_sample_dialogs(dialogs, ["A", "B", "C"])
 
-        self.assertEqual(len(samples["A"]["own_samples"]), 2)
+        # top2（A、B，各 10 条）享受加额 8 条；C 维持 samples_per_speaker=2。
+        self.assertEqual(len(samples["A"]["own_samples"]), 8)
+        self.assertEqual(len(samples["B"]["own_samples"]), 8)
+        self.assertEqual(len(samples["C"]["own_samples"]), 1)  # 只有 1 条发言
+
+    def test_sample_count_cap_applies_to_non_top_speaker(self):
+        # C 有 10 条发言但发言量仍垫底 → 非 top2，cap=2 生效。
+        inferencer = _make_inferencer(samples_per_speaker=2, max_chars_per_speaker=10000)
+        dialogs = [
+            *[ _make_dialog("A", f"a line {i}", start_time=float(i)) for i in range(30) ],
+            *[ _make_dialog("B", f"b line {i}", start_time=100.0 + i) for i in range(20) ],
+            *[ _make_dialog("C", f"c line {i}", start_time=200.0 + i) for i in range(10) ],
+        ]
+
+        samples = inferencer._extract_sample_dialogs(dialogs, ["A", "B", "C"])
+
+        self.assertEqual(len(samples["C"]["own_samples"]), 2)
+
+    def test_top_speakers_get_boosted_quota(self):
+        """锁定决策 6：发言量 top2 的说话人采样上限提高到 8 条/1200 字符。"""
+        inferencer = _make_inferencer(samples_per_speaker=3, max_chars_per_speaker=400)
+        dialogs = [
+            *[ _make_dialog("A", f"a line {i} with some length here", start_time=float(i)) for i in range(30) ],
+            *[ _make_dialog("B", f"b line {i} with some length here", start_time=100.0 + i) for i in range(20) ],
+            *[ _make_dialog("C", f"c line {i} with some length here", start_time=200.0 + i) for i in range(5) ],
+        ]
+
+        samples = inferencer._extract_sample_dialogs(dialogs, ["A", "B", "C"])
+
+        # A、B 是发言量 top2 → 各 8 条；C 维持 3 条。
+        self.assertEqual(len(samples["A"]["own_samples"]), 8)
+        self.assertEqual(len(samples["B"]["own_samples"]), 8)
+        self.assertEqual(len(samples["C"]["own_samples"]), 3)
 
     def test_total_char_cap(self):
+        # C 发言量垫底 → 非 top2，char cap 用构造参数 50。
         inferencer = _make_inferencer(samples_per_speaker=10, max_chars_per_speaker=50)
         # Each line is 30 chars; with a 50-char total budget, at most 1 full line fits
         # plus a truncated remainder of the second.
         long_line = "x" * 30
-        dialogs = [_make_dialog("A", long_line, start_time=float(i)) for i in range(5)]
+        dialogs = [
+            *[ _make_dialog("A", f"a{i} " + "y" * 10, start_time=float(i)) for i in range(6) ],
+            *[ _make_dialog("B", f"b{i} " + "y" * 10, start_time=100.0 + i) for i in range(5) ],
+            *[ _make_dialog("C", long_line, start_time=200.0 + i) for i in range(3) ],
+        ]
 
-        samples = inferencer._extract_sample_dialogs(dialogs, ["A"])
-        total_chars = sum(len(s) for s in samples["A"]["own_samples"])
+        samples = inferencer._extract_sample_dialogs(dialogs, ["A", "B", "C"])
+        total_chars = sum(len(s) for s in samples["C"]["own_samples"])
 
         self.assertLessEqual(total_chars, 50)
+        self.assertGreater(total_chars, 0)
+
+    def test_top_speaker_char_boost_to_1200(self):
+        """top2 说话人总字符配额加额到 1200（每人 8 条、每条 120 上限）。"""
+        inferencer = _make_inferencer(samples_per_speaker=3, max_chars_per_speaker=400)
+        long_line = "z" * 200  # 超过单条上限 120，截断后 120/条
+        dialogs = [
+            *[ _make_dialog("A", long_line, start_time=float(i)) for i in range(20) ],
+            *[ _make_dialog("B", long_line, start_time=100.0 + i) for i in range(10) ],
+        ]
+
+        samples = inferencer._extract_sample_dialogs(dialogs, ["A", "B"])
+
+        total_a = sum(len(s) for s in samples["A"]["own_samples"])
+        self.assertEqual(len(samples["A"]["own_samples"]), 8)
+        self.assertLessEqual(total_a, 1200)
+        self.assertEqual(total_a, 8 * 120)  # 8 条 x 120 字符/条 = 960 <= 1200
 
     def test_single_sample_truncated_to_120_chars(self):
         inferencer = _make_inferencer(samples_per_speaker=1, max_chars_per_speaker=10000)
@@ -567,12 +648,20 @@ class TestPromptGroupRendering(unittest.TestCase):
 
 
 class TestConfidenceGating(unittest.TestCase):
-    """Low-confidence mappings must be downgraded to a placeholder label, not applied."""
+    """schema v2（证据裁决）：confidence 不再决定采用与否，只作诊断值。
 
-    def _run_infer(self, speaker_mapping, confidence, threshold=0.6):
+    重写说明（card-vta-261015-speaker-evidence 锁定决策 2）：原
+    test_low_confidence_downgraded_to_placeholder 锁定的「conf<0.6 → 降级」
+    已被证据裁决替代：applied 与否由引用核对结果决定；降级只发生在
+    「无核对通过的候选」时，与自报 confidence 无关。
+    """
+
+    def _run_infer(self, speaker_mapping, confidence, candidates=None, threshold=0.6):
         inferencer = _make_inferencer(confidence_threshold=threshold)
         inferencer.llm_client.call = MagicMock(
-            return_value=_mock_llm_response(speaker_mapping, confidence)
+            return_value=_mock_llm_response(
+                speaker_mapping, confidence, candidates=candidates
+            )
         )
         dialogs = [
             _make_dialog("Speaker1", "hello there", start_time=0.0),
@@ -584,20 +673,128 @@ class TestConfidenceGating(unittest.TestCase):
             title="t",
         )
 
-    def test_low_confidence_downgraded_to_placeholder(self):
+    def test_low_confidence_with_verified_evidence_still_applied(self):
+        """锁定决策 2 / 验收④：conf=0.1 但 dialog_address 引用核对通过 → 仍 applied。
+        另一个 speaker 无候选 → 无条件降级（与它的高 confidence 无关）。"""
         result = self._run_infer(
             speaker_mapping={"Speaker1": "张三", "Speaker2": "李四"},
-            confidence={"Speaker1": 0.9, "Speaker2": 0.3},
+            confidence={"Speaker1": 0.1, "Speaker2": 0.9},
+            candidates=_auto_candidates(
+                {"Speaker1": [("张三", "hello there")]}
+            ),
         )
 
         self.assertEqual(result["mapping"]["Speaker1"], "张三")
-        self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
         self.assertTrue(result["meta"]["Speaker1"]["applied"])
+        self.assertEqual(result["meta"]["Speaker1"]["confidence"], 0.1)
+        self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
         self.assertFalse(result["meta"]["Speaker2"]["applied"])
-        self.assertEqual(result["meta"]["Speaker2"]["confidence"], 0.3)
-        # The originally inferred (but unapplied) name is still recorded for audit purposes.
-        self.assertEqual(result["meta"]["Speaker2"]["name"], "李四")
+        self.assertEqual(result["meta"]["Speaker2"]["rejection_reason"], "no_verified_evidence")
         self.assertEqual(result["low_confidence"], ["Speaker2"])
+
+    def test_high_confidence_without_verified_evidence_downgrades(self):
+        """反向：conf=0.99 但引用伪造（quote 不在输入中）→ 作废降级（验收①）。"""
+        result = self._run_infer(
+            speaker_mapping={"Speaker1": "张三", "Speaker2": "李四"},
+            confidence={"Speaker1": 0.99, "Speaker2": 0.99},
+            candidates={
+                "Speaker1": [
+                    {
+                        "name": "张三",
+                        "evidence_type": "dialog_address",
+                        "evidence_quote": "这句话根本不在输入里",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
+        self.assertFalse(result["meta"]["Speaker1"]["applied"])
+        self.assertEqual(result["meta"]["Speaker1"]["rejection_reason"], "quote_missing")
+        self.assertIn("Speaker1", result["low_confidence"])
+
+    def test_missing_confidence_defaults_to_zero_for_diagnostics_only(self):
+        """confidence 字段缺失 → meta 里记 0.0（诊断），但不再触发降级：
+        降级只由证据核对结果决定。"""
+        inferencer = _make_inferencer(confidence_threshold=0.6)
+        response = MagicMock()
+        response.structured_output = {
+            "speaker_mapping": {"Speaker1": "张三", "Speaker2": "李四"},
+            "candidates": _auto_candidates(
+                {"Speaker1": [("张三", "hello there")]}
+            ),
+            "reasoning": "no confidence field at all",
+        }
+        inferencer.llm_client.call = MagicMock(return_value=response)
+        dialogs = [
+            _make_dialog("Speaker1", "hello there", start_time=0.0),
+            _make_dialog("Speaker2", "hi", start_time=1.0),
+        ]
+
+        result = inferencer.infer(speakers=["Speaker1", "Speaker2"], dialogs=dialogs, title="t")
+
+        self.assertEqual(result["meta"]["Speaker1"]["confidence"], 0.0)
+        # 证据核对通过 → 照常 applied，confidence 缺失不再是降级理由。
+        self.assertTrue(result["meta"]["Speaker1"]["applied"])
+        self.assertEqual(result["mapping"]["Speaker1"], "张三")
+        self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
+
+    def test_per_speaker_confidence_missing_key_defaults_to_low_diagnostic(self):
+        """per-speaker confidence 缺某 speaker 的键 → 该 speaker 记 0.0 诊断值，
+        采用与否仍由证据决定。"""
+        result = self._run_infer(
+            speaker_mapping={"Speaker1": "张三", "Speaker2": "李四"},
+            confidence={"Speaker2": 0.9},  # Speaker1 key missing entirely
+            candidates=_auto_candidates(
+                {
+                    "Speaker1": [("张三", "hello there")],
+                    "Speaker2": [("李四", "hi back")],
+                }
+            ),
+        )
+
+        self.assertEqual(result["meta"]["Speaker1"]["confidence"], 0.0)
+        self.assertTrue(result["meta"]["Speaker1"]["applied"])
+
+        self.assertEqual(result["meta"]["Speaker2"]["confidence"], 0.9)
+        self.assertTrue(result["meta"]["Speaker2"]["applied"])
+
+    def test_malformed_confidence_value_defaults_to_low_diagnostic(self):
+        """confidence 无法解析 → 记 0.0 诊断值；采用与否仍由证据决定。"""
+        result = self._run_infer(
+            speaker_mapping={"Speaker1": "张三", "Speaker2": "李四"},
+            confidence={"Speaker1": "not-a-number", "Speaker2": 0.9},
+            candidates=_auto_candidates(
+                {
+                    "Speaker1": [("张三", "hello there")],
+                    "Speaker2": [("李四", "hi back")],
+                }
+            ),
+        )
+
+        self.assertEqual(result["meta"]["Speaker1"]["confidence"], 0.0)
+        self.assertTrue(result["meta"]["Speaker1"]["applied"])
+
+        self.assertEqual(result["meta"]["Speaker2"]["confidence"], 0.9)
+        self.assertTrue(result["meta"]["Speaker2"]["applied"])
+
+    def test_scalar_confidence_applies_to_all_speakers(self):
+        """整体标量 confidence 应用到所有 speaker 的 meta（诊断字段形态不变）。"""
+        result = self._run_infer(
+            speaker_mapping={"Speaker1": "张三", "Speaker2": "李四"},
+            confidence=0.9,
+            candidates=_auto_candidates(
+                {
+                    "Speaker1": [("张三", "hello there")],
+                    "Speaker2": [("李四", "hi back")],
+                }
+            ),
+        )
+
+        self.assertEqual(result["meta"]["Speaker1"]["confidence"], 0.9)
+        self.assertEqual(result["meta"]["Speaker2"]["confidence"], 0.9)
+        self.assertTrue(result["meta"]["Speaker1"]["applied"])
+        self.assertTrue(result["meta"]["Speaker2"]["applied"])
 
     def test_fallback_label_uses_numeric_suffix_of_original_label(self):
         """The placeholder number must come from the label's own digit (Speaker7 -> 7),
@@ -607,6 +804,9 @@ class TestConfidenceGating(unittest.TestCase):
             return_value=_mock_llm_response(
                 speaker_mapping={"Speaker1": "张三", "Speaker7": "李四"},
                 confidence={"Speaker1": 0.9, "Speaker7": 0.1},
+                candidates=_auto_candidates(
+                    {"Speaker1": [("张三", "hello")]}
+                ),
             )
         )
         dialogs = [
@@ -616,6 +816,7 @@ class TestConfidenceGating(unittest.TestCase):
 
         result = inferencer.infer(speakers=["Speaker1", "Speaker7"], dialogs=dialogs, title="t")
 
+        # Speaker7 无候选 → 证据裁决降级，占位符序号仍取标签自身数字。
         self.assertEqual(result["mapping"]["Speaker7"], "说话人7")
 
     def test_fallback_label_falls_back_to_position_when_no_digit(self):
@@ -624,6 +825,9 @@ class TestConfidenceGating(unittest.TestCase):
             return_value=_mock_llm_response(
                 speaker_mapping={"alpha": "张三", "beta": "李四"},
                 confidence={"alpha": 0.9, "beta": 0.1},
+                candidates=_auto_candidates(
+                    {"alpha": [("张三", "hello")]}
+                ),
             )
         )
         dialogs = [
@@ -635,78 +839,6 @@ class TestConfidenceGating(unittest.TestCase):
 
         # "beta" has no digit -> falls back to its 1-based position in speakers list (2nd).
         self.assertEqual(result["mapping"]["beta"], "说话人2")
-
-    def test_missing_confidence_field_defaults_to_low_and_downgrades(self):
-        """A response missing the `confidence` field entirely must NOT be
-        treated as maximally confident -- this feature exists specifically
-        to avoid applying uncertain inferences, and a missing confidence
-        signal is the most uncertain case of all. It must default to a LOW
-        confidence so the speaker gets downgraded to a placeholder."""
-        inferencer = _make_inferencer(confidence_threshold=0.6)
-        response = MagicMock()
-        response.structured_output = {
-            "speaker_mapping": {"Speaker1": "张三", "Speaker2": "李四"},
-            "reasoning": "no confidence field at all",
-        }
-        inferencer.llm_client.call = MagicMock(return_value=response)
-        dialogs = [
-            _make_dialog("Speaker1", "hello", start_time=0.0),
-            _make_dialog("Speaker2", "hi", start_time=1.0),
-        ]
-
-        result = inferencer.infer(speakers=["Speaker1", "Speaker2"], dialogs=dialogs, title="t")
-
-        self.assertEqual(result["meta"]["Speaker1"]["confidence"], 0.0)
-        self.assertFalse(result["meta"]["Speaker1"]["applied"])
-        self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
-        self.assertIn("Speaker1", result["low_confidence"])
-
-    def test_per_speaker_confidence_missing_key_defaults_to_low_and_downgrades(self):
-        """A per-speaker confidence dict that simply omits one speaker's key
-        (as opposed to containing an unparsable value) must also default to
-        low confidence for that speaker, not 1.0. The other speaker, whose
-        key IS present with a valid high value, must be unaffected."""
-        result = self._run_infer(
-            speaker_mapping={"Speaker1": "张三", "Speaker2": "李四"},
-            confidence={"Speaker2": 0.9},  # Speaker1 key missing entirely
-        )
-
-        self.assertEqual(result["meta"]["Speaker1"]["confidence"], 0.0)
-        self.assertFalse(result["meta"]["Speaker1"]["applied"])
-        self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
-        self.assertIn("Speaker1", result["low_confidence"])
-
-        self.assertEqual(result["meta"]["Speaker2"]["confidence"], 0.9)
-        self.assertTrue(result["meta"]["Speaker2"]["applied"])
-
-    def test_malformed_confidence_value_defaults_to_low_and_downgrades(self):
-        """A confidence value that cannot be parsed into a float (e.g. a
-        non-numeric string) must default to low confidence, not 1.0. A
-        sibling speaker with a valid, high confidence value in the same
-        response must be unaffected."""
-        result = self._run_infer(
-            speaker_mapping={"Speaker1": "张三", "Speaker2": "李四"},
-            confidence={"Speaker1": "not-a-number", "Speaker2": 0.9},
-        )
-
-        self.assertEqual(result["meta"]["Speaker1"]["confidence"], 0.0)
-        self.assertFalse(result["meta"]["Speaker1"]["applied"])
-        self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
-        self.assertIn("Speaker1", result["low_confidence"])
-
-        self.assertEqual(result["meta"]["Speaker2"]["confidence"], 0.9)
-        self.assertTrue(result["meta"]["Speaker2"]["applied"])
-
-    def test_scalar_confidence_applies_to_all_speakers(self):
-        result = self._run_infer(
-            speaker_mapping={"Speaker1": "张三", "Speaker2": "李四"},
-            confidence=0.9,
-        )
-
-        self.assertEqual(result["meta"]["Speaker1"]["confidence"], 0.9)
-        self.assertEqual(result["meta"]["Speaker2"]["confidence"], 0.9)
-        self.assertTrue(result["meta"]["Speaker1"]["applied"])
-        self.assertTrue(result["meta"]["Speaker2"]["applied"])
 
 
 class TestUnsampledSpeakerIdentityFallback(unittest.TestCase):
@@ -757,6 +889,12 @@ class TestUnsampledSpeakerIdentityFallback(unittest.TestCase):
             return_value=_mock_llm_response(
                 speaker_mapping={"alpha": "张三", "beta": "李四"},
                 confidence={"alpha": 0.9, "beta": 0.9},
+                candidates=_auto_candidates(
+                    {
+                        "alpha": [("张三", "x" * 100)],
+                        "beta": [("李四", "x" * 100)],
+                    }
+                ),
             )
         )
 
@@ -782,6 +920,7 @@ class TestUnsampledSpeakerIdentityFallback(unittest.TestCase):
             return_value=_mock_llm_response(
                 speaker_mapping={"alpha": "张三"},
                 confidence={"alpha": 0.9},
+                candidates=_auto_candidates({"alpha": [("张三", "hello there")]}),
             )
         )
         dialogs = [
@@ -813,6 +952,7 @@ class TestUnsampledSpeakerIdentityFallback(unittest.TestCase):
             return_value=_mock_llm_response(
                 speaker_mapping={"alpha": "张三"},
                 confidence={"alpha": 0.9},
+                candidates=_auto_candidates({"alpha": [("张三", "hello there")]}),
             )
         )
         dialogs = [
@@ -942,6 +1082,11 @@ class TestCacheCoverageValidation(unittest.TestCase):
             return_value=_mock_llm_response(
                 speaker_mapping={"Speaker1": "张三", "Speaker2": "李四"},
                 confidence={"Speaker1": 0.9, "Speaker2": 0.9},
+                candidates=_auto_candidates(
+                    {
+                        "Speaker2": [("李四", "hello")],
+                    }
+                ),
             )
         )
 
@@ -984,6 +1129,9 @@ class TestCacheCoverageValidation(unittest.TestCase):
             return_value=_mock_llm_response(
                 speaker_mapping={"Speaker1": "张三", "Speaker2": "王五"},
                 confidence={"Speaker1": 0.95, "Speaker2": 0.3},
+                candidates=_auto_candidates(
+                    {"Speaker1": [("张三", "hi")]}
+                ),
             )
         )
 

@@ -21,9 +21,17 @@ from ..prompts import (
     SPEAKER_INFERENCE_SYSTEM_PROMPT,
     build_speaker_inference_user_prompt,
 )
-from ..prompts.schemas.speaker_mapping import SPEAKER_MAPPING_SCHEMA
+from ..prompts.schemas.speaker_mapping import (
+    SPEAKER_EVIDENCE_TYPES,
+    SPEAKER_MAPPING_SCHEMA,
+)
 
 logger = setup_logger(__name__)
+
+# 证据裁决规则版本（card-vta-261015-speaker-evidence）。纳入 input_fingerprint：
+# 裁决规则升级后旧缓存自然失效重算，不会用旧规则的 mapping 冒充新规则的产物。
+# 唯一定义处，与 SpeakerInferencer.input_fingerprint 同文件维护。
+SPEAKER_EVIDENCE_RULES_VERSION = 2
 
 
 def build_speaker_risk_flags(
@@ -33,6 +41,12 @@ def build_speaker_risk_flags(
 
     ``base_dialogs`` is intentionally the pre-merge timeline so a dropped cluster's
     share reflects the evidence the gate actually saw, not a merged display count.
+
+    schema v1 meta（无 candidates）与 v2 meta（含 candidates）按形状分叉判定
+    "dropped cluster"：v1 沿用旧 confidence 门控语义（confidence < threshold 且
+    未采用）；v2 的 confidence 只是 LLM 自报诊断、不再参与采用判定，被采用的
+    与否由证据核对决定，因此 v2 判据是「已采样但未采用」本身——自报 confidence
+    高低不改变「主要说话人被降级」这一风险事实。
     """
     meta = inference_result.get("meta") if isinstance(inference_result, dict) else {}
     if not isinstance(meta, dict):
@@ -64,14 +78,33 @@ def build_speaker_risk_flags(
         )
         return sampled and confidence_is_valid and float(confidence) >= confidence_threshold
 
+    def _is_v2_evidence_meta(details: Dict) -> bool:
+        """schema v2 meta 条目带 candidates（写侧唯一来源 SpeakerInferencer
+        的证据裁决路径总会写入，空列表也写）；v1 产物从不带。"""
+        return "candidates" in details
+
+    def _entry_confidence_valid(details: Dict) -> bool:
+        confidence = details.get("confidence")
+        return (
+            isinstance(confidence, (int, float))
+            and not isinstance(confidence, bool)
+            and math.isfinite(float(confidence))
+        )
+
     if total_dialogs:
         dropped_cluster = any(
             bool(details.get("sampled", True))
             and not _mapping_was_adopted(str(label), details)
-            and isinstance(details.get("confidence"), (int, float))
-            and not isinstance(details.get("confidence"), bool)
-            and math.isfinite(float(details["confidence"]))
-            and float(details["confidence"]) < confidence_threshold
+            and (
+                # v2：已采样但证据核对未通过/无佐证 → 未采用即风险，不再看
+                # 自报 confidence。
+                _is_v2_evidence_meta(details)
+                or (
+                    # v1 语义保持不变：confidence 有效且低于阈值。
+                    _entry_confidence_valid(details)
+                    and float(details["confidence"]) < confidence_threshold
+                )
+            )
             and speaker_counts.get(str(label), 0) / total_dialogs >= 0.05
             for label, details in meta.items()
             if isinstance(details, dict)
@@ -98,6 +131,15 @@ class SpeakerInferencer:
 
     # 单条采样文本的截断上限（字符数）。未纳入外部配置——过细粒度，固定即可。
     _MAX_CHARS_PER_SAMPLE = 120
+
+    # 发言量 top2 说话人的采样加额（card-vta-261015-speaker-evidence 锁定
+    # 决策 6）：按发言条数取前两名，采样上限提高到 8 条/1200 字符，其余
+    # 维持 samples_per_speaker/max_chars_per_speaker 默认 3 条/400。目的：
+    # 保证对话内称呼片段（生产案例「胖哥」称呼未被 3 条采样覆盖）有更高
+    # 概率进入模型输入。全局预算逻辑不变（_apply_global_sample_budget）。
+    _TOP_SPEAKER_QUOTA_SLOTS = 2
+    _TOP_SPEAKER_SAMPLE_COUNT = 8
+    _TOP_SPEAKER_MAX_CHARS = 1200
 
     @staticmethod
     def resolve_dialog_speaker(dialog: Dict) -> Optional[object]:
@@ -166,8 +208,26 @@ class SpeakerInferencer:
         return list(dict.fromkeys(labels))
 
     @staticmethod
-    def input_fingerprint(speakers: List[str], dialogs: List[Dict]) -> str:
-        """Hash the diarization inputs that make a mapping reusable."""
+    def input_fingerprint(
+        speakers: List[str],
+        dialogs: List[Dict],
+        *,
+        title: str = "",
+        author: str = "",
+        description: str = "",
+        rules_version: int = SPEAKER_EVIDENCE_RULES_VERSION,
+    ) -> str:
+        """Hash the diarization inputs that make a mapping reusable.
+
+        card-vta-261015-speaker-evidence：除说话人集合与对话内容外，还纳入
+        title/author/description 与裁决规则版本。三个消费点必须同源传参：
+        - SpeakerInferencer.infer() 内部（写侧/缓存查询）
+        - transcription.py 分层缓存预检（读侧）
+        - llm_ops.py 补层刷新/身份恢复（读侧，从 existing_snapshot 取元数据）
+        任何一侧漏改都会造成读写指纹永久不一致（历史坑，见类 docstring）。
+        keyword 参数带默认值：旧调用（不传元数据）仍能工作，但三个消费点已
+        全部同步传参；rules_version 默认取当前 SPEAKER_EVIDENCE_RULES_VERSION。
+        """
         normalized_dialogs = []
         for value in dialogs:
             if not isinstance(value, dict):
@@ -185,6 +245,10 @@ class SpeakerInferencer:
         canonical = {
             "speakers": [str(value) for value in speakers],
             "dialogs": normalized_dialogs,
+            "title": str(title or ""),
+            "author": str(author or ""),
+            "description": str(description or ""),
+            "rules_version": int(rules_version),
         }
         encoded = json.dumps(
             canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
@@ -287,7 +351,9 @@ class SpeakerInferencer:
             logger.warning("Speaker list is empty, skipping inference")
             return self._identity_fallback(speakers)
 
-        input_fingerprint = self.input_fingerprint(speakers, dialogs)
+        input_fingerprint = self.input_fingerprint(
+            speakers, dialogs, title=title, author=author, description=description
+        )
 
         # 缓存命中校验：缓存 mapping 必须覆盖当前 speakers 集合才能复用，
         # 否则说明本次转录出现了缓存里没有的新说话人，必须重新推断。
@@ -302,34 +368,44 @@ class SpeakerInferencer:
                 normalized_cache = self._normalize_cached_result(cached)
                 if normalized_cache and set(normalized_cache["mapping"].keys()) >= set(speakers):
                     logger.info(f"Retrieved speaker_mapping from cache: {platform}/{media_id}")
-                    # ci-gate review：缓存里的 mapping 是写入时那次调用的
-                    # confidence_threshold 门控结果；用户之后调高/调低阈值
-                    # 配置不该被已缓存内容悄悄绕过。meta 里存了每个 speaker
-                    # 的原始 name/confidence，用当前（可能已变化的）阈值重跑
-                    # 一遍既有的 _apply_confidence_gate，不发起任何新的 LLM
-                    # 调用，纯本地重新判定。
-                    cached_meta = normalized_cache["meta"]
-                    raw_mapping = {
-                        speaker: cached_meta[speaker]["name"] for speaker in speakers
-                    }
-                    confidence_by_speaker = {
-                        speaker: cached_meta[speaker]["confidence"] for speaker in speakers
-                    }
-                    # 缓存里的 meta 可能来自"从未采样、直接 identity fallback"
-                    # 的说话人（sampled=False），必须原样保留这个标记一起重放，
-                    # 否则这些说话人会被当成"送入过 LLM 但 confidence 缺失"，
-                    # 走错路径降级成「说话人N」。缺失该字段的旧条目默认按
-                    # True（已采样）处理，保持原有的阈值重判行为不变。
-                    sampled = {
-                        speaker: cached_meta[speaker].get("sampled", True)
-                        for speaker in speakers
-                    }
-                    cache_hit_result = self._apply_confidence_gate(
-                        speakers=speakers,
-                        raw_mapping=raw_mapping,
-                        confidence_by_speaker=confidence_by_speaker,
-                        sampled=sampled,
-                    )
+                    if self._is_evidence_result(normalized_cache):
+                        # schema v2（证据裁决）产物：mapping/applied 是写入时
+                        # 引用核对的结果，而核对需要本轮 prompt 输入文本，
+                        # 缓存里只有 quote 没有全文，无法离线重核——直接采用
+                        # 缓存结论。裁决规则变更时指纹里的 rules_version 会
+                        # 变化，旧产物自然 miss 走重算，不会套旧规则结论。
+                        cache_hit_result = {
+                            "mapping": dict(normalized_cache["mapping"]),
+                            "meta": dict(normalized_cache["meta"]),
+                            "low_confidence": list(normalized_cache["low_confidence"]),
+                        }
+                    else:
+                        # v1（confidence 门控）产物：meta 里存了每个 speaker
+                        # 的原始 name/confidence，用当前（可能已变化的）阈值重跑
+                        # 一遍既有的 _apply_confidence_gate，不发起任何新的 LLM
+                        # 调用，纯本地重新判定（旧降级语义，见锁定决策 4）。
+                        cached_meta = normalized_cache["meta"]
+                        raw_mapping = {
+                            speaker: cached_meta[speaker]["name"] for speaker in speakers
+                        }
+                        confidence_by_speaker = {
+                            speaker: cached_meta[speaker]["confidence"] for speaker in speakers
+                        }
+                        # 缓存里的 meta 可能来自"从未采样、直接 identity fallback"
+                        # 的说话人（sampled=False），必须原样保留这个标记一起重放，
+                        # 否则这些说话人会被当成"送入过 LLM 但 confidence 缺失"，
+                        # 走错路径降级成「说话人N」。缺失该字段的旧条目默认按
+                        # True（已采样）处理，保持原有的阈值重判行为不变。
+                        sampled = {
+                            speaker: cached_meta[speaker].get("sampled", True)
+                            for speaker in speakers
+                        }
+                        cache_hit_result = self._apply_confidence_gate(
+                            speakers=speakers,
+                            raw_mapping=raw_mapping,
+                            confidence_by_speaker=confidence_by_speaker,
+                            sampled=sampled,
+                        )
                     # 命中缓存、未发起新的 LLM 调用——不是本轮真实推断，见
                     # infer() 顶部 docstring "source" 一节。
                     cache_hit_result["source"] = "cache_hit"
@@ -386,6 +462,7 @@ class SpeakerInferencer:
 
             raw_mapping = dict(result.structured_output.get("speaker_mapping") or {})
             raw_confidence = result.structured_output.get("confidence")
+            raw_candidates = result.structured_output.get("candidates")
 
             # 确保所有 speaker 都有推断名称：缺失则回退为原始标签
             for speaker in speakers:
@@ -395,17 +472,22 @@ class SpeakerInferencer:
             # 与 prompt 里的 original_speakers 一致）求解——被预算/无有效
             # 发言排除的说话人压根没被问过，对它们调用 _resolve_confidence
             # 只会产生误导性的"缺失 confidence"告警。它们的最终归宿由下面
-            # 的 sampled 标记决定，不经过置信度门槛判断。
+            # 的 sampled 标记决定，不经过置信度门槛判断。schema v2 起
+            # confidence 仅作诊断值记录进 meta，不参与采用判定。
             confidence_by_speaker = self._resolve_confidence(
                 raw_confidence, list(sample_groups.keys())
             )
             sampled = {speaker: speaker in sample_groups for speaker in speakers}
 
-            inference_result = self._apply_confidence_gate(
+            inference_result = self._apply_evidence_gate(
                 speakers=speakers,
                 raw_mapping=raw_mapping,
                 confidence_by_speaker=confidence_by_speaker,
+                candidates_by_speaker=(
+                    raw_candidates if isinstance(raw_candidates, dict) else {}
+                ),
                 sampled=sampled,
+                prompt_text=user_prompt,
             )
             # 本轮真实调用了 LLM 并成功产出新映射——见 infer() 顶部 docstring
             # "source" 一节，唯一允许下游"补层刷新"触碰既有展示产物的来源。
@@ -488,7 +570,16 @@ class SpeakerInferencer:
 
         for speaker in speakers:
             candidates = candidate_dialogs[speaker]
-            if len(candidates) <= self.samples_per_speaker:
+            # 发言量 top2 加额：按发言条数降序取前两名（并列按 speakers 列表
+            # 顺序即首次出现顺序），其配额改用加额常量；其余说话人维持构造
+            # 参数不变。
+            if speaker in self._top_sample_speakers(candidate_dialogs, speakers):
+                quota_count = self._TOP_SPEAKER_SAMPLE_COUNT
+                quota_chars = self._TOP_SPEAKER_MAX_CHARS
+            else:
+                quota_count = self.samples_per_speaker
+                quota_chars = self.max_chars_per_speaker
+            if len(candidates) <= quota_count:
                 selected = candidates
                 per_sample_limit = None
             else:
@@ -497,9 +588,9 @@ class SpeakerInferencer:
                 # other K values, evenly spaced positions retain the same rule.
                 last_index = len(candidates) - 1
                 positions = [
-                    round(index * last_index / (self.samples_per_speaker - 1))
-                    for index in range(self.samples_per_speaker)
-                ] if self.samples_per_speaker > 1 else [0]
+                    round(index * last_index / (quota_count - 1))
+                    for index in range(quota_count)
+                ] if quota_count > 1 else [0]
                 selected = [candidates[position] for position in positions]
                 # Reserve an equal share of the per-speaker budget for each
                 # stratified sample so a long head/middle sample cannot crowd
@@ -507,15 +598,22 @@ class SpeakerInferencer:
                 per_sample_limit = (
                     min(
                         self._MAX_CHARS_PER_SAMPLE,
-                        self.max_chars_per_speaker // self.samples_per_speaker,
+                        quota_chars // quota_count,
                     )
-                    if self.samples_per_speaker > 0
+                    if quota_count > 0
                     else None
                 )
             for text in selected:
                 if per_sample_limit is not None:
                     text = self._truncate(text, per_sample_limit)
-                self._try_add_sample(speaker, text, own_samples, own_chars)
+                self._try_add_sample(
+                    speaker,
+                    text,
+                    own_samples,
+                    own_chars,
+                    sample_count_limit=quota_count,
+                    total_chars_limit=quota_chars,
+                )
 
         sample_groups = {}
         for speaker in speakers:
@@ -529,6 +627,25 @@ class SpeakerInferencer:
             }
 
         return self._apply_global_sample_budget(sample_groups)
+
+    def _top_sample_speakers(
+        self, candidate_dialogs: Dict[str, List[str]], speakers: List[str]
+    ) -> set:
+        """按发言条数选出采样加额的说话人集合（发言量 top2）。
+
+        排序键：发言条数降序，并列按首次出现顺序（candidate_dialogs 的键
+        按 speakers 列表顺序初始化，dict 插入序即首次出现序，sorted 稳定
+        排序保持之）——不用 speakers.index(s) 当 key，那是每个元素 O(n)
+        查找，说话人上千时整个排序退化成 O(n²)（
+        test_extract_sample_dialogs_stays_fast_with_many_speakers 锁住）。
+        发言条数取 candidate_dialogs（含后续会被分层截断的全部有效发言），
+        与采样上限无关——加额针对的是「话说得多的人」。
+        """
+        ranked = sorted(
+            candidate_dialogs.keys(),
+            key=lambda s: -len(candidate_dialogs.get(s) or []),
+        )
+        return set(ranked[: self._TOP_SPEAKER_QUOTA_SLOTS])
 
     def _apply_global_sample_budget(self, sample_groups: Dict[str, Dict]) -> Dict[str, Dict]:
         """对采样总字符数施加全局上限，防止说话人数量异常多时 prompt 失控
@@ -630,12 +747,24 @@ class SpeakerInferencer:
         text: str,
         own_samples: Dict[str, List[str]],
         own_chars: Dict[str, int],
+        sample_count_limit: Optional[int] = None,
+        total_chars_limit: Optional[int] = None,
     ) -> None:
-        """尝试为说话人追加一条采样文本，受条数与总字符双重上限约束"""
-        if len(own_samples[speaker]) >= self.samples_per_speaker:
+        """尝试为说话人追加一条采样文本，受条数与总字符双重上限约束
+
+        上限缺省时用构造参数（samples_per_speaker/max_chars_per_speaker）；
+        发言量 top2 的说话人由调用方传入加额后的上限（8 条/1200 字符）。
+        """
+        count_limit = (
+            sample_count_limit if sample_count_limit is not None else self.samples_per_speaker
+        )
+        chars_limit = (
+            total_chars_limit if total_chars_limit is not None else self.max_chars_per_speaker
+        )
+        if len(own_samples[speaker]) >= count_limit:
             return
 
-        remaining = self.max_chars_per_speaker - own_chars[speaker]
+        remaining = chars_limit - own_chars[speaker]
         if remaining <= 0:
             return
 
@@ -892,6 +1021,199 @@ class SpeakerInferencer:
                 "applied": applied,
                 "sampled": True,
             }
+
+        return {"mapping": mapping, "meta": meta, "low_confidence": low_confidence}
+
+    # ------------------------------------------------------------------
+    # 证据裁决（schema v2，card-vta-261015-speaker-evidence）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_evidence_result(result: Dict) -> bool:
+        """判定推断结果是否为 schema v2（证据裁决）产物。
+
+        判据：meta 任一条目含 "candidates" 键。v2 写侧唯一来源
+        （_apply_evidence_gate）对每个已采样条目都会写入 candidates
+        （无候选时是空列表）；v1 产物（_apply_confidence_gate 及更早）
+        从不写这个键。缓存重放据此分叉：v2 直接采用，v1 走旧 confidence
+        门控重判。
+        """
+        meta = result.get("meta")
+        if not isinstance(meta, dict):
+            return False
+        return any(
+            isinstance(entry, dict) and "candidates" in entry
+            for entry in meta.values()
+        )
+
+    @staticmethod
+    def _verify_candidates(
+        candidates, prompt_text: str
+    ) -> Tuple[List[Dict], List[str]]:
+        """逐条核对 LLM 候选的引用，返回 (核对通过的候选, 作废原因列表)。
+
+        核对规则（fail-closed，任一不满足即作废）：
+        - name 非空字符串
+        - evidence_type 在域值内（SPEAKER_EVIDENCE_TYPES），域外类型一律作废
+        - evidence_quote 非空且**逐字**存在于本轮 prompt 输入文本中
+          （不做 strip/归一化——LLM 摇抄不逐字就是证据不合格）
+
+        作废原因（quote_missing / invalid_candidate / unknown_evidence_type）
+        返回给调用方写入 meta 供诊断；候选级原因中 quote_missing 是轴表
+        点名的必须可观测的一项。
+        """
+        verified: List[Dict] = []
+        rejected: List[str] = []
+        if not isinstance(candidates, list):
+            return verified, rejected
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                rejected.append("invalid_candidate")
+                continue
+            name = cand.get("name")
+            evidence_type = cand.get("evidence_type")
+            quote = cand.get("evidence_quote")
+            if not isinstance(name, str) or not name.strip():
+                rejected.append("invalid_candidate")
+                continue
+            if evidence_type not in SPEAKER_EVIDENCE_TYPES:
+                rejected.append("unknown_evidence_type")
+                continue
+            if not isinstance(quote, str) or not quote or quote not in prompt_text:
+                rejected.append("quote_missing")
+                continue
+            verified.append(
+                {
+                    "name": name.strip(),
+                    "evidence_type": evidence_type,
+                    "evidence_quote": quote,
+                }
+            )
+        return verified, rejected
+
+    @staticmethod
+    def _decide_display_name(
+        verified: List[Dict],
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """按确定性规则从核对通过的候选中裁决显示名。
+
+        规则（与卡面锁定决策 3 一一对应）：
+        - dialog_address + title_credit/author_host 双证据 →
+          ``主名（对话称:别名）`` 复合形式
+        - 仅 dialog_address → 直接采用
+        - 仅 title_credit/author_host → 拒绝（无对话佐证不得采用元数据名）
+        - 仅 description_roster → 拒绝（名单≠发言人，永不独立生效）
+        - 无核对通过候选 → 拒绝
+        """
+        dialog = next(
+            (c for c in verified if c["evidence_type"] == "dialog_address"), None
+        )
+        credit = next(
+            (
+                c
+                for c in verified
+                if c["evidence_type"] in ("title_credit", "author_host")
+            ),
+            None,
+        )
+        if dialog and credit:
+            return f"{credit['name']}（对话称:{dialog['name']}）", None
+        if dialog:
+            return dialog["name"], None
+        if credit:
+            return None, "title_credit_without_dialog_support"
+        if any(c["evidence_type"] == "description_roster" for c in verified):
+            return None, "description_roster_not_standalone"
+        return None, "no_verified_evidence"
+
+    def _apply_evidence_gate(
+        self,
+        speakers: List[str],
+        raw_mapping: Dict[str, str],
+        confidence_by_speaker: Dict[str, float],
+        candidates_by_speaker: Dict,
+        sampled: Optional[Dict[str, bool]] = None,
+        prompt_text: str = "",
+    ) -> Dict:
+        """证据裁决：按核对通过的引用决定显示名，confidence 只入 meta。
+
+        与 _apply_confidence_gate（仍服务 v1 缓存重判）的关键差异：
+        - applied 与否完全由引用核对结果决定；LLM 自报 confidence 不参与。
+        - 未采样的 speaker 保留原始标签（同 v1 语义）。
+        - meta 新增 candidates（LLM 原始候选，供审计）/ verified_candidates
+          （核对通过的候选，applied 映射据此可指回已核对引用）/
+          rejection_reason（未采用时的作废原因）。
+
+        Returns:
+            {"mapping", "meta", "low_confidence"}；low_confidence 语义
+            在 v2 下是「证据核对未通过/未采样的 label 列表」。
+        """
+        mapping: Dict[str, str] = {}
+        meta: Dict[str, Dict] = {}
+        low_confidence: List[str] = []
+
+        for speaker in speakers:
+            was_sampled = True if sampled is None else sampled.get(speaker, True)
+
+            if not was_sampled:
+                mapping[speaker] = speaker
+                low_confidence.append(speaker)
+                meta[speaker] = {
+                    "name": speaker,
+                    "confidence": self._UNRESOLVABLE_CONFIDENCE_DEFAULT,
+                    "applied": False,
+                    "sampled": False,
+                    "candidates": [],
+                    "verified_candidates": [],
+                    "rejection_reason": "not_sampled",
+                }
+                logger.info(
+                    f"Speaker '{speaker}' was never sampled/sent to the LLM "
+                    "(excluded by budget or no valid dialog), keeping original label"
+                )
+                continue
+
+            confidence = confidence_by_speaker.get(
+                speaker, self._UNRESOLVABLE_CONFIDENCE_DEFAULT
+            )
+            candidates = candidates_by_speaker.get(speaker)
+            if not isinstance(candidates, list):
+                candidates = []
+            verified, rejected = self._verify_candidates(candidates, prompt_text)
+            display_name, reason = self._decide_display_name(verified)
+            inferred_name = raw_mapping.get(speaker, speaker)
+
+            if display_name is None:
+                # 全部候选都因引用不在输入中作废时，作废原因取 quote_missing
+                # （轴表点名的可观测项），否则用裁决规则给出的原因。
+                if not verified and rejected and all(r == "quote_missing" for r in rejected):
+                    reason = "quote_missing"
+                fallback_label = self._build_fallback_label(speaker, speakers)
+                mapping[speaker] = fallback_label
+                low_confidence.append(speaker)
+                meta[speaker] = {
+                    "name": inferred_name,
+                    "confidence": confidence,
+                    "applied": False,
+                    "sampled": True,
+                    "candidates": candidates,
+                    "verified_candidates": verified,
+                    "rejection_reason": reason,
+                }
+                logger.warning(
+                    f"Speaker '{speaker}' evidence gate rejected (reason={reason}), "
+                    f"downgrading inferred name '{inferred_name}' -> '{fallback_label}'"
+                )
+            else:
+                mapping[speaker] = display_name
+                meta[speaker] = {
+                    "name": inferred_name,
+                    "confidence": confidence,
+                    "applied": True,
+                    "sampled": True,
+                    "candidates": candidates,
+                    "verified_candidates": verified,
+                }
 
         return {"mapping": mapping, "meta": meta, "low_confidence": low_confidence}
 
