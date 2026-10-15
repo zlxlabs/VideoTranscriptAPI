@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from video_transcript_api.cache.cache_manager import CacheManager
+from video_transcript_api.llm.prompts.schemas.speaker_mapping import SPEAKER_MAPPING_SCHEMA_VERSION
 from video_transcript_api.llm.core.speaker_inferencer import SpeakerInferencer
 from video_transcript_api.llm.coordinator import LLMCoordinator
 
@@ -53,7 +54,8 @@ def test_artifact_uses_files_loc_and_validates_fingerprint(tmp_path):
     record = cache.get_cache("youtube", "media-1", use_speaker_recognition=True)
     artifact_path = cache.cache_dir / record["files_loc"] / "speaker_mapping.json"
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
-    assert artifact["schema_version"] == 1
+    # card-vta-261015-speaker-evidence：envelope 版本升为 v2（证据裁决）。
+    assert artifact["schema_version"] == SPEAKER_MAPPING_SCHEMA_VERSION == 2
     assert artifact["input_fingerprint"] == fingerprint
     assert artifact["speakers"] == speakers
     assert artifact["source"] == "llm"
@@ -495,6 +497,15 @@ def test_deep_malformed_artifact_falls_back_to_real_inference_not_a_task_failure
     llm.call.return_value = SimpleNamespace(structured_output={
         "speaker_mapping": {"Speaker1": "Alice", "Speaker2": "Bob"},
         "confidence": {"Speaker1": 0.95, "Speaker2": 0.95},
+        # schema v2：引用取自采样文本（_dialogs 的逐字原文），核对可过。
+        "candidates": {
+            "Speaker1": [
+                {"name": "Alice", "evidence_type": "dialog_address", "evidence_quote": "Hello"}
+            ],
+            "Speaker2": [
+                {"name": "Bob", "evidence_type": "dialog_address", "evidence_quote": "World"}
+            ],
+        },
     })
     inferencer = SpeakerInferencer(llm, cache_manager=cache)
 
@@ -759,6 +770,15 @@ def test_infer_speaker_names_alone_still_calls_llm_for_name_inference(tmp_path):
             return SimpleNamespace(structured_output={
                 "speaker_mapping": {"Speaker1": "Alice", "Speaker2": "Bob"},
                 "confidence": {"Speaker1": 0.95, "Speaker2": 0.95},
+                # schema v2：引用取自采样文本（_dialogs 的逐字原文）。
+                "candidates": {
+                    "Speaker1": [
+                        {"name": "Alice", "evidence_type": "dialog_address", "evidence_quote": "Hello"}
+                    ],
+                    "Speaker2": [
+                        {"name": "Bob", "evidence_type": "dialog_address", "evidence_quote": "World"}
+                    ],
+                },
             })
         if task_type == "speaker_contradiction_scan":
             return SimpleNamespace(structured_output={"contradictions": []})

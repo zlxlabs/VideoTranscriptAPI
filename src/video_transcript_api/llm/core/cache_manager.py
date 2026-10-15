@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from ...utils.logging import setup_logger
+from ...llm.prompts.schemas.speaker_mapping import SPEAKER_MAPPING_SCHEMA_VERSION
 
 logger = setup_logger(__name__)
 
@@ -115,12 +116,15 @@ class CacheManager:
                 # inference always supplies validation inputs and only accepts
                 # the versioned artifact envelope.
                 if input_fingerprint is None or speakers is None:
-                    if payload.get("schema_version") == 1:
+                    if payload.get("schema_version") in (1, SPEAKER_MAPPING_SCHEMA_VERSION):
                         result = payload.get("result")
                         return result if isinstance(result, dict) else None
                     return payload
+                # schema v1（旧 confidence 门控产物）仍可读：指纹不匹配时自然
+                # miss（v1 的指纹是旧算法值），不会错误复用；重放语义由
+                # SpeakerInferencer._normalize_cached_result 按形状分叉。
                 if (
-                    payload.get("schema_version") != 1
+                    payload.get("schema_version") not in (1, SPEAKER_MAPPING_SCHEMA_VERSION)
                     or payload.get("input_fingerprint") != input_fingerprint
                     or set(payload.get("speakers") or []) != set(speakers)
                     or payload.get("source") != "llm"
@@ -157,7 +161,7 @@ class CacheManager:
             payload = speaker_mapping
             if input_fingerprint is not None and speakers is not None:
                 payload = {
-                    "schema_version": 1,
+                    "schema_version": SPEAKER_MAPPING_SCHEMA_VERSION,
                     "input_fingerprint": input_fingerprint,
                     "speakers": list(speakers),
                     "source": source,

@@ -1406,7 +1406,17 @@ def process_transcription(
                 )
                 speakers = _extract_speaker_labels(dialogs)
                 if speakers:
-                    fingerprint = SpeakerInferencer.input_fingerprint(speakers, dialogs)
+                    # 指纹纳入元数据与裁决规则版本（card-vta-261015-speaker-evidence）：
+                    # video_title/author/description 与 infer() 写侧、llm_ops
+                    # 读侧同源（都取自 cache_data 的同一份元数据），三者任一
+                    # 不一致都会让 speaker_mapping.json 判 miss 走重算。
+                    fingerprint = SpeakerInferencer.input_fingerprint(
+                        speakers,
+                        dialogs,
+                        title=video_title,
+                        author=author,
+                        description=description,
+                    )
                     current_speaker_mapping = cache_manager.get_speaker_mapping(
                         cache_data.get("platform"),
                         cache_data.get("media_id"),

@@ -1829,12 +1829,20 @@ def _restore_real_names_after_identity_fallback(
         else (current_transcript_data or [])
     )
     current_speakers = SpeakerInferencer.extract_speaker_labels(current_dialogs)
+    # 指纹纳入元数据与裁决规则版本（card-vta-261015-speaker-evidence）：与
+    # transcription.py 分层缓存预检同源——existing_snapshot 就是
+    # cache_manager.get_cache() 的返回，title/author/description 取自同一份
+    # 缓存快照，与写侧 SpeakerInferencer.infer() 用的元数据一致。
     verified_mapping = (
         cache_manager.get_speaker_mapping(
             platform,
             media_id,
             input_fingerprint=SpeakerInferencer.input_fingerprint(
-                current_speakers, current_dialogs
+                current_speakers,
+                current_dialogs,
+                title=(existing_snapshot or {}).get("title") or "",
+                author=(existing_snapshot or {}).get("author") or "",
+                description=(existing_snapshot or {}).get("description") or "",
             ),
             speakers=current_speakers,
         )

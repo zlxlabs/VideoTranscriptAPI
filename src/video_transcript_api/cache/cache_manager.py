@@ -12,6 +12,7 @@ import threading
 import time
 from ..utils.logging import setup_logger
 from ..utils.task_status import TaskStatus
+from ..llm.prompts.schemas.speaker_mapping import SPEAKER_MAPPING_SCHEMA_VERSION
 
 logger = setup_logger("cache_manager")
 
@@ -1659,8 +1660,12 @@ class CacheManager:
             payload = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(payload, dict):
                 return None
+            # schema v1（confidence 门控产物）仍可读：指纹不匹配时自然 miss
+            # （v1 的指纹是旧算法值），不会错误复用；schema v2（证据裁决）
+            # 是当前写侧唯一版本。v1 result 的重放语义（旧 confidence 门控
+            # 重判）由 SpeakerInferencer._normalize_cached_result 按形状分叉。
             if (
-                payload.get("schema_version") != 1
+                payload.get("schema_version") not in (1, SPEAKER_MAPPING_SCHEMA_VERSION)
                 or payload.get("input_fingerprint") != input_fingerprint
                 or set(payload.get("speakers") or []) != set(speakers)
                 or payload.get("source") != "llm"
@@ -1712,7 +1717,7 @@ class CacheManager:
             path = artifact_dir / "speaker_mapping.json"
             temp_path = artifact_dir / f".{path.name}.{uuid.uuid4().hex}.tmp"
             payload = {
-                "schema_version": 1,
+                "schema_version": SPEAKER_MAPPING_SCHEMA_VERSION,
                 "input_fingerprint": input_fingerprint,
                 "speakers": list(speakers),
                 "source": source,
