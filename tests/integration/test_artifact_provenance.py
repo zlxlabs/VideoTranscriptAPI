@@ -91,11 +91,16 @@ def _seed_identity_mapping(cache):
         llm_type="structured", content={"dialogs": [], "speaker_mapping": REAL_NAMES},
     )
     speakers = SpeakerInferencer.extract_speaker_labels(SEGMENTS)
+    # card-vta-261015-speaker-evidence：指纹已纳入元数据，seed 与
+    # _restore_real_names_after_identity_fallback 读侧同源（title/author
+    # 取自 save_cache 存入的快照值，description 未存为空）。
     cache.save_speaker_mapping(
         PLATFORM, MEDIA_ID,
         {"mapping": REAL_NAMES, "meta": {s: {"name": n, "confidence": 0.9}
                                           for s, n in REAL_NAMES.items()}},
-        input_fingerprint=SpeakerInferencer.input_fingerprint(speakers, SEGMENTS),
+        input_fingerprint=SpeakerInferencer.input_fingerprint(
+            speakers, SEGMENTS, title="Demo video", author="Channel", description=""
+        ),
         speakers=speakers,
     )
 

@@ -137,7 +137,17 @@ def _seed_prior_successful_speaker_round(cm, *, transcript_data):
     )
 
     speakers = SpeakerInferencer.extract_speaker_labels(transcript_data["segments"])
-    fingerprint = SpeakerInferencer.input_fingerprint(speakers, transcript_data["segments"])
+    # card-vta-261015-speaker-evidence：指纹已纳入元数据，seed 必须与
+    # _restore_real_names_after_identity_fallback 读侧同源传参——该链路从
+    # existing_snapshot（save_cache 存入的 title/author；description 未存
+    # 时为空）取元数据。
+    fingerprint = SpeakerInferencer.input_fingerprint(
+        speakers,
+        transcript_data["segments"],
+        title="Demo",
+        author="Alice",
+        description="",
+    )
     cm.save_speaker_mapping(
         PLATFORM, MEDIA_ID,
         {
@@ -461,8 +471,17 @@ def _seed_prior_round_with_diverging_old_and_verified_mappings(cm):
 
     # speaker_mapping.json / verified_mapping: the authoritative, correct
     # names, fingerprint-matched to this round's actual transcript_data.
+    # card-vta-261015-speaker-evidence：指纹已纳入元数据，seed 必须与
+    # _restore_real_names_after_identity_fallback 读侧同源传参（title/author
+    # 取自 save_cache 存入的快照值，description 未存为空）。
     speakers = SpeakerInferencer.extract_speaker_labels(TRANSCRIPT_SEGMENTS_ROUND_1)
-    fingerprint = SpeakerInferencer.input_fingerprint(speakers, TRANSCRIPT_SEGMENTS_ROUND_1)
+    fingerprint = SpeakerInferencer.input_fingerprint(
+        speakers,
+        TRANSCRIPT_SEGMENTS_ROUND_1,
+        title="Demo",
+        author="Alice",
+        description="",
+    )
     cm.save_speaker_mapping(
         PLATFORM, MEDIA_ID,
         {
