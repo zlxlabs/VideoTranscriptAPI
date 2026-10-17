@@ -1,6 +1,7 @@
 # Business-repo caller for gate-v2-disposition.yml.
-# Copy to .github/workflows/gate-disposition.yml. Replace
-# @__PINNED_GATE_SHA__ with the desired ref of zlxlabs/gate.
+# Copy to .github/workflows/gate-disposition.yml. The reusable workflow follows
+# gate's moving v2 release tag; gate-v2-disposition resolves its implementation
+# from that tag, so no separate implementation-ref input is passed.
 name: gate-disposition
 
 on:
