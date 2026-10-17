@@ -392,6 +392,17 @@ test('Chromium uploads raw media through production API, worker, shared ASR/LLM,
   const revoked = (await inspectRealState(request)).uploads[0];
   expect(revoked.revoked_at).toBeTruthy();
   expect(revoked.root_status).toBe('success');
+  await page.route('**/__e2e__/diagnostic-404.png', async (route) => route.fulfill({
+    status: 404,
+    contentType: 'text/plain',
+    body: 'synthetic 404 used to validate failure diagnostics',
+  }));
+  await page.evaluate(() => {
+    const image = document.createElement('img');
+    image.src = '/__e2e__/diagnostic-404.png';
+    document.body.append(image);
+  });
+  await expect.poll(() => unexpectedNetwork.some((entry) => entry.includes('GET /__e2e__/diagnostic-404.png 404'))).toBe(true);
   const expectedPageAborts = [
     'GET /api/audit/filter-options net::ERR_ABORTED',
     'GET /api/audit/history net::ERR_ABORTED',
