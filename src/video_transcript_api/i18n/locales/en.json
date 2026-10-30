@@ -120,6 +120,7 @@
   "render.speaker.confirmed": "Confirmed",
   "render.speaker.pending": "Unconfirmed",
   "render.speaker.risk_warning": "Speaker labels in this episode may be inaccurate",
+  "render.speaker.names_unresolved": "Some speaker names could not be identified",
   "render.speaker.suspect": "Needs review",
   "web.cleaned.created_at": "Created at: {time}",
   "web.cleaned.heading": "⚠️ Content cleaned up",

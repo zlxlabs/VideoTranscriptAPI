@@ -1,6 +1,9 @@
 import json
 from pathlib import Path
 
+import pytest
+
+from video_transcript_api.i18n import ui_language_scope
 from video_transcript_api.utils.rendering.dialog_renderer import DialogRenderer
 
 
@@ -26,7 +29,64 @@ def test_renderer_keeps_dialog_index_anchor_and_renders_segment_metadata(tmp_pat
     assert 'data-start-time="00:00:01"' in html
     assert "&lt;Override&gt;" in html
     assert "suspect" in html
-    assert "本集说话人区分可能不准" in html
+    assert 'data-speaker-risk="names_unresolved"' in html
+    assert "部分说话人姓名未识别" in html
+    assert "本集说话人区分可能不准" not in html
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        (["semantic_contradiction_detected"], [("segmentation", "本集说话人区分可能不准")]),
+        (["semantic_scan_unreliable"], [("segmentation", "本集说话人区分可能不准")]),
+        (["low_confidence_cluster_dropped"], [("names_unresolved", "部分说话人姓名未识别")]),
+        (["low_average_mapping_confidence"], []),
+        (
+            ["low_confidence_cluster_dropped", "semantic_contradiction_detected"],
+            [
+                ("segmentation", "本集说话人区分可能不准"),
+                ("names_unresolved", "部分说话人姓名未识别"),
+            ],
+        ),
+        (["future_unknown_risk"], [("segmentation", "本集说话人区分可能不准")]),
+    ],
+)
+def test_renderer_maps_risk_flags_to_ordered_warnings(tmp_path, flags, expected):
+    with ui_language_scope("zh-CN"):
+        html = _render(
+            tmp_path,
+            {"dialogs": [{"speaker": "Alice", "text": "hello"}], "speaker_risk_flags": flags},
+        )
+
+    banners = html.split('<div class="speaker-risk-warning"')[1:]
+    assert len(banners) == len(expected)
+    for banner, (risk, message) in zip(banners, expected):
+        assert f'data-speaker-risk="{risk}"' in banner
+        assert f">{message}</div>" in banner
+
+
+def test_renderer_translates_name_warning_in_english(tmp_path):
+    with ui_language_scope("en"):
+        html = _render(
+            tmp_path,
+            {"dialogs": [{"speaker": "Alice", "text": "hello"}], "speaker_risk_flags": ["low_confidence_cluster_dropped"]},
+        )
+
+    assert 'data-speaker-risk="names_unresolved"' in html
+    assert "Some speaker names could not be identified" in html
+    assert "Speaker labels in this episode may be inaccurate" not in html
+
+
+def test_renderer_translates_segmentation_warning_in_english(tmp_path):
+    with ui_language_scope("en"):
+        html = _render(
+            tmp_path,
+            {"dialogs": [{"speaker": "Alice", "text": "hello"}], "speaker_risk_flags": ["semantic_contradiction_detected"]},
+        )
+
+    assert 'data-speaker-risk="segmentation"' in html
+    assert "Speaker labels in this episode may be inaccurate" in html
+    assert "Some speaker names could not be identified" not in html
 
 
 def test_renderer_escapes_segment_metadata_attribute_quotes(tmp_path):

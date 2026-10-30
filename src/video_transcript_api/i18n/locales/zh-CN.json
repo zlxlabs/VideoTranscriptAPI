@@ -120,6 +120,7 @@
   "render.speaker.confirmed": "已确认",
   "render.speaker.pending": "待确认",
   "render.speaker.risk_warning": "本集说话人区分可能不准",
+  "render.speaker.names_unresolved": "部分说话人姓名未识别",
   "render.speaker.suspect": "待核实",
   "web.cleaned.created_at": "创建时间：{time}",
   "web.cleaned.heading": "⚠️ 内容已清理",

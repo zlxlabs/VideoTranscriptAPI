@@ -109,6 +109,8 @@ def test_english_catalog_uses_unconfirmed_label(tmp_path, language_config):
         },
     )
     assert "Unconfirmed" in html
-    assert "Speaker labels in this episode may be inaccurate" in html
+    assert "Some speaker names could not be identified" in html
+    assert 'data-speaker-risk="names_unresolved"' in html
+    assert "Speaker labels in this episode may be inaccurate" not in html
     assert "待确认" not in html
     assert "本集说话人区分可能不准" not in html
