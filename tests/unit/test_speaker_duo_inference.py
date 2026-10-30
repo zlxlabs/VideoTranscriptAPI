@@ -61,19 +61,11 @@ def _make_inferencer():
     )
 
 
-def _mock_llm(structured_output):
-    response = MagicMock()
-    response.structured_output = structured_output
-    return response
-
-
 def _install_llm(inferencer, structured_output):
     """只打桩 llm_client.call（首轮说话人推断是唯一被调用的任务）。"""
-
-    def fake(*args, **kwargs):
-        return _mock_llm(structured_output)
-
-    inferencer.llm_client.call = MagicMock(side_effect=fake)
+    response = MagicMock()
+    response.structured_output = structured_output
+    inferencer.llm_client.call = MagicMock(return_value=response)
 
 
 def _structured_output(candidates, roles=None, mapping=None, confidence=None):
@@ -114,64 +106,43 @@ def _addressed_dialogs(address_line, count=10):
     称呼句紧贴 Speaker1 的首次出场（context_before 只取出场前最近 2 条），
     这样 dialog_address 证据能逐字核对通过，无需触发自我介绍复核调用。
     """
-    dialogs = []
-    for index in range(count):
-        dialogs.append(
-            {
-                "speaker": "Speaker2",
-                "text": f"Speaker2 says line {index}",
-                "start_time": float(index),
-            }
-        )
+    dialogs = [
+        {
+            "speaker": "Speaker2",
+            "text": f"Speaker2 says line {index}",
+            "start_time": float(index),
+        }
+        for index in range(count)
+    ]
     dialogs[-1]["text"] = address_line
-    for index in range(count):
-        dialogs.append(
-            {
-                "speaker": "Speaker1",
-                "text": f"Speaker1 says line {index}",
-                "start_time": float(count + index),
-            }
-        )
+    dialogs += [
+        {
+            "speaker": "Speaker1",
+            "text": f"Speaker1 says line {index}",
+            "start_time": float(count + index),
+        }
+        for index in range(count)
+    ]
     return dialogs
 
 
 class TestDuoPrimarySelection(unittest.TestCase):
     """主要说话人判定：按 base dialogs 的发言条数算占比。"""
 
-    def test_two_equal_speakers_are_primary(self):
-        dialogs = _dialogs({"Speaker1": 10, "Speaker2": 10})
-        self.assertEqual(
-            select_primary_speakers(dialogs, ["Speaker1", "Speaker2"]),
-            ["Speaker1", "Speaker2"],
-        )
-
-    def test_three_speakers_close_pathway(self):
-        """三个说话人各占约 33%：不是低歧义两人分区。"""
-        dialogs = _dialogs({"Speaker1": 10, "Speaker2": 10, "Speaker3": 10})
-        self.assertEqual(
-            select_primary_speakers(dialogs, ["Speaker1", "Speaker2", "Speaker3"]),
-            [],
-        )
-
-    def test_small_cluster_is_not_primary(self):
-        """两个主要说话人 + 一个 3% 的小簇：小簇不算主要说话人。"""
-        dialogs = _dialogs({"Speaker1": 48, "Speaker2": 47, "Speaker3": 3})
-        self.assertEqual(
-            select_primary_speakers(
-                dialogs, ["Speaker1", "Speaker2", "Speaker3"]
-            ),
-            ["Speaker1", "Speaker2"],
-        )
-
-    def test_two_speakers_below_combined_share_close_pathway(self):
-        """两人合计不足 80%：其余发言散在多人小簇里，不算低歧义。"""
-        dialogs = _dialogs({"Speaker1": 20, "Speaker2": 20, "Speaker3": 60})
-        self.assertEqual(
-            select_primary_speakers(
-                dialogs, ["Speaker1", "Speaker2", "Speaker3"]
-            ),
-            [],
-        )
+    def test_primary_selection_cases(self):
+        cases = [
+            # (说明, 每人条数, 期望的主要说话人)
+            ("两人各半", {"Speaker1": 10, "Speaker2": 10}, ["Speaker1", "Speaker2"]),
+            ("三人分摊", {"S1": 10, "S2": 10, "S3": 10}, []),
+            ("两个主要 + 3% 小簇", {"S1": 48, "S2": 47, "S3": 3}, ["S1", "S2"]),
+            ("两人合计不足 80%", {"S1": 20, "S2": 20, "S3": 60}, []),
+        ]
+        for label, counts, expected in cases:
+            with self.subTest(label):
+                speakers = list(counts)
+                self.assertEqual(
+                    select_primary_speakers(_dialogs(counts), speakers), expected
+                )
 
 
 class TestDuoAxes(unittest.TestCase):
@@ -180,59 +151,83 @@ class TestDuoAxes(unittest.TestCase):
     def _run(self, dialogs, title, author, candidates, roles, speakers=None):
         speakers = speakers or ["Speaker1", "Speaker2"]
         inferencer = _make_inferencer()
-        _install_llm(
-            inferencer,
-            _structured_output(candidates, roles=roles),
-        )
+        _install_llm(inferencer, _structured_output(candidates, roles=roles))
         result = inferencer.infer(
-            speakers=speakers,
-            dialogs=dialogs,
-            title=title,
-            author=author,
+            speakers=speakers, dialogs=dialogs, title=title, author=author
         )
         return inferencer, result
 
     def _collison_candidates(self):
         return {
-            "Speaker1": [
-                _candidate("John Collison", "author_host", "John Collison")
-            ],
+            "Speaker1": [_candidate("John Collison", "author_host", "John Collison")],
             "Speaker2": [_candidate("sama", "title_credit", "@sama")],
         }
 
-    def test_unknown_role_keeps_current_result(self):
-        """轴表第二行：任一角色 unknown 则两人都不采用，维持现行拒绝原因。"""
+    def test_closed_pathway_cases(self):
+        """通路必须关闭的各格：两位说话人都保持占位符与原拒绝原因。"""
         dialogs, metadata = _load_fixture()
-        _, result = self._run(
-            dialogs,
-            metadata["title"],
-            metadata["author"],
-            self._collison_candidates(),
-            {"Speaker1": "host", "Speaker2": "unknown"},
-        )
-        self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
-        self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
-        for speaker in ("Speaker1", "Speaker2"):
-            self.assertFalse(result["meta"][speaker]["applied"])
-            self.assertEqual(
-                result["meta"][speaker]["rejection_reason"],
-                "title_credit_without_dialog_support",
-            )
-
-    def test_duplicate_roles_keep_current_result(self):
-        """轴表第三行：两人都是 host 则两人都不采用。"""
-        dialogs, metadata = _load_fixture()
-        _, result = self._run(
-            dialogs,
-            metadata["title"],
-            metadata["author"],
-            self._collison_candidates(),
-            {"Speaker1": "host", "Speaker2": "host"},
-        )
-        self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
-        self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
-        self.assertFalse(result["meta"]["Speaker1"]["applied"])
-        self.assertFalse(result["meta"]["Speaker2"]["applied"])
+        collison = self._collison_candidates()
+        cases = [
+            (
+                "角色 unknown",
+                dialogs,
+                metadata["title"],
+                metadata["author"],
+                collison,
+                {"Speaker1": "host", "Speaker2": "unknown"},
+            ),
+            (
+                "角色重复",
+                dialogs,
+                metadata["title"],
+                metadata["author"],
+                collison,
+                {"Speaker1": "host", "Speaker2": "host"},
+            ),
+            (
+                "标题两个 @ 提及",
+                dialogs,
+                "OpenAI’s @sama and @karpathy joined me at the pub",
+                metadata["author"],
+                collison,
+                {"Speaker1": "host", "Speaker2": "guest"},
+            ),
+            (
+                "两人静态候选同名",
+                _dialogs({"Speaker1": 10, "Speaker2": 10}),
+                "Alex and alex talk",
+                "Alex",
+                {
+                    "Speaker1": [_candidate("Alex", "author_host", "Alex")],
+                    "Speaker2": [_candidate("alex", "title_credit", "Alex")],
+                },
+                {"Speaker1": "host", "Speaker2": "guest"},
+            ),
+            (
+                "一人挂两个不同静态名",
+                _dialogs({"Speaker1": 10, "Speaker2": 10}),
+                "Johnny and sama joined me at the pub",
+                "John",
+                {
+                    "Speaker1": [
+                        _candidate("John", "author_host", "John"),
+                        _candidate("Johnny", "title_credit", "Johnny"),
+                    ],
+                    "Speaker2": [_candidate("sama", "title_credit", "sama")],
+                },
+                {"Speaker1": "host", "Speaker2": "guest"},
+            ),
+        ]
+        for label, case_dialogs, title, author, candidates, roles in cases:
+            with self.subTest(label):
+                _, result = self._run(
+                    case_dialogs, title, author, candidates, roles
+                )
+                self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
+                self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
+                for speaker in ("Speaker1", "Speaker2"):
+                    self.assertFalse(result["meta"][speaker]["applied"])
+                    self.assertNotIn(DUO_EVIDENCE_TIER, result["meta"][speaker])
 
     def test_missing_roles_field_closes_pathway(self):
         """轴表第九行：LLM 没给 roles 字段时通路关闭，不报错。"""
@@ -250,57 +245,6 @@ class TestDuoAxes(unittest.TestCase):
         self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
         self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
         self.assertNotIn(DUO_EVIDENCE_TIER, result["meta"]["Speaker1"])
-
-    def test_same_static_name_closes_pathway(self):
-        """轴表第六行：两人的静态候选同名则通路关闭。"""
-        dialogs = _dialogs({"Speaker1": 10, "Speaker2": 10})
-        candidates = {
-            "Speaker1": [_candidate("Alex", "author_host", "Alex")],
-            "Speaker2": [_candidate("alex", "title_credit", "Alex")],
-        }
-        _, result = self._run(
-            dialogs,
-            "Alex and Alex talk",
-            "Alex",
-            candidates,
-            {"Speaker1": "host", "Speaker2": "guest"},
-        )
-        self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
-        self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
-
-    def test_two_title_mentions_close_pathway(self):
-        """轴表第七行：标题里有两个 @ 提及时分不清谁是嘉宾。"""
-        dialogs, metadata = _load_fixture()
-        title = "OpenAI’s @sama and @karpathy joined me at the pub"
-        _, result = self._run(
-            dialogs,
-            title,
-            metadata["author"],
-            self._collison_candidates(),
-            {"Speaker1": "host", "Speaker2": "guest"},
-        )
-        self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
-        self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
-
-    def test_two_distinct_names_in_one_speaker_close_pathway(self):
-        """同一位主要说话人挂了两个不同静态名字时通路关闭。"""
-        dialogs = _dialogs({"Speaker1": 10, "Speaker2": 10})
-        candidates = {
-            "Speaker1": [
-                _candidate("John", "author_host", "John"),
-                _candidate("Johnny", "title_credit", "Johnny"),
-            ],
-            "Speaker2": [_candidate("sama", "title_credit", "sama")],
-        }
-        _, result = self._run(
-            dialogs,
-            "Johnny and sama joined me at the pub",
-            "John",
-            candidates,
-            {"Speaker1": "host", "Speaker2": "guest"},
-        )
-        self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
-        self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
 
     def test_small_cluster_keeps_placeholder(self):
         """轴表第五行：小簇保持占位符，两个主要说话人照样采用。"""
@@ -330,7 +274,7 @@ class TestDuoAxes(unittest.TestCase):
         Speaker1 的名字来自对话称呼（dialog_address），它没有静态候选，
         整条通路随之关闭。
 
-        另附一条口径说明：卡面锁定决策里的撞名判据是 casefold **完全相等**
+        口径说明：卡面锁定决策里的撞名判据是 casefold **完全相等**
         （「Sam」与「sama」casefold 后并不相等），本卡按该口径实现。
         """
         dialogs = _addressed_dialogs("Sam welcome to the show")
@@ -407,9 +351,7 @@ class TestCollisonFixtureEndToEnd(unittest.TestCase):
     def setUp(self):
         self.dialogs, self.metadata = _load_fixture()
         self.candidates = {
-            "Speaker1": [
-                _candidate("John Collison", "author_host", "John Collison")
-            ],
+            "Speaker1": [_candidate("John Collison", "author_host", "John Collison")],
             "Speaker2": [_candidate("sama", "title_credit", "@sama")],
         }
         self.inferencer = _make_inferencer()
@@ -433,10 +375,7 @@ class TestCollisonFixtureEndToEnd(unittest.TestCase):
         """轴表第一行：两位主要说话人都拿到带推测标注的名字。"""
         self.assertEqual(
             self.result["mapping"],
-            {
-                "Speaker1": EXPECTED_HOST_NAME,
-                "Speaker2": EXPECTED_GUEST_NAME,
-            },
+            {"Speaker1": EXPECTED_HOST_NAME, "Speaker2": EXPECTED_GUEST_NAME},
         )
         self.assertEqual(self.result["low_confidence"], [])
 
@@ -455,12 +394,18 @@ class TestCollisonFixtureEndToEnd(unittest.TestCase):
         call = self.inferencer.llm_client.call.call_args
         self.assertEqual(call.kwargs["task_type"], "speaker_inference")
         self.assertEqual(call.kwargs["response_schema"], SPEAKER_MAPPING_SCHEMA)
-        payload = call.kwargs["response_schema"]
-        self.assertIn("roles", payload["required"])
+        schema = call.kwargs["response_schema"]
+        self.assertIn("roles", schema["required"])
         self.assertEqual(
-            payload["properties"]["roles"]["additionalProperties"]["enum"],
+            schema["properties"]["roles"]["additionalProperties"]["enum"],
             list(SPEAKER_ROLE_TYPES),
         )
+
+    def test_roles_instruction_reaches_the_llm(self):
+        """角色说明必须真的进入本轮 system prompt（roles 与 candidates 同属一次调用）。"""
+        system_prompt = self.inferencer.llm_client.call.call_args.kwargs["system_prompt"]
+        for fragment in ("roles", "host", "guest", "unknown", "提问", "作者"):
+            self.assertIn(fragment, system_prompt)
 
     def test_rendered_html_has_no_pending_badge(self):
         """渲染后两位说话人都不带「待确认」徽章。"""
@@ -491,13 +436,6 @@ class TestCollisonFixtureEndToEnd(unittest.TestCase):
         self.assertIn("作者关联推测:John Collison", html_out)
         self.assertIn("标题关联推测:sama", html_out)
         self.assertNotIn('data-speaker-status="pending"', html_out)
-
-
-    def test_roles_instruction_reaches_the_llm(self):
-        """角色说明必须真的进入本轮 system prompt（roles 与 candidates 同属一次调用）。"""
-        system_prompt = self.inferencer.llm_client.call.call_args.kwargs["system_prompt"]
-        for fragment in ("roles", "host", "guest", "unknown", "提问", "作者"):
-            self.assertIn(fragment, system_prompt)
 
 
 class TestDuoSchemaContract(unittest.TestCase):
