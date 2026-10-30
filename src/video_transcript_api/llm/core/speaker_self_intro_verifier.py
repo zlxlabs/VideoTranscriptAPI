@@ -70,6 +70,43 @@ class SpeakerSelfIntroVerifier:
         return parsed
 
 
+def apply_self_intro_review(
+    llm_client: LLMClient,
+    model: str,
+    reasoning_effort: Optional[str],
+    prepared: Sequence[Tuple],
+) -> None:
+    """Pack pending own-sample quotes into one review call and attach verdicts.
+
+    Each ``prepared`` row is
+    ``(speaker, confidence, candidates, verified, rejected, pending)``.
+    ``verified`` and ``rejected`` are mutated in place. No pending rows
+    means the LLM is not called.
+    """
+    pending_items: List[Dict[str, str]] = []
+    refs_by_row: List[List[Tuple[str, Dict[str, Any]]]] = []
+    for row in prepared:
+        refs: List[Tuple[str, Dict[str, Any]]] = []
+        for item in row[5]:
+            item_id = f"si-{len(pending_items)}"
+            pending_items.append(
+                {
+                    "id": item_id,
+                    "name": item["name"],
+                    "quote": item["evidence_quote"],
+                }
+            )
+            refs.append((item_id, item))
+        refs_by_row.append(refs)
+    verdicts: Dict[str, str] = {}
+    if pending_items:
+        verdicts = SpeakerSelfIntroVerifier(
+            llm_client, model, reasoning_effort
+        ).verify(pending_items)
+    for row, refs in zip(prepared, refs_by_row):
+        attach_self_intro_verdicts(refs, verdicts, row[3], row[4])
+
+
 def attach_self_intro_verdicts(
     pending_refs: Sequence[Tuple[str, Dict[str, Any]]],
     verdicts: Dict[str, str],

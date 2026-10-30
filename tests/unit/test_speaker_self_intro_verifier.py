@@ -11,6 +11,7 @@ from video_transcript_api.llm.core.speaker_self_intro_verifier import (
     SELF_INTRO_UNCLEAR,
     SPEAKER_SELF_INTRO_TASK_TYPE,
     SpeakerSelfIntroVerifier,
+    apply_self_intro_review,
 )
 from video_transcript_api.llm.prompts.schemas.speaker_self_intro import (
     SELF_INTRO_CLASSIFICATIONS,
@@ -71,6 +72,18 @@ def speaker_llm_side_effect(
         return response
 
     return fake
+
+
+def install_speaker_llm(inferencer, inference_response, **kwargs):
+    inferencer.llm_client.call = MagicMock(
+        side_effect=speaker_llm_side_effect(inference_response, **kwargs)
+    )
+
+
+def assert_inference_and_review(call_mock):
+    types = [c.kwargs.get("task_type") for c in call_mock.call_args_list]
+    if types.count("speaker_inference") != 1 or types.count("speaker_self_intro") != 1:
+        raise AssertionError("unexpected task_types=%r" % (types,))
 
 
 def _mock_llm(structured_output):
@@ -149,6 +162,22 @@ class TestSelfIntroPromptIsolation(unittest.TestCase):
         self.assertEqual(tuple(enum_values), SELF_INTRO_CLASSIFICATIONS)
 
 
+class TestApplySelfIntroReview(unittest.TestCase):
+    def test_empty_pending_does_not_call_llm(self):
+        llm = MagicMock()
+        verified: list = []
+        rejected: list = []
+        apply_self_intro_review(
+            llm,
+            "test-model",
+            None,
+            [("Speaker1", 0.9, [], verified, rejected, [])],
+        )
+        llm.call.assert_not_called()
+        self.assertEqual(verified, [])
+        self.assertEqual(rejected, [])
+
+
 class TestVerifierCallContract(unittest.TestCase):
     def test_verify_sends_schema_task_type_and_isolated_prompt(self):
         llm_client = MagicMock()
@@ -205,27 +234,32 @@ class TestInferSelfIntroAxes(unittest.TestCase):
             ),
         )
 
-    def test_bob_here_self_introduction_applies(self):
-        inferencer, result = self._own_sample_run("Bob here", "Bob")
-        self.assertEqual(result["mapping"]["Speaker1"], "Bob")
-        self.assertEqual(
-            result["meta"]["Speaker1"]["candidates"][0]["self_intro_verdict"],
-            SELF_INTRO_PASS,
-        )
-        self.assertEqual(inferencer.llm_client.call.call_count, 2)
-
-    def test_third_party_mention_rejected(self):
-        _, result = self._own_sample_run(
-            "John Collison wrote about this",
-            "John Collison",
-            classification="third_party_mention",
-        )
-        self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
-        self.assertEqual(result["meta"]["Speaker1"]["rejection_reason"], "name_not_self_intro")
-        self.assertEqual(
-            result["meta"]["Speaker1"]["candidates"][0]["self_intro_verdict"],
-            "third_party_mention",
-        )
+    def test_own_sample_address_classifications(self):
+        cases = [
+            ("Bob here", "Bob", "self_introduction", True),
+            ("柠姐在这儿", "柠姐", "self_introduction", True),
+            ("John Collison wrote about this", "John Collison", "third_party_mention", False),
+            ("欢迎张三发言", "张三", "addressed_by_other", False),
+        ]
+        for quote, name, classification, is_intro in cases:
+            with self.subTest(quote=quote):
+                inferencer, result = self._own_sample_run(
+                    quote, name, classification=classification
+                )
+                expected = name if is_intro else "说话人1"
+                self.assertEqual(result["mapping"]["Speaker1"], expected)
+                self.assertEqual(result["meta"]["Speaker1"]["applied"], is_intro)
+                self.assertEqual(
+                    result["meta"]["Speaker1"]["candidates"][0]["self_intro_verdict"],
+                    classification,
+                )
+                if not is_intro:
+                    self.assertEqual(
+                        result["meta"]["Speaker1"]["rejection_reason"],
+                        "name_not_self_intro",
+                    )
+                if is_intro:
+                    self.assertEqual(inferencer.llm_client.call.call_count, 2)
 
     def test_missing_or_illegal_classification_is_unclear(self):
         _, missing = self._own_sample_run("Bob here", "Bob", classification=None)

@@ -17,7 +17,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from video_transcript_api.llm.core.speaker_inferencer import SPEAKER_EVIDENCE_RULES_VERSION, SpeakerInferencer
-from tests.unit.test_speaker_self_intro_verifier import speaker_llm_side_effect
+from tests.unit.test_speaker_self_intro_verifier import assert_inference_and_review, install_speaker_llm
 
 
 def _make_dialog(speaker, text, start_time=None):
@@ -715,12 +715,9 @@ class TestConfidenceGating(unittest.TestCase):
 
     def _run_infer(self, speaker_mapping, confidence, candidates=None, threshold=0.6):
         inferencer = _make_inferencer(confidence_threshold=threshold)
-        inferencer.llm_client.call = MagicMock(
-            side_effect=speaker_llm_side_effect(
-                _mock_llm_response(
-                    speaker_mapping, confidence, candidates=candidates
-                )
-            )
+        install_speaker_llm(
+            inferencer,
+            _mock_llm_response(speaker_mapping, confidence, candidates=candidates),
         )
         dialogs = [
             _make_dialog("Speaker1", "hello there，我是张三", start_time=0.0),
@@ -784,9 +781,7 @@ class TestConfidenceGating(unittest.TestCase):
             ),
             "reasoning": "no confidence field at all",
         }
-        inferencer.llm_client.call = MagicMock(
-            side_effect=speaker_llm_side_effect(response)
-        )
+        install_speaker_llm(inferencer, response)
         dialogs = [
             _make_dialog("Speaker1", "hello there，我是张三", start_time=0.0),
             _make_dialog("Speaker2", "hi", start_time=1.0),
@@ -861,16 +856,15 @@ class TestConfidenceGating(unittest.TestCase):
         """The placeholder number must come from the label's own digit (Speaker7 -> 7),
         not from its position in the speakers list (which would be 2nd -> 2)."""
         inferencer = _make_inferencer(confidence_threshold=0.6)
-        inferencer.llm_client.call = MagicMock(
-            side_effect=speaker_llm_side_effect(
-                _mock_llm_response(
+        install_speaker_llm(
+            inferencer,
+            _mock_llm_response(
                     speaker_mapping={"Speaker1": "张三", "Speaker7": "李四"},
                     confidence={"Speaker1": 0.9, "Speaker7": 0.1},
                     candidates=_auto_candidates(
                         {"Speaker1": [("张三", "我是张三")]}
                     ),
                 )
-            )
         )
         dialogs = [
             _make_dialog("Speaker1", "hello，我是张三", start_time=0.0),
@@ -884,16 +878,15 @@ class TestConfidenceGating(unittest.TestCase):
 
     def test_fallback_label_falls_back_to_position_when_no_digit(self):
         inferencer = _make_inferencer(confidence_threshold=0.6)
-        inferencer.llm_client.call = MagicMock(
-            side_effect=speaker_llm_side_effect(
-                _mock_llm_response(
+        install_speaker_llm(
+            inferencer,
+            _mock_llm_response(
                     speaker_mapping={"alpha": "张三", "beta": "李四"},
                     confidence={"alpha": 0.9, "beta": 0.1},
                     candidates=_auto_candidates(
                         {"alpha": [("张三", "我是张三")]}
                     ),
                 )
-            )
         )
         dialogs = [
             _make_dialog("alpha", "hello，我是张三", start_time=0.0),
@@ -907,15 +900,7 @@ class TestConfidenceGating(unittest.TestCase):
 
 
 class TestUnsampledSpeakerIdentityFallback(unittest.TestCase):
-    """A speaker excluded from sampling entirely (global budget, or simply no
-    valid dialog) must keep its ORIGINAL label -- not get downgraded to a
-    "SpeakerN" placeholder. Regression guard: fixing "missing confidence
-    defaults to low" (so a speaker the LLM was asked about but didn't answer
-    for gets downgraded) must not also sweep in speakers the LLM was never
-    asked about at all -- those have zero inference signal and belong to the
-    pre-existing identity-fallback path, not the low-confidence-downgrade
-    path. ci-gate review: "应将未采样标签与 LLM 返回的低置信度猜测区分开，
-    前者保留原标签"."""
+    """Unsampled speakers keep their original label, not a placeholder."""
 
     def test_budget_excluded_speaker_keeps_original_label_not_placeholder(self):
         speakers = ["alpha", "beta", "gamma"]
@@ -952,9 +937,9 @@ class TestUnsampledSpeakerIdentityFallback(unittest.TestCase):
         # The LLM is only ever prompted with "alpha"/"beta" context (gamma
         # was excluded before the prompt was built), so a realistic mock
         # response has no opinion on "gamma" at all.
-        inferencer.llm_client.call = MagicMock(
-            side_effect=speaker_llm_side_effect(
-                _mock_llm_response(
+        install_speaker_llm(
+            inferencer,
+            _mock_llm_response(
                     speaker_mapping={"alpha": "张三", "beta": "李四"},
                     confidence={"alpha": 0.9, "beta": 0.9},
                     candidates=_auto_candidates(
@@ -964,7 +949,6 @@ class TestUnsampledSpeakerIdentityFallback(unittest.TestCase):
                         }
                     ),
                 )
-            )
         )
 
         result = inferencer.infer(speakers=speakers, dialogs=dialogs, title="t")
@@ -985,14 +969,13 @@ class TestUnsampledSpeakerIdentityFallback(unittest.TestCase):
         same call get sampled and sent to the LLM normally. That speaker
         must also keep its original label, not a fabricated placeholder."""
         inferencer = _make_inferencer(confidence_threshold=0.6)
-        inferencer.llm_client.call = MagicMock(
-            side_effect=speaker_llm_side_effect(
-                _mock_llm_response(
+        install_speaker_llm(
+            inferencer,
+            _mock_llm_response(
                     speaker_mapping={"alpha": "张三"},
                     confidence={"alpha": 0.9},
                     candidates=_auto_candidates({"alpha": [("张三", "我是张三")]}),
                 )
-            )
         )
         dialogs = [
             _make_dialog("alpha", "hello there，我是张三", start_time=0.0),
@@ -1019,14 +1002,13 @@ class TestUnsampledSpeakerIdentityFallback(unittest.TestCase):
         cache_manager = MagicMock()
         cache_manager.get_speaker_mapping.return_value = None
         inferencer = _make_inferencer(cache_manager=cache_manager, confidence_threshold=0.6)
-        inferencer.llm_client.call = MagicMock(
-            side_effect=speaker_llm_side_effect(
-                _mock_llm_response(
+        install_speaker_llm(
+            inferencer,
+            _mock_llm_response(
                     speaker_mapping={"alpha": "张三"},
                     confidence={"alpha": 0.9},
                     candidates=_auto_candidates({"alpha": [("张三", "我是张三")]}),
                 )
-            )
         )
         dialogs = [
             _make_dialog("alpha", "hello there，我是张三", start_time=0.0),
@@ -1154,9 +1136,9 @@ class TestCacheCoverageValidation(unittest.TestCase):
         # Legacy flat-dict cache only covers Speaker1; Speaker2 is new this run.
         cache_manager.get_speaker_mapping.return_value = {"Speaker1": "张三"}
         inferencer = _make_inferencer(cache_manager=cache_manager)
-        inferencer.llm_client.call = MagicMock(
-            side_effect=speaker_llm_side_effect(
-                _mock_llm_response(
+        install_speaker_llm(
+            inferencer,
+            _mock_llm_response(
                     speaker_mapping={"Speaker1": "张三", "Speaker2": "李四"},
                     confidence={"Speaker1": 0.9, "Speaker2": 0.9},
                     candidates=_auto_candidates(
@@ -1165,7 +1147,6 @@ class TestCacheCoverageValidation(unittest.TestCase):
                         }
                     ),
                 )
-            )
         )
 
         result = inferencer.infer(
@@ -1179,12 +1160,7 @@ class TestCacheCoverageValidation(unittest.TestCase):
             media_id="m",
         )
 
-        task_types = [
-            call.kwargs.get("task_type")
-            for call in inferencer.llm_client.call.call_args_list
-        ]
-        self.assertEqual(task_types.count("speaker_inference"), 1)
-        self.assertEqual(task_types.count("speaker_self_intro"), 1)
+        assert_inference_and_review(inferencer.llm_client.call)
         self.assertEqual(result["mapping"]["Speaker2"], "李四")
         # Re-inferred result must be persisted back (overwriting the stale cache).
         cache_manager.save_speaker_mapping.assert_called_once()
@@ -1208,16 +1184,15 @@ class TestCacheCoverageValidation(unittest.TestCase):
             "Speaker2": "李四",
         }
         inferencer = _make_inferencer(cache_manager=cache_manager)
-        inferencer.llm_client.call = MagicMock(
-            side_effect=speaker_llm_side_effect(
-                _mock_llm_response(
+        install_speaker_llm(
+            inferencer,
+            _mock_llm_response(
                     speaker_mapping={"Speaker1": "张三", "Speaker2": "王五"},
                     confidence={"Speaker1": 0.95, "Speaker2": 0.3},
                     candidates=_auto_candidates(
                         {"Speaker1": [("张三", "我是张三")]}
                     ),
                 )
-            )
         )
 
         result = inferencer.infer(
@@ -1233,12 +1208,7 @@ class TestCacheCoverageValidation(unittest.TestCase):
 
         # Legacy cache must not short-circuit inference, even though it
         # nominally "covers" both current speakers.
-        task_types = [
-            call.kwargs.get("task_type")
-            for call in inferencer.llm_client.call.call_args_list
-        ]
-        self.assertEqual(task_types.count("speaker_inference"), 1)
-        self.assertEqual(task_types.count("speaker_self_intro"), 1)
+        assert_inference_and_review(inferencer.llm_client.call)
         # Fresh, confidence-aware result -- Speaker2's low confidence (0.3)
         # correctly triggers the downgrade the legacy cache was hiding.
         self.assertEqual(result["mapping"]["Speaker1"], "张三")

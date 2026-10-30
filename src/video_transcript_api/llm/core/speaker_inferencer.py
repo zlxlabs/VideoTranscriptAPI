@@ -17,10 +17,7 @@ from ...utils.logging import setup_logger
 from .llm_client import LLMClient
 from .cache_manager import CacheManager
 from .key_info_extractor import KeyInfo
-from .speaker_self_intro_verifier import (
-    SpeakerSelfIntroVerifier,
-    attach_self_intro_verdicts,
-)
+from .speaker_self_intro_verifier import apply_self_intro_review
 from ..prompts import (
     SPEAKER_INFERENCE_SYSTEM_PROMPT,
     build_speaker_inference_user_prompt,
@@ -33,12 +30,8 @@ from ..prompts.schemas.speaker_mapping import (
 
 logger = setup_logger(__name__)
 
-# 证据裁决规则版本（card-vta-261015-speaker-evidence）。纳入 input_fingerprint：
-# 裁决规则升级后旧缓存自然失效重算，不会用旧规则的 mapping 冒充新规则的产物。
-# 唯一定义处，与 SpeakerInferencer.input_fingerprint 同文件维护。
-# v2 = 证据裁决；v3 = 推测标注；v4 = 平台先验与第三人提及旁证；
-# v5 = 静态证据绑定候选名、本人样本仅接受自我介绍；
-# v6 = 本人样本自我介绍改由独立 LLM 复核，不再用正则句式。旧缓存经指纹失效。
+# 证据裁决规则版本，纳入 input_fingerprint；升级后旧缓存失效重算。
+# 唯一定义处。v2-v5 见历史；v6 = 本人样本自我介绍改由独立 LLM 复核。
 SPEAKER_EVIDENCE_RULES_VERSION = 6
 
 
@@ -1221,12 +1214,7 @@ class SpeakerInferencer:
         *,
         dialog_sources: Dict[str, str],
     ) -> Tuple[List[Dict], List[str], List[Dict]]:
-        """核对引用、名字绑定，并标出需要独立复核的本人样本候选。
-
-        dialog_sources 保存同一采样组中的原始上下文和本人样本文本。
-        出场前他人发言与旁证条目仍直接通过；只出现在本人样本里的
-        dialog_address 进入 pending，交给独立复核调用分类。
-        """
+        """核对引用与名字绑定；本人样本 dialog_address 放入 pending 待复核。"""
         verified: List[Dict] = []
         rejected: List[str] = []
         pending: List[Dict] = []
@@ -1375,16 +1363,12 @@ class SpeakerInferencer:
     ) -> Dict:
         """按核对通过的证据裁决显示名；confidence 只记录到 meta。
 
-        dialog_sections_by_speaker 按 speaker 保存 context_before 和 own_samples
-        原文。出场上下文中的他人称呼与程序核实的呼叫-回应旁证可直接采用；
-        只出现在本人样本里的 dialog_address 交给独立复核调用分类。
-        静态行不受对话分区影响。每次 infer 最多一次复核调用。
+        本人样本 dialog_address 经 apply_self_intro_review 一次打包复核。
         """
         mapping: Dict[str, str] = {}
         meta: Dict[str, Dict] = {}
         low_confidence: List[str] = []
         prepared: List[Tuple] = []
-        pending_items: List[Dict[str, str]] = []
 
         for speaker in speakers:
             was_sampled = True if sampled is None else sampled.get(speaker, True)
@@ -1420,29 +1404,15 @@ class SpeakerInferencer:
                 corroboration_entries=(corroboration_by_speaker or {}).get(speaker),
                 dialog_sources=dialog_sources,
             )
-            pending_refs = []
-            for item in pending:
-                item_id = f"si-{len(pending_items)}"
-                pending_items.append(
-                    {
-                        "id": item_id,
-                        "name": item["name"],
-                        "quote": item["evidence_quote"],
-                    }
-                )
-                pending_refs.append((item_id, item))
             prepared.append(
-                (speaker, confidence, candidates, verified, rejected, pending_refs)
+                (speaker, confidence, candidates, verified, rejected, pending)
             )
 
-        verdicts: Dict[str, str] = {}
-        if pending_items:
-            verdicts = SpeakerSelfIntroVerifier(
-                self.llm_client, self.model, self.reasoning_effort
-            ).verify(pending_items)
+        apply_self_intro_review(
+            self.llm_client, self.model, self.reasoning_effort, prepared
+        )
 
-        for speaker, confidence, candidates, verified, rejected, pending_refs in prepared:
-            attach_self_intro_verdicts(pending_refs, verdicts, verified, rejected)
+        for speaker, confidence, candidates, verified, rejected, _pending in prepared:
             display_name, reason = self._decide_display_name(verified, speaker, speakers)
             inferred_name = raw_mapping.get(speaker, speaker)
 
@@ -1505,21 +1475,10 @@ class SpeakerInferencer:
         return f"说话人{n}"
 
     def _identity_fallback(self, speakers: List[str]) -> Dict:
-        """无法推断时的兜底：所有说话人使用原始标签，标记为未采信
+        """无法推断时的兜底：所有说话人使用原始标签，标记为未采信。
 
-        meta 里附带 "sampled": False，与 _apply_confidence_gate 的同名字段
-        保持形状一致——虽然这两条路径的结果目前都不会被写入缓存（调用方
-        没有传 platform/media_id 走到这里，或者是异常兜底），但形状统一
-        能避免未来读取 meta 的代码要额外处理"某些路径没有这个 key"。
-
-        统一在这里标记 "source": "identity_fallback"（本地 codex review
-        第 6 轮 G4），而不是让 infer() 的每个调用点各自补一遍：这个方法是
-        speakers 为空、allow_llm=False、无有效采样样本、LLM 调用异常这
-        四条路径唯一共用的出口，集中标记既不遗漏也不会几处代码各写一遍、
-        将来漂移。调用方（llm_ops._refresh_speaker_names_in_existing_
-        structured_artifact）据此拒绝用这类没有真实推断依据的结果覆盖既有
-        展示产物——尤其是"LLM 调用异常"这条路径，瞬时故障不该把已经展示的
-        真名替换成占位符。
+        meta 带 sampled=False，与 confidence gate 同形。source 固定为
+        identity_fallback，供调用方拒绝用无真实推断的结果覆盖已有产物。
         """
         return {
             "mapping": {speaker: speaker for speaker in speakers},

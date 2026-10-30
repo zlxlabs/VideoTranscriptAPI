@@ -10,7 +10,7 @@ from video_transcript_api.llm.core.speaker_inferencer import (
     SPEAKER_EVIDENCE_RULES_VERSION,
     SpeakerInferencer,
 )
-from tests.unit.test_speaker_self_intro_verifier import speaker_llm_side_effect
+from tests.unit.test_speaker_self_intro_verifier import install_speaker_llm
 
 FIXTURE_PATH = (
     Path(__file__).parent.parent
@@ -61,20 +61,19 @@ def _run_infer_with(candidates, confidence, dialogs=None, speakers=None, title=F
     dialogs = dialogs if dialogs is not None else _load_fixture_dialogs()
     speakers = speakers if speakers is not None else ["Speaker1", "Speaker2"]
     inferencer = _make_inferencer()
-    inferencer.llm_client.call = MagicMock(
-        side_effect=speaker_llm_side_effect(
-            _mock_llm(
-                {
-                    "speaker_mapping": {
-                        "Speaker1": "林晚风",
-                        "Speaker2": "柠姐",
-                    },
-                    "confidence": confidence,
-                    "candidates": candidates,
-                    "reasoning": "mock",
-                }
-            )
-        )
+    install_speaker_llm(
+        inferencer,
+        _mock_llm(
+            {
+                "speaker_mapping": {
+                    "Speaker1": "林晚风",
+                    "Speaker2": "柠姐",
+                },
+                "confidence": confidence,
+                "candidates": candidates,
+                "reasoning": "mock",
+            }
+        ),
     )
     result = inferencer.infer(
         speakers=speakers,
@@ -186,44 +185,6 @@ class TestRealFixtureEvidenceGate(unittest.TestCase):
         verified = result["meta"]["Speaker2"]["verified_candidates"]
         self.assertEqual([candidate["name"] for candidate in verified], ["柠姐"])
         self.assertEqual(result["mapping"]["Speaker2"], "柠姐")
-
-    def test_own_sample_address_requires_self_introduction(self):
-        cases = [
-            ("Bob here", "Bob", "self_introduction", True),
-            ("柠姐在这儿", "柠姐", "self_introduction", True),
-            ("John Collison wrote about this", "John Collison", "third_party_mention", False),
-            ("欢迎张三发言", "张三", "addressed_by_other", False),
-        ]
-        for quote, name, classification, is_intro in cases:
-            with self.subTest(quote=quote):
-                inferencer = _make_inferencer()
-                candidates = {"Speaker1": [_candidate(name, "dialog_address", quote)]}
-                inferencer.llm_client.call = MagicMock(
-                    side_effect=speaker_llm_side_effect(
-                        _mock_llm(
-                            {
-                                "speaker_mapping": {"Speaker1": name},
-                                "confidence": {"Speaker1": 0.0},
-                                "candidates": candidates,
-                                "reasoning": "mock",
-                            }
-                        ),
-                        classification=classification,
-                    )
-                )
-                result = inferencer.infer(
-                    speakers=["Speaker1"],
-                    dialogs=[{"speaker": "Speaker1", "text": quote}],
-                    title=FIXTURE_TITLE,
-                    author=FIXTURE_AUTHOR,
-                    description=FIXTURE_DESCRIPTION,
-                )
-                meta = result["meta"]["Speaker1"]
-                self.assertEqual(result["mapping"]["Speaker1"], name if is_intro else "说话人1")
-                self.assertEqual(meta["applied"], is_intro)
-                self.assertEqual(meta["candidates"][0]["self_intro_verdict"], classification)
-                if not is_intro:
-                    self.assertEqual(meta["rejection_reason"], "name_not_self_intro")
 
     def test_forged_quote_rejected_to_placeholder(self):
         """不在输入中的引用作废并降级。"""
@@ -489,16 +450,14 @@ class TestMetadataChangeMissesCache(unittest.TestCase):
 
         def fake_llm_call(**kwargs):
             calls["n"] += 1
-            return speaker_llm_side_effect(
-                _mock_llm(
-                    {
-                        "speaker_mapping": {"Speaker1": "林晚风", "Speaker2": "柠姐"},
-                        "confidence": {"Speaker1": 0.9, "Speaker2": 0.9},
-                        "candidates": {},
-                        "reasoning": "mock",
-                    }
-                )
-            )(**kwargs)
+            return _mock_llm(
+                {
+                    "speaker_mapping": {"Speaker1": "林晚风", "Speaker2": "柠姐"},
+                    "confidence": {"Speaker1": 0.9, "Speaker2": 0.9},
+                    "candidates": {},
+                    "reasoning": "mock",
+                }
+            )
 
         inferencer.llm_client.call = MagicMock(side_effect=fake_llm_call)
         return inferencer, cache, calls
