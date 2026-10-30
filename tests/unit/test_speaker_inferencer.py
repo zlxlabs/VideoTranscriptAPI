@@ -1069,8 +1069,8 @@ class TestUnsampledSpeakerIdentityFallback(unittest.TestCase):
 class TestCacheCoverageValidation(unittest.TestCase):
     """Cached mapping must cover the current speaker set to be reused."""
 
-    def test_evidence_rules_version_bumped_to_7(self):
-        self.assertEqual(SPEAKER_EVIDENCE_RULES_VERSION, 7)
+    def test_evidence_rules_version_bumped_to_8(self):
+        self.assertEqual(SPEAKER_EVIDENCE_RULES_VERSION, 8)
 
     def test_cache_hit_when_covers_current_speakers(self):
         cache_manager = MagicMock()

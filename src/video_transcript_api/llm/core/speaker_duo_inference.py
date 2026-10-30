@@ -11,10 +11,14 @@ guest / unknown）与核对通过的静态候选名；任何一条前提不成�
 说话人保持现行结果（占位符 + 原拒绝原因）。
 
 前提（全部 fail-closed）：主要说话人恰好两个（按 base dialogs 的发言条数占比，
-各 ≥15%、两人合计 ≥80%）；两位主要说话人各有 ≥1 条核对通过的静态候选
-（title_credit / author_host）；两人用到的名字按 casefold 后恰好两个不同名字；
-标题里的 @ 提及不超过一个；roles 里两人恰好一个 host、一个 guest；定出的名字
-不与另一位说话人已采用的名字相同（casefold）。
+各 ≥15%、两人合计 ≥80%）；两位主要说话人至少一位有 ≥1 条核对通过的静态候选
+（title_credit / author_host），有候选者的候选名按 casefold 后恰好一个；双边
+（两人都有候选）时两个名字必须不同；单边（只有一位有候选）时该候选的来源
+必须与角色一致（author_host 只能给 host，title_credit 只能给 guest）；只有当
+某位说话人实际采用的 title_credit 候选名字来自标题里的账号（quote 里以
+``@名字`` 形式出现）时，标题里其余 @ 提及才计数，计数 ≥1 就关闭；roles 里
+两人恰好一个 host、一个 guest；定出的名字不与另一位说话人已采用的名字相同
+（casefold）。单边命名只给有候选的那位定名，另一位保持现行结果。
 
 显示名沿用现行复合名的措辞：``{说话人N}｜标题关联推测:{name}`` /
 ``{说话人N}｜作者关联推测:{name}``——推测属性必须就地可见，禁止裸名。
@@ -126,9 +130,30 @@ def _static_candidates(meta_entry: Any) -> List[Dict]:
     ]
 
 
-def _mention_count(title: str) -> int:
-    """标题里的 @ 提及个数；提及其以上时无法确定谁是嘉宾。"""
-    return len(re.findall(r"@\w+", str(title or "")))
+def _is_account_named(candidate: Dict) -> bool:
+    """候选名是否来自账号：quote 里该名字以 ``@名字`` 形式出现。"""
+    name = str(candidate.get("name") or "").strip()
+    quote = str(candidate.get("evidence_quote") or "")
+    if not name:
+        return False
+    return re.search("@" + re.escape(name), quote, re.IGNORECASE) is not None
+
+
+def _extra_at_mentions(title: str, account_name: str) -> int:
+    """标题里除账号本名之外的 @ 提及个数；≥1 时无法确认谁是嘉宾。"""
+    own = account_name.strip().casefold()
+    mentions = re.findall(r"@(\w+)", str(title or ""))
+    return sum(1 for mention in mentions if mention.casefold() != own)
+
+
+def _role_consistent_candidate(candidates: List[Dict], role: str) -> Optional[Dict]:
+    """单边命名时的来源与角色一致性：author_host 只能给 host，title_credit
+    只能给 guest；两类都有时取与角色一致的那类，不一致返回 None（关闭）。"""
+    preferred = "author_host" if role == ROLE_HOST else "title_credit"
+    for candidate in candidates:
+        if candidate.get("evidence_type") == preferred:
+            return candidate
+    return None
 
 
 def _pick_candidate(candidates: List[Dict], role: str) -> Dict:
@@ -195,33 +220,54 @@ def plan_duo_names(
     role_by_speaker = _resolve_roles(roles, primary)
     if role_by_speaker is None:
         return {}
-    if _mention_count(title) > 1:
-        return {}
 
     candidates_by_speaker: Dict[str, List[Dict]] = {}
-    distinct_names: List[str] = []
+    name_by_speaker: Dict[str, str] = {}
     for speaker in primary:
         candidates = _static_candidates(meta.get(speaker))
         names = {candidate["name"].strip().casefold() for candidate in candidates}
-        if len(names) != 1:
-            # 没有静态候选，或同一人名下挂了 ≥2 个不同名字：分不清是谁。
+        if len(names) > 1:
+            # 同一人名下挂了 ≥2 个不同名字：分不清是谁。
             return {}
         candidates_by_speaker[speaker] = candidates
-        distinct_names.append(next(iter(names)))
-    if distinct_names[0] == distinct_names[1]:
+        if len(names) == 1:
+            name_by_speaker[speaker] = next(iter(names))
+    if not name_by_speaker:
+        return {}
+    if len(name_by_speaker) == 2 and name_by_speaker[primary[0]] == name_by_speaker[primary[1]]:
         return {}
 
+    solo = len(name_by_speaker) == 1
     plan: Dict[str, Tuple[str, str]] = {}
     for speaker in primary:
         entry = meta.get(speaker)
         if not isinstance(entry, dict) or entry.get("applied"):
             # 现行规则已能定名的人保持现行结果，本通路不插手。
             continue
+        if speaker not in name_by_speaker:
+            # 单边命名：只给有核对通过静态候选的那位定名，另一位保持现行结果。
+            continue
         role = role_by_speaker[speaker]
-        candidate = _pick_candidate(candidates_by_speaker[speaker], role)
+        candidates = candidates_by_speaker[speaker]
+        candidate = (
+            _role_consistent_candidate(candidates, role)
+            if solo
+            else _pick_candidate(candidates, role)
+        )
+        if candidate is None:
+            # 单边且来源与角色不一致：author_host 只能给 host，title_credit
+            # 只能给 guest，判错方向比不显示名字更糟。
+            return {}
         name = candidate["name"].strip()
         if name.casefold() in _adopted_names(meta, mapping, speaker):
             # 与另一位说话人已采用的名字撞名：整条通路关闭。
+            return {}
+        if (
+            candidate.get("evidence_type") == "title_credit"
+            and _is_account_named(candidate)
+            and _extra_at_mentions(title, name) >= 1
+        ):
+            # 名字来自标题里的账号：标题若还 @ 了别人，无法确认谁是嘉宾。
             return {}
         label = _fallback_label(speaker, speakers)
         marker = _MARKERS[candidate["evidence_type"]]
