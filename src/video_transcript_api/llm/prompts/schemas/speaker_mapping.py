@@ -14,6 +14,17 @@ speaker_mapping/confidence 外，必须为每个说话人给出候选名列表�
 # confidence-gate 产物）与 v2，指纹不匹配时自然 miss。
 SPEAKER_MAPPING_SCHEMA_VERSION = 2
 
+# 角色域值。程序侧 fail-closed：域值之外（含 unknown）的角色一律按
+# 「角色未定」处理，两人通路随之关闭。
+# - host：主持人（提问/引导方）
+# - guest：被访谈嘉宾
+# - unknown：分不清时的诚实答案
+SPEAKER_ROLE_TYPES = (
+    "host",
+    "guest",
+    "unknown",
+)
+
 # 证据类型域值。程序侧 fail-closed：域值之外的 evidence_type 一律作废。
 # - dialog_address：对话内他人称呼/自我介绍（单证据即可 applied）
 # - title_credit：标题专场名（须另有 dialog_address 佐证才 applied）
@@ -77,11 +88,23 @@ SPEAKER_MAPPING_SCHEMA = {
                 },
             },
         },
+        "roles": {
+            "type": "object",
+            "description": (
+                "每个说话人的角色判断：host=主持人（提问与引导方），"
+                "guest=被访谈嘉宾，unknown=分不清时的诚实答案；"
+                "判断依据只有对话内容，发布账号（作者）不一定是主持人"
+            ),
+            "additionalProperties": {
+                "type": "string",
+                "enum": list(SPEAKER_ROLE_TYPES),
+            },
+        },
         "reasoning": {
             "type": "string",
             "description": "推断依据说明"
         }
     },
-    "required": ["speaker_mapping", "confidence", "candidates", "reasoning"],
+    "required": ["speaker_mapping", "confidence", "candidates", "roles", "reasoning"],
     "additionalProperties": False
 }

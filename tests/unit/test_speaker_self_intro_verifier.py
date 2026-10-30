@@ -114,6 +114,7 @@ def _inference_output(candidates, confidence, mapping=None, reasoning="first-rou
             "speaker_mapping": mapping,
             "confidence": confidence,
             "candidates": candidates,
+            "roles": {speaker: "unknown" for speaker in candidates},
             "reasoning": reasoning,
         }
     )

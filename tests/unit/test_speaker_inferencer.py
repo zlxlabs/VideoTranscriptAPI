@@ -7,9 +7,8 @@ Covers the "per-speaker sampling + confidence downgrade" refactor:
 - Evidence rules, not the model's confidence, decide whether names are applied.
 - Legacy confidence-only caches are re-inferred; cache hits must cover every speaker.
 - Prompt sample groups are ordered by first-appearance time.
-- The prompt's raw speaker-label list ("original_speakers") is cropped to
-  the speakers that survive the global sample budget, so it can't blow up
-  the prompt on its own when diarization produces thousands of labels.
+- The prompt's raw speaker-label list ("original_speakers") is cropped to the
+  speakers surviving the global sample budget, so it can't blow up the prompt.
 """
 
 import time
@@ -40,6 +39,8 @@ def _mock_llm_response(speaker_mapping, confidence, reasoning="because", candida
     structured = {
         "speaker_mapping": speaker_mapping,
         "confidence": confidence,
+        # schema 起 roles 必填；本文件的用例只需要现行闸门结果，角色一律 unknown。
+        "roles": {label: "unknown" for label in speaker_mapping},
         "reasoning": reasoning,
     }
     if candidates is not None:
@@ -51,8 +52,7 @@ def _mock_llm_response(speaker_mapping, confidence, reasoning="because", candida
 def _auto_candidates(mapping_quotes):
     """按 {label: [(name, quote), ...]} 快速构造通过核对的 dialog_address 候选。
 
-    quote 必须是该 label 采样文本的逐字子串，且必须包含 name 本身
-    （gate 修复轮第 4 轮名字绑定判据；调用方负责）。
+    quote 必须是该 label 采样文本的逐字子串，且必须包含 name 本身（调用方负责）。
     """
     return {
         label: [
@@ -1069,8 +1069,8 @@ class TestUnsampledSpeakerIdentityFallback(unittest.TestCase):
 class TestCacheCoverageValidation(unittest.TestCase):
     """Cached mapping must cover the current speaker set to be reused."""
 
-    def test_evidence_rules_version_bumped_to_6(self):
-        self.assertEqual(SPEAKER_EVIDENCE_RULES_VERSION, 6)
+    def test_evidence_rules_version_bumped_to_7(self):
+        self.assertEqual(SPEAKER_EVIDENCE_RULES_VERSION, 7)
 
     def test_cache_hit_when_covers_current_speakers(self):
         cache_manager = MagicMock()
