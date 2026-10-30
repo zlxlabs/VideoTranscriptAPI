@@ -17,7 +17,7 @@ def _dialogs():
     # 包含候选名本身，候选引用取此处的逐字子串。
     return [
         {"speaker": "Speaker1", "text": "Hello, I'm Alice", "start_time": 0.0},
-        {"speaker": "Speaker2", "text": "World, Bob here", "start_time": 1.0},
+        {"speaker": "Speaker2", "text": "World, I'm Bob here", "start_time": 1.0},
     ]
 
 
@@ -505,7 +505,7 @@ def test_deep_malformed_artifact_falls_back_to_real_inference_not_a_task_failure
                 {"name": "Alice", "evidence_type": "dialog_address", "evidence_quote": "I'm Alice"}
             ],
             "Speaker2": [
-                {"name": "Bob", "evidence_type": "dialog_address", "evidence_quote": "Bob here"}
+                {"name": "Bob", "evidence_type": "dialog_address", "evidence_quote": "I'm Bob here"}
             ],
         },
     })
@@ -778,7 +778,7 @@ def test_infer_speaker_names_alone_still_calls_llm_for_name_inference(tmp_path):
                         {"name": "Alice", "evidence_type": "dialog_address", "evidence_quote": "I'm Alice"}
                     ],
                     "Speaker2": [
-                        {"name": "Bob", "evidence_type": "dialog_address", "evidence_quote": "Bob here"}
+                        {"name": "Bob", "evidence_type": "dialog_address", "evidence_quote": "I'm Bob here"}
                     ],
                 },
             })

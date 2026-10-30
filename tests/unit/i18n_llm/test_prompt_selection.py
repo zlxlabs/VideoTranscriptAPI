@@ -68,10 +68,27 @@ def _git_show(path: str) -> bytes:
     )
 
 
-def test_chinese_prompt_module_matches_base_byte_for_byte():
-    """Chinese prompt constants stay in prompts/__init__.py and must not drift."""
+def test_chinese_prompt_module_matches_base_except_speaker_evidence_definitions():
+    baseline = _git_show(CHINESE_PROMPT_MODULE)
+    changes = (
+        (
+            "- `dialog_address`：对话内其他人对该说话人的称呼，或该说话人的自我介绍。最强的证据，单条核对通过即可被采用为显示名。引用可来自：该说话人本人片段/出场上下文，或第三人提及旁证区中呼叫对象为该说话人的句子（旁证句的呼叫-回应关系已由程序核实，采用时程序会在 meta 里记录来源说话人与段号）。",
+            "- `dialog_address`：对话内其他人对该说话人的称呼，或本人明确自我介绍。最强证据，单条核对通过即可采用。引用可来自出场前他人发言或第三人提及旁证；本人发言中仅提及姓名不算称呼，只有符合自我介绍句式才算证据。旁证句的呼叫-回应关系已由程序核实，采用时会记录来源说话人与段号。",
+        ),
+        (
+            "- `title_credit`：视频标题/专场名/作者名。仅当另有该说话人的 `dialog_address` 佐证（表明该说话人是专场主角/主持人）时才会被采用；标题名与对话称呼是否同一人属于推测，采用时显示名会保留原始说话人编号并以「标题关联推测」等标注形式同时带上两条来源名。",
+            "- `title_credit`：视频标题/专场名。引用必须来自标题。仅当另有该说话人的 `dialog_address` 佐证时才会被采用；标题名与对话称呼是否同一人属于推测，采用时显示名会保留原始说话人编号并以「标题关联推测」标注两条来源名。",
+        ),
+        (
+            "- `author_host`：作者署名即主持人身份。与 `title_credit` 同规则。",
+            "- `author_host`：发布账号的署名。署名不等于出镜者或主持人，转载、搬运、剪辑账号尤其如此。仅当另有该说话人的 `dialog_address` 佐证时才会被采用；采用时以「作者关联推测」标注两条来源名。",
+        ),
+    )
+    for old, new in changes:
+        assert baseline.count(old.encode()) == 1
+        baseline = baseline.replace(old.encode(), new.encode(), 1)
     current = (PROJECT_ROOT / CHINESE_PROMPT_MODULE).read_bytes()
-    assert current == _git_show(CHINESE_PROMPT_MODULE)
+    assert current == baseline
 
 
 def test_chinese_summary_builder_matches_base_when_language_is_zh_cn(language_config):
