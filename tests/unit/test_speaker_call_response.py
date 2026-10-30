@@ -389,6 +389,7 @@ class TestCorroborationVerify(unittest.TestCase):
             [_candidate("江哥", "dialog_address", CALL_QUOTE_1)],
             quote_sections={"dialog_address": "[Speaker1]（本人片段，不含旁证句）"},
             corroboration_entries=self._entries(),
+            dialog_sources={"context_before": "", "own_samples": ""},
         )
         self.assertEqual(rejected, [])
         self.assertEqual(len(verified), 1)
@@ -396,44 +397,43 @@ class TestCorroborationVerify(unittest.TestCase):
         self.assertEqual(verified[0]["corroboration"]["segment_index"], 1)
 
     def test_other_speaker_corroboration_entry_rejected(self):
-        """quote 只在他人的旁证条目里（错误目标）→ quote_missing。"""
         verified, rejected = SpeakerInferencer._verify_candidates(
             [_candidate("江哥", "dialog_address", WRONG_TARGET_QUOTE)],
             quote_sections={"dialog_address": "[Speaker1]（本人片段，不含旁证句）"},
             corroboration_entries=self._entries(),
+            dialog_sources={"context_before": "", "own_samples": ""},
         )
         self.assertEqual(verified, [])
         self.assertEqual(rejected, ["quote_missing"])
 
     def test_corroboration_name_not_in_quote_rejected(self):
-        """旁证路径同样执行 name-in-quote 判据：quote 不含候选名 → 作废。"""
         verified, rejected = SpeakerInferencer._verify_candidates(
             [_candidate("林知遥", "dialog_address", CALL_QUOTE_1)],
             quote_sections={"dialog_address": "[Speaker1]（本人片段，不含旁证句）"},
             corroboration_entries=self._entries(),
+            dialog_sources={"context_before": "", "own_samples": ""},
         )
         self.assertEqual(verified, [])
         self.assertEqual(rejected, ["name_not_in_quote"])
 
     def test_own_section_quote_still_takes_priority(self):
-        """本人片段路径优先且不带 corroboration meta（既有行为不变）。"""
-        own_section = f"[Speaker1]: {CALL_QUOTE_1}"
+        own_quote = "我是江哥"
         verified, rejected = SpeakerInferencer._verify_candidates(
-            [_candidate("江哥", "dialog_address", CALL_QUOTE_1)],
-            quote_sections={"dialog_address": own_section},
-            corroboration_entries=self._entries(),
+            [_candidate("江哥", "dialog_address", own_quote)],
+            quote_sections={"dialog_address": own_quote},
+            corroboration_entries=[{"speaker": "Guest", "text": own_quote}],
+            dialog_sources={"context_before": "", "own_samples": own_quote},
         )
         self.assertEqual(rejected, [])
         self.assertEqual(len(verified), 1)
         self.assertNotIn("corroboration", verified[0])
 
     def test_non_dialog_type_has_no_corroboration_channel(self):
-        """旁证通道只对 dialog_address 开放：静态行 quote 不在自身分区时
-        不允许借旁证条目通过。"""
         verified, rejected = SpeakerInferencer._verify_candidates(
             [_candidate("江哥", "title_credit", CALL_QUOTE_1)],
             quote_sections={"title_credit": "- 标题：某标题", "dialog_address": ""},
             corroboration_entries=self._entries(),
+            dialog_sources={"context_before": "", "own_samples": ""},
         )
         self.assertEqual(verified, [])
         self.assertEqual(rejected, ["quote_missing"])

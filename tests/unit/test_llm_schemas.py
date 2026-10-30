@@ -510,8 +510,8 @@ class TestSystemPromptConstants:
     def test_unified_validation_system_prompt_not_empty(self):
         assert len(UNIFIED_VALIDATION_SYSTEM_PROMPT) > 50
 
-    def test_speaker_inference_system_prompt_not_empty(self):
-        assert len(SPEAKER_INFERENCE_SYSTEM_PROMPT) > 50
+    def test_speaker_inference_system_prompt_evidence_definitions(self):
+        assert all(text in SPEAKER_INFERENCE_SYSTEM_PROMPT for text in ("视频标题/专场名。", "发布账号的署名。署名不等于出镜者或主持人", "转载、搬运、剪辑账号尤其如此", "本人发言中仅提及姓名不算称呼"))
 
     def test_key_info_system_prompt_not_empty(self):
         assert len(KEY_INFO_SYSTEM_PROMPT) > 50

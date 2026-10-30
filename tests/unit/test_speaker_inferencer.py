@@ -4,12 +4,8 @@ cache coverage validation, and prompt group rendering.
 Covers the "per-speaker sampling + confidence downgrade" refactor:
 - Late-appearing speakers still get sampled with first-appearance context.
 - Per-speaker sample count / char caps are enforced.
-- Low-confidence mappings are downgraded to a placeholder label ("SpeakerN"),
-  not applied as a real name.
-- Missing/malformed confidence defaults to 0.0 (low confidence, downgraded).
-- Cache is only reused when it covers the current speaker set AND carries
-  real confidence data; legacy (flat dict, pre-confidence-gating) cache
-  format is treated as unusable and forces re-inference (ci-gate review).
+- Evidence rules, not the model's confidence, decide whether names are applied.
+- Legacy confidence-only caches are re-inferred; cache hits must cover every speaker.
 - Prompt sample groups are ordered by first-appearance time.
 - The prompt's raw speaker-label list ("original_speakers") is cropped to
   the speakers that survive the global sample budget, so it can't blow up
@@ -20,7 +16,7 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from video_transcript_api.llm.core.speaker_inferencer import SpeakerInferencer
+from video_transcript_api.llm.core.speaker_inferencer import SPEAKER_EVIDENCE_RULES_VERSION, SpeakerInferencer
 
 
 def _make_dialog(speaker, text, start_time=None):
@@ -1075,6 +1071,9 @@ class TestUnsampledSpeakerIdentityFallback(unittest.TestCase):
 
 class TestCacheCoverageValidation(unittest.TestCase):
     """Cached mapping must cover the current speaker set to be reused."""
+
+    def test_evidence_rules_version_bumped_to_5(self):
+        self.assertEqual(SPEAKER_EVIDENCE_RULES_VERSION, 5)
 
     def test_cache_hit_when_covers_current_speakers(self):
         cache_manager = MagicMock()

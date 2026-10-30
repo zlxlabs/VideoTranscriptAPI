@@ -32,13 +32,9 @@ logger = setup_logger(__name__)
 # 证据裁决规则版本（card-vta-261015-speaker-evidence）。纳入 input_fingerprint：
 # 裁决规则升级后旧缓存自然失效重算，不会用旧规则的 mapping 冒充新规则的产物。
 # 唯一定义处，与 SpeakerInferencer.input_fingerprint 同文件维护。
-# v2 = 证据裁决上线；v3 = 复合显示名带「推测」标注（gate 修复轮第 3 轮：
-# 标题名与对话称呼是否同一人属模型推测，mapping 值必须就地自证推测属性，
-# 含原始说话人编号 + 推测标注 + 两条来源名）；v4 = 平台先验段 + 第三人提及
-# 旁证区（gate 修复轮第 5 轮：prompt 新增 twitter_space 平台背景先验、采样
-# 阶段新增呼叫-回应旁证收集与 dialog_address 旁证引用判据）。显示格式与
-# 证据可达性都属于裁决规则的一部分，bump 版本让旧格式缓存经指纹自然失效重算。
-SPEAKER_EVIDENCE_RULES_VERSION = 4
+# v2 = 证据裁决；v3 = 推测标注；v4 = 平台先验与第三人提及旁证；
+# v5 = 静态证据绑定候选名、本人样本仅接受自我介绍。旧缓存经指纹失效。
+SPEAKER_EVIDENCE_RULES_VERSION = 5
 
 
 def build_speaker_risk_flags(
@@ -498,24 +494,20 @@ class SpeakerInferencer:
             platform=platform,
             corroboration_snippets=corroboration_snippets,
         )
-        # quote 核对分区（gate 审查修复②）：与 user_prompt 同参同源构建，
-        # 核对收窄到 evidence_type 对应分区，防止「仅出现在描述参会名单里的
-        # 名字被误标为 dialog_address」的绕行。
+        # Metadata sections share the prompt builder; dialog sources below split
+        # the same sampled text by context_before versus own_samples.
         quote_sections = build_speaker_quote_sections(
             video_title=title,
             author=author,
             description=description,
             context_snippets=context_snippets,
         )
-        # gate 修复轮第 2 轮（correctness-speaker-evidence-quote-scope·跨说话人
-        # 借用）：dialog_address 的核对对象从「全部说话人片段拼接的转录区」
-        # 收窄到「该说话人自己的采样片段与出场上下文」。per-speaker 片段由
-        # _render_speaker_segment 渲染——与拼进 prompt 的 context_snippets 是
-        # 同一份渲染逻辑（"\n\n".join 不改片段内容），逐字同源；其他说话人
-        # 文本中的称呼不构成该说话人的 dialog_address 证据（fixture 上
-        # Speaker1 片段里的「黄兰姐」不能让它冒领 Speaker2 的「兰姐」称呼）。
+        # Keep raw evidence sources separate; prompt rendering remains unchanged.
         dialog_sections_by_speaker = {
-            speaker: self._render_speaker_segment(speaker, info)
+            speaker: {
+                "context_before": "\n".join(text for _, text in info["context_before"]),
+                "own_samples": "\n".join(info["own_samples"]),
+            }
             for speaker, info in sample_groups.items()
         }
 
@@ -1221,43 +1213,18 @@ class SpeakerInferencer:
         candidates,
         quote_sections: Optional[Dict[str, str]] = None,
         corroboration_entries: Optional[List[Dict]] = None,
+        *,
+        dialog_sources: Dict[str, str],
     ) -> Tuple[List[Dict], List[str]]:
-        """逐条核对 LLM 候选的引用，返回 (核对通过的候选, 作废原因列表)。
+        """核对引用、名字绑定与本人样本自我介绍。
 
-        核对规则（fail-closed，任一不满足即作废）：
-        - name 非空字符串
-        - evidence_type 在域值内（SPEAKER_EVIDENCE_TYPES），域外类型一律作废
-        - evidence_quote 含实质内容：去首尾空白后长度 >= 2 且至少含一个
-          字母/数字/汉字（isalnum 语义）——纯空白/纯标点（全角空格、中文
-          引号、单个逗号等）即使逐字存在于输入中也无证据价值
-          （gate 审查修复①：correctness-whitespace-evidence-quote）
-        - evidence_quote 逐字存在于其 evidence_type 对应分区（
-          build_speaker_quote_sections，与 user prompt 组装同源），不做
-          strip/归一化——LLM 摇抄不逐字就是证据不合格；分区缺失或为空串
-          时任何 quote 都核对不过
-          （gate 审查修复②：correctness-speaker-evidence-quote-scope）。
-          gate 修复轮第 5 轮②扩展：dialog_address 的 quote 允许来自第三人
-          提及旁证条目（corroboration_entries，本人片段分区核对不到时的
-          第二通道）——quote 必须逐字出现在本说话人的某条旁证条目文本内，
-          且该条目在收集时已被程序证明「呼叫后紧邻本人应答」；quote 与
-          呼叫对象的一致性由条目归属（只传入本说话人的条目）保证。通道
-          只对 dialog_address 开放，静态行分类仍以自身分区为唯一核对对象。
-        - dialog_address 的 evidence_quote 必须包含候选名本身（英文忽略
-          大小写）——本人片段与旁证两条通道同样适用；归属核对只证明文本
-          属于该说话人，不证明文本支持该姓名
-          （gate 审查修复④：correctness-dialog-candidate-name-not-bound-
-          to-quote）。静态行（title_credit/author_host/description_roster）
-          核对不变：复合名侧已有双证据 + 推测标注兜住关联性。
-
-        作废原因（quote_missing / name_not_in_quote / invalid_candidate /
-        unknown_evidence_type）返回给调用方写入 meta 供诊断；候选级原因中
-        quote_missing 是轴表点名的必须可观测的一项。旁证通道核对通过的
-        候选附带 corroboration 元数据（来源说话人、段号、时间）——evidence
-        meta 如实标注 quote 来源（gate 修复轮第 5 轮②）。
+        dialog_sources 保存同一采样组中的原始上下文和本人样本文本。
         """
         verified: List[Dict] = []
         rejected: List[str] = []
         sections = quote_sections or {}
+        context_before = dialog_sources.get("context_before", "")
+        own_samples = dialog_sources.get("own_samples", "")
         if not isinstance(candidates, list):
             return verified, rejected
         for cand in candidates:
@@ -1280,38 +1247,51 @@ class SpeakerInferencer:
             if len(stripped) < 2 or not any(ch.isalnum() for ch in stripped):
                 rejected.append("quote_missing")
                 continue
+            corroboration_entry = next(
+                (
+                    entry
+                    for entry in (corroboration_entries or [])
+                    if evidence_type == "dialog_address"
+                    and isinstance(entry, dict)
+                    and quote in (entry.get("text") or "")
+                ),
+                None,
+            )
             corroboration_meta: Optional[Dict] = None
-            if quote not in sections.get(evidence_type, ""):
-                # 本人/静态分区核对不过：仅 dialog_address 允许第二通道
-                # （第三人提及旁证条目），其余类型直接作废。
-                if evidence_type != "dialog_address":
-                    rejected.append("quote_missing")
-                    continue
-                entry = next(
-                    (
-                        e
-                        for e in (corroboration_entries or [])
-                        if isinstance(e, dict) and quote in (e.get("text") or "")
-                    ),
-                    None,
-                )
-                if entry is None:
+            if evidence_type == "dialog_address":
+                section_hit = quote in context_before or quote in own_samples
+            else:
+                section_hit = quote in sections.get(evidence_type, "")
+            if not section_hit:
+                if evidence_type != "dialog_address" or corroboration_entry is None:
                     rejected.append("quote_missing")
                     continue
                 corroboration_meta = {
-                    "source_speaker": str(entry.get("speaker", "")),
-                    "segment_index": entry.get("index"),
-                    "quote_time": entry.get("time"),
+                    "source_speaker": str(corroboration_entry.get("speaker", "")),
+                    "segment_index": corroboration_entry.get("index"),
+                    "quote_time": corroboration_entry.get("time"),
                 }
-            # gate 审查修复④：dialog_address 的名字绑定判据（见 docstring），
-            # 本人片段与旁证两条通道同样适用。
-            if evidence_type == "dialog_address":
-                bound_name = name.strip()
-                if bound_name.casefold() not in quote.casefold():
-                    rejected.append("name_not_in_quote")
-                    continue
+            bound_name = name.strip()
+            if bound_name.casefold() not in quote.casefold():
+                rejected.append("name_not_in_quote")
+                continue
+            if (
+                evidence_type == "dialog_address"
+                and quote in own_samples
+                and quote not in context_before
+                and corroboration_entry is None
+                and not re.search(
+                    r"(?:我是|我叫|本人是|我的名字是|i'm|i am|my name is|this is)"
+                    r"[\s:：,，.。!！?？、\"'“”‘’（）()—–-]*"
+                    + re.escape(bound_name),
+                    quote,
+                    re.IGNORECASE,
+                )
+            ):
+                rejected.append("name_not_self_intro")
+                continue
             verified_candidate = {
-                "name": name.strip(),
+                "name": bound_name,
                 "evidence_type": evidence_type,
                 "evidence_quote": quote,
             }
@@ -1382,36 +1362,14 @@ class SpeakerInferencer:
         sampled: Optional[Dict[str, bool]] = None,
         quote_sections: Optional[Dict[str, str]] = None,
         *,
-        dialog_sections_by_speaker: Dict[str, str],
+        dialog_sections_by_speaker: Dict[str, Dict[str, str]],
         corroboration_by_speaker: Optional[Dict[str, List[Dict]]] = None,
     ) -> Dict:
-        """证据裁决：按核对通过的引用决定显示名，confidence 只入 meta。
+        """按核对通过的证据裁决显示名；confidence 只记录到 meta。
 
-        与 _apply_confidence_gate（仍服务 v1 缓存重判）的关键差异：
-        - applied 与否完全由引用核对结果决定；LLM 自报 confidence 不参与。
-        - 未采样的 speaker 保留原始标签（同 v1 语义）。
-        - meta 新增 candidates（LLM 原始候选，供审计）/ verified_candidates
-          （核对通过的候选，applied 映射据此可指回已核对引用）/
-          rejection_reason（未采用时的作废原因）。
-
-        Args:
-            dialog_sections_by_speaker: speaker→自身采样片段（含出场上下文）
-                的渲染文本（gate 修复轮第 2 轮，correctness-speaker-evidence-
-                quote-scope 跨说话人借用）。dialog_address 的 quote 对该说话人
-                只核对这个分区，必传 keyword——映射缺某 speaker 时按空分区
-                fail-closed（该 speaker 的 dialog_address 候选一律核对不过），
-                与静态分区缺失的既有语义一致。title_credit/author_host/
-                description_roster 三类静态行核对不受影响（与说话人无关）。
-            corroboration_by_speaker: speaker→第三人提及旁证条目列表
-                （gate 修复轮第 5 轮②，_collect_call_response_evidence 的
-                输出）。dialog_address 的 quote 在本人片段分区核对不过时，
-                允许逐字命中本说话人的旁证条目（收集时已程序核实呼叫-回应）；
-                核对通过后候选附带 corroboration 元数据（来源说话人/段号）。
-                None 或映射缺失 speaker 时按空列表 fail-closed。
-
-        Returns:
-            {"mapping", "meta", "low_confidence"}；low_confidence 语义
-            在 v2 下是「证据核对未通过/未采样的 label 列表」。
+        dialog_sections_by_speaker 按 speaker 保存 context_before 和 own_samples
+        原文。出场上下文中的他人称呼与程序核实的呼叫-回应旁证可直接采用；
+        本人样本中的候选名必须符合自我介绍句式。静态行不受对话分区影响。
         """
         mapping: Dict[str, str] = {}
         meta: Dict[str, Dict] = {}
@@ -1444,29 +1402,27 @@ class SpeakerInferencer:
             candidates = candidates_by_speaker.get(speaker)
             if not isinstance(candidates, list):
                 candidates = []
-            # dialog_address 分区按说话人收窄（跨说话人借用修复）；静态行
-            # 分区原样透传。映射缺失的 speaker 得到空串 → fail-closed。
-            effective_sections = dict(quote_sections or {})
-            effective_sections["dialog_address"] = dialog_sections_by_speaker.get(
-                speaker, ""
-            )
+            # Dialog quotes are checked against raw source text, not prompt labels.
+            dialog_sources = dialog_sections_by_speaker.get(speaker, {})
             verified, rejected = self._verify_candidates(
                 candidates,
-                effective_sections,
+                quote_sections,
                 corroboration_entries=(corroboration_by_speaker or {}).get(speaker),
+                dialog_sources=dialog_sources,
             )
             display_name, reason = self._decide_display_name(verified, speaker, speakers)
             inferred_name = raw_mapping.get(speaker, speaker)
 
             if display_name is None:
-                # 全部候选都因引用核对作废（quote_missing / name_not_in_quote，
-                # 修复④新增后者）且无任何核对通过时，作废原因取核对层原因
-                # （quote_missing 是轴表点名的可观测项，混合时优先），否则用
-                # 裁决规则给出的原因。
                 if not verified and rejected and all(
-                    r in ("quote_missing", "name_not_in_quote") for r in rejected
+                    r in ("quote_missing", "name_not_in_quote", "name_not_self_intro")
+                    for r in rejected
                 ):
-                    reason = "quote_missing" if "quote_missing" in rejected else "name_not_in_quote"
+                    reason = next(
+                        r
+                        for r in ("quote_missing", "name_not_in_quote", "name_not_self_intro")
+                        if r in rejected
+                    )
                 fallback_label = self._build_fallback_label(speaker, speakers)
                 mapping[speaker] = fallback_label
                 low_confidence.append(speaker)
