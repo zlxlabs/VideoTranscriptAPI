@@ -267,15 +267,14 @@ class TestDuoAxes(unittest.TestCase):
         self.assertEqual(result["mapping"]["Speaker3"], "说话人3")
         self.assertFalse(result["meta"]["Speaker3"]["applied"])
 
-    def test_adopted_dialog_name_keeps_other_speaker_unnamed(self):
-        """轴表第八行：一人已被对话称呼采用，另一人不得采用标题名。
+    def test_adopted_dialog_name_leaves_solo_metadata_for_other_speaker(self):
+        """轴表第八行：一人已被对话称呼采用，另一人走单边元数据定名。
 
-        关闭的机制是「两位主要说话人各至少 1 条核对通过的静态候选」：
-        Speaker1 的名字来自对话称呼（dialog_address），它没有静态候选，
-        整条通路随之关闭。
-
-        口径说明：卡面锁定决策里的撞名判据是 casefold **完全相等**
-        （「Sam」与「sama」casefold 后并不相等），本卡按该口径实现。
+        本卡之前的机制是「两位各需一条静态候选」，此场景整条关闭；
+        本卡开放单边命名后：Speaker1 的名字来自对话称呼（dialog_address，
+        无静态候选），Speaker2 是唯一有核对通过静态候选的一位，照常
+        单边定名；只要定出的名字与 Speaker1 已采用的名字（casefold）
+        不同就不算撞名（Sam ≠ sama）。
         """
         dialogs = _addressed_dialogs("Sam welcome to the show")
         candidates = {
@@ -293,8 +292,11 @@ class TestDuoAxes(unittest.TestCase):
         )
         # 现行规则已采用的名字保持不变（dialog_address 单证据）。
         self.assertEqual(result["mapping"]["Speaker1"], "Sam")
-        self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
-        self.assertFalse(result["meta"]["Speaker2"]["applied"])
+        self.assertEqual(
+            result["mapping"]["Speaker2"], "说话人2｜标题关联推测:sama"
+        )
+        self.assertTrue(result["meta"]["Speaker2"]["applied"])
+        self.assertEqual(result["meta"]["Speaker2"]["evidence_tier"], DUO_EVIDENCE_TIER)
 
     def test_identical_adopted_name_conflict_closes_pathway(self):
         """已采用的名字与本通路定出的名字 casefold 相等时关闭通路。"""
@@ -339,6 +341,180 @@ class TestDuoAxes(unittest.TestCase):
         )
         self.assertEqual(result["mapping"]["Speaker1"], "说话人1｜作者关联推测:Ann")
         self.assertEqual(result["mapping"]["Speaker2"], "说话人2｜标题关联推测:Bob")
+
+    def test_solo_naming_source_role_mismatch_closes_pathway(self):
+        """单边：S1 只有 author_host，role=guest：来源与角色不一致，通路关闭。
+
+        对应生产样本 BV1LYj36MEQW：模型给 S1 绑作者刘钊泽、却把 S1 判为 guest。
+        """
+        dialogs = _dialogs({"Speaker1": 10, "Speaker2": 10})
+        candidates = {
+            "Speaker1": [_candidate("刘钊泽", "author_host", "刘钊泽")],
+            "Speaker2": [],
+        }
+        _, result = self._run(
+            dialogs,
+            "刘钊泽聊了聊律师行业",
+            "刘钊泽",
+            candidates,
+            {"Speaker1": "guest", "Speaker2": "host"},
+        )
+        self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
+        self.assertFalse(result["meta"]["Speaker1"]["applied"])
+        self.assertNotIn(DUO_EVIDENCE_TIER, result["meta"]["Speaker1"])
+
+    def test_solo_naming_title_credit_guest_is_adopted(self):
+        """单边：S1 只有 title_credit、role=guest：单边定名 medium。
+
+        另一位（无候选、role=host）保持现行占位符。
+        """
+        dialogs = _dialogs({"Speaker1": 10, "Speaker2": 10})
+        candidates = {
+            "Speaker1": [_candidate("清月", "title_credit", "清月")],
+            "Speaker2": [],
+        }
+        _, result = self._run(
+            dialogs,
+            "清月： solo founder 专访",
+            "",
+            candidates,
+            {"Speaker1": "guest", "Speaker2": "host"},
+        )
+        self.assertEqual(result["mapping"]["Speaker1"], "说话人1｜标题关联推测:清月")
+        self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
+        self.assertEqual(result["meta"]["Speaker1"]["evidence_tier"], DUO_EVIDENCE_TIER)
+        self.assertEqual(result["meta"]["Speaker1"]["role"], "guest")
+
+    def test_solo_naming_both_types_pick_role_consistent(self):
+        """单边：两类静态候选都有时，取与角色一致的那类。"""
+        dialogs = _dialogs({"Speaker1": 10, "Speaker2": 10})
+        candidates = {
+            "Speaker1": [
+                _candidate("国平", "title_credit", "国平"),
+                _candidate("国平", "author_host", "国平"),
+            ],
+            "Speaker2": [],
+        }
+        _, result = self._run(
+            dialogs,
+            "国平聊了聊宏观",
+            "国平",
+            candidates,
+            {"Speaker1": "host", "Speaker2": "guest"},
+        )
+        self.assertEqual(result["mapping"]["Speaker1"], "说话人1｜作者关联推测:国平")
+
+    def test_solo_naming_second_speaker_with_two_names_still_names_solo(self):
+        """单边：另一位挂两个不同静态名，只影响它自己保持占位符；
+
+        solo 一位的定名正确性不依赖另一位的候选，照常单边定名。
+        （轴表未覆盖格，按「总能给出最可能的人名」的目标处理，已在报告说明。）
+        """
+        dialogs = _dialogs({"Speaker1": 10, "Speaker2": 10})
+        candidates = {
+            "Speaker1": [_candidate("国平", "author_host", "国平")],
+            "Speaker2": [
+                _candidate("阿哲", "title_credit", "阿哲"),
+                _candidate("阿泽", "title_credit", "阿泽"),
+            ],
+        }
+        _, result = self._run(
+            dialogs,
+            "国平聊了聊宏观",
+            "国平",
+            candidates,
+            {"Speaker1": "host", "Speaker2": "guest"},
+        )
+        self.assertEqual(result["mapping"]["Speaker1"], "说话人1｜作者关联推测:国平")
+        self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
+        self.assertNotIn(DUO_EVIDENCE_TIER, result["meta"]["Speaker2"])
+
+    def test_solo_naming_adopted_name_conflict_closes_pathway(self):
+        """单边撞名：solo 的名字与另一位已采用的名字 casefold 相等时关闭。"""
+        dialogs = _addressed_dialogs("Sama welcome to the show")
+        candidates = {
+            "Speaker1": [
+                _candidate("Sama", "dialog_address", "Sama welcome to the show")
+            ],
+            "Speaker2": [_candidate("sama", "title_credit", "sama")],
+        }
+        _, result = self._run(
+            dialogs,
+            "sama joined me at the pub",
+            "John",
+            candidates,
+            {"Speaker1": "host", "Speaker2": "guest"},
+        )
+        self.assertEqual(result["mapping"]["Speaker1"], "Sama")
+        self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
+        self.assertFalse(result["meta"]["Speaker2"]["applied"])
+
+    def test_solo_naming_account_title_with_extra_mention_closes_pathway(self):
+        """单边账号型标题名：标题还 @ 了别人时无法确认谁是嘉宾，通路关闭。"""
+        dialogs = _dialogs({"Speaker1": 10, "Speaker2": 10})
+        candidates = {
+            "Speaker1": [],
+            "Speaker2": [_candidate("alice", "title_credit", "@alice")],
+        }
+        _, result = self._run(
+            dialogs,
+            "@alice and @bob talk",
+            "Bob",
+            candidates,
+            {"Speaker1": "host", "Speaker2": "guest"},
+        )
+        self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
+        self.assertFalse(result["meta"]["Speaker2"]["applied"])
+
+    def test_fullname_title_credit_ignores_at_mentions(self):
+        """@ 规则收窄：名字来自标题正文全名时不受 @ 计数影响（生产样本
+        2110818209989558508：标题里第二个 @ 是公司账号，不应整条关闭）。"""
+        dialogs = _dialogs({"Speaker1": 10, "Speaker2": 10})
+        candidates = {
+            "Speaker1": [
+                _candidate("Sabrina Halper", "author_host", "Sabrina Halper")
+            ],
+            "Speaker2": [
+                _candidate(
+                    "Ali Ansari",
+                    "title_credit",
+                    "Ali Ansari (@aliansarinik), the 25-year-old solo founder and CEO of @micro1_ai",
+                )
+            ],
+        }
+        _, result = self._run(
+            dialogs,
+            "I sat down with Ali Ansari (@aliansarinik), the 25-year-old solo founder "
+            "and CEO of @micro1_ai, on building fast",
+            "Sabrina Halper",
+            candidates,
+            {"Speaker1": "host", "Speaker2": "guest"},
+        )
+        self.assertEqual(
+            result["mapping"]["Speaker1"], "说话人1｜作者关联推测:Sabrina Halper"
+        )
+        self.assertEqual(
+            result["mapping"]["Speaker2"], "说话人2｜标题关联推测:Ali Ansari"
+        )
+        self.assertEqual(result["meta"]["Speaker1"]["evidence_tier"], DUO_EVIDENCE_TIER)
+        self.assertEqual(result["meta"]["Speaker2"]["evidence_tier"], DUO_EVIDENCE_TIER)
+
+    def test_account_title_with_extra_mention_still_closes_pathway(self):
+        """@ 规则收窄后仍关：账号型名字 + 标题里其余 @ 提及 ≥ 1。"""
+        dialogs = _dialogs({"Speaker1": 10, "Speaker2": 10})
+        candidates = {
+            "Speaker1": [_candidate("Bob", "author_host", "Bob")],
+            "Speaker2": [_candidate("alice", "title_credit", "@alice")],
+        }
+        _, result = self._run(
+            dialogs,
+            "@alice and @bob talk",
+            "Bob",
+            candidates,
+            {"Speaker1": "host", "Speaker2": "guest"},
+        )
+        self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
+        self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
 
     def test_role_only_applies_to_rejected_speaker(self):
         """现行规则已定名的人保持现行结果，本通路不插手。"""

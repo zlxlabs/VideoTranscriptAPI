@@ -321,6 +321,66 @@ class TestCollisonFixtureTiers(unittest.TestCase):
         self.assertEqual(_level_fields(result, "Speaker2")[0], "medium")
         self.assertEqual(_level_fields(result, "Speaker2")[1], "sama")
 
+    def test_axis_row1_expanded_fullname_is_low_with_solo_medium(self):
+        """轴表第一行：S2 扩写全名判 low，S1 走单边命名判 medium。
+
+        E2E 断言（卡面）：meta.Speaker2.confidence_level == "low" 且
+        guess_name == "Sam Altman"；mapping.Speaker1 ==
+        "说话人1｜作者关联推测:John Collison"。
+        """
+        result = self._run(
+            {
+                "Speaker1": [
+                    _candidate("John Collison", "author_host", "John Collison")
+                ],
+                "Speaker2": [_candidate("Sam Altman", "title_credit", "@sama")],
+            },
+            mapping={"Speaker1": "John Collison", "Speaker2": "Sam Altman"},
+        )
+        self.assertEqual(
+            result["mapping"]["Speaker1"], "说话人1｜作者关联推测:John Collison"
+        )
+        self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
+        level, guess, basis = _level_fields(result, "Speaker2")
+        self.assertEqual(level, "low")
+        self.assertEqual(guess, "Sam Altman")
+        self.assertEqual(basis["evidence_type"], "title_credit")
+        self.assertEqual(basis["quote"], "@sama")
+        self.assertEqual(basis["rejection_reason"], "name_not_in_quote")
+        level, guess, basis = _level_fields(result, "Speaker1")
+        self.assertEqual(level, "medium")
+        self.assertEqual(guess, "John Collison")
+        self.assertEqual(basis["evidence_type"], "author_host")
+        self.assertEqual(basis["quote"], "John Collison")
+        self.assertEqual(basis["role"], "host")
+        self.assertIsNone(basis["rejection_reason"])
+
+    def test_serialized_meta_keeps_tier_fields(self):
+        """跨发布边界：meta 会序列化进 speaker_mapping.json，往返后取值域不变。"""
+        result = self._run(
+            {
+                "Speaker1": [
+                    _candidate("John Collison", "author_host", "John Collison")
+                ],
+                "Speaker2": [_candidate("Sam Altman", "title_credit", "@sama")],
+            },
+            mapping={"Speaker1": "John Collison", "Speaker2": "Sam Altman"},
+        )
+        restored = json.loads(json.dumps(result))
+        for speaker, entry in restored["meta"].items():
+            self.assertIn(entry["confidence_level"], CONFIDENCE_LEVELS)
+            self.assertTrue(
+                entry["guess_name"] is None or isinstance(entry["guess_name"], str)
+            )
+            self.assertEqual(
+                set(entry["basis"]), {"evidence_type", "quote", "role", "rejection_reason"}
+            )
+            for value in entry["basis"].values():
+                self.assertTrue(value is None or isinstance(value, str))
+        self.assertEqual(restored["meta"]["Speaker2"]["confidence_level"], "low")
+        self.assertEqual(restored["meta"]["Speaker2"]["guess_name"], "Sam Altman")
+        self.assertEqual(restored["meta"]["Speaker1"]["confidence_level"], "medium")
+
     def test_llm_failure_fallback_still_has_levels(self):
         """轴表末行：LLM 调用失败走 identity fallback，每个条目都有 none 档，不报错。"""
         dialogs, metadata = _load_fixture()
