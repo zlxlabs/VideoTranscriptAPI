@@ -17,6 +17,10 @@ from ...utils.logging import setup_logger
 from .llm_client import LLMClient
 from .cache_manager import CacheManager
 from .key_info_extractor import KeyInfo
+from .speaker_self_intro_verifier import (
+    SpeakerSelfIntroVerifier,
+    attach_self_intro_verdicts,
+)
 from ..prompts import (
     SPEAKER_INFERENCE_SYSTEM_PROMPT,
     build_speaker_inference_user_prompt,
@@ -33,8 +37,9 @@ logger = setup_logger(__name__)
 # 裁决规则升级后旧缓存自然失效重算，不会用旧规则的 mapping 冒充新规则的产物。
 # 唯一定义处，与 SpeakerInferencer.input_fingerprint 同文件维护。
 # v2 = 证据裁决；v3 = 推测标注；v4 = 平台先验与第三人提及旁证；
-# v5 = 静态证据绑定候选名、本人样本仅接受自我介绍。旧缓存经指纹失效。
-SPEAKER_EVIDENCE_RULES_VERSION = 5
+# v5 = 静态证据绑定候选名、本人样本仅接受自我介绍；
+# v6 = 本人样本自我介绍改由独立 LLM 复核，不再用正则句式。旧缓存经指纹失效。
+SPEAKER_EVIDENCE_RULES_VERSION = 6
 
 
 def build_speaker_risk_flags(
@@ -1215,18 +1220,21 @@ class SpeakerInferencer:
         corroboration_entries: Optional[List[Dict]] = None,
         *,
         dialog_sources: Dict[str, str],
-    ) -> Tuple[List[Dict], List[str]]:
-        """核对引用、名字绑定与本人样本自我介绍。
+    ) -> Tuple[List[Dict], List[str], List[Dict]]:
+        """核对引用、名字绑定，并标出需要独立复核的本人样本候选。
 
         dialog_sources 保存同一采样组中的原始上下文和本人样本文本。
+        出场前他人发言与旁证条目仍直接通过；只出现在本人样本里的
+        dialog_address 进入 pending，交给独立复核调用分类。
         """
         verified: List[Dict] = []
         rejected: List[str] = []
+        pending: List[Dict] = []
         sections = quote_sections or {}
         context_before = dialog_sources.get("context_before", "")
         own_samples = dialog_sources.get("own_samples", "")
         if not isinstance(candidates, list):
-            return verified, rejected
+            return verified, rejected, pending
         for cand in candidates:
             if not isinstance(cand, dict):
                 rejected.append("invalid_candidate")
@@ -1280,15 +1288,15 @@ class SpeakerInferencer:
                 and quote in own_samples
                 and quote not in context_before
                 and corroboration_entry is None
-                and not re.search(
-                    r"(?:我是|我叫|本人是|我的名字是|i'm|i am|my name is|this is)"
-                    r"[\s:：,，.。!！?？、\"'“”‘’（）()—–-]*"
-                    + re.escape(bound_name),
-                    quote,
-                    re.IGNORECASE,
-                )
             ):
-                rejected.append("name_not_self_intro")
+                pending.append(
+                    {
+                        "name": bound_name,
+                        "evidence_type": evidence_type,
+                        "evidence_quote": quote,
+                        "source": cand,
+                    }
+                )
                 continue
             verified_candidate = {
                 "name": bound_name,
@@ -1298,7 +1306,7 @@ class SpeakerInferencer:
             if corroboration_meta is not None:
                 verified_candidate["corroboration"] = corroboration_meta
             verified.append(verified_candidate)
-        return verified, rejected
+        return verified, rejected, pending
 
     @staticmethod
     def _decide_display_name(
@@ -1369,11 +1377,14 @@ class SpeakerInferencer:
 
         dialog_sections_by_speaker 按 speaker 保存 context_before 和 own_samples
         原文。出场上下文中的他人称呼与程序核实的呼叫-回应旁证可直接采用；
-        本人样本中的候选名必须符合自我介绍句式。静态行不受对话分区影响。
+        只出现在本人样本里的 dialog_address 交给独立复核调用分类。
+        静态行不受对话分区影响。每次 infer 最多一次复核调用。
         """
         mapping: Dict[str, str] = {}
         meta: Dict[str, Dict] = {}
         low_confidence: List[str] = []
+        prepared: List[Tuple] = []
+        pending_items: List[Dict[str, str]] = []
 
         for speaker in speakers:
             was_sampled = True if sampled is None else sampled.get(speaker, True)
@@ -1402,14 +1413,36 @@ class SpeakerInferencer:
             candidates = candidates_by_speaker.get(speaker)
             if not isinstance(candidates, list):
                 candidates = []
-            # Dialog quotes are checked against raw source text, not prompt labels.
             dialog_sources = dialog_sections_by_speaker.get(speaker, {})
-            verified, rejected = self._verify_candidates(
+            verified, rejected, pending = self._verify_candidates(
                 candidates,
                 quote_sections,
                 corroboration_entries=(corroboration_by_speaker or {}).get(speaker),
                 dialog_sources=dialog_sources,
             )
+            pending_refs = []
+            for item in pending:
+                item_id = f"si-{len(pending_items)}"
+                pending_items.append(
+                    {
+                        "id": item_id,
+                        "name": item["name"],
+                        "quote": item["evidence_quote"],
+                    }
+                )
+                pending_refs.append((item_id, item))
+            prepared.append(
+                (speaker, confidence, candidates, verified, rejected, pending_refs)
+            )
+
+        verdicts: Dict[str, str] = {}
+        if pending_items:
+            verdicts = SpeakerSelfIntroVerifier(
+                self.llm_client, self.model, self.reasoning_effort
+            ).verify(pending_items)
+
+        for speaker, confidence, candidates, verified, rejected, pending_refs in prepared:
+            attach_self_intro_verdicts(pending_refs, verdicts, verified, rejected)
             display_name, reason = self._decide_display_name(verified, speaker, speakers)
             inferred_name = raw_mapping.get(speaker, speaker)
 
