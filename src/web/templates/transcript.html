@@ -356,9 +356,9 @@
     font-weight: 600;
     vertical-align: middle;
 }
-.speaker-pending,
-.speaker-override-suspect { background: #fef3c7; color: #92400e; }
-.speaker-override-confirmed { background: #d1fae5; color: #065f46; }
+.speaker-pending, .speaker-override-suspect, .speaker-level-badge[data-speaker-level="low"] { background: #fef3c7; color: #92400e; }
+.speaker-override-confirmed, .speaker-level-badge[data-speaker-level="high"] { background: #d1fae5; color: #065f46; }
+.speaker-level-badge[data-speaker-level="medium"] { background: #dbeafe; color: #1e40af; }
 
 /* Summary compression guidance is informational, not a quality failure. */
 .summary-condensation-hint {
