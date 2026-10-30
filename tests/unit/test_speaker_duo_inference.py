@@ -317,6 +317,29 @@ class TestDuoAxes(unittest.TestCase):
         self.assertEqual(result["mapping"]["Speaker2"], "说话人2")
         self.assertFalse(result["meta"]["Speaker2"]["applied"])
 
+    def test_both_candidate_types_pick_by_role(self):
+        """同一位说话人两类静态候选都有时：host 优先作者署名，guest 优先标题名。"""
+        dialogs = _dialogs({"Speaker1": 10, "Speaker2": 10})
+        candidates = {
+            "Speaker1": [
+                _candidate("Ann", "author_host", "Ann"),
+                _candidate("Ann", "title_credit", "Ann"),
+            ],
+            "Speaker2": [
+                _candidate("Bob", "title_credit", "Bob"),
+                _candidate("Bob", "author_host", "Bob"),
+            ],
+        }
+        _, result = self._run(
+            dialogs,
+            "Ann and Bob talk",
+            "Ann",
+            candidates,
+            {"Speaker1": "host", "Speaker2": "guest"},
+        )
+        self.assertEqual(result["mapping"]["Speaker1"], "说话人1｜作者关联推测:Ann")
+        self.assertEqual(result["mapping"]["Speaker2"], "说话人2｜标题关联推测:Bob")
+
     def test_role_only_applies_to_rejected_speaker(self):
         """现行规则已定名的人保持现行结果，本通路不插手。"""
         dialogs = _addressed_dialogs("Ann welcome to the show")
