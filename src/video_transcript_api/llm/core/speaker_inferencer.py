@@ -19,6 +19,7 @@ from .cache_manager import CacheManager
 from .key_info_extractor import KeyInfo
 from .speaker_self_intro_verifier import apply_self_intro_review
 from .speaker_duo_inference import apply_duo_metadata_roles
+from .speaker_confidence_level import assign_confidence_levels
 from ..prompts import (
     SPEAKER_INFERENCE_SYSTEM_PROMPT,
     build_speaker_inference_user_prompt,
@@ -370,10 +371,8 @@ class SpeakerInferencer:
               speaker_mapping.json，见下方 save_speaker_mapping 调用）。只有
               这个来源才应当触发下游的展示刷新。
             - "cache_hit"：命中此前已持久化的映射（本身也是历史上某次
-              "llm"来源的产物，见 CacheManager.get_speaker_mapping 的读侧
-              校验——非 "llm" 来源的缓存文件已被当缓存未命中处理），本轮
-              没有发起任何新的 LLM 调用。既有展示产物理论上早已与它一致，
-              不需要因为一次缓存命中就重新刷新一遍。
+              "llm"来源的产物，见 CacheManager.get_speaker_mapping 的读侧校验），
+              本轮没有发起任何新的 LLM 调用，也不因此重新刷新既有展示产物。
             - "identity_fallback"：没有任何真实推断依据——说话人列表为空、
               allow_llm=False、没有有效发言样本可采样、或 LLM 调用本身抛出
               异常（网络抖动/限流/超时等瞬时故障）。这几种情况原始产出都
@@ -546,10 +545,10 @@ class SpeakerInferencer:
                 dialog_sections_by_speaker=dialog_sections_by_speaker,
                 corroboration_by_speaker=corroboration,
             )
-            # 两人访谈「元数据+角色」推测通路（evidence_tier=duo_metadata_role）：
-            # 结构前提全由程序核对，LLM 只给角色与候选；前提不成立则保持现行结果。
-            inference_result = apply_duo_metadata_roles(
-                inference_result, dialogs, title, speakers, result.structured_output.get("roles")
+            # 两人访谈「元数据+角色」推测通路（evidence_tier=duo_metadata_role）：结构前提全由
+            # 程序核对；之后按证据强弱补 confidence_level/guess_name/basis（卡面接口契约）。
+            inference_result = assign_confidence_levels(
+                apply_duo_metadata_roles(inference_result, dialogs, title, speakers, result.structured_output.get("roles"))
             )
             # 本轮真实调用了 LLM 并成功产出新映射——见 infer() 顶部 docstring
             # "source" 一节，唯一允许下游"补层刷新"触碰既有展示产物的来源。
@@ -1477,10 +1476,10 @@ class SpeakerInferencer:
     def _identity_fallback(self, speakers: List[str]) -> Dict:
         """无法推断时的兜底：所有说话人使用原始标签，标记为未采信。
 
-        meta 带 sampled=False，与 confidence gate 同形。source 固定为
-        identity_fallback，供调用方拒绝用无真实推断的结果覆盖已有产物。
+        meta 带 sampled=False；source 固定 identity_fallback，调用方不得拿它覆盖
+        既有好名字。档位字段由 assign_confidence_levels 补齐（无证据，全落 none）。
         """
-        return {
+        result = {
             "mapping": {speaker: speaker for speaker in speakers},
             "meta": {
                 speaker: {
@@ -1494,6 +1493,7 @@ class SpeakerInferencer:
             "low_confidence": list(speakers),
             "source": "identity_fallback",
         }
+        return assign_confidence_levels(result)
 
     # ------------------------------------------------------------------
     # 缓存兼容
