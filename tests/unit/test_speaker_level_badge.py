@@ -149,7 +149,7 @@ def test_confirmed_override_suppresses_level_badge(tmp_path):
         }],
         "speaker_mapping": {"S1": "木子"},
         "segment_overrides": {
-            "seg-confirmed": {"name": "木子", "status": "confirmed"},
+            "seg-confirmed": {"status": "confirmed"},
         },
         "speaker_inference_meta": {"S1": {"confidence_level": "high", "guess_name": "木子"}},
     }
@@ -160,6 +160,70 @@ def test_confirmed_override_suppresses_level_badge(tmp_path):
     assert 'speaker-override-confirmed' in html
     assert 'data-speaker-level=' not in html
     assert 'data-confidence-level="high"' in html
+
+
+def test_override_name_takes_precedence_over_inference_level(tmp_path):
+    payload = {
+        "dialogs": [
+            {"segment_id": "seg-medium", "speaker": "说话人1｜作者关联推测:John Collison", "speaker_id": "S1", "text": "one"},
+            {"segment_id": "seg-low", "speaker": "说话人2", "speaker_id": "S2", "text": "two"},
+            {"segment_id": "seg-none", "speaker": "说话人3", "speaker_id": "S3", "text": "three"},
+        ],
+        "speaker_mapping": {
+            "S1": "说话人1｜作者关联推测:John Collison",
+            "S2": "说话人2",
+            "S3": "说话人3",
+        },
+        "segment_overrides": {
+            "seg-medium": {"name": "张三", "status": "confirmed"},
+            "seg-low": {"name": "李四", "status": "suspect"},
+            "seg-none": {"name": "王五", "status": "suspect"},
+        },
+        "speaker_inference_meta": {
+            "S1": {
+                "confidence_level": "medium",
+                "guess_name": "John Collison",
+                "basis": {"evidence_type": "author_host", "quote": "John Collison", "role": "host"},
+            },
+            "S2": {
+                "confidence_level": "low",
+                "guess_name": "Sam Altman",
+                "basis": {"evidence_type": "title_credit", "quote": "@sama", "rejection_reason": "name_not_verified"},
+            },
+            "S3": {"confidence_level": "none"},
+        },
+    }
+
+    html = _render_payload(tmp_path, json.dumps(payload, ensure_ascii=False))
+    tags = re.findall(r'<div class="speaker-tag"[^>]*>.*?</div>', html, re.DOTALL)
+
+    assert len(tags) == 3
+    medium_text = tags[0].split(">", 1)[1]
+    assert "张三" in medium_text
+    assert "John Collison" not in medium_text
+    assert 'data-confidence-level="override"' in tags[0]
+    assert 'data-speaker-level=' not in tags[0]
+    assert 'data-speaker-status="pending"' not in tags[0]
+    assert "可能是" not in tags[0]
+    assert 'data-override-status="confirmed"' in tags[0]
+    assert "依据：作者「John Collison」；角色：主持人" in tags[0]
+    assert "说话人1｜作者关联推测:John Collison" not in tags[0]
+
+    assert "李四" in tags[1]
+    assert "Sam Altman" not in tags[1]
+    assert "可能是" not in tags[1]
+    assert "未通过核对" not in tags[1]
+    assert 'data-confidence-level="override"' in tags[1]
+    assert 'data-speaker-level=' not in tags[1]
+    assert 'data-speaker-status="pending"' not in tags[1]
+    assert 'data-override-status="suspect"' in tags[1]
+
+    assert "王五" in tags[2]
+    assert 'data-confidence-level="override"' in tags[2]
+    assert 'data-speaker-level=' not in tags[2]
+    assert 'data-speaker-status="pending"' not in tags[2]
+    assert 'data-speaker-level=' not in tags[2]
+    assert 'data-override-status="suspect"' in tags[2]
 
 
 def test_level_guess_and_basis_values_are_escaped_in_text_and_attributes(tmp_path):

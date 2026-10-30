@@ -110,11 +110,14 @@ def _render_level_tag(
     level: str,
 ) -> str:
     safe_display = html.escape(str(display_speaker), quote=True)
+    has_override_name = bool(override and override.get("name"))
     guess_name = details.get("guess_name")
     safe_guess = (
         "" if guess_name is None else html.escape(str(guess_name), quote=True)
     )
-    if level == "medium":
+    if has_override_name:
+        label = safe_display
+    elif level == "medium":
         label = safe_guess
     elif level == "low":
         label = (
@@ -124,7 +127,9 @@ def _render_level_tag(
     else:
         label = safe_display
 
-    title = _basis_title(details, level, display_speaker)
+    title_level = "override" if has_override_name else level
+    title = _basis_title(details, title_level, display_speaker)
+    confidence_level = "override" if has_override_name else level
     title_attr = f' title="{html.escape(title, quote=True)}"' if title else ""
     basis = details.get("basis")
     rejection_reason = basis.get("rejection_reason") if isinstance(basis, dict) else None
@@ -148,13 +153,13 @@ def _render_level_tag(
         )
 
     level_badge = ""
-    if level in {"high", "medium", "low"} and override_status != "confirmed":
+    if not has_override_name and level in {"high", "medium", "low"} and override_status != "confirmed":
         level_badge = (
             '<span class="speaker-status-badge speaker-level-badge" '
             f'data-speaker-level="{level}">{t(f"render.speaker.level.{level}")}</span>'
         )
     pending_badge = ""
-    if level == "none":
+    if level == "none" and not has_override_name:
         pending_badge = (
             '<span class="speaker-status-badge speaker-pending" '
             'data-speaker-status="pending">'
@@ -162,7 +167,7 @@ def _render_level_tag(
             + "</span>"
         )
 
-    return f'''<div class="speaker-tag"{title_attr} data-confidence-level="{level}"{rejection_attr} style="background-color: {color};">
+    return f'''<div class="speaker-tag"{title_attr} data-confidence-level="{confidence_level}"{rejection_attr} style="background-color: {color};">
                             {label}
                             {level_badge}{pending_badge}{override_badge}
                         </div>'''
