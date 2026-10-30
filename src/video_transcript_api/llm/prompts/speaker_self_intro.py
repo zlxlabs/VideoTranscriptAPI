@@ -23,6 +23,7 @@ Positive examples (self_introduction):
 - name="柠姐", quote="柠姐在这儿"
 - name="某某", quote="大家好，这里是某某"
 - name="Alice", quote="Hi, I’m Alice"
+- name="Bob", quote="大家都叫我 Bob"
 
 Negative examples:
 - name="John Collison", quote="John Collison wrote about this" → third_party_mention
