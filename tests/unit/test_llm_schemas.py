@@ -97,7 +97,7 @@ class TestSpeakerMappingSchema:
         # schema_version=2：candidates 必填（证据裁决，card-vta-261015-speaker-evidence）
         _assert_json_schema_object(
             SPEAKER_MAPPING_SCHEMA,
-            ["speaker_mapping", "confidence", "candidates", "reasoning"],
+            ["speaker_mapping", "confidence", "candidates", "roles", "reasoning"],
         )
         assert SPEAKER_MAPPING_SCHEMA["additionalProperties"] is False
 
@@ -742,7 +742,7 @@ class TestPromptsSchemaReExports:
         )
         _assert_json_schema_object(
             SPEAKER_MAPPING_SCHEMA,
-            ["speaker_mapping", "confidence", "candidates", "reasoning"],
+            ["speaker_mapping", "confidence", "candidates", "roles", "reasoning"],
         )
         assert SPEAKER_MAPPING_SCHEMA["additionalProperties"] is False
         assert SPEAKER_MAPPING_SCHEMA_VERSION == 2

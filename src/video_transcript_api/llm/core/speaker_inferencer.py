@@ -18,11 +18,13 @@ from .llm_client import LLMClient
 from .cache_manager import CacheManager
 from .key_info_extractor import KeyInfo
 from .speaker_self_intro_verifier import apply_self_intro_review
+from .speaker_duo_inference import apply_duo_metadata_roles
 from ..prompts import (
     SPEAKER_INFERENCE_SYSTEM_PROMPT,
     build_speaker_inference_user_prompt,
     build_speaker_quote_sections,
 )
+from ..prompts.speaker_duo_roles import SPEAKER_DUO_ROLES_INSTRUCTION
 from ..prompts.schemas.speaker_mapping import (
     SPEAKER_EVIDENCE_TYPES,
     SPEAKER_MAPPING_SCHEMA,
@@ -31,8 +33,8 @@ from ..prompts.schemas.speaker_mapping import (
 logger = setup_logger(__name__)
 
 # 证据裁决规则版本，纳入 input_fingerprint；升级后旧缓存失效重算。
-# 唯一定义处。v2-v5 见历史；v6 = 本人样本自我介绍改由独立 LLM 复核。
-SPEAKER_EVIDENCE_RULES_VERSION = 6
+# 唯一定义处。v2-v5 见历史；v6 = 本人样本自我介绍改由独立 LLM 复核；v7 = 两人访谈开放「元数据+角色」推测命名通路。
+SPEAKER_EVIDENCE_RULES_VERSION = 7
 
 
 def build_speaker_risk_flags(
@@ -133,9 +135,8 @@ class SpeakerInferencer:
     # 单条采样文本的截断上限（字符数）。未纳入外部配置——过细粒度，固定即可。
     _MAX_CHARS_PER_SAMPLE = 120
 
-    # 发言量 top2 说话人的采样配额下限：普通说话人配置是基准，top2 的条数
-    # 与字符数分别取 max(基准, 此下限)。任一基准为 0 时全员停用采样并走
-    # identity fallback。提高默认基准之上的召回，保留全局预算逻辑不变。
+    # 发言量 top2 说话人的采样配额下限：普通说话人配置是基准，top2 的条数与
+    # 字符数分别取 max(基准, 此下限)。任一基准为 0 时全员停用采样并走 identity fallback。
     _TOP_SPEAKER_QUOTA_SLOTS = 2
     _TOP_SPEAKER_SAMPLE_COUNT = 8
     _TOP_SPEAKER_MAX_CHARS = 1200
@@ -146,9 +147,8 @@ class SpeakerInferencer:
 
     # 呼叫-回应发现窗口：他人呼叫段 P 之后最多看 3 段。窗口内首个发言段的
     # 说话人即「应答者」，应答者必须恰好是被采样说话人本人（收紧判据，见
-    # _collect_call_response_evidence docstring）。coerce 后的对话无空文本
-    # 段，首个发言段即 P 的紧邻下一段；窗口常数对含空文本段的原始输入
-    # 保留「3 段内」语义。
+    # _collect_call_response_evidence docstring）。coerce 后的对话无空文本段，
+    # 首个发言段即 P 的紧邻下一段；窗口常数对含空文本段的原始输入保留「3 段内」语义。
     _CALL_RESPONSE_WINDOW = 3
 
     # 单条旁证短句截断上限（字符）。旁证只承担「别人怎么称呼他」的指向
@@ -259,8 +259,7 @@ class SpeakerInferencer:
         - transcription.py 分层缓存预检（读侧）
         - llm_ops.py 补层刷新/身份恢复（读侧，从 existing_snapshot 取元数据）
         任何一侧漏改都会造成读写指纹永久不一致（历史坑，见类 docstring）。
-        keyword 参数带默认值：旧调用（不传元数据）仍能工作，但三个消费点已
-        全部同步传参；rules_version 默认取当前 SPEAKER_EVIDENCE_RULES_VERSION。
+        keyword 参数带默认值（旧调用仍能工作）；rules_version 默认取当前 SPEAKER_EVIDENCE_RULES_VERSION。
         """
         normalized_dialogs = []
         for value in dialogs:
@@ -473,16 +472,12 @@ class SpeakerInferencer:
 
         # ci-gate review（第5轮）：这里必须用 sample_groups 的 key（预算裁剪后
         # 保留的说话人），而不是原始完整的 speakers 列表。_apply_global_sample_budget
-        # 已经把采样片段区控制在预算内，但如果标签列表本身仍塞入全部 speakers，
-        # 光是 ', '.join() 这一行在虚假说话人成百上千时也能贡献上万字符，
-        # 预算形同虚设。被裁掉的说话人在采样区没有任何文本，让 LLM 对着一个
-        # 完全没有上下文的陌生标签猜真名没有意义。sample_groups 在
-        # _apply_global_sample_budget 内部已按「首次出场时间」顺序写入，
-        # 直接取其 key 顺序即可，无需重新排序。
-        #
-        # 注意：_apply_confidence_gate 仍遍历完整 speakers 列表组装最终结果，
-        # 这一处不受影响——被预算裁掉的说话人依旧会出现在 mapping/meta/
-        # low_confidence 里，走「无采样样本」的既有兜底路径。
+        # 已经把采样片段区控制在预算内，但标签列表若仍塞入全部 speakers，光是
+        # ', '.join() 在虚假说话人成百上千时就能贡献上万字符，预算形同虚设；被裁掉
+        # 的说话人在采样区没有任何文本，让 LLM 猜真名没有意义。sample_groups 已按
+        # 「首次出场时间」顺序写入，直接取其 key 顺序即可。
+        # 注意：_apply_confidence_gate 仍遍历完整 speakers 列表组装最终结果——
+        # 被预算裁掉的说话人依旧会出现在 mapping/meta/low_confidence 里。
         user_prompt = build_speaker_inference_user_prompt(
             context_snippets=context_snippets,
             original_speakers=list(sample_groups.keys()),
@@ -512,7 +507,8 @@ class SpeakerInferencer:
         try:
             result = self.llm_client.call(
                 model=self.model,
-                system_prompt=SPEAKER_INFERENCE_SYSTEM_PROMPT,
+                # roles 与 candidates 同属一次调用：角色说明拼在系统提示词尾部。
+                system_prompt=SPEAKER_INFERENCE_SYSTEM_PROMPT + SPEAKER_DUO_ROLES_INSTRUCTION,
                 user_prompt=user_prompt,
                 response_schema=SPEAKER_MAPPING_SCHEMA,
                 reasoning_effort=self.reasoning_effort,
@@ -549,6 +545,11 @@ class SpeakerInferencer:
                 quote_sections=quote_sections,
                 dialog_sections_by_speaker=dialog_sections_by_speaker,
                 corroboration_by_speaker=corroboration,
+            )
+            # 两人访谈「元数据+角色」推测通路（evidence_tier=duo_metadata_role）：
+            # 结构前提全由程序核对，LLM 只给角色与候选；前提不成立则保持现行结果。
+            inference_result = apply_duo_metadata_roles(
+                inference_result, dialogs, title, speakers, result.structured_output.get("roles")
             )
             # 本轮真实调用了 LLM 并成功产出新映射——见 infer() 顶部 docstring
             # "source" 一节，唯一允许下游"补层刷新"触碰既有展示产物的来源。
@@ -1040,9 +1041,8 @@ class SpeakerInferencer:
 
     # 缺失/无法解析的 confidence 找不到任何依据判断"该采信"，因此按此值
     # （低于任何合理阈值）处理，而不是按 1.0（最高置信度）处理——ci-gate
-    # review（第5轮）指出，这个功能存在的意义就是"不确定的时候不要强行
-    # 套用推断结果"，缺失/无法解析恰恰是最不确定的情况，若默认按满分
-    # 采信，等于反向违背了这个功能本身的初衷。
+    # review（第5轮）指出，不确定的时候不要强行套用推断结果，缺失/无法解析
+    # 恰恰是最不确定的情况，若默认按满分采信等于反向违背这个功能的初衷。
     _UNRESOLVABLE_CONFIDENCE_DEFAULT = 0.0
 
     def _resolve_confidence(self, confidence_raw, labels: List[str]) -> Dict[str, float]:

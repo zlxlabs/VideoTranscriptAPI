@@ -99,7 +99,7 @@ def _make_inferencer(cached_mapping=None, confidence_threshold=0.6):
 
 def _mock_llm(structured_output):
     response = MagicMock()
-    response.structured_output = structured_output
+    response.structured_output = {"roles": {}, **structured_output}
     return response
 
 
