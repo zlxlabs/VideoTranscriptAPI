@@ -44,6 +44,7 @@ from video_transcript_api.utils.logging.logger import load_config
 from video_transcript_api.api.services.view_token_resolver import (
     build_stage_progress_display,
 )
+from video_transcript_api.utils.rendering.dialog_renderer import DialogRenderer
 from video_transcript_api.utils.rendering.home_page import render_home_html
 from video_transcript_api.utils.rendering.i18n_jinja import install_i18n
 STATIC_DIR = ROOT / "src" / "web" / "static"
@@ -90,25 +91,18 @@ def _fixture_error_message() -> str:
     return "Fixture failed status" if _fixture_language == "en" else "夹具失败状态"
 
 
-def _fixture_calibrated_html() -> str:
-    body = _fixture_transcript()
-    if _fixture_language == "en":
-        pending = "Unconfirmed"
-        speaker = "Speaker 1"
-    else:
-        pending = "待确认"
-        speaker = "说话人1"
-    return (
-        '<div class="dialog-container">'
-        '<div id="dlg-0" class="dialog-item">'
-        '<div class="speaker-header">'
-        f'<div class="speaker-tag" title="{pending}" data-confidence-level="{pending}">'
-        f"{speaker}"
-        f'<span class="speaker-status-badge speaker-pending" data-speaker-status="pending">{pending}</span>'
-        "</div></div>"
-        f'<div class="dialog-content"><p>{body}</p></div>'
-        "</div></div>"
-    )
+def _fixture_calibrated_html(risk_flag: str, ui_language: str) -> str:
+    speaker = "Speaker 1" if ui_language == "en" else "说话人1"
+    payload = {
+        "dialogs": [{"segment_id": "seg_1", "speaker": speaker, "text": _fixture_transcript()}],
+        "speaker_risk_flags": [risk_flag],
+    }
+    with tempfile.TemporaryDirectory(prefix="vta-browser-render-") as cache_dir:
+        (Path(cache_dir) / "llm_processed.json").write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+        )
+        with ui_language_scope(ui_language):
+            return DialogRenderer()._render_from_structured_data(cache_dir)
 
 # Browser fixture uses the production resolver so stage labels follow the same
 # global language as the Jinja ``t()`` globals during the i18n regression.
@@ -665,7 +659,10 @@ class BrowserFixtureHandler(BaseHTTPRequestHandler):
                 else _fixture_summary_html()
             ),
             "summary_state": "generated",
-            "calibrated_html": _fixture_calibrated_html(),
+            "calibrated_html": _fixture_calibrated_html(
+                parse_qs(query_string).get("speaker-risk", ["low_confidence_cluster_dropped"])[0],
+                ui_language,
+            ),
             "calibrated_text": _fixture_transcript(),
             "stats": {"original_length": len(_fixture_transcript()), "calibrated_length": len(_fixture_transcript()), "summary_length": 13},
             "deep_read_prompt_presets": get_deep_read_prompt_presets({"web": {}}),

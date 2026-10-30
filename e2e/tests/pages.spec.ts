@@ -104,6 +104,23 @@ test('public reading page displays transcript and opens a working text export', 
   await expect(page.locator('body')).toContainText('隔离浏览器夹具中的正文，验证公开阅读与导出。');
 });
 
+test('share page identifies unresolved speaker names without warning of bad separation', async ({ page }) => {
+  await page.goto('/view/browser-fixture-view');
+  const warnings = page.locator('#calibrated-content-block .speaker-risk-warning');
+  await expect(warnings).toHaveCount(1);
+  await expect(warnings).toHaveAttribute('data-speaker-risk', 'names_unresolved');
+  await expect(warnings).toHaveText('部分说话人姓名未识别');
+  await expect(page.getByText('本集说话人区分可能不准', { exact: true })).toHaveCount(0);
+});
+
+test('share page warns about potentially inaccurate speaker separation', async ({ page }) => {
+  await page.goto('/view/browser-fixture-view?speaker-risk=semantic_contradiction_detected');
+  const warnings = page.locator('#calibrated-content-block .speaker-risk-warning');
+  await expect(warnings).toHaveCount(1);
+  await expect(warnings).toHaveAttribute('data-speaker-risk', 'segmentation');
+  await expect(warnings).toHaveText('本集说话人区分可能不准');
+});
+
 test('home page smoke: production landing content and entry links render', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'VideoTranscriptAPI' })).toBeVisible();
