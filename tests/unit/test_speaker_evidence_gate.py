@@ -1,16 +1,4 @@
-"""说话人显示名证据裁决的验收与回归测试（card-vta-261015-speaker-evidence）。
-
-覆盖：
-- 真实 fixture 形态的验收测试（tests/fixtures/twitter_space_1wxWjlzQVwDJQ/
-  为人工编写的合成对话，见该目录 README.md；mock LLM，不打真网）：作者名
-  主持 applied、dialog_address+title_credit 双证据带标注复合名、伪造引用
-  作废降级、低 confidence 不再拦截。
-- input_fingerprint 扩展（title/author/description/rules_version）。
-- 裁决规则的确定性分支（description_roster 不独立生效、无佐证标题名拒绝、
-  未知证据类型作废）。
-- v1（confidence 门控）旧产物缓存重放走旧降级语义；v2 产物缓存重放直接采用。
-- gate 修复轮第 3 轮①：复合名三要素语义与网页/导出下游断言。
-"""
+"""说话人证据闸门回归测试：核对、缓存、复合显示名与下游语义。"""
 
 import json
 import inspect
@@ -22,6 +10,7 @@ from video_transcript_api.llm.core.speaker_inferencer import (
     SPEAKER_EVIDENCE_RULES_VERSION,
     SpeakerInferencer,
 )
+from tests.unit.test_speaker_self_intro_verifier import install_speaker_llm
 
 FIXTURE_PATH = (
     Path(__file__).parent.parent
@@ -55,16 +44,26 @@ def _candidate(name, evidence_type, quote):
     return {"name": name, "evidence_type": evidence_type, "evidence_quote": quote}
 
 
-def _run_infer_with(candidates, confidence, dialogs=None, speakers=None):
-    """以 mock LLM 跑完整 infer 链路（真实 fixture 采样 + 证据裁决）。
+def _verify_in_context(candidates, sections):
+    verified, rejected, _pending = SpeakerInferencer._verify_candidates(
+        candidates,
+        sections,
+        dialog_sources={
+            "context_before": sections.get("dialog_address", ""),
+            "own_samples": "",
+        },
+    )
+    return verified, rejected
 
-    返回 (inferencer, result)，供需要检查 inferencer 内部状态的用例使用。
-    """
+
+def _run_infer_with(candidates, confidence, dialogs=None, speakers=None, title=FIXTURE_TITLE):
+    """以 mock LLM 跑完整推断链路，返回 inferencer 与结果。"""
     dialogs = dialogs if dialogs is not None else _load_fixture_dialogs()
     speakers = speakers if speakers is not None else ["Speaker1", "Speaker2"]
     inferencer = _make_inferencer()
-    inferencer.llm_client.call = MagicMock(
-        return_value=_mock_llm(
+    install_speaker_llm(
+        inferencer,
+        _mock_llm(
             {
                 "speaker_mapping": {
                     "Speaker1": "林晚风",
@@ -74,12 +73,12 @@ def _run_infer_with(candidates, confidence, dialogs=None, speakers=None):
                 "candidates": candidates,
                 "reasoning": "mock",
             }
-        )
+        ),
     )
     result = inferencer.infer(
         speakers=speakers,
         dialogs=dialogs,
-        title=FIXTURE_TITLE,
+        title=title,
         author=FIXTURE_AUTHOR,
         description=FIXTURE_DESCRIPTION,
     )
@@ -127,9 +126,7 @@ class TestRealFixtureEvidenceGate(unittest.TestCase):
         return _run_infer_with(candidates, confidence, self.dialogs, self.speakers)[1]
 
     def test_host_author_name_applied_not_placeholder(self):
-        """验收①：主持人形态——author_host + dialog_address 引用均取自输入
-        真实文本 → applied，mapping["Speaker1"] != 说话人1（合成角色：主持人
-        =作者林晚风，对话中称「风哥」；对应原生产案例被低置信隐藏的主持人）。"""
+        """author_host 与本人自我介绍可共同生成推测标注名。"""
         # dialog_address 的 quote 取 Speaker1 真实采样文本的首条（必然逐字
         # 在 prompt 中）；name 是 LLM 对话称呼的声称值，程序只核对 quote 存在性。
         speaker1_sample = self.sample_groups["Speaker1"]["own_samples"][0]
@@ -154,9 +151,7 @@ class TestRealFixtureEvidenceGate(unittest.TestCase):
         )
 
     def test_soul_lan_composite_display_name(self):
-        """验收②：「柠姐/青柠」案例形态——Speaker2 的 dialog_address（柠姐，
-        quote 真实在采样覆盖的对话文本中）+ title_credit（青柠，quote 取自
-        标题）双候选 → 「说话人2｜标题关联推测:青柠｜对话称:柠姐」。"""
+        """Speaker2 的柠姐对话证据与青柠标题证据生成复合名。"""
         prompt_text = self._prompt_text()
         # 「柠姐」必须真实被采样覆盖（top2 加额后在本 fixture 上成立），
         # 否则此测试的前提即失效——称呼片段进不了输入正是本卡要修的根因。
@@ -175,9 +170,24 @@ class TestRealFixtureEvidenceGate(unittest.TestCase):
         )
         self.assertTrue(result["meta"]["Speaker2"]["applied"])
 
+    def test_static_quote_must_bind_candidate_name(self):
+        candidates = {
+            "Speaker2": [
+                _candidate("Invented Person", "title_credit", "OpenAI"),
+                _candidate("Invented Person", "description_roster", "小满"),
+                _candidate("柠姐", "dialog_address", "大家好，我是柠姐，麦能听到了吗？"),
+            ],
+        }
+        result = _run_infer_with(
+            candidates, {"Speaker1": 0.0, "Speaker2": 0.0}, title="OpenAI"
+        )[1]
+
+        verified = result["meta"]["Speaker2"]["verified_candidates"]
+        self.assertEqual([candidate["name"] for candidate in verified], ["柠姐"])
+        self.assertEqual(result["mapping"]["Speaker2"], "柠姐")
+
     def test_forged_quote_rejected_to_placeholder(self):
-        """验收③：引用伪造（quote 不在输入中）→ 候选作废、显示「说话人N」，
-        meta 保留作废原因 quote_missing。"""
+        """不在输入中的引用作废并降级。"""
         candidates = {
             "Speaker2": [
                 _candidate("某大V", "dialog_address", "这句引用根本不在输入文本中"),
@@ -194,8 +204,7 @@ class TestRealFixtureEvidenceGate(unittest.TestCase):
         self.assertEqual(result["meta"]["Speaker2"]["verified_candidates"], [])
 
     def test_low_confidence_does_not_gate_application(self):
-        """验收④：confidence=0.1 但证据核对通过 → 仍 applied（confidence 已
-        退出裁决，只入 meta）。"""
+        """低 confidence 不改变通过证据的裁决。"""
         candidates = {
             "Speaker2": [
                 _candidate("柠姐", "dialog_address", "柠姐"),
@@ -210,10 +219,7 @@ class TestRealFixtureEvidenceGate(unittest.TestCase):
         self.assertEqual(result["mapping"]["Speaker1"], "说话人1")
 
     def test_whitespace_or_punctuation_quote_rejected(self):
-        """审查修复①（correctness-whitespace-evidence-quote）：空白/纯标点
-        quote 无实质证据内容——即便逐字存在于输入也按 quote_missing 作废。
-        quote 取真实采样区里出现过的单个全角逗号（生产 LLM 摇抄标点的真实
-        形态），旧判据会放行导致无实质证据的候选 applied。"""
+        """真实采样区中的纯标点引用必须作废。"""
         quote = "，"
         prompt_text = self._prompt_text()
         # 前提自证：该 quote 确实逐字存在于本轮输入（排除假红）。
@@ -230,10 +236,7 @@ class TestRealFixtureEvidenceGate(unittest.TestCase):
         self.assertEqual(result["meta"]["Speaker2"]["rejection_reason"], "quote_missing")
 
     def test_cross_section_quote_rejected(self):
-        """审查修复②（correctness-speaker-evidence-quote-scope）：quote 只
-        出现在另一分区（描述参会名单）却声称 dialog_address → 核对收窄到
-        evidence_type 对应分区后作废，堵住「名单里的名字标成对话称呼」的
-        绕行路径。"""
+        """描述名单中的名字不能充当对话称呼证据。"""
         # 望舒只出现在描述参会名单，从不出现在任何发言采样里（前提已探针）。
         prompt_text = self._prompt_text()
         self.assertIn("望舒", prompt_text)
@@ -249,8 +252,7 @@ class TestRealFixtureEvidenceGate(unittest.TestCase):
         self.assertEqual(result["meta"]["Speaker2"]["rejection_reason"], "quote_missing")
 
     def test_v1_cached_artifact_replays_with_legacy_confidence_semantics(self):
-        """验收⑤：v1 旧产物（仅 confidence 无 candidates）读侧兼容不崩，
-        走旧降级语义（conf 重判），报告选定「走旧降级语义」选项。"""
+        """v1 缓存仍走 confidence 重判。"""
         cached_v1 = {
             "mapping": {"Speaker1": "张主持", "Speaker2": "李主讲"},
             "meta": {
@@ -280,8 +282,7 @@ class TestRealFixtureEvidenceGate(unittest.TestCase):
         self.assertIn("Speaker2", result["low_confidence"])
 
     def test_v2_cached_artifact_replays_verdict_directly(self):
-        """v2 产物缓存命中：证据裁决结论无法离线重核（输入全文不在缓存），
-        直接采用缓存 mapping/applied，不发起 LLM 调用。"""
+        """v2 缓存命中直接复用已裁决结果。"""
         cached_v2 = {
             "mapping": {
                 "Speaker1": "说话人1｜作者关联推测:林晚风｜对话称:风哥",
@@ -333,10 +334,7 @@ class TestRealFixtureEvidenceGate(unittest.TestCase):
         self.assertTrue(result["meta"]["Speaker2"]["applied"])
 
     def test_dialog_quote_without_name_rejected(self):
-        """gate 修复轮第 4 轮（correctness-dialog-candidate-name-not-bound-to-
-        quote）：归属核对只证明 quote 属于该说话人，不证明 quote 支持该姓名。
-        quote 真实存在于说话人自身片段但不含候选名 → 候选作废、降级说话人N，
-        作废原因记 name_not_in_quote。"""
+        """本人片段引用不含候选名时作废。"""
         quote = "先说结论：三十天拉新一万这件事，没有捷径，全是重复劳动。"
         # 前提自证：quote 真实存在于 Speaker2 自身片段（排除假红——若采样没
         # 覆盖该句，候选会挂在分区核对 quote_missing 而非本判据）。
@@ -358,8 +356,7 @@ class TestRealFixtureEvidenceGate(unittest.TestCase):
         )
 
     def test_dialog_quote_containing_name_still_applies(self):
-        """第 4 轮对照：quote 含候选名本身（合成 fixture 中「柠姐」在 Speaker2
-        片段内的自我介绍句）→ applied 保持，新判据不误伤真证据。"""
+        """本人自我介绍仍然通过核对。"""
         quote = "大家好，我是柠姐，麦能听到了吗？"
         candidates = {
             "Speaker2": [_candidate("柠姐", "dialog_address", quote)],
@@ -371,9 +368,7 @@ class TestRealFixtureEvidenceGate(unittest.TestCase):
 
 
 class TestGateRound2QuoteScope(unittest.TestCase):
-    """gate 修复轮第 2 轮：dialog_address 的 quote 核对收窄到该说话人自身的
-    采样片段与出场上下文（correctness-speaker-evidence-quote-scope 跨说话人
-    借用 + correctness-static-label-evidence-quote 联合兜住）。"""
+    """说话人对话证据的来源范围回归。"""
 
     def setUp(self):
         self.dialogs = _load_fixture_dialogs()
@@ -384,11 +379,7 @@ class TestGateRound2QuoteScope(unittest.TestCase):
         self.seg2 = inferencer._render_speaker_segment("Speaker2", self.sample_groups["Speaker2"])
 
     def test_dialog_quote_borrowed_from_other_speaker_rejected(self):
-        """跨说话人借用：他人出场上下文里的称呼引用不得作为本说话人的
-        dialog_address 证据。fixture 上「柠姐，我邀请你做共同主持人了」只
-        出现在 Speaker2 的出场上下文（Speaker1 说出的、归属 Speaker2 的称呼
-        证据）；Speaker1 自身片段里虽含「陈柠姐」字样但无此句（前提自证，
-        排除假红）。收窄前 quote 对全转录区核对会放行，Speaker1 被误标「柠姐」。"""
+        """不允许借用别的说话人的上下文称呼。"""
         quote = "柠姐，我邀请你做共同主持人了"
         self.assertIn(quote, self.seg2)
         self.assertNotIn(quote, self.seg1)
@@ -408,11 +399,7 @@ class TestGateRound2QuoteScope(unittest.TestCase):
         self.assertTrue(result["meta"]["Speaker2"]["applied"])
 
     def test_static_evidence_only_never_applies(self):
-        """联合兜住：三类静态行证据全部核对通过（quote 逐字存在于对应静态行，
-        防幻觉核对保持）、无任何 dialog_address → 永不 applied。静态行核对与
-        per-speaker 收窄正交：title_credit/author_host/description_roster 仍按
-        静态分区核对，静态证据永远不足以单独支撑显示名（不变式轴表：无佐证的
-        标题名不得 applied）。"""
+        """三类静态证据通过核对也不能单独命名。"""
         candidates = {
             "Speaker2": [
                 _candidate("青柠", "title_credit", "青柠专场"),
@@ -434,9 +421,7 @@ class TestGateRound2QuoteScope(unittest.TestCase):
 
 
 class _FingerprintAwareCache:
-    """按 (platform, media_id, input_fingerprint) 精确模拟真实 CacheManager 的
-    指纹敏感命中行为：v2 起 input_fingerprint 是缓存 payload 字段，值变即 miss
-    （真实读侧见 CacheManager.get_speaker_mapping 的指纹比对）。"""
+    """模拟按真实 input_fingerprint 命中缓存。"""
 
     def __init__(self):
         self.store = {}
@@ -455,10 +440,7 @@ class _FingerprintAwareCache:
 
 
 class TestMetadataChangeMissesCache(unittest.TestCase):
-    """correctness-metadata-fingerprint-order（第 2 轮）：元数据变 → 指纹变 →
-    旧映射不命中重算，锁为 spec（实现侧已两次被主审驳回改动，按门禁规则以
-    回归测试锁定预期行为：指纹含 title/author/description，元数据变化必须
-    触发缓存 miss 与 LLM 重算）。"""
+    """元数据变化必须改变缓存指纹并重算。"""
 
     def _make(self):
         inferencer = _make_inferencer()
@@ -519,7 +501,7 @@ class TestEvidenceGateRules(unittest.TestCase):
 
     def test_description_roster_alone_never_applies(self):
         """参会名单核对通过也不得单独 applied（名单≠发言人）。"""
-        verified, rejected = SpeakerInferencer._verify_candidates(
+        verified, rejected = _verify_in_context(
             [_candidate("小满", "description_roster", "小满")],
             {"description_roster": "描述：…小满…"},
         )
@@ -530,32 +512,44 @@ class TestEvidenceGateRules(unittest.TestCase):
         self.assertIsNone(name)
         self.assertEqual(reason, "description_roster_not_standalone")
 
-    def test_title_credit_without_dialog_support_rejected(self):
-        verified, _ = SpeakerInferencer._verify_candidates(
-            [_candidate("青柠", "title_credit", "青柠专场")],
-            {"title_credit": "标题：…青柠专场…"},
-        )
-        name, reason = SpeakerInferencer._decide_display_name(
-            verified, "Speaker2", ["Speaker2"]
-        )
-        self.assertIsNone(name)
-        self.assertEqual(reason, "title_credit_without_dialog_support")
+    def test_static_name_binding_keeps_matching_author_without_support(self):
+        for evidence_type, name, quote, section, label in (
+            ("title_credit", "青柠", "青柠专场", "title_credit", "标题"),
+            ("author_host", "John Collison", "John Collison", "author_host", "作者"),
+            ("author_host", " John Collison ", "JOHN COLLISON", "author_host", "作者"),
+        ):
+            verified, rejected = _verify_in_context(
+                [_candidate(name, evidence_type, quote)],
+                {section: f"- {label}：{quote}"},
+            )
+            self.assertEqual(rejected, [])
+            self.assertEqual([candidate["name"] for candidate in verified], [name.strip()])
+            display, reason = SpeakerInferencer._decide_display_name(
+                verified, "Speaker2", ["Speaker2"]
+            )
+            self.assertIsNone(display)
+            self.assertEqual(reason, "title_credit_without_dialog_support")
 
-    def test_dialog_address_alone_applies_directly(self):
-        verified, _ = SpeakerInferencer._verify_candidates(
-            [_candidate("柠姐", "dialog_address", "今天是柠姐的专场")],
-            {"dialog_address": "…今天是柠姐的专场…"},
-        )
-        name, reason = SpeakerInferencer._decide_display_name(
-            verified, "Speaker2", ["Speaker2"]
-        )
-        self.assertEqual(name, "柠姐")
-        self.assertIsNone(reason)
+    def test_context_before_address_remains_valid(self):
+        quote = "今天是青柠姐的专场"
+        inferencer = _make_inferencer()
+        dialogs = _load_fixture_dialogs()
+        speakers = ["Speaker1", "Speaker2"]
+        samples = inferencer._extract_sample_dialogs(dialogs, speakers)
+        context = "\n".join(text for _, text in samples["Speaker2"]["context_before"])
+        own = "\n".join(samples["Speaker2"]["own_samples"])
+        self.assertIn(quote, context)
+        self.assertNotIn(quote, own)
+        result = _run_infer_with(
+            {"Speaker2": [_candidate("青柠姐", "dialog_address", quote)]},
+            {"Speaker1": 0.0, "Speaker2": 0.0},
+        )[1]
+        self.assertEqual(result["mapping"]["Speaker2"], "青柠姐")
 
     def test_composite_format_is_exact(self):
         """title_credit + dialog_address → 带标注复合名（gate 修复轮第 3 轮①：
         三要素缺一不可——说话人编号、「推测」字样、两条来源名）。"""
-        verified, _ = SpeakerInferencer._verify_candidates(
+        verified, _ = _verify_in_context(
             [
                 _candidate("青柠", "title_credit", "青柠专场"),
                 _candidate("柠姐", "dialog_address", "柠姐"),
@@ -569,7 +563,7 @@ class TestEvidenceGateRules(unittest.TestCase):
         self.assertEqual(name, "说话人2｜标题关联推测:青柠｜对话称:柠姐")
 
     def test_unknown_evidence_type_rejected(self):
-        verified, rejected = SpeakerInferencer._verify_candidates(
+        verified, rejected = _verify_in_context(
             [_candidate("张三", "vibes", "张三")],
             {"dialog_address": "张三"},
         )
@@ -578,7 +572,7 @@ class TestEvidenceGateRules(unittest.TestCase):
 
     def test_partial_quote_substring_is_enough(self):
         """quote 是输入的逐字子串即可（不要求整行/整段）。"""
-        verified, _ = SpeakerInferencer._verify_candidates(
+        verified, _ = _verify_in_context(
             [_candidate("柠姐", "dialog_address", "柠姐，我邀请你")],
             {"dialog_address": "开场：柠姐，我邀请你做共同主持人了……"},
         )
@@ -588,14 +582,14 @@ class TestEvidenceGateRules(unittest.TestCase):
         """修复①边界值：纯空白/纯标点（含长度>=2 的多标点串）一律
         quote_missing；带实质字符的才放行。"""
         for quote in ("\u3000\u3000", "\u201c\u201d", "，", "，。", " 。 "):
-            verified, rejected = SpeakerInferencer._verify_candidates(
+            verified, rejected = _verify_in_context(
                 [_candidate("张三", "dialog_address", quote)],
                 {"dialog_address": f"对话{quote}后文"},
             )
             self.assertEqual(verified, [], f"quote={quote!r} should be rejected")
             self.assertEqual(rejected, ["quote_missing"])
         # 对照：去首尾空白后有实质内容的 quote 放行（逐字存在性仍用原文核对）。
-        verified, _ = SpeakerInferencer._verify_candidates(
+        verified, _ = _verify_in_context(
             [_candidate("张三", "dialog_address", " 张三 ")],
             {"dialog_address": "对话 张三 后文"},
         )
@@ -605,14 +599,14 @@ class TestEvidenceGateRules(unittest.TestCase):
         """修复④（第 4 轮）边界：dialog_address 的 quote 必须包含候选名本身，
         英文名忽略大小写（ADRIAN PUNK 支持 Adrian Punk）；不含名的真实
         quote 对该名字无证据力 → name_not_in_quote。"""
-        verified, rejected = SpeakerInferencer._verify_candidates(
+        verified, rejected = _verify_in_context(
             [_candidate("Adrian Punk", "dialog_address", "welcome, ADRIAN PUNK speaking")],
             {"dialog_address": "welcome, ADRIAN PUNK speaking"},
         )
         self.assertEqual(len(verified), 1)
         self.assertEqual(rejected, [])
 
-        verified, rejected = SpeakerInferencer._verify_candidates(
+        verified, rejected = _verify_in_context(
             [_candidate("张三", "dialog_address", "今天天气不错")],
             {"dialog_address": "今天天气不错"},
         )
@@ -621,14 +615,14 @@ class TestEvidenceGateRules(unittest.TestCase):
 
     def test_quote_in_wrong_section_rejected(self):
         """修复②边界：quote 只存在于另一分区/分区缺失时，逐字存在也不放行。"""
-        verified, rejected = SpeakerInferencer._verify_candidates(
+        verified, rejected = _verify_in_context(
             [_candidate("望舒", "dialog_address", "望舒")],
             {"description_roster": "- 描述：…望舒…"},
         )
         self.assertEqual(verified, [])
         self.assertEqual(rejected, ["quote_missing"])
         # 分区缺失（如空描述不进 prompt）→ fail-closed。
-        verified, rejected = SpeakerInferencer._verify_candidates(
+        verified, rejected = _verify_in_context(
             [_candidate("青柠", "title_credit", "青柠专场")],
             {},
         )
@@ -694,19 +688,14 @@ class TestInputFingerprintExtension(unittest.TestCase):
 
 
 class TestCompositeNameSemantics(unittest.TestCase):
-    """gate 修复轮第 3 轮①：复合显示名语义显式化。
-
-    契约（主脑续修指令锁定）：含 title_credit/author_host 的复合 mapping 值
-    三要素缺一不可——原始说话人编号、「推测」字样、两条来源名；标题名与
-    对话称呼是否同一人是模型推测，程序只核实引用存在与分区归属，因此
-    复合名必须就地自证推测属性，禁止裸标题名/作者名。仅 dialog_address
-    的 mapping 值保持对话称呼原文（可证实事实，不标注）。
-    """
+    """复合名必须包含说话人、推测标记和两条来源。"""
 
     def _verified(self, credit_type="title_credit"):
-        verified, rejected = SpeakerInferencer._verify_candidates(
+        credit_name = "青柠" if credit_type == "title_credit" else "林晚风"
+        credit_quote = "青柠专场" if credit_type == "title_credit" else "林晚风"
+        verified, rejected = _verify_in_context(
             [
-                _candidate("青柠" if credit_type == "title_credit" else "林晚风", credit_type, "原文引用"),
+                _candidate(credit_name, credit_type, credit_quote),
                 _candidate("柠姐", "dialog_address", "柠姐"),
             ],
             {
@@ -749,8 +738,7 @@ class TestCompositeNameSemantics(unittest.TestCase):
             self.assertNotEqual(name, "柠姐")
 
     def test_non_numeric_label_uses_position_number(self):
-        """原始标签无数字时（如 FunASR 通道的「说话人A」），复合名按
-        speakers 列表位次编号，与降级占位符同一套编号规则。"""
+        """非数字说话人标签按列表位次编号。"""
         verified = self._verified("title_credit")
         name, _ = SpeakerInferencer._decide_display_name(
             verified, "说话人B", ["说话人A", "说话人B"]
@@ -758,11 +746,9 @@ class TestCompositeNameSemantics(unittest.TestCase):
         self.assertTrue(name.startswith("说话人2｜"), name)
 
     def test_wrong_credit_association_still_annotated_end_to_end(self):
-        """反例（主脑续修指令①）：真实引用 + 错误关联——dialog_address 真
-        （Guest 的对话称呼），title_credit 标给无标题关联的普通说话人。
-        程序无法验证语义关联，因此显示名必须带「推测」标注而非裸名。"""
+        """真实但错误关联的两条证据仍须显示推测标注。"""
         dialogs = [
-            {"speaker": "Speaker1", "text": "欢迎来到今晚的直播", "start_time": 0.0},
+            {"speaker": "Speaker1", "text": "欢迎小张来到今晚的直播", "start_time": 0.0},
             {"speaker": "Speaker2", "text": "大家好我是小张，今天来串门", "start_time": 1.0},
             {"speaker": "Speaker1", "text": "小张请坐", "start_time": 2.0},
         ]
@@ -774,7 +760,7 @@ class TestCompositeNameSemantics(unittest.TestCase):
                     "confidence": {"Speaker1": 0.9, "Speaker2": 0.9},
                     "candidates": {
                         "Speaker2": [
-                            _candidate("小张", "dialog_address", "小张"),
+                            _candidate("小张", "dialog_address", "欢迎小张"),
                             # 语义错误关联：小张与标题专场毫无关系，但 quote 逐字真实。
                             _candidate("青柠", "title_credit", "青柠专场"),
                         ],
@@ -799,14 +785,12 @@ class TestCompositeNameSemantics(unittest.TestCase):
 
 
 class TestCompositeNameDownstreamSurfaces(unittest.TestCase):
-    """gate 修复轮第 3 轮①：复合名是单一事实源——归一化对话（网页渲染、
-    导出文本、LLM 后续输入的共同上游）原样携带复合名，渲染层不二次加工。"""
+    """复合名在网页与归一化结果中保持不变。"""
 
     COMPOSITE = "说话人2｜标题关联推测:青柠｜对话称:柠姐"
 
     def test_web_html_contains_all_composite_elements(self):
-        """网页渲染：结构化数据里 dialogs.speaker 已是复合名，HTML 必须
-        同时含「说话人2」「推测」「青柠」「柠姐」四要素（转义不改中文字面）。"""
+        """网页 HTML 保留复合名的四个组成部分。"""
         import tempfile
 
         from video_transcript_api.utils.rendering.dialog_renderer import DialogRenderer
@@ -837,8 +821,7 @@ class TestCompositeNameDownstreamSurfaces(unittest.TestCase):
         self.assertNotIn('data-speaker-status="pending"', html_out)
 
     def test_normalized_dialogs_carry_composite_verbatim(self):
-        """导出/后续输入上游：processor 归一化对话原样携带复合名，
-        speaker_id 保留原始标签（映射关系可追溯）。"""
+        """归一化对话保留复合名与原始 speaker_id。"""
         from video_transcript_api.llm.processors.speaker_aware_processor import (
             SpeakerAwareProcessor,
         )
@@ -861,13 +844,7 @@ class TestCompositeNameDownstreamSurfaces(unittest.TestCase):
 
 
 class TestPlatformSpeakerPriors(unittest.TestCase):
-    """gate 修复轮第 5 轮③：平台说话人先验。
-
-    契约：表内平台（twitter_space）在视频信息区追加先验段；表外平台/未传
-    platform 与旧输出逐字一致（零变化）；先验段只进 prompt 展示、不进任何
-    引用分区（从先验文案摘 quote 会被逐字核对 fail-closed 作废）；规则版本
-    随先验上线 bump 3→4。
-    """
+    """平台背景只进入提示词，不参与证据引用核对。"""
 
     def _build(self, platform=""):
         from video_transcript_api.llm.prompts import (
@@ -891,8 +868,7 @@ class TestPlatformSpeakerPriors(unittest.TestCase):
         self.assertIn(priors["twitter_space"], prompt.split("**转录内容片段**")[0])
 
     def test_unknown_or_missing_platform_output_unchanged(self):
-        """表外平台零变化：不传 platform、传空串、传未知平台三种形态的
-        prompt 与旧（无先验）输出逐字一致。"""
+        """未配置先验的平台保持旧 prompt 文本。"""
         from video_transcript_api.llm.prompts import build_speaker_inference_user_prompt
 
         legacy = build_speaker_inference_user_prompt(
@@ -910,8 +886,7 @@ class TestPlatformSpeakerPriors(unittest.TestCase):
             )
 
     def test_prior_never_enters_quote_sections(self):
-        """先验段不是证据：不进 build_speaker_quote_sections 任何分区，
-        从先验文案摘 quote 会被 fail-closed 作废。"""
+        """平台先验不进入任何证据引用分区。"""
         from video_transcript_api.llm.prompts import (
             PLATFORM_SPEAKER_PRIORS,
             build_speaker_quote_sections,
@@ -928,9 +903,6 @@ class TestPlatformSpeakerPriors(unittest.TestCase):
             self.assertNotIn(prior, text)
             self.assertNotIn("平台背景", text)
 
-    def test_rules_version_bumped_to_4(self):
-        """先验与旁证上线属裁决规则变化：v3→v4，旧缓存经指纹自然失效。"""
-        self.assertEqual(SPEAKER_EVIDENCE_RULES_VERSION, 4)
 
 
 if __name__ == "__main__":

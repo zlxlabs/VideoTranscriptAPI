@@ -10,11 +10,11 @@ from video_transcript_api.cache.cache_manager import CacheManager
 from video_transcript_api.llm.prompts.schemas.speaker_mapping import SPEAKER_MAPPING_SCHEMA_VERSION
 from video_transcript_api.llm.core.speaker_inferencer import SpeakerInferencer
 from video_transcript_api.llm.coordinator import LLMCoordinator
+from tests.unit.test_speaker_self_intro_verifier import assert_inference_and_review, speaker_llm_side_effect
 
 
 def _dialogs():
-    # 文本含说话人自报名：gate 修复轮第 4 轮起 dialog_address 的 quote 必须
-    # 包含候选名本身，候选引用取此处的逐字子串。
+    # dialog_address quote 必须是候选名的逐字子串。
     return [
         {"speaker": "Speaker1", "text": "Hello, I'm Alice", "start_time": 0.0},
         {"speaker": "Speaker2", "text": "World, Bob here", "start_time": 1.0},
@@ -496,19 +496,21 @@ def test_deep_malformed_artifact_falls_back_to_real_inference_not_a_task_failure
     )
 
     llm = MagicMock()
-    llm.call.return_value = SimpleNamespace(structured_output={
-        "speaker_mapping": {"Speaker1": "Alice", "Speaker2": "Bob"},
-        "confidence": {"Speaker1": 0.95, "Speaker2": 0.95},
-        # schema v2：引用取自采样文本（_dialogs 的逐字原文）且含候选名本身，核对可过。
-        "candidates": {
-            "Speaker1": [
-                {"name": "Alice", "evidence_type": "dialog_address", "evidence_quote": "I'm Alice"}
-            ],
-            "Speaker2": [
-                {"name": "Bob", "evidence_type": "dialog_address", "evidence_quote": "Bob here"}
-            ],
-        },
-    })
+    llm.call.side_effect = speaker_llm_side_effect(
+        SimpleNamespace(structured_output={
+            "speaker_mapping": {"Speaker1": "Alice", "Speaker2": "Bob"},
+            "confidence": {"Speaker1": 0.95, "Speaker2": 0.95},
+            # schema v2：引用取自采样文本（_dialogs 的逐字原文）且含候选名本身，核对可过。
+            "candidates": {
+                "Speaker1": [
+                    {"name": "Alice", "evidence_type": "dialog_address", "evidence_quote": "I'm Alice"}
+                ],
+                "Speaker2": [
+                    {"name": "Bob", "evidence_type": "dialog_address", "evidence_quote": "Bob here"}
+                ],
+            },
+        })
+    )
     inferencer = SpeakerInferencer(llm, cache_manager=cache)
 
     result = inferencer.infer(
@@ -518,7 +520,7 @@ def test_deep_malformed_artifact_falls_back_to_real_inference_not_a_task_failure
 
     # The corrupted cache must not have been treated as a hit -- the real
     # inference path (LLM call) must have taken over instead of crashing.
-    llm.call.assert_called_once()
+    assert_inference_and_review(llm.call)
     assert result["mapping"] == {"Speaker1": "Alice", "Speaker2": "Bob"}
 
 
@@ -741,14 +743,7 @@ def test_all_processing_features_disabled_make_zero_llm_calls(tmp_path):
 
 
 def test_infer_speaker_names_alone_still_calls_llm_for_name_inference(tmp_path):
-    """Matrix case locking in already-decided semantics: calibrate=False +
-    summarize=False must NOT silence infer_speaker_names=True. Name inference
-    is a "transcription" deliverable, independent from calibration/summary,
-    so it must still reach the LLM while calibration and summary make zero
-    calls. Real coordinator + real processors; only the LLM boundary is
-    mocked (same style as test_all_processing_features_disabled_make_zero_llm_calls
-    above, which locks the opposite corner of this matrix).
-    """
+    """calibrate/summary off must not silence infer_speaker_names=True."""
     coordinator = LLMCoordinator(
         config_dict={
             "llm": {
@@ -784,6 +779,8 @@ def test_infer_speaker_names_alone_still_calls_llm_for_name_inference(tmp_path):
             })
         if task_type == "speaker_contradiction_scan":
             return SimpleNamespace(structured_output={"contradictions": []})
+        if task_type == "speaker_self_intro":
+            return speaker_llm_side_effect(None)(**kwargs)
         raise AssertionError(
             f"unexpected LLM call while calibration/summary are disabled: "
             f"task_type={task_type!r}"
@@ -808,8 +805,7 @@ def test_infer_speaker_names_alone_still_calls_llm_for_name_inference(tmp_path):
         for call in coordinator.llm_client.call.call_args_list
     }
     assert called_task_types <= {
-        "key_info",
-        "speaker_inference",
+        "key_info", "speaker_inference", "speaker_self_intro",
         "speaker_contradiction_scan",
     }
     # ... and calibration/summary made zero calls (would have raised above
