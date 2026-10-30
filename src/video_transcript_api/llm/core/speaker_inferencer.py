@@ -33,9 +33,9 @@ from ..prompts.schemas.speaker_mapping import (
 
 logger = setup_logger(__name__)
 
-# 证据裁决规则版本，纳入 input_fingerprint；升级后旧缓存失效重算。
-# 唯一定义处。v2-v5 见历史；v6 = 本人样本自我介绍改由独立 LLM 复核；v7 = 两人访谈开放「元数据+角色」推测命名通路。
-SPEAKER_EVIDENCE_RULES_VERSION = 7
+# 证据裁决规则版本，纳入 input_fingerprint；升级后旧缓存失效重算。唯一定义处。
+# v2-v6 见历史（v6 = 自我介绍改独立 LLM 复核）；v7 = 两人访谈「元数据+角色」推测命名；v8 = @ 收窄到账号型、单边命名、提示词要求照抄原样。
+SPEAKER_EVIDENCE_RULES_VERSION = 8
 
 
 def build_speaker_risk_flags(
