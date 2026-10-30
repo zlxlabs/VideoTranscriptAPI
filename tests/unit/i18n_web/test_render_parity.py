@@ -1,8 +1,8 @@
-"""zh-CN render output must stay character-identical to the pre-i18n baseline.
+"""zh-CN render output must match the checked-in visible-output baseline.
 
 Locks design invariant 1 for C4: default language (missing ``language`` key
-or ``zh-CN``) produces the same user-visible HTML as before the catalog
-migration.
+or ``zh-CN``) produces identical HTML, including the current flag-specific
+speaker warning copy.
 
 All console output must be in English only (no emoji, no Chinese).
 """
@@ -99,4 +99,5 @@ def test_zh_cn_catalog_values_match_original_home_copy(language_config):
     assert t("render.speaker.pending") == "待确认"
     assert t("render.speaker.confirmed") == "已确认"
     assert t("render.speaker.risk_warning") == "本集说话人区分可能不准"
+    assert t("render.speaker.names_unresolved") == "部分说话人姓名未识别"
     assert t("og.ai_label") == "AI 总结"

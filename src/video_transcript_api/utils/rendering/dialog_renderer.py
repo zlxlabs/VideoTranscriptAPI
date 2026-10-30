@@ -484,9 +484,7 @@ class DialogRenderer:
             if not speaker_meta:
                 speaker_meta = structured_data.get("speaker_inference", {})
 
-            # 获取说话人列表
-            # 防御：plain 源结构化产物（mode=="plain_structured"）的段落无 speaker 键，
-            # 用下标 d["speaker"] 会直接 KeyError 崩主视图；无 speaker 段不参与颜色映射。
+            # Plain structured artifacts may omit speakers; only named speakers need colors.
             speakers = list(
                 dict.fromkeys(d.get("speaker") for d in dialogs if d.get("speaker"))
             )
@@ -509,15 +507,19 @@ class DialogRenderer:
                         chapter_anchors[seg] = ch
 
             html_parts = ['<div class="dialog-container">']
-            if speaker_risk_flags:
-                html_parts.append(
-                    '<div class="speaker-risk-warning" role="alert">'
-                    + t("render.speaker.risk_warning")
-                    + "</div>"
-                )
-
-            # Enumerate over the original dialogs list so start_seg / #dlg-{i}
-            # stay aligned with the raw input indices used by chapters.
+            risk_flags = set(speaker_risk_flags)
+            segmentation_warning = bool(
+                risk_flags - {"low_confidence_cluster_dropped", "low_average_mapping_confidence"}
+            )
+            for kind, key, show in (
+                ("segmentation", "render.speaker.risk_warning", segmentation_warning),
+                ("names_unresolved", "render.speaker.names_unresolved", "low_confidence_cluster_dropped" in risk_flags),
+            ):
+                if show:
+                    html_parts.append(
+                        f'<div class="speaker-risk-warning" role="alert" data-speaker-risk="{kind}">{t(key)}</div>'
+                    )
+            # Keep dlg ids aligned with raw indexes consumed by chapter anchors.
             for dlg_index, dialog in enumerate(dialogs):
                 speaker = dialog.get("speaker") or ""
                 segment_id = dialog.get("segment_id")
@@ -568,8 +570,7 @@ class DialogRenderer:
                 if content_html and not content_html.startswith("<p>"):
                     content_html = f"<p>{content_html}</p>"
 
-                # Chapter jump contract: the DOM id always follows the raw dialog
-                # index; segment IDs are metadata only and never replace dlg-{i}.
+                # DOM ids follow raw indexes; segment IDs remain metadata for chapter jumps.
                 item_attrs = f'id="dlg-{dlg_index}" class="dialog-item"'
                 if segment_id:
                     safe_segment_id = html.escape(str(segment_id), quote=True)
@@ -577,8 +578,7 @@ class DialogRenderer:
                 if start_time_attr:
                     item_attrs += f' data-start-time="{start_time_attr}"'
 
-                # Inline chapter header (T11): insert before the dialog whose
-                # index matches a jumpable chapter's start_seg.
+                # Insert each jumpable chapter header before its start_seg dialog.
                 anchor_html = _render_chapter_anchor(chapter_anchors.get(dlg_index))
                 if anchor_html:
                     html_parts.append(anchor_html)

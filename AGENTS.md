@@ -61,3 +61,5 @@ Commit messages follow the current log style: concise, imperative Chinese summar
 
 ## Security & Configuration Notes
 Do not commit live credentials; extend `config/config.example.jsonc` and document defaults instead. Keep generated artifacts in `data/` and `logs/` out of patches unless troubleshooting. When working with remote transcription servers, load tokens from environment variables and delete leftover media under `data/temp` after tests so sensitive media does not linger.
+
+ui-evidence-exempt: 2026-10-30 本仓 ui-browser.yml 未接 gate-hub ui-evidence-publish，PR 评论无可点录屏链接 (#282)
