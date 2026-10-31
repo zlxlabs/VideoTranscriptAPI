@@ -61,11 +61,18 @@ class EditMetadataRequest(BaseModel):
 
 
 def _clean_optional(value: str | None) -> str | None:
-    """strip() a provided field; blank-after-strip means invalid, not absent."""
+    """strip() a provided field; blank-after-strip means invalid, not absent.
+
+    None (key omitted, or explicitly null) means "leave this field alone";
+    a provided blank string is a client error and fails the whole request
+    instead of being silently dropped (first review, F1).
+    """
     if value is None:
         return None
     stripped = value.strip()
-    return stripped or None
+    if not stripped:
+        raise ApiError(400, "metadata_invalid")
+    return stripped
 
 
 @router.post("/edit_metadata")
