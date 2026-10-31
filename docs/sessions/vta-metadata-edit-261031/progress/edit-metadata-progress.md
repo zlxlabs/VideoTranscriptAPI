@@ -11,4 +11,17 @@
 - **关键决策与已否决方案**：实现顺序定为 权限白名单红测 → 路由红测 → 实现 → 全量绿；
   `metadata_shared_denied` 优先于 `metadata_in_flight`（按卡面锁定决策文序）；
   old→new 走 logger.info 结构化一行，不污染 log_api_call 的结构化列。
-- **下一步唯一动作**：提交 tests/unit/test_user_manager_permissions.py 的红测（edit_metadata 白名单）。
+- **下一步唯一动作**：提交 tests/unit/test_edit_metadata.py 红测（路由模块不存在，14 用例 ImportError 红），然后实现。
+
+## 2026-10-31 段2：主测红
+
+- **当前阶段**：implementing（TDD 红-2 已提交）
+- **本段结论**：主测 tests/unit/test_edit_metadata.py 落盘，覆盖卡面全部 11 个场景
+  （含 speaker=0/1 变体覆盖与 OG PNG 失效）。红-1 实测：`UserConfigError: user entry
+  1.permissions contains an invalid permission`；红-2 实测：`ImportError: cannot import
+  name 'metadata' from ...routes`。两个红均为预期类型。
+- **关键决策与已否决方案**：测试只 mock verify_token Depends 与 UserManager 的
+  check_permission，ownership/约束/写入全部走真实 CacheManager + 真实 AuditLogger
+  （卡面端到端要求）；error_code 断言依赖 install_api_error_handlers 注册。
+- **下一步唯一动作**：实现 ALLOWED_PERMISSIONS + metadata_editor.py + metadata.py 路由
+  + app 注册 + i18n 文案 + users.example.json，一次提交转绿。
