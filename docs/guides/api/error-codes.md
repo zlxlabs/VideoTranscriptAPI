@@ -27,6 +27,11 @@ HTTP 状态来自生产代码中的 `ApiError(status, error_code)` 调用。`dyn
 | `invalid_history_status` | 422 | status must be one of: success, failed, all | status must be one of: success, failed, all |
 | `invalid_url` | 400 | 视频URL不能为空 | The video URL is required |
 | `llm_queue_full` | 503 | LLM 队列已满，请稍后重试{note} | The LLM queue is full. Please try again later.{note} |
+| `metadata_in_flight` | 409 | 该媒体仍有进行中的任务，结束后才能修改标题或作者 | This media still has tasks in progress; title/author can be edited after they finish |
+| `metadata_invalid` | 400 | title/author 至少提供一项，且不能为空白 | Provide at least one of title/author, and neither may be blank |
+| `metadata_ownership_denied` | 403 | 无权编辑该分享页的标题或作者 | You are not authorized to edit this page's title or author |
+| `metadata_permission_denied` | 403 | 无编辑分享页元数据权限 | You do not have permission to edit share page metadata |
+| `metadata_shared_denied` | 403 | 该媒体存在其他账号提交的任务，禁止修改 | This media has tasks submitted by other accounts and cannot be edited |
 | `notes_already_exists` | 400 | 详细笔记已存在，无需重复生成 | Detailed notes already exist |
 | `notes_already_in_progress` | 409 | 详细笔记正在生成中，请等待当前任务完成 | Detailed notes are already being generated |
 | `notes_chapters_required` | 409 | 详细笔记依赖已生成的章节层，请先生成章节后再重试 | Generate chapters before requesting detailed notes |

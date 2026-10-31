@@ -32,7 +32,7 @@ from .context import (
     run_with_runtime,
     unbind_runtime,
 )
-from .routes import audit, health, tasks, uploads, users, views
+from .routes import audit, health, metadata, tasks, uploads, users, views
 from .services.transcription import process_llm_queue, process_task_queue
 from .services.terminal_status import run_terminal_notification_dispatcher
 
@@ -408,6 +408,7 @@ def create_app(
 
     app.include_router(health.router)
     app.include_router(tasks.router)
+    app.include_router(metadata.router)
     app.include_router(uploads.router)
     app.include_router(audit.router)
     app.include_router(users.router)

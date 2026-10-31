@@ -7,7 +7,7 @@
       "feishu_webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/user1-key",
       "created_at": "2025-01-01T00:00:00Z",
       "enabled": true,
-      "permissions": ["recalibrate"]
+      "permissions": ["recalibrate", "edit_metadata"]
     },
     "sk-user002-yyyyyyyyyy": {
       "user_id": "user_002",

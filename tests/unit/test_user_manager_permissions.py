@@ -30,7 +30,7 @@ def users_config(tmp_path):
                 "user_id": "admin",
                 "name": "Admin User",
                 "enabled": True,
-                "permissions": ["recalibrate", "delete", "admin"],
+                "permissions": ["recalibrate", "delete", "admin", "edit_metadata"],
                 "wechat_webhook": "https://qyapi.weixin.qq.com/admin",
             },
             "sk-viewer-token": {
@@ -95,12 +95,62 @@ class TestPermissionCheck:
         assert manager.check_permission(user, "recalibrate") is True
         assert manager.check_permission(user, "delete") is True
 
+    def test_admin_has_edit_metadata(self, manager):
+        """edit_metadata is a grantable permission (vta-261031).
+
+        The admin fixture carries edit_metadata in its permissions array;
+        this locks both the whitelist (config load must not reject it) and
+        the per-user grant.
+        """
+        user = manager.validate_token("sk-admin-token")
+        assert manager.check_permission(user, "edit_metadata") is True
+
+    def test_edit_metadata_not_granted_is_false(self, manager):
+        """A user without edit_metadata in permissions must not have it."""
+        user = manager.validate_token("sk-viewer-token")
+        assert manager.check_permission(user, "edit_metadata") is False
+
     def test_viewer_limited_permissions(self, manager):
         """Viewer should only have recalibrate permission."""
         user = manager.validate_token("sk-viewer-token")
         assert manager.check_permission(user, "recalibrate") is True
         assert manager.check_permission(user, "admin") is False
         assert manager.check_permission(user, "delete") is False
+
+
+class TestEditMetadataWhitelist:
+    """edit_metadata must be in ALLOWED_PERMISSIONS; near-miss names stay rejected.
+
+    (vta-261031) Guard against reusing/recalibrating the permission name:
+    a typo'd variant like "metadata_edit" must still raise UserConfigError,
+    proving the whitelist was extended with exactly "edit_metadata".
+    """
+
+    def test_unknown_near_miss_permission_rejected(self, tmp_path, fallback_config):
+        from video_transcript_api.utils.accounts.user_manager import (
+            UserConfigError,
+            UserManager,
+        )
+
+        users_data = {
+            "users": {
+                "sk-typo-token": {
+                    "user_id": "typo_user",
+                    "name": "Typo User",
+                    "enabled": True,
+                    "permissions": ["metadata_edit"],
+                },
+            }
+        }
+        path = tmp_path / "users.json"
+        path.write_text(json.dumps(users_data), encoding="utf-8")
+        with pytest.raises(UserConfigError):
+            UserManager(users_config_path=str(path), fallback_config=fallback_config)
+
+    def test_legacy_user_has_edit_metadata(self, manager):
+        """Legacy single-token user keeps implicit all-permissions behavior."""
+        user = manager.validate_token("legacy-token-123")
+        assert manager.check_permission(user, "edit_metadata") is True
 
     def test_no_perms_user(self, manager):
         """User with empty permissions should have no permissions."""
