@@ -93,8 +93,9 @@ def _seed_task(
     )
     with cache_manager._get_cursor() as cursor:
         cursor.execute(
-            "UPDATE task_status SET status = ? WHERE task_id = ?",
-            (status, task["task_id"]),
+            "UPDATE task_status SET status = ?, title = ?, author = ? "
+            "WHERE task_id = ?",
+            (status, title, author, task["task_id"]),
         )
     return task["view_token"]
 
