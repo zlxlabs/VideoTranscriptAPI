@@ -18,6 +18,8 @@ Covered card scenarios:
  9. "url" field in request body -> 422 (model forbids extra fields)
 10. og_card.*.png files are removed after a successful edit
 11. upload_ prefixed token is rejected (404 transcript_not_found)
+12. a blank-after-strip field sent together with a valid field is rejected
+    (400 metadata_invalid) -- the valid field must not be written either
 
 All console output must be in English only (no emoji, no Chinese).
 """
@@ -389,6 +391,73 @@ class TestInvalidBody:
 
         assert resp.status_code == 400
         assert resp.json()["error_code"] == "metadata_invalid"
+
+    def test_blank_title_with_valid_author_400(self, monkeypatch, cache_manager):
+        """A provided-but-blank title invalidates the whole request.
+
+        The sibling author is valid, so the old code silently ignored the
+        blank title and wrote the author only. Both tables and the public
+        page must stay untouched and the call must fail loudly.
+        """
+        from video_transcript_api.api.services.view_token_resolver import (
+            ViewTokenResolver,
+        )
+
+        view_token = _seed_task(cache_manager, submitted_by="user_a")
+        client = self._client(monkeypatch, cache_manager)
+
+        resp = client.post(
+            "/api/edit_metadata",
+            json={
+                "view_token": view_token,
+                "title": "   ",
+                "author": "Bob",
+            },
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["error_code"] == "metadata_invalid"
+
+        cache_rows, task_rows = _read_media_rows(cache_manager)
+        assert cache_rows == [("Old Title", "Old Author")]
+        assert all(row == ("Old Title", "Old Author") for row in task_rows)
+
+        payload = ViewTokenResolver(cache_manager).get_view_data_by_token(
+            view_token
+        )
+        assert payload["title"] == "Old Title"
+        assert payload["author"] == "Old Author"
+
+    def test_valid_title_with_blank_author_400(self, monkeypatch, cache_manager):
+        """Symmetric case: a blank author invalidates the whole request."""
+        from video_transcript_api.api.services.view_token_resolver import (
+            ViewTokenResolver,
+        )
+
+        view_token = _seed_task(cache_manager, submitted_by="user_a")
+        client = self._client(monkeypatch, cache_manager)
+
+        resp = client.post(
+            "/api/edit_metadata",
+            json={
+                "view_token": view_token,
+                "title": "Bob",
+                "author": "   ",
+            },
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["error_code"] == "metadata_invalid"
+
+        cache_rows, task_rows = _read_media_rows(cache_manager)
+        assert cache_rows == [("Old Title", "Old Author")]
+        assert all(row == ("Old Title", "Old Author") for row in task_rows)
+
+        payload = ViewTokenResolver(cache_manager).get_view_data_by_token(
+            view_token
+        )
+        assert payload["title"] == "Old Title"
+        assert payload["author"] == "Old Author"
 
 
 # ---------------------------------------------------------------------------
