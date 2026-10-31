@@ -38,3 +38,31 @@
   ownership_check_unavailable 现有错误码；测试 seed 补 task_status 终态写回
   （create_task 的 INSERT 本身不写 title/author，DB 未改断言才覆盖两表）。
 - **下一步唯一动作**：make test 全量回归。
+
+## 2026-10-31 段4：全量绿、守卫级联、红验
+
+- **当前阶段**：verifying（全量绿 + 红验完成）
+- **本段结论**：make test exit=0、[100%] 无 F/E；初跑红在两个既有 i18n 守卫（错误码
+  参考文档 stale + 手写目录缺新码），走 delegate scope-request seq=1 批准后登记
+  `test_error_codes.py` 5 行并重新生成 `docs/guides/api/error-codes.md`，守卫绿。
+  红验两枚均有效：① video_cache UPDATE 加 `AND use_speaker_recognition = 0` →
+  TestSpeakerVariantCoverage 红（'Speaker1 Title' != 'Both'，AssertionError）；② 权限闸
+  `if False and ...` → TestPermissionDenied 红（assert 200 == 403）。均 cp 备份/单点还原，
+  还原后 41 passed。
+- **关键决策与已否决方案**：红验用最小注入（只改判据行），不用全局替换；make test 在
+  重定向下不输出 pytest 摘要行（-q 叠加本仓插件行为的既有现象），全绿判据取 exit=0 +
+  [100%] 全点。
+- **下一步唯一动作**：push 分支，写 report.md。
+
+## 2026-10-31 段5：交付文档（部署顺序）
+
+- **当前阶段**：done
+- **本段结论**：上线顺序（同 routes/metadata.py docstring）：
+  1. 先部署本卡代码（新路由 + ALLOWED_PERMISSIONS 白名单）；
+  2. 再往生产 `config/users.json` 给目标 key 的 permissions 加 `edit_metadata`（未跟踪
+     运行时文件，不在本卡范围）。
+  回滚顺序反向：先把 `edit_metadata` 从 users.json 删掉，再回滚代码——
+  `_validate_users` 对未知权限名抛 UserConfigError 拒绝整份配置，新配置 + 旧代码会
+  打挂全部用户鉴权。
+- **关键决策与已否决方案**：无。
+- **下一步唯一动作**：push。
