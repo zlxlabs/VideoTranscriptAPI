@@ -14,7 +14,7 @@ from ..logging import setup_logger
 
 logger = setup_logger("user_manager")
 
-ALLOWED_PERMISSIONS = frozenset({"recalibrate", "delete", "admin"})
+ALLOWED_PERMISSIONS = frozenset({"recalibrate", "delete", "admin", "edit_metadata"})
 RESERVED_USER_IDS = frozenset({"legacy_user"})
 USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _WHITESPACE_PATTERN = re.compile(r"\s")

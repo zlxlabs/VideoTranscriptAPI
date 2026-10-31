@@ -23,5 +23,18 @@
 - **关键决策与已否决方案**：测试只 mock verify_token Depends 与 UserManager 的
   check_permission，ownership/约束/写入全部走真实 CacheManager + 真实 AuditLogger
   （卡面端到端要求）；error_code 断言依赖 install_api_error_handlers 注册。
-- **下一步唯一动作**：实现 ALLOWED_PERMISSIONS + metadata_editor.py + metadata.py 路由
-  + app 注册 + i18n 文案 + users.example.json，一次提交转绿。
+- **下一步唯一动作**：实现转绿（已提交），跑 make test 全量 + 红验 + scope check，然后 push。
+
+## 2026-10-31 段3：实现绿
+
+- **当前阶段**：implementing（Narrow-Verify 绿）
+- **本段结论**：`uv run pytest -q tests/unit/test_edit_metadata.py
+  tests/unit/test_user_manager_permissions.py` => `41 passed, 1.63s`。实现五件套：
+  ALLOWED_PERMISSIONS 加 edit_metadata；metadata_editor.py（约束检查 + 单事务双 UPDATE
+  + OG PNG 清理）；routes/metadata.py（四道闸 + upload_ 拒绝 + url 422）；app.py 注册；
+  i18n 五个错误码中英双份 + users.example.json 示例。
+- **关键决策与已否决方案**：editor 直接抛 ApiError（照 services/transcription.py 惯例，
+  否决了 services→routes 反向 import 的初稿）；ownership 异常复用 503
+  ownership_check_unavailable 现有错误码；测试 seed 补 task_status 终态写回
+  （create_task 的 INSERT 本身不写 title/author，DB 未改断言才覆盖两表）。
+- **下一步唯一动作**：make test 全量回归。
