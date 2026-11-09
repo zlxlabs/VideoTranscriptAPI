@@ -1060,7 +1060,7 @@ class TestStartSegSortNormalization(ChaptersProcessorTestBase):
         )
 
         with patch(
-            "video_transcript_api.llm.processors.chapters_processor.logger"
+            "video_transcript_api.llm.processors.chapters_validation.logger"
         ) as mock_logger:
             result = self.processor.process(segments=segments, title="T")
 
@@ -1085,7 +1085,7 @@ class TestStartSegSortNormalization(ChaptersProcessorTestBase):
         ])
 
         with patch(
-            "video_transcript_api.llm.processors.chapters_processor.logger"
+            "video_transcript_api.llm.processors.chapters_validation.logger"
         ) as mock_logger:
             result = self.processor.process(segments=segments, title="T")
 
