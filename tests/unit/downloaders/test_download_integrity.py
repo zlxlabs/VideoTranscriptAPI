@@ -12,6 +12,7 @@ class _FakeResponse:
     def __init__(self, body, headers=None):
         self.body = body
         self.headers = headers or {}
+        self.status_code = 200
 
     def raise_for_status(self):
         return None
@@ -132,7 +133,25 @@ def test_generic_nonempty_body_without_content_length_runs_media_validation(
     assert validations == [str(task_dir / "audio.mp3")]
 
 
-def test_base_content_length_mismatch_fails_and_discards_temp_file(tmp_path, monkeypatch):
+def test_generic_streaming_size_limit_discards_oversized_body(tmp_path, monkeypatch):
+    downloader, task_dir = _make_generic(tmp_path)
+    downloader.max_download_bytes = 3
+    payload = b"too-large"
+    monkeypatch.setattr(
+        downloader,
+        "_safe_request",
+        lambda *args, **kwargs: _FakeResponse(payload),
+    )
+
+    result = downloader.download_file("https://files.example/audio.mp3", "audio.mp3")
+
+    assert result is None
+    assert not (task_dir / "audio.mp3").exists()
+
+
+def test_base_content_length_mismatch_fails_and_discards_temp_file(
+    tmp_path, monkeypatch
+):
     downloader = _ConcreteBaseDownloader()
     downloader.temp_manager = _BaseTempManager(str(tmp_path))
     downloader.max_download_bytes = 0
@@ -141,6 +160,11 @@ def test_base_content_length_mismatch_fails_and_discards_temp_file(tmp_path, mon
         lambda *args, **kwargs: _FakeResponse(b"short", {"Content-Length": "12"}),
     )
     monkeypatch.setattr(downloader, "_validate_media_file", lambda path: True)
+    error_logs = []
+    monkeypatch.setattr(
+        "video_transcript_api.downloaders.base.logger.error",
+        lambda message, *args, **kwargs: error_logs.append(message),
+    )
 
     result = downloader.download_file(
         "https://files.example/audio.mp4", "audio.mp4", max_retries=1
@@ -149,3 +173,4 @@ def test_base_content_length_mismatch_fails_and_discards_temp_file(tmp_path, mon
     assert result is None
     assert downloader.temp_manager.created
     assert not os.path.exists(downloader.temp_manager.created[0])
+    assert any("DOWNLOAD_LENGTH_MISMATCH" in str(message) for message in error_logs)
