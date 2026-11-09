@@ -14,6 +14,7 @@ Covers:
 from unittest.mock import patch, MagicMock, call
 
 import pytest
+from loguru import logger as loguru_logger
 
 from src.video_transcript_api.utils.notifications.router import NotificationRouter
 
@@ -388,6 +389,125 @@ class TestRouterIsEnabled:
 
     def test_disabled_without_channels(self, router_no_config):
         assert router_no_config.is_enabled is False
+
+
+def test_router_warns_for_every_default_webhook_dispatch_without_leaking_url(
+    router_dual,
+):
+    router, wechat, feishu = router_dual
+    records = []
+    sink_id = loguru_logger.add(
+        lambda message: records.append(message.record), level="WARNING"
+    )
+
+    def fallback_warnings():
+        return [
+            record["message"]
+            for record in records
+            if record["level"].name == "WARNING"
+            and "NOTIFY_TARGET_FALLBACK_DEFAULT" in record["message"]
+        ]
+
+    try:
+        router.send_view_link(
+            title="Video title",
+            view_token="token",
+            channel_name="wechat",
+            task_id="t1",
+        )
+        warnings = fallback_warnings()
+        assert len(warnings) == 1
+        assert "channel=wechat" in warnings[0]
+        assert "method=send_view_link" in warnings[0]
+        assert "task_id=t1" in warnings[0]
+        assert "https://" not in warnings[0]
+        assert wechat.send_rich.call_args.kwargs["webhook"] is None
+
+        for method_name, operation in (
+            ("send_text", lambda: router.send_text("hello")),
+            ("send_rich", lambda: router.send_rich("## content")),
+            (
+                "notify_task_status",
+                lambda: router.notify_task_status(
+                    url="https://example.test/video",
+                    status="started",
+                    task_id="status-t1",
+                ),
+            ),
+        ):
+            records.clear()
+            operation()
+            warnings = fallback_warnings()
+            assert len(warnings) == 2
+            assert all(f"method={method_name}" in warning for warning in warnings)
+            assert any("channel=wechat" in warning for warning in warnings)
+            assert any("channel=feishu" in warning for warning in warnings)
+            assert all("https://" not in warning for warning in warnings)
+            if method_name == "notify_task_status":
+                assert all("task_id=status-t1" in warning for warning in warnings)
+
+        for method_name, operation, channel_method in (
+            (
+                "send_text",
+                lambda: router.send_text("fallback", channel_name="feishu"),
+                "send_text",
+            ),
+            (
+                "send_rich",
+                lambda: router.send_rich("fallback", channel_name="feishu"),
+                "send_rich",
+            ),
+            (
+                "notify_task_status",
+                lambda: router.notify_task_status(
+                    url="https://example.test/video",
+                    status="started",
+                    channel_name="feishu",
+                    task_id="fallback-t1",
+                ),
+                "notify_task_status",
+            ),
+        ):
+            getattr(feishu, channel_method).return_value = False
+            getattr(wechat, channel_method).return_value = True
+            records.clear()
+            operation()
+            warnings = fallback_warnings()
+            assert len(warnings) == 2
+            assert all(f"method={method_name}" in warning for warning in warnings)
+            assert any("channel=feishu" in warning for warning in warnings)
+            assert any("channel=wechat" in warning for warning in warnings)
+            assert all("https://" not in warning for warning in warnings)
+            if method_name == "notify_task_status":
+                assert all("task_id=fallback-t1" in warning for warning in warnings)
+
+        records.clear()
+        router.send_view_link(
+            title="Video title",
+            view_token="token",
+            channel_name="wechat",
+            webhooks={"wechat": "https://custom.example/secret"},
+            task_id="t1",
+        )
+        assert fallback_warnings() == []
+        assert (
+            wechat.send_rich.call_args.kwargs["webhook"]
+            == "https://custom.example/secret"
+        )
+
+        records.clear()
+        router.send_text(
+            "hello",
+            channel_name="wechat",
+            webhook="https://custom.example/single-secret",
+        )
+        assert fallback_warnings() == []
+        assert (
+            wechat.send_text.call_args.kwargs["webhook"]
+            == "https://custom.example/single-secret"
+        )
+    finally:
+        loguru_logger.remove(sink_id)
 
 
 class TestStatusEmojiMatchesLayeredCopy:

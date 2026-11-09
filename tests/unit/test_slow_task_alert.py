@@ -67,7 +67,7 @@ def test_slow_transcription_alerts_exactly_once_on_both_channels(channels, monke
         "task_aabbcc112233", url="https://www.youtube.com/watch?v=x",
     )
     assert _wait_for(wecom, 1) == 1
-    assert len(feishu.sent) == 1
+    assert _wait_for(feishu, 1) == 1
     time.sleep(0.15)
     assert len(wecom.sent) == 1
     content = wecom.sent[0]
