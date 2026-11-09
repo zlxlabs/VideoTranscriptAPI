@@ -1,0 +1,182 @@
+"""Regression tests for atomic publication of transcript bodies and sidecars.
+
+Console output: English only, no emoji.
+"""
+import json
+import threading
+
+import pytest
+
+from src.video_transcript_api.cache import cache_manager as cache_manager_module
+from src.video_transcript_api.cache.cache_manager import CacheManager
+from src.video_transcript_api.transcriber.segments import load_segments
+
+
+@pytest.fixture
+def cm(tmp_path):
+    manager = CacheManager(cache_dir=str(tmp_path / "cache"))
+    yield manager
+    manager.close()
+
+
+def _save_group(cm, body, segment_text):
+    return cm.save_cache(
+        platform="youtube",
+        url="https://example.com/generation-test",
+        media_id="generation-test",
+        use_speaker_recognition=False,
+        transcript_data=body,
+        transcript_type="capswriter",
+        extra_json_data={
+            "segments": [
+                {"start_time": 0, "end_time": 1, "text": segment_text}
+            ]
+        },
+    )
+
+
+def _assert_complete_group(cache_data, allowed_groups):
+    assert cache_data is None or any(
+        cache_data["transcript_data"] == body
+        and cache_data.get("segments", [{}])[0].get("text") == segment
+        for body, segment in allowed_groups
+    ), "cache read returned a mixed or partial transcript generation"
+
+
+def _assert_segments_are_one_known_generation(segments, allowed_texts):
+    assert segments is None or (
+        len(segments) == 1 and segments[0]["text"] in allowed_texts
+    ), "segment reader returned data outside the published generations"
+
+
+def test_second_file_replace_failure_never_exposes_mixed_group(
+    cm, monkeypatch,
+):
+    old_group = ("OLD BODY", "OLD SEGMENT")
+    new_group = ("NEW BODY", "NEW SEGMENT")
+    initial = _save_group(cm, *old_group)
+    assert initial is not None
+
+    real_replace = cache_manager_module.os.replace
+    replace_count = 0
+
+    def fail_second_replace(source, target):
+        nonlocal replace_count
+        replace_count += 1
+        if replace_count == 2:
+            raise OSError("injected second artifact replacement failure")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(cache_manager_module.os, "replace", fail_second_replace)
+    assert _save_group(cm, *new_group) is None
+    assert replace_count == 2, "the failure must occur at the second artifact replacement"
+
+    cache_data = cm.get_cache(
+        platform="youtube", media_id="generation-test", use_speaker_recognition=False
+    )
+    _assert_complete_group(cache_data, [old_group, new_group])
+
+    media_dir = (
+        cm.cache_dir / cache_data["files_loc"]
+        if cache_data is not None
+        else cm.cache_dir / initial["files_loc"]
+    )
+    _assert_segments_are_one_known_generation(
+        load_segments(media_dir), {old_group[1], new_group[1]}
+    )
+
+    legacy_path = cm._get_file_path("youtube", "legacy-layout")
+    legacy_path.mkdir(parents=True)
+    (legacy_path / "transcript_capswriter.txt").write_text(
+        "LEGACY BODY", encoding="utf-8"
+    )
+    legacy_loc = legacy_path.relative_to(cm.cache_dir).as_posix()
+    with cm._get_cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO video_cache "
+            "(platform, url, media_id, use_speaker_recognition, files_loc) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("youtube", "https://example.com/legacy-layout", "legacy-layout", 0, legacy_loc),
+        )
+    legacy_data = cm.get_cache(
+        platform="youtube", media_id="legacy-layout", use_speaker_recognition=False
+    )
+    assert legacy_data["transcript_data"] == "LEGACY BODY"
+
+
+def test_reader_between_artifact_replacements_never_sees_mixed_group(
+    cm, monkeypatch,
+):
+    old_group = ("OLD BODY", "OLD SEGMENT")
+    new_group = ("NEW BODY", "NEW SEGMENT")
+    initial = _save_group(cm, *old_group)
+    assert initial is not None
+
+    first_replace_done = threading.Event()
+    continue_writer = threading.Event()
+    read_done = threading.Event()
+    save_result = {}
+    read_result = {}
+    real_replace = cache_manager_module.os.replace
+    replace_count = 0
+
+    def pause_after_first_replace(source, target):
+        nonlocal replace_count
+        replace_count += 1
+        result = real_replace(source, target)
+        if replace_count == 1:
+            first_replace_done.set()
+            assert continue_writer.wait(timeout=5), "writer release timed out"
+        return result
+
+    monkeypatch.setattr(cache_manager_module.os, "replace", pause_after_first_replace)
+
+    def save_new_group():
+        save_result["value"] = _save_group(cm, *new_group)
+
+    def read_during_save():
+        cache_data = cm.get_cache(
+            platform="youtube", media_id="generation-test", use_speaker_recognition=False
+        )
+        read_result["cache"] = cache_data
+        read_result["segments"] = (
+            load_segments(cm.cache_dir / cache_data["files_loc"])
+            if cache_data is not None else None
+        )
+        read_done.set()
+
+    writer = threading.Thread(target=save_new_group)
+    writer.start()
+    reader = None
+    try:
+        assert first_replace_done.wait(timeout=3), "writer never reached first replacement"
+        reader = threading.Thread(target=read_during_save)
+        reader.start()
+        assert not read_done.wait(timeout=0.3), (
+            "reader exposed an in-progress artifact group before the database switch"
+        )
+    finally:
+        continue_writer.set()
+        writer.join(timeout=5)
+        if reader is not None:
+            reader.join(timeout=5)
+
+    assert not writer.is_alive(), "writer did not finish after release"
+    assert read_done.is_set(), "reader did not finish after publication"
+    _assert_complete_group(read_result["cache"], [old_group, new_group])
+    _assert_segments_are_one_known_generation(
+        read_result["segments"], {old_group[1], new_group[1]}
+    )
+    assert save_result.get("value") is not None
+    final_data = cm.get_cache(
+        platform="youtube", media_id="generation-test", use_speaker_recognition=False
+    )
+    _assert_complete_group(final_data, [new_group])
+    generation_dir = cm.cache_dir / final_data["files_loc"]
+    assert (generation_dir / "transcript_capswriter.txt").read_bytes() == b"NEW BODY"
+    expected_sidecar = json.dumps(
+        {"segments": [{"start_time": 0, "end_time": 1, "text": "NEW SEGMENT"}]},
+        ensure_ascii=False,
+        indent=2,
+    ).encode("utf-8")
+    assert (generation_dir / "transcript_capswriter.json").read_bytes() == expected_sidecar
