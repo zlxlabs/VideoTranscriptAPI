@@ -2820,7 +2820,8 @@ def _build_calibration_warning(stats: dict) -> str:
     Returns:
         str: 警告文本（空字符串表示无警告）
     """
-    if stats.get("calibration_status") == CalibrationStatus.DISABLED:
+    status = stats.get("calibration_status")
+    if status == CalibrationStatus.DISABLED:
         return (
             "\n⚠️ **AI 校对未启用**：当前显示为未经校对的原始语音识别文本"
             "（可能含错别字、断句错误）。"
@@ -2830,7 +2831,6 @@ def _build_calibration_warning(stats: dict) -> str:
     if not cal_stats:
         return ""
 
-    status = stats.get("calibration_status")
     if status is None:
         status = derive_calibration_status_from_stats(cal_stats)
     if status == CalibrationStatus.NONE:

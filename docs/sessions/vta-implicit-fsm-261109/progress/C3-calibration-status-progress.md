@@ -39,3 +39,10 @@
   - llm_ops 顶层 status 缺失分支保留：真实链路 coordinator 必写顶层 status，该分支只服务
     旧缓存/测试 mock 数据，且让 test_llm_ops_helpers.py 零余量约束下无需改测试数据。
 - **下一步唯一动作**：跑全仓 `CalibrationStatus.FULL` grep 清单与 scope check，收尾报告与 draft PR。
+
+## 段 3：门禁 finding 反馈重排
+
+- **当前阶段**：feedback follow-up（实现已提交）
+- **本段结论**：`_build_calibration_warning` 现在在函数入口读取统一 `status`，紧接着处理 DISABLED，再检查统计是否为空和缺失状态的派生。新增非空全失败统计下 DISABLED 提示优先的回归测试，避免主审再次因 diff hunk 外分支误读。
+- **关键决策与已否决方案**：按反馈只重排状态判断并补针对性断言，不改警告文案和派生口径；新测试在原 base 上预期通过，因此标记为红验不适用（行为已正确，仅锁定结构性重排后的优先级）。
+- **下一步唯一动作**：运行本卡窄测与报告契约检查，记录结果并收尾。

@@ -383,6 +383,25 @@ class TestLegacyViewsCallSite:
 class TestBuildCalibrationWarningCallSite:
     """Real caller: llm_ops._build_calibration_warning."""
 
+    def test_disabled_status_takes_priority_over_nonempty_failure_stats(self):
+        from video_transcript_api.api.services.llm_ops import (
+            _build_calibration_warning,
+        )
+
+        stats = {
+            "calibration_status": CalibrationStatus.DISABLED,
+            "calibration_stats": {
+                "total_chunks": 3,
+                "success_count": 0,
+                "partial_count": 0,
+                "fallback_count": 0,
+                "failed_count": 3,
+            },
+        }
+        warning = _build_calibration_warning(stats)
+        assert "AI 校对未启用" in warning
+        assert "校准完全失败" not in warning
+
     def test_partial_only_stats_surfaces_warning(self):
         """Partial-only chunk stats used to produce NO warning (the old
         trigger only counted failed/fallback); now PARTIAL must warn."""
