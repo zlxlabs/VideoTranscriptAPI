@@ -898,15 +898,16 @@ class CacheManager:
         media_path: Optional[str] = None,
         byte_size: Optional[int] = None,
         sha256: Optional[str] = None,
+        notification_webhooks: Optional[Dict[str, Any]] = None,
         enqueue: Optional[Callable[[Dict[str, Any]], None]] = None,
         now: Optional[datetime.datetime] = None,
     ) -> Dict[str, Any]:
         """Create root/admission and optionally hand off once before SQL commit.
 
         The HTTP producer must supply its queue's synchronous ``put_nowait`` callback;
-        it executes inside this no-await SQL transaction. Existing store-level callers
-        may omit it when they are not producing an HTTP task. If commit fails after the
-        callback succeeds, the dispatcher rejects the stale item against durable state.
+        it executes inside this no-await SQL transaction and the payload embeds
+        ``notification_webhooks`` verbatim. If commit fails after the callback
+        succeeds, the dispatcher rejects the stale item against durable state.
         """
         if not media_id:
             raise ValueError("media_id must be non-empty")
@@ -954,6 +955,7 @@ class CacheManager:
                     "url": source_url or "",
                     "platform": "local_upload",
                     "processing_options": json.loads(options_json),
+                    "notification_webhooks": dict(notification_webhooks or {}),
                 })
             return record
 

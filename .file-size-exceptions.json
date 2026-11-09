@@ -1,0 +1,12 @@
+[
+  {
+    "path": "src/video_transcript_api/cache/cache_manager.py",
+    "ceiling": 3945,
+    "reason": "dlg-20261109-041332-a7c5e2: accept_local_upload must thread notification_webhooks into the enqueue payload (production incident task_8a1a597ba41a4c5492a24ed1fc6d2a87, 2026-11-09); drop this entry when accept_local_upload is split out of cache_manager.py"
+  },
+  {
+    "path": "tests/integration/test_upload_intake.py",
+    "ceiling": 889,
+    "reason": "dlg-20261109-041332-a7c5e2: exact queue-payload literals gain the notification_webhooks key (+1 per site) to keep the producer-consumer contract exhaustive; drop this entry when these tests move to a dedicated upload-dispatch contract file"
+  }
+]

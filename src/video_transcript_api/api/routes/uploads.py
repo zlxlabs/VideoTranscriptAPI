@@ -151,6 +151,18 @@ def _reject(reason: str, error: ApiError) -> ApiError:
     return error
 
 
+def _user_notification_webhooks(user_info: dict) -> dict:
+    """Per-channel targets from the submitting user's stored webhook config."""
+    return {
+        channel: user_info.get(field)
+        for channel, field in (
+            ("wechat", "wechat_webhook"),
+            ("feishu", "feishu_webhook"),
+        )
+        if user_info.get(field)
+    }
+
+
 def _receipt(upload: dict) -> dict:
     accepted = upload.get("state") == "accepted" and not upload.get("error_code")
     state = upload.get("state") if not upload.get("error_code") else "failed"
@@ -337,6 +349,7 @@ async def receive_upload(
             cache_manager.set_local_upload_error(upload_id, failure_code)
             raise _reject(failure_code, ApiError(503, "upload_queue_full"))
         media_id = f"upload_{uuid.uuid4().hex}"
+        notification_webhooks = _user_notification_webhooks(user_info)
         try:
             accepted = cache_manager.accept_local_upload(
                 upload_id,
@@ -350,6 +363,7 @@ async def receive_upload(
                 media_path=str(media_path),
                 byte_size=observed_bytes,
                 sha256=digest.hexdigest(),
+                notification_webhooks=notification_webhooks,
                 enqueue=task_queue.put_nowait,
             )
         except ValueError as exc:
@@ -362,14 +376,6 @@ async def receive_upload(
 
         accepted_record = cache_manager.get_local_upload_by_id(accepted["upload_id"])
         notification_fields = local_upload_notification_fields(accepted_record)
-        notification_webhooks = {
-            channel: user_info.get(field)
-            for channel, field in (
-                ("wechat", "wechat_webhook"),
-                ("feishu", "feishu_webhook"),
-            )
-            if user_info.get(field)
-        }
         notification_result = get_notification_router().send_view_link(
             title=notification_fields["title"],
             view_token=accepted_record["view_token"],
