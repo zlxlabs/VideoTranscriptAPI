@@ -401,7 +401,8 @@ class TestBuildCalibrationWarningCallSite:
         }
         warning = _build_calibration_warning(stats)
         assert warning != ""
-        assert "2/2" in warning
+        assert "覆盖率不足" in warning
+        assert "0/2" in warning
 
     def test_applied_zero_stats_surfaces_total_failure_warning(self):
         """Corrections all empty (applied==0) must surface the total-failure

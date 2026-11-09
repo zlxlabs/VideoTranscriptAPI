@@ -44,7 +44,12 @@ from ...i18n import (
 from ...utils.rendering.home_page import render_home_html
 from ...utils.rendering.i18n_jinja import install_i18n
 from ...utils.timeutil import format_datetime_for_display
-from ...utils.llm_status import CalibrationStatus, ChaptersStatus, NotesStatus
+from ...utils.llm_status import (
+    CalibrationStatus,
+    ChaptersStatus,
+    NotesStatus,
+    derive_calibration_status_from_stats,
+)
 
 logger = lazy_resource(get_logger)
 cache_manager = lazy_resource(get_cache_manager)
@@ -845,29 +850,22 @@ async def export_content(view_token: str, export_type: str, request: Request):
         )
 
 
-def _derive_legacy_calibration_status(cal_stats: Dict[str, Any]) -> str:
+def _derive_legacy_calibration_status(cal_stats: Dict[str, Any]) -> CalibrationStatus | None:
     """为没有 llm_status.json 的旧结构化缓存现算 calibration_status。
 
-    口径与 SpeakerAwareProcessor._calibrate_chunks 里写入的公式完全一致：
-    failed_count==0 且 fallback_count==0 → full；全部 chunk 都是 fallback/failed → none；
-    否则 partial。这里独立重算一次（而不是导入 processor），避免 API 路由层
-    反向依赖 llm 处理器内部实现，保持层次解耦。
+    口径统一走 utils.llm_status.derive_calibration_status_from_stats（与
+    processor/通知完全同源）：总数为 0 或没有任何单元获得有效 LLM 修正
+    （全 fallback/failed，或 dialog_counts.applied==0）→ none；存在降级/
+    失败/低覆盖(partial) → partial；否则 full。旧缓存缺 partial_count/
+    dialog_counts 时按接受过合并结果的单元数(total-degraded)默认计入。
 
     Args:
         cal_stats: llm_processed.json 里的 calibration_stats 字典（chunk 口径）
 
     Returns:
-        CalibrationStatus 取值；字段缺失时保守返回 None 对应的空字符串场景由调用方处理
+        CalibrationStatus 取值；字典不含已知口径字段时返回 None，由调用方处理
     """
-    total = cal_stats.get("total_chunks", 0)
-    failed = cal_stats.get("failed_count", 0)
-    fallback = cal_stats.get("fallback_count", 0)
-
-    if failed == 0 and fallback == 0:
-        return CalibrationStatus.FULL
-    if total and (failed + fallback) == total:
-        return CalibrationStatus.NONE
-    return CalibrationStatus.PARTIAL
+    return derive_calibration_status_from_stats(cal_stats)
 
 
 def _page_has_dialog_anchors(

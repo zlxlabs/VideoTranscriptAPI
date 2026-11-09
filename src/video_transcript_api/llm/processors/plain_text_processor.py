@@ -7,7 +7,7 @@ import concurrent.futures
 import re
 
 from ...utils.logging import setup_logger
-from ...utils.llm_status import CalibrationStatus
+from ...utils.llm_status import CalibrationStatus, derive_calibration_status
 from ..core.config import LLMConfig
 from ..core.llm_client import LLMClient
 from ..core.key_info_extractor import KeyInfoExtractor, KeyInfo
@@ -155,14 +155,14 @@ class PlainTextProcessor:
         # 上面局部变量 calibrated_segments（校对后文本列表）混淆——此处在赋值前先读取计数。
         calibrated_segment_count = total_segments - fallback_segments
 
-        if total_segments == 0:
-            calibration_status = CalibrationStatus.NONE
-        elif fallback_segments == 0 and low_quality_segments == 0:
-            calibration_status = CalibrationStatus.FULL
-        elif calibrated_segment_count == 0:
-            calibration_status = CalibrationStatus.NONE
-        else:
-            calibration_status = CalibrationStatus.PARTIAL
+        # 统一口径（utils.llm_status.derive_calibration_status）：llm_output_units
+        # 为采用了 LLM 输出的段数（success + low_quality），fallback 段无输出。
+        calibration_status = derive_calibration_status(
+            total_units=total_segments,
+            llm_output_units=calibrated_segment_count,
+            degraded_units=fallback_segments,
+            partial_units=low_quality_segments,
+        )
 
         return {
             "calibrated_text": calibrated_text,

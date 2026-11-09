@@ -21,3 +21,21 @@
   - 否决给结构化路径单独传布尔 has_llm_output：卡面要求入参为计数，applied 信号折叠进
     llm_output_units（==0 即无任何单元获得有效修正）。
 - **下一步唯一动作**：跑窄测确认红（collection error + PARTIAL 断言失败），提交「TDD红:」。
+
+## 段 2：实现转绿
+
+- **当前阶段**：implementing（实现提交）
+- **本段结论**：`utils/llm_status.py` 新增 `derive_calibration_status`（唯一口径）与
+  `derive_calibration_status_from_stats`（dict 适配）。四个调用点全部改为调用：
+  speaker_aware（applied==0 → llm_output_units=0，低覆盖压 PARTIAL）、plain_text、
+  views `_derive_legacy_calibration_status`（变一行委托）、llm_ops `_build_calibration_warning`
+  （DISABLED 先判；顶层 status 缺失时走 from_stats；NONE/PARTIAL 分别出完全失败/部分异常
+  文案，PARTIAL 详情按 chunk/segment 字段展示计数并新增「覆盖率不足」子句）。
+  窄测 5 文件 + test_views_calibration_stats + notification 相关全绿；`make test` exit=0。
+  修复过程中改了自己红测里一处断言笔误（partial-only 场景 success=0，文案是 0/2 不是 2/2）。
+- **关键决策与已否决方案**：
+  - 通知构造不再维护独立公式，但 PARTIAL 的详情计数展示保留（测试断言 "3/5" 等锁住），
+    chunk 路径详情新增 partial（覆盖率不足）子句——旧公式 partial-only 时静默无警告。
+  - llm_ops 顶层 status 缺失分支保留：真实链路 coordinator 必写顶层 status，该分支只服务
+    旧缓存/测试 mock 数据，且让 test_llm_ops_helpers.py 零余量约束下无需改测试数据。
+- **下一步唯一动作**：跑全仓 `CalibrationStatus.FULL` grep 清单与 scope check，收尾报告与 draft PR。
