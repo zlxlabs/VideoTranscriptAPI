@@ -150,6 +150,17 @@ def _chapter_title(user_prompt):
     return user_prompt[start:].splitlines()[0]
 
 
+def _set_english_output_language(monkeypatch):
+    monkeypatch.setattr(
+        "video_transcript_api.llm.processors.notes_processor.get_language",
+        lambda: "en",
+    )
+    monkeypatch.setattr(
+        "video_transcript_api.llm.prompts.localized.get_language",
+        lambda: "en",
+    )
+
+
 def test_structured_slice_is_closed_and_calls_notes_sequentially():
     segments = _structured_segments()
     client = FakeNotesClient(["- **第一章结论**", "- 第二章结论"])
@@ -321,7 +332,8 @@ def test_notes_density_retry_uses_fixed_instruction_when_first_output_is_too_lon
     )
 
 
-def test_notes_density_retry_warns_and_keeps_second_long_output():
+def test_notes_density_retry_warns_and_keeps_second_long_output(monkeypatch):
+    _set_english_output_language(monkeypatch)
     segments = [{"start": 0, "end": 1, "text": "abcdefghij"}]
     client = FakeNotesClient(["xxxxxxxxx", "yyyyyyyyy"])
 
@@ -394,7 +406,10 @@ def test_one_chapter_failure_returns_no_partial_text():
     assert progress == [(1, 2)]
 
 
-def test_notes_concurrency_keeps_chapter_order_when_completion_is_out_of_order():
+def test_notes_concurrency_keeps_chapter_order_when_completion_is_out_of_order(
+    monkeypatch,
+):
+    _set_english_output_language(monkeypatch)
     segments, chapters = _chapter_batch(4)
     completed = []
     progress = []
@@ -434,7 +449,8 @@ def test_notes_concurrency_keeps_chapter_order_when_completion_is_out_of_order()
     )
 
 
-def test_notes_concurrency_does_not_exceed_configured_worker_limit():
+def test_notes_concurrency_does_not_exceed_configured_worker_limit(monkeypatch):
+    _set_english_output_language(monkeypatch)
     notes_concurrency = 2
     segments, chapters = _chapter_batch(4)
     expected_concurrency = min(len(chapters["chapters"]), notes_concurrency)
@@ -465,7 +481,8 @@ def test_notes_concurrency_does_not_exceed_configured_worker_limit():
     assert peak == expected_concurrency
 
 
-def test_notes_concurrency_propagates_usage_context_to_workers():
+def test_notes_concurrency_propagates_usage_context_to_workers(monkeypatch):
+    _set_english_output_language(monkeypatch)
     segments, chapters = _chapter_batch(3)
     seen_contexts = []
     context_lock = threading.Lock()
