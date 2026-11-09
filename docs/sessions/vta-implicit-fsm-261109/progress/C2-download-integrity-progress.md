@@ -9,3 +9,15 @@
 - 本段结论：补充 generic 流式体积上限的落盘清理判据；在独立 detached worktree 的 Base commit 上运行全部五个新测试，五项均失败，确认新增测试有效。
 - 关键决策与已否决方案：基线红验在独立 worktree 执行，未使用 git stash；运行结束后销毁临时 worktree。
 - 下一步唯一动作：提交新增上限判据，再提交生产实现。
+
+### 里程碑 3：完整性实现转绿
+- 当前阶段：implementing / 实现完成
+- 本段结论：generic 移除续传并逐次从头覆盖，校验长度、非空、流式体积上限和媒体有效性；BaseDownloader 长度不符会记录 DOWNLOAD_LENGTH_MISMATCH、删除临时文件并进入现有失败重试。窄测全绿。
+- 关键决策与已否决方案：不改 media_resolver；因 SSRF 传输测试使用无效微型假媒体，获批 seq=1 后仅在该测试 helper 中隔离媒体 probe。
+- 下一步唯一动作：提交实现后完成接受检查与范围自检。
+
+### 里程碑 4：测试隔离迁入 sibling fixture
+- 当前阶段：implementing / 收敛文件闸
+- 本段结论：提交闸拒绝增长 1037 行的 SSRF 测试模块，拒绝修改已撤销；seq=2 获批在 tests/unit/downloaders/conftest.py 增加仅作用于 test_generic_ssrf 的自动 fixture，遵守 request.module 名称限定。
+- 关键决策与已否决方案：不压行或删除测试绕过文件体积 ratchet；不用无条件全目录 stub。
+- 下一步唯一动作：提交实现与隔离 fixture，再运行最终接受检查。

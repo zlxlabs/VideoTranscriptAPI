@@ -274,14 +274,18 @@ class BaseDownloader(ABC):
                 actual_size = os.path.getsize(local_path)
                 logger.info(f"actual file size: {actual_size / 1024 / 1024:.2f} MB")
 
+                if expected_size is not None and actual_size != expected_size:
+                    message = (
+                        f"DOWNLOAD_LENGTH_MISMATCH: expected {expected_size}, "
+                        f"actual {actual_size}"
+                    )
+                    logger.error(message)
+                    self._discard_temp(local_path)
+                    raise DownloadFailedError(message)
+
                 if actual_size == 0:
                     self._discard_temp(local_path)
                     raise DownloadFailedError(f"downloaded file is 0 bytes: {local_path}")
-
-                if expected_size and abs(actual_size - expected_size) > 1024:
-                    logger.warning(
-                        f"file size mismatch - expected: {expected_size}, actual: {actual_size}"
-                    )
 
                 if not self._validate_media_file(local_path):
                     self._discard_temp(local_path)
