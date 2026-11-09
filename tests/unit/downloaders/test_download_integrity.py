@@ -183,8 +183,9 @@ def test_base_gzip_length_is_not_compared_to_decoded_bytes(tmp_path, monkeypatch
     downloader = _ConcreteBaseDownloader()
     downloader.temp_manager = _BaseTempManager(str(tmp_path))
     downloader.max_download_bytes = 0
-    decoded_body = b"decoded payload is longer than its gzip representation"
+    decoded_body = b"decoded-payload-" * 128
     compressed_body = gzip.compress(decoded_body)
+    assert len(compressed_body) < len(decoded_body)
     response = _FakeResponse(
         decoded_body,
         {
@@ -209,8 +210,9 @@ def test_base_gzip_length_is_not_compared_to_decoded_bytes(tmp_path, monkeypatch
 
 def test_generic_gzip_length_is_not_compared_to_decoded_bytes(tmp_path, monkeypatch):
     downloader, task_dir = _make_generic(tmp_path)
-    decoded_body = b"decoded payload is longer than its gzip representation"
+    decoded_body = b"decoded-payload-" * 128
     compressed_body = gzip.compress(decoded_body)
+    assert len(compressed_body) < len(decoded_body)
     response = _FakeResponse(
         decoded_body,
         {
