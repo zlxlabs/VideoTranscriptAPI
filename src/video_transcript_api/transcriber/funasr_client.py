@@ -338,9 +338,6 @@ class FunASRSpeakerClient:
             return "queue_full" in blob
         return False
 
-    # ----------------------------------------------------------------- #
-    # phase 1：提交（上传 / 命中缓存 / 入队）
-    # ----------------------------------------------------------------- #
     async def _submit(self, file_path, file_size, file_hash, output_format, force_refresh, deadline):
         """发起 upload_request 并完成上传。
 
@@ -357,21 +354,22 @@ class FunASRSpeakerClient:
             file_path, file_size, file_hash, output_format, force_refresh
         )
 
-    def _post_upload_outcome(self, response):
-        """解析「上传完成后」的服务端响应为统一 outcome。"""
+    def _post_upload_outcome(self, response, task_id):
+        """解析上传回执；入队或完成推送必须绑定 upload_ready 的 task_id。"""
         rtype = response.get("type")
         if rtype == "upload_complete":
-            # task_id 由上层在 upload_ready 阶段已持有；这里无入队回执，用兜底首延迟
             return {"kind": "task", "task_id": None, "first_delay": self.first_delay_fallback}
-        if rtype == "task_queued":
+        if rtype in ("task_queued", "task_complete"):
             data = response.get("data", {}) or {}
-            return {
-                "kind": "task",
-                "task_id": data.get("task_id"),
-                "first_delay": self._parse_first_delay(data, self.first_delay_fallback),
-            }
-        if rtype == "task_complete":
-            return {"kind": "result", "result": response["data"]["result"]}
+            if data.get("task_id") != task_id:
+                raise FunASRFatal("FUNASR_PROTOCOL_ERROR: upload task_id mismatch or missing")
+            if rtype == "task_queued":
+                return {
+                    "kind": "task",
+                    "task_id": task_id,
+                    "first_delay": self._parse_first_delay(data, self.first_delay_fallback),
+                }
+            return {"kind": "result", "result": data["result"]}
         if self._is_queue_full(response):
             raise self._queue_full(response)
         if rtype == "error":
@@ -429,7 +427,7 @@ class FunASRSpeakerClient:
                 "file_data": base64.b64encode(file_data).decode(),
             },
         })
-        outcome = self._post_upload_outcome(await self.receive_message())
+        outcome = self._post_upload_outcome(await self.receive_message(), task_id)
         if outcome["kind"] == "task" and outcome["task_id"] is None:
             outcome["task_id"] = task_id
         return outcome
@@ -522,20 +520,15 @@ class FunASRSpeakerClient:
                 continue
 
             if response.get("type") == "error":
-                # finalize 阶段的 error（session_not_found/task_not_found）→ session 已失效，
-                # 凭 file_hash 整体重投（命中缓存秒回，否则重新分片）。
                 data = response.get("data", {}) or {}
                 logger.info(f"finalize 失败({data.get('error')})，凭 file_hash 重投")
                 raise FunASRPollMiss(data.get("error", "finalize_failed"))
 
-            outcome = self._post_upload_outcome(response)
+            outcome = self._post_upload_outcome(response, task_id)
             if outcome["kind"] == "task" and outcome["task_id"] is None:
                 outcome["task_id"] = task_id
             return outcome
 
-    # ----------------------------------------------------------------- #
-    # phase 2：轮询 task_status_batch 直到终态
-    # ----------------------------------------------------------------- #
     async def _poll(self, task_id, first_delay, deadline):
         """周期轮询单个 task_id 直到终态。
 
@@ -561,7 +554,6 @@ class FunASRSpeakerClient:
             done = self._handle_poll_message(message, task_id)
             if done is not None:
                 return done
-            # pending/processing 或杂音 → 继续轮询
             if message.get("type") == "task_status_batch":
                 await asyncio.sleep(self.poll_interval)
 
@@ -576,26 +568,34 @@ class FunASRSpeakerClient:
         rtype = message.get("type")
 
         if rtype == "task_status_batch":
-            items = message.get("data", {}).get("items", []) or []
+            data = message.get("data", {}) or {}
+            items = data.get("items", []) or []
             item = next((it for it in items if it.get("task_id") == task_id), None)
             if item is None:
-                item = items[0] if items else {}
+                raise FunASRFatal("FUNASR_PROTOCOL_ERROR: task_status_batch omitted task_id")
             status = item.get("status")
             if status == "completed":
+                result = item.get("result") or item.get("srt_content")
+                if not result:
+                    raise FunASRFatal("completed task has empty result")
                 logger.info("转录完成")
-                return item.get("result") or item.get("srt_content")
+                return result
             if status in _TERMINAL_FAIL:
                 raise FunASRFatal(f"转录失败({status}): {item.get('error')}")
-            if status is None:
-                # poll-miss：task_expired / task_not_found
-                raise FunASRPollMiss(item.get("error", "poll_miss"))
-            # pending / processing
-            return None
+            if status is None and item.get("error") in _POLL_MISS_ERRORS:
+                raise FunASRPollMiss(item["error"])
+            if status in ("pending", "processing"):
+                return None
+            raise FunASRFatal(f"FUNASR_PROTOCOL_ERROR: unknown task status {status!r}")
 
-        # 期间可能夹杂的 push：自身完成直接收下，杂音忽略续轮
         if rtype == "task_complete":
+            data = message.get("data", {}) or {}
+            if not data.get("task_id"):
+                raise FunASRFatal("FUNASR_PROTOCOL_ERROR: task_complete missing task_id")
+            if data["task_id"] != task_id:
+                return None
             logger.info("收到 task_complete 推送，转录完成")
-            return message["data"]["result"]
+            return data["result"]
         if self._is_queue_full(message):
             raise self._queue_full(message)
         if rtype == "error":
