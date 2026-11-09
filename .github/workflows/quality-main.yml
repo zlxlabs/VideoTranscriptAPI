@@ -1,0 +1,43 @@
+# quality-main —— push 到 main 时自动跑全量 quality（#314）。
+# 先例出处：zlxlabs/fd-satisfaction-survey/.github/workflows/quality-main.yml（#761）。
+# 背景：gate.yml 只由 pull_request 触发，main push 上没有验证 workflow，导致
+# agent-config 无法自动推导 verify-remote-main。本 workflow 让每个 main SHA 自带
+# 全量测试收据。不跑模型主审：主审已在 PR 合并前完成，main 上只补测试证据。
+name: quality-main
+
+on:
+  push:
+    branches: [main]
+
+# 按 SHA 分组、互不取消：并发合并后主干上每个提交都要有自己的完整 run，
+# 构建门禁按 SHA 认收据，取消别人的 run 等于丢收据。
+concurrency:
+  group: quality-main-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  quality-main:
+    # 与 zlxlabs/gate gate-v2.yml quality job 同一 runner 池（通过 gh run view 42623491620
+    # 查得 quality job 实际 labels 为 ["self-hosted", "linux", "ci"]）。
+    # 不跑 gate-v2 流量优化与计量设施（Git mirror 预热、网卡字节统计等）；
+    # 使用 runner 预装 uv（沿用 PR #306），执行与 gate-v2 quality 等价的测试入口。
+    name: quality-main
+    runs-on: [self-hosted, linux, ci]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+      - name: Verify runner-provided toolchain
+        run: which uv && uv --version && uv cache dir
+      - name: Lint / format
+        run: |
+          if [ -f Makefile ] && grep -qE '^lint:' Makefile; then make lint
+          else echo "no 'lint' make target — skipping"; fi
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Tests
+        run: make test
