@@ -79,9 +79,13 @@ class TestURLParserBasic:
         parser = URLParser()
         first_page = parser.parse("https://www.bilibili.com/video/BV1AoEg6SEW4?p=1")
         second_page = parser.parse("https://www.bilibili.com/video/BV1AoEg6SEW4?p=2")
+        leading_zero_page = parser.parse(
+            "https://www.bilibili.com/video/BV1AoEg6SEW4?p=02"
+        )
 
         assert first_page.video_id == "BV1AoEg6SEW4"
         assert second_page.video_id == "BV1AoEg6SEW4_p2"
+        assert leading_zero_page.video_id == "BV1AoEg6SEW4_p2"
         assert first_page.video_id != second_page.video_id
 
     def test_bilibili_short_url(self):

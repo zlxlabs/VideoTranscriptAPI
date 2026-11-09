@@ -80,6 +80,15 @@ def test_new_downloader_resolves_requested_page_cid(tmp_path):
     assert result["cid"] == 202
     assert selected_cids == [202]
 
+    short_downloader = _make_downloader(tmp_path)
+    short_selected_cids = _mock_tikhub(short_downloader, tmp_path)
+    short_downloader.resolve_short_url = lambda _: P2_URL
+    with patch("video_transcript_api.downloaders.bilibili.DEBUG_DIR", str(tmp_path)):
+        short_result = short_downloader.get_video_info("https://b23.tv/short")
+    assert short_result["video_id"] == f"{BV_ID}_p2"
+    assert short_result["cid"] == 202
+    assert short_selected_cids == [202]
+
 
 def test_tikhub_page_out_of_range_fails_with_page_identity_error(tmp_path):
     downloader = _make_downloader(tmp_path)

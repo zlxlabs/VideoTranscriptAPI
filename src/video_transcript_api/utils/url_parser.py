@@ -279,6 +279,10 @@ class URLParser:
                     # 移除可能的查询参数（&）
                     if '&' in video_id:
                         video_id = video_id.split('&')[0]
+                    if platform == 'bilibili' and video_id.startswith('BV'):
+                        page = re.search(r'[?&]p=(\d+)(?:[&#]|$)', url)
+                        if page and int(page.group(1)) > 1:
+                            video_id += f"_p{int(page.group(1))}"
                     logger.debug(f"正则匹配成功: platform={platform}, pattern={pattern}, video_id={video_id}")
                     return platform, video_id
 

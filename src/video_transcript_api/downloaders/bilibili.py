@@ -75,16 +75,18 @@ class BilibiliDownloader(BaseDownloader):
             url: 视频URL
 
         返回:
-            str: 视频BV号
+            str: 视频身份；P1 保留 BV 号，后续分 P 使用 BV_pN
+        返回的身份同时作为每分 P 的实例缓存键。
         """
         # 解析短链接
         if "b23.tv" in url:
             url = self.resolve_short_url(url)
 
-        # 提取BV号
         match = re.search(r"BV(\w+)", url)
         if match:
-            return f"BV{match.group(1)}"
+            bv_id = f"BV{match.group(1)}"
+            page_num = self._extract_page_number(url)
+            return f"{bv_id}_p{page_num}" if page_num > 1 else bv_id
 
         logger.error(f"无法从URL中提取Bilibili视频BV号: {url}")
         raise ValueError(f"无法从URL中提取Bilibili视频BV号: {url}")
@@ -170,7 +172,6 @@ class BilibiliDownloader(BaseDownloader):
 
         # 重试循环：对超时/网络异常以及风控 code(-412/-799/-509) 做指数退避重试。
         # 注意 B 站风控是 HTTP 200 + body code 异常，状态码级重试无效，必须判 code。
-        last_err = None
         for attempt in range(1, _OFFICIAL_API_MAX_RETRIES + 1):
             try:
                 logger.info(
@@ -229,7 +230,6 @@ class BilibiliDownloader(BaseDownloader):
                 return metadata
 
             except (requests.exceptions.Timeout, requests.exceptions.RequestException) as e:
-                last_err = e
                 if attempt < _OFFICIAL_API_MAX_RETRIES:
                     backoff = _OFFICIAL_API_BACKOFF_BASE * (2 ** (attempt - 1))
                     logger.warning(
@@ -248,10 +248,7 @@ class BilibiliDownloader(BaseDownloader):
                 logger.error(f"获取B站官方元数据时发生未知错误: {e}")
                 return {}
 
-        # 理论上不会到这里（循环内均有 return），保险返回空
-        if last_err:
-            logger.warning(f"调用B站官方API最终失败: {last_err}")
-        return {}
+        raise RuntimeError("Bilibili metadata retry loop ended without a result")
 
     def _get_video_info_bbdown(self, url):
         """
@@ -264,9 +261,10 @@ class BilibiliDownloader(BaseDownloader):
             dict: 包含视频信息的字典
         """
         resolved_url = self.resolve_short_url(url) if "b23.tv" in url else url
-        bv_id = self._extract_video_id(resolved_url)
+        video_id = self._extract_video_id(resolved_url)
+        bv_id = re.sub(r"_p\d+$", "", video_id)
         canonical_url = f"https://www.bilibili.com/video/{bv_id}"
-        logger.info(f"使用BBDown下载Bilibili视频: bv_id={bv_id}, url={canonical_url}")
+        logger.info(f"使用BBDown下载Bilibili视频: video_id={video_id}, url={canonical_url}")
 
         bbdown_config = self.config.get("bbdown", {})
         system_platform = platform.system().lower()
@@ -391,7 +389,7 @@ class BilibiliDownloader(BaseDownloader):
                         elif not self._validate_media_file(latest_file):
                             stage = "media_invalid"
                         else:
-                            result = self._build_bbdown_result(latest_file, bv_id)
+                            result = self._build_bbdown_result(latest_file, video_id)
                             attempt_succeeded = True
                             shutil.rmtree(temp_dir, ignore_errors=True)
                             self._untrack_bbdown_temp_dir(temp_dir)
@@ -574,10 +572,13 @@ class BilibiliDownloader(BaseDownloader):
 
         返回:
             dict: 包含视频信息的字典
+        TikHub 请求使用裸 BV 号，CID 按 URL 中的分 P 选择。
         """
         try:
-            # 提取视频BV号
-            bv_id = self._extract_video_id(url)
+            video_id = self._extract_video_id(url)
+            page_match = re.search(r"_p(\d+)$", video_id)
+            page_num = int(page_match.group(1)) if page_match else self._extract_page_number(url)
+            bv_id = re.sub(r"_p\d+$", "", video_id)
 
             # 调用API获取视频信息
             endpoint = f"/api/v1/bilibili/web/fetch_one_video"
@@ -659,11 +660,13 @@ class BilibiliDownloader(BaseDownloader):
 
             logger.info(f"获取到视频信息: 标题='{video_title}', 作者='{author}'")
 
-            # 获取cid
-            cid = data.get("cid")
+            pages = data.get("pages") or []
+            page = next((item for item in pages if item.get("page") == page_num), None)
+            cid = page.get("cid") if page else None
+            if not pages and page_num == 1:
+                cid = data.get("cid")
             if not cid:
-                logger.error("无法获取Bilibili视频CID")
-                raise ValueError(f"无法获取Bilibili视频CID: {url}")
+                raise ValueError(f"BILIBILI_PAGE_NOT_FOUND: video_id={video_id}, page={page_num}")
 
             # 调用API获取视频流地址
             endpoint = f"/api/v1/bilibili/web/fetch_video_playurl"
@@ -758,11 +761,10 @@ class BilibiliDownloader(BaseDownloader):
                 raise ValueError(f"无法获取Bilibili视频下载地址: {url}")
 
             # 清理文件名中的非法字符
-            safe_title = re.sub(r'[\\/*?:"<>|]', "_", video_title)
             filename = f"bilibili_{bv_id}_{int(time.time())}.{file_ext}"
 
             result = {
-                "video_id": bv_id,
+                "video_id": video_id,
                 "cid": cid,
                 "video_title": video_title,
                 "author": author,
@@ -789,13 +791,10 @@ class BilibiliDownloader(BaseDownloader):
         返回:
             dict: 包含视频信息的字典
         """
-        try:
-            bv_id = self._extract_video_id(url)
-            if bv_id in self._cached_video_info:
-                logger.debug(f"[实例缓存命中] 使用缓存的视频信息: {bv_id}")
-                return self._cached_video_info[bv_id]
-        except Exception:
-            bv_id = None
+        video_id = self._extract_video_id(url)
+        if video_id in self._cached_video_info:
+            logger.debug(f"[实例缓存命中] 使用缓存的视频信息: {video_id}")
+            return self._cached_video_info[video_id]
 
         # 判断是否使用BBDown下载
         use_bbdown = self.config.get("bbdown", {}).get("use_bbdown", False)
@@ -807,8 +806,7 @@ class BilibiliDownloader(BaseDownloader):
             logger.info("使用API获取Bilibili视频信息")
             result = self._get_video_info_api(url)
 
-        if bv_id:
-            self._cached_video_info[bv_id] = result
+        self._cached_video_info[video_id] = result
         return result
 
     def download_file(self, url, filename):
@@ -865,7 +863,9 @@ class BilibiliDownloader(BaseDownloader):
             VideoMetadata: 标准化的视频元数据对象
         """
         # 1. 主数据源：官方 API（内置 cookie + 重试加固）
-        official_metadata = self._fetch_bilibili_official_metadata(video_id)
+        official_metadata = self._fetch_bilibili_official_metadata(
+            re.sub(r"_p\d+$", "", video_id)
+        )
 
         # 2. 仅 TikHub 模式才在元数据阶段调用 get_video_info（轻量 + 提供 cid）
         use_bbdown = self.config.get("bbdown", {}).get("use_bbdown", False)
