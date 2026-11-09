@@ -374,8 +374,9 @@ test('Chromium uploads raw media through production API, worker, shared ASR/LLM,
   await expect(row.locator('.task-title')).toContainText('全链路浏览器上传样本');
   const stopShare = row.locator('.btn-stop-share');
   await expect(stopShare).toBeVisible();
-  await page.clock.install();
-  await page.clock.pauseAt(new Date());
+  const start = new Date();
+  await page.clock.install({ time: start });
+  await page.clock.pauseAt(new Date(start.getTime()));
   let revokedSummaryRequests = 0;
   page.on('request', (item) => {
     if (item.method() === 'GET' && new URL(item.url()).pathname === '/api/audit/summary') {
