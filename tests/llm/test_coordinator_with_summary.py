@@ -143,10 +143,17 @@ class TestCoordinatorWithSummary(unittest.TestCase):
             cache_dir=self.cache_dir,
         )
 
-        result = coordinator.process(
-            content="This is a very long text... " * 100,  # > 500 chars
-            title="Test Title",
-        )
+        with patch(
+            "video_transcript_api.llm.processors.summary_processor.get_language",
+            return_value="en",
+        ), patch(
+            "video_transcript_api.llm.prompts.localized.get_language",
+            return_value="en",
+        ):
+            result = coordinator.process(
+                content="This is a very long text... " * 100,  # > 500 chars
+                title="Test Title",
+            )
 
         # Verify summary is generated
         self.assertIsNotNone(result["summary_text"])

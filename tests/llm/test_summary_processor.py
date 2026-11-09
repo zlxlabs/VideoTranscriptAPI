@@ -35,6 +35,11 @@ def _usage(completion_tokens: int) -> LLMUsage:
 class TestSummaryProcessor(unittest.TestCase):
   def setUp(self):
     self.processor_module_logger = processor_module_logger
+    self.language_patcher = patch.object(
+      summary_processor_module, "get_language", return_value="en"
+    )
+    self.language_patcher.start()
+    self.addCleanup(self.language_patcher.stop)
     self.processor = _make_processor()
     self.long_text = _long_text()
     self.mock_call = self.processor.llm_client.call

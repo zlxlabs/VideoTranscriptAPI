@@ -252,7 +252,15 @@ class TestCachedDialogsSeedAnchorsNotesReader:
         assert anchor == DIALOGS
         assert compute_notes_anchor_fingerprint(anchor) == source["fingerprint"]
 
-        client = FakeNotesClient(["notes one", "notes two", "notes three"])
+        monkeypatch.setattr(
+            "video_transcript_api.llm.processors.notes_processor.get_language",
+            lambda: "zh-CN",
+        )
+        monkeypatch.setattr(
+            "video_transcript_api.llm.prompts.localized.get_language",
+            lambda: "zh-CN",
+        )
+        client = FakeNotesClient(["中文笔记一", "中文笔记二", "中文笔记三"])
         notes_result = NotesProcessor(client, _notes_config()).process(
             cache_dir=tmp_path
         )

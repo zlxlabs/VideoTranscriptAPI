@@ -150,6 +150,28 @@ def _chapter_title(user_prompt):
     return user_prompt[start:].splitlines()[0]
 
 
+def _set_english_output_language(monkeypatch):
+    monkeypatch.setattr(
+        "video_transcript_api.llm.processors.notes_processor.get_language",
+        lambda: "en",
+    )
+    monkeypatch.setattr(
+        "video_transcript_api.llm.prompts.localized.get_language",
+        lambda: "en",
+    )
+
+
+def _set_chinese_output_language(monkeypatch):
+    monkeypatch.setattr(
+        "video_transcript_api.llm.processors.notes_processor.get_language",
+        lambda: "zh-CN",
+    )
+    monkeypatch.setattr(
+        "video_transcript_api.llm.prompts.localized.get_language",
+        lambda: "zh-CN",
+    )
+
+
 def test_structured_slice_is_closed_and_calls_notes_sequentially():
     segments = _structured_segments()
     client = FakeNotesClient(["- **第一章结论**", "- 第二章结论"])
@@ -321,9 +343,10 @@ def test_notes_density_retry_uses_fixed_instruction_when_first_output_is_too_lon
     )
 
 
-def test_notes_density_retry_warns_and_keeps_second_long_output():
+def test_notes_density_retry_warns_and_keeps_second_long_output(monkeypatch):
+    _set_chinese_output_language(monkeypatch)
     segments = [{"start": 0, "end": 1, "text": "abcdefghij"}]
-    client = FakeNotesClient(["xxxxxxxxx", "yyyyyyyyy"])
+    client = FakeNotesClient(["中" * 9, "文" * 9])
 
     with patch(
         "video_transcript_api.llm.processors.notes_processor.logger.warning"
@@ -334,7 +357,7 @@ def test_notes_density_retry_warns_and_keeps_second_long_output():
         )
 
     assert result.status is NotesStatus.GENERATED
-    assert result.text.endswith("yyyyyyyyy")
+    assert result.text.endswith("文" * 9)
     warning.assert_called_once()
     warning_message = warning.call_args.args[0]
     assert "Notes chapter 0" in warning_message
@@ -394,11 +417,15 @@ def test_one_chapter_failure_returns_no_partial_text():
     assert progress == [(1, 2)]
 
 
-def test_notes_concurrency_keeps_chapter_order_when_completion_is_out_of_order():
+def test_notes_concurrency_keeps_chapter_order_when_completion_is_out_of_order(
+    monkeypatch,
+):
+    _set_chinese_output_language(monkeypatch)
     segments, chapters = _chapter_batch(4)
     completed = []
     progress = []
     completion_events = [threading.Event() for _ in range(4)]
+    notes_body = "中文笔记" * 8
 
     class ReverseCompletionNotesClient:
         def call(self, **kwargs):
@@ -410,7 +437,7 @@ def test_notes_concurrency_keeps_chapter_order_when_completion_is_out_of_order()
                 )
             completed.append(title)
             completion_events[chapter_index].set()
-            return f"- {title} notes"
+            return f"- {title} notes {notes_body}"
 
     result = NotesProcessor(
         ReverseCompletionNotesClient(), _config(notes_concurrency=4)
@@ -423,18 +450,17 @@ def test_notes_concurrency_keeps_chapter_order_when_completion_is_out_of_order()
     assert result.status is NotesStatus.GENERATED
     assert completed == ["Chapter 3", "Chapter 2", "Chapter 1", "Chapter 0"]
     assert progress == [(1, 4), (2, 4), (3, 4), (4, 4)]
-    assert result.text.index("Chapter 0\n- Chapter 0 notes") < result.text.index(
-        "Chapter 1\n- Chapter 1 notes"
-    )
-    assert result.text.index("Chapter 1\n- Chapter 1 notes") < result.text.index(
-        "Chapter 2\n- Chapter 2 notes"
-    )
-    assert result.text.index("Chapter 2\n- Chapter 2 notes") < result.text.index(
-        "Chapter 3\n- Chapter 3 notes"
-    )
+    chapter_0 = f"Chapter 0\n- Chapter 0 notes {notes_body}"
+    chapter_1 = f"Chapter 1\n- Chapter 1 notes {notes_body}"
+    chapter_2 = f"Chapter 2\n- Chapter 2 notes {notes_body}"
+    chapter_3 = f"Chapter 3\n- Chapter 3 notes {notes_body}"
+    assert result.text.index(chapter_0) < result.text.index(chapter_1)
+    assert result.text.index(chapter_1) < result.text.index(chapter_2)
+    assert result.text.index(chapter_2) < result.text.index(chapter_3)
 
 
-def test_notes_concurrency_does_not_exceed_configured_worker_limit():
+def test_notes_concurrency_does_not_exceed_configured_worker_limit(monkeypatch):
+    _set_english_output_language(monkeypatch)
     notes_concurrency = 2
     segments, chapters = _chapter_batch(4)
     expected_concurrency = min(len(chapters["chapters"]), notes_concurrency)
@@ -465,7 +491,8 @@ def test_notes_concurrency_does_not_exceed_configured_worker_limit():
     assert peak == expected_concurrency
 
 
-def test_notes_concurrency_propagates_usage_context_to_workers():
+def test_notes_concurrency_propagates_usage_context_to_workers(monkeypatch):
+    _set_english_output_language(monkeypatch)
     segments, chapters = _chapter_batch(3)
     seen_contexts = []
     context_lock = threading.Lock()

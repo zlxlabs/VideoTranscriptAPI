@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+from ...i18n import get_language
 from ...utils.logging import setup_logger
 from ...utils.llm_status import SummaryStatus
 from ..core.config import LLMConfig
@@ -19,6 +20,7 @@ from ..prompts.localized import (
     length_budget_coefficient,
     summary_system_prompt,
 )
+from ..utils.language_detector import detect_language
 
 logger = setup_logger(__name__)
 
@@ -185,7 +187,7 @@ class SummaryProcessor:
 
             if len(working_text) <= budget.hard_cap:
                 logger.info(f"Summary generated successfully (length: {len(working_text)})")
-                return SummaryResult(text=working_text, status=SummaryStatus.GENERATED)
+                return self._result_for_text(working_text)
 
             retry_suffix = (
                 en_prompts.SUMMARY_BUDGET_RETRY_SUFFIX
@@ -220,7 +222,7 @@ class SummaryProcessor:
                 logger.info(
                     f"Summary generated after compression retry (length: {len(retry_text)})"
                 )
-                return SummaryResult(text=retry_text, status=SummaryStatus.GENERATED)
+                return self._result_for_text(retry_text)
 
             candidates = [working_text]
             if retry_text and len(retry_text) >= 50:
@@ -232,11 +234,24 @@ class SummaryProcessor:
                 f"retry={len(retry_text) if retry_text else 0} "
                 f"hard_cap={budget.hard_cap} accepted={len(final_text)}"
             )
-            return SummaryResult(text=final_text, status=SummaryStatus.GENERATED)
+            return self._result_for_text(final_text)
 
         except Exception as e:
             logger.error(f"Summary generation failed: {e}", exc_info=True)
             return SummaryResult(text=None, status=SummaryStatus.FAILED)
+
+    @staticmethod
+    def _result_for_text(text: str) -> SummaryResult:
+        """Return GENERATED only when the final summary matches the output language."""
+        expected_language = "en" if get_language() == "en" else "zh"
+        detected_language = detect_language(text)
+        if detected_language != expected_language:
+            logger.error(
+                "SUMMARY-LANGUAGE-MISMATCH: "
+                f"expected={expected_language} detected={detected_language}"
+            )
+            return SummaryResult(text=None, status=SummaryStatus.FAILED)
+        return SummaryResult(text=text, status=SummaryStatus.GENERATED)
 
     @staticmethod
     def _is_truncated(
