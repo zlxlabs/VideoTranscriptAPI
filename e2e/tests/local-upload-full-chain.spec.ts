@@ -376,7 +376,7 @@ test('Chromium uploads raw media through production API, worker, shared ASR/LLM,
   await expect(stopShare).toBeVisible();
   const start = new Date();
   await page.clock.install({ time: start });
-  await page.clock.pauseAt(new Date(start.getTime()));
+  await page.clock.pauseAt(new Date(start.getTime() + 60_000));
   let revokedSummaryRequests = 0;
   page.on('request', (item) => {
     if (item.method() === 'GET' && new URL(item.url()).pathname === '/api/audit/summary') {
