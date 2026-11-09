@@ -30,6 +30,11 @@
   6. **界面**：Jinja 模板、静态页（`index.html`/`history.html`/`app.js`）、渲染器（`dialog_renderer`/`markdown_renderer`）、分享图卡面文字、导出元数据，全部改走文案目录；`<html lang>` 跟随配置。
   7. **API 报错**：JSON 错误体增加稳定 `error_code`（snake_case，跨语言不变），`detail` 按全局语言本地化。自家前端直接显示 `detail` 无需改；第三方客户端可按 `error_code` 自行处理。任务失败原因在写入时按当时语言本地化。
   8. **文档**：新增英文 `README.en.md`，中英 README 顶部互链；`config.example.jsonc` 改为单文件中英双语注释（不拆两份示例，避免漂移），并写入 `language` 键说明。
+
+## 篇幅预算校准（#269）
+
+英文总结系数定为 2.4：#269 的 9 份真实样本测得，同一媒体英文与中文总结字符比中位数为 2.43。总结 hard cap 是软预算：超限时只进行一次压缩重试；若重试后仍超限，仍接受输出，不截断，也不因超限判失败。
+
 - **已否决**：
   - `output_language: auto`（跟随内容语言）：中文用户看英文视频今天得到中文总结，这是翻译价值；auto 会让它悄悄消失。
   - `ui_locale` + `output_language` 双键：全局单配置下没有「界面英文、总结中文」的真实消费者；真出现时再加覆盖键。

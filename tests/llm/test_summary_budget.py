@@ -73,13 +73,18 @@ class TestSummaryBudgetBands(unittest.TestCase):
 class TestSummaryBudgetLanguageCoefficient(unittest.TestCase):
   def test_coefficient_scales_character_bands_not_length_thresholds(self):
     chinese = compute_summary_budget(4000, coefficient=1.0)
-    english = compute_summary_budget(4000, coefficient=1.8)
+    english = compute_summary_budget(4000, coefficient=2.4)
     self.assertEqual(chinese.target_min, 500)
-    self.assertEqual(english.target_min, 900)
-    self.assertEqual(english.target_max, 5400)
-    self.assertEqual(english.hard_cap, 8100)
-    self.assertEqual(english.max_tokens, 12150)
+    self.assertEqual(english.target_min, 1200)
+    self.assertEqual(english.target_max, 7200)
+    self.assertEqual(english.hard_cap, 10800)
+    self.assertEqual(english.max_tokens, 16200)
     self.assertEqual(classify_original_length_band(4000), "S")
+
+    english_m = compute_summary_budget(15000, coefficient=2.4)
+    english_l = compute_summary_budget(30000, coefficient=2.4)
+    self.assertEqual(english_m.hard_cap, 12000)
+    self.assertEqual(english_l.hard_cap, 19200)
 
 
 class TestSummaryMaxTokensPolicy(unittest.TestCase):

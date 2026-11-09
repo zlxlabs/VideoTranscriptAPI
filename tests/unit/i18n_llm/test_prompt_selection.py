@@ -213,8 +213,8 @@ def test_english_prompts_are_native_not_chinese_plus_write_in_english(language_c
     assert "Speaker[x]" not in single
     assert "at most 12 words" in chapters
     assert "不超过 20 个字" not in chapters
-    assert length_budget_coefficient() == 1.8
-    assert en_prompts.LENGTH_BUDGET_COEFFICIENT == 1.8
+    assert length_budget_coefficient() == 2.4
+    assert en_prompts.LENGTH_BUDGET_COEFFICIENT == 2.4
 
 
 def test_chapter_title_limits_are_language_localized(language_config):
@@ -241,12 +241,12 @@ def test_english_builders_use_english_labels(language_config):
         video_title="Title",
         author="Author",
         description="Desc",
-        budget_target_min=900,
-        budget_target_max=5400,
-        budget_hard_cap=8100,
+        budget_target_min=1200,
+        budget_target_max=7200,
+        budget_hard_cap=10800,
     )
     assert summary.startswith(
-        "**Length budget**: 900–5400 characters total, must not exceed 8100 characters."
+        "**Length budget**: 1200–7200 characters total, must not exceed 10800 characters."
     )
     assert "**篇幅预算**" not in summary
     assert "**Transcript**:" in summary
