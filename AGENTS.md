@@ -1,6 +1,10 @@
 过程中请使用中文和我沟通，但 console 里请优先使用英文。
 
 浏览器验证政策：真实 Chromium 回归保持阻断；本开源仓不接维护者私有 PWRS 服务，也不要求 PWRS_REPORTER_TOKEN；失败证据由本仓 Browser regression workflow 上传 GitHub Actions artifact。
+
+verify-remote: gate.yml
+verify-remote-main: quality-main.yml
+
 # Repository Guidelines
 
 ## Project Structure & Module Organization
