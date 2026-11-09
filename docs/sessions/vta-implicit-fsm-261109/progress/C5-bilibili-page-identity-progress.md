@@ -11,3 +11,10 @@
 - 本段结论：新增 `test_tikhub_later_page_without_page_list_fails`；在独立 worktree 的 Base commit 上实跑该单测，结果为 1 failed，原因是旧实现未拒绝 P2 并使用 root cid。
 - 关键决策与已否决方案：无；测试明确覆盖“无分 P 列表”而非只用超出已有列表的页码代替。
 - 下一步唯一动作：提交该补充红测及本段进度，仍保持实现未提交。
+
+## 里程碑 3：锁定分 P 元数据身份
+
+- 当前阶段：implementing，补充对分 P 元数据 ID 与官方 API BV 参数分离的断言。
+- 本段结论：扩展 BBDown 元数据测试，要求 P2 元数据仍使用裸 BV 请求官方 API、但返回 `BV_p2`；独立 Base worktree 实跑该测试为 1 failed，旧代码返回裸 BV 身份。
+- 关键决策与已否决方案：官方 API 仍以 BV 查询视频级元数据，不把带 `_pN` 的缓存身份发给官方接口。
+- 下一步唯一动作：提交本段红测试及进度记录。
