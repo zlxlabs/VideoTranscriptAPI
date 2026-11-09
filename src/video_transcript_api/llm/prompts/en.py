@@ -7,9 +7,9 @@ they still follow detected content language.
 
 from typing import Any, Dict, Optional
 
-# English needs more characters than Chinese for the same information.
-# Applied to summary budget bands and min_summary_threshold.
-LENGTH_BUDGET_COEFFICIENT = 1.8
+# #269's nine real-model samples measured a 2.43 median English/Chinese summary ratio.
+# The hard cap is a soft budget: summary_processor retries once, then accepts over-cap output.
+LENGTH_BUDGET_COEFFICIENT = 2.4
 
 # Chapter titles: Chinese prompt counts 字 (20); English prompt counts words.
 CHAPTER_TITLE_MAX_WORDS = 12
