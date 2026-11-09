@@ -11,3 +11,10 @@
 - 本段结论：`save_cache` 将新产物组写入新的不可变 generation 目录，数据库行的 `files_loc` 更新作为唯一发布点；写入失败时旧数据库行仍指向完整旧组。旧版确定性目录仍可由 `get_cache` 读取；重写时从当前变体（缺席时 sibling）的目录复制既有其他产物。
 - 关键决策与已否决方案：没有调整正文与侧车的替换先后；旧 generation 不在发布后立即删除，避免尚在读取旧 `files_loc` 的读者遇到已删除目录。
 - 下一步唯一动作：提交实现、配套回归与本段进度，然后运行完整 `tests/cache/` 窄测。
+
+## 里程碑 3：本地验收与范围闸
+
+- 当前阶段：本地窄测通过，等待推送与 draft PR
+- 本段结论：`uv run --frozen pytest -q tests/cache/` 通过（61 项），Accept-Check 文件通过（2 项）；`card_scope_check.py` 确认基线至 HEAD 的 4 个变更文件均在授权范围内。按 `ci-standard-v1`，本机未运行远程 `make test`。
+- 关键决策与已否决方案：旧 generation 不立即删除，避免数据库指针切换前已取得旧路径的读者失去文件；报告申明 generation 回收不在本卡范围内。
+- 下一步唯一动作：推送当前分支并创建正文引用卡面标题的 draft PR。
