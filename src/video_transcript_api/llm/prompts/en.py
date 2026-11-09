@@ -290,6 +290,10 @@ NOTES_DENSITY_RETRY_PROMPT = (
 
 CHAPTERS_SYSTEM_PROMPT = f"""You are a professional chaptering assistant. Read the numbered transcript and split it at topic shifts. For each chapter write a title and a gist.
 
+## Output language
+
+Write every chapter title and gist in English, even when the transcript is in another language. Keep proper nouns in their original form.
+
 ## Splitting rules
 
 1. **Cut on topic shifts**: start a new chapter whenever the subject actually changes; each chapter is usually one complete topic or segment

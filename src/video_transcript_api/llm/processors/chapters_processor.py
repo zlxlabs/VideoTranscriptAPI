@@ -15,7 +15,6 @@
   密度、同名合并）都在本地代码里做，不依赖 LLM 自我把关。
 """
 
-import bisect
 import hashlib
 import json
 import math
@@ -34,6 +33,15 @@ from ..prompts.localized import (
     chapter_title_limits,
     chapters_system_prompt,
     is_english,
+)
+from .chapters_validation import (
+    CHAPTERS_LANGUAGE_MISMATCH,
+    _RETRY_HINT_MAX_CHARS,
+    _RETRY_HINT_TRUNCATE_TO,
+    _RETRY_HINT_VALUE_MAX_CHARS,
+    _RETRY_HINT_VALUE_TRUNCATE_TO,
+    _truncate_repr_for_hint,
+    _validate_and_normalize_start_segs,
 )
 
 logger = setup_logger(__name__)
@@ -86,19 +94,6 @@ _MAX_CHAPTER_SECONDS = 40 * 60     # 平均章节时长上限（秒）
 # 数 KB 甚至更长；防御性截断到此长度，只记 warning、不算失败（与 title 超长
 # 截断同一级别的软处理），详见 `_truncate_description`。
 _DESCRIPTION_MAX_CHARS = 2000
-
-# 语义校验失败信息会把 LLM 自己返回的非法值（如超长 title/gist 原文）通过
-# repr 回显进错误描述，这份描述又会被拼进第二次调用的 retry_hint——如果不
-# 加限制，LLM 首次返回一个超长垃圾值就能让第二次 prompt 远超
-# `max_chapters_input_chars`，绕过门控 4"只测量首次 prompt"的输入安全上限
-# （gate-r24 P2）。两级防线，详见 `_truncate_repr_for_hint`/`_build_retry_hint`：
-# 1. 逐值截断——校验函数拼错误信息时，对每个被 repr 回显的非法值单独限长；
-# 2. 整体截断 + 压平——构造最终 retry_hint 前的兜底，不依赖上游是否记得
-#    逐值截断。
-_RETRY_HINT_VALUE_MAX_CHARS = 200
-_RETRY_HINT_VALUE_TRUNCATE_TO = 199
-_RETRY_HINT_MAX_CHARS = 1000
-_RETRY_HINT_TRUNCATE_TO = 999
 
 # gate-r27 P3：`_generate_with_retry` 两次尝试（首次 + 单次语义重试）都失败
 # 后，`_process_impl` 会把最后一次的原始 raw_chapters（LLM 返回的整份
@@ -562,44 +557,6 @@ def _truncate_description(description: Optional[str]) -> str:
     return truncated
 
 
-def _truncate_repr_for_hint(
-    value: Any,
-    max_chars: int = _RETRY_HINT_VALUE_MAX_CHARS,
-    truncate_to: int = _RETRY_HINT_VALUE_TRUNCATE_TO,
-) -> str:
-    """把即将拼进错误信息/日志的不可信值转成安全长度的 repr（gate-r24 P2，
-    gate-r27 P3 扩展为通用截断 helper）。
-
-    原始动机（gate-r24 P2）：供 `_validate_and_normalize_start_segs` 内部拼
-    错误信息时替代裸的 `{value!r}` 插值——value 是 LLM 返回的原始字段
-    （start_seg 类型错误时的整个值、title、gist），完全不受本服务控制，
-    理论上可以长达数十万字符（如 LLM 返回大段垃圾填充）。不做限长的话，
-    这个 repr 会原样进入 `_validate_and_normalize_start_segs` 的返回值，
-    最终拼进第二次调用的 retry_hint，让第二次 prompt 的长度失控。
-
-    gate-r27 P3：`max_chars`/`truncate_to` 开放为可选参数（默认沿用原来的
-    retry-hint 单值上限，调用方不传时行为完全不变），供 `_process_impl`
-    终态失败 error 拼接 raw_chapters 时复用同一套"截断 + 省略号"策略、但配
-    一套更宽松的独立上限（`_FINAL_ERROR_RAW_CHAPTERS_MAX_CHARS` 等）——那
-    条路径与 retry_hint 无关（不会被回显进下一次 prompt），允许比 retry
-    单值场景更长的诊断样本，但同样需要硬上限，不能无界拼接全量原文。
-
-    Args:
-        value: 待展示的非法值，任意类型（未必是 str——start_seg 类型错误
-            分支可能传入任意 JSON 类型）
-        max_chars: 不截断的长度上限，默认 `_RETRY_HINT_VALUE_MAX_CHARS`
-        truncate_to: 超限时保留的前缀长度，默认 `_RETRY_HINT_VALUE_TRUNCATE_TO`
-
-    Returns:
-        str: repr(value) 的结果，长度 <= max_chars
-            （超长时截断为前 truncate_to 字符 + "…"）
-    """
-    text = repr(value)
-    if len(text) <= max_chars:
-        return text
-    return text[:truncate_to] + "…"
-
-
 def _build_retry_hint(validation_error: str) -> str:
     """把语义校验错误信息转换为安全的 retry_hint（gate-r24 P2 第二层防线）。
 
@@ -626,184 +583,6 @@ def _build_retry_hint(validation_error: str) -> str:
     if len(flattened) <= _RETRY_HINT_MAX_CHARS:
         return flattened
     return flattened[:_RETRY_HINT_TRUNCATE_TO] + "…"
-
-
-def _count_moved_entries(chapters: List[Dict[str, Any]]) -> int:
-    """统计按 start_seg 排序后位置会变化的章节条数（逐位与排序结果比较）。
-
-    仅用于乱序归一化时的观测统计（进 warning），不参与任何判定。
-    """
-    sorted_segs = sorted(c["start_seg"] for c in chapters)
-    return sum(
-        1 for c, target in zip(chapters, sorted_segs) if c["start_seg"] != target
-    )
-
-
-def _longest_increasing_subsequence(values: List[int]) -> int:
-    """严格递增最长子序列（LIS）长度，O(n log n) patience 实现。
-
-    调用方传入的 start_seg 已去重（值互异），严格递增与非降等价。
-    仅用于乱序归一化时的观测统计（进 warning），不参与任何判定。
-    """
-    tails: List[int] = []
-    for value in values:
-        pos = bisect.bisect_left(tails, value)
-        if pos == len(tails):
-            tails.append(value)
-        else:
-            tails[pos] = value
-    return len(tails)
-
-
-def _validate_and_normalize_start_segs(
-    raw_chapters: Any,
-    survived_indices: List[int],
-) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
-    """校验并规范化 LLM 返回的 chapters 列表的 start_seg 序列。
-
-    校验以下内容：
-    1. 每项 start_seg 必须是 int（排除 bool；整数字符串与整数值浮点先强转
-       为 int——容忍 LLM 类型抖动）且属于 `survived_indices`——即
-       调用方传入的**原始** segments 列表里、经入口过滤后幸存下来的原始下标
-       集合。这里不再用 `[0, segment_count)` 区间校验：入口过滤后幸存的原始
-       下标可能不连续（中间的下标对应被过滤掉的条目），区间校验会放行一个
-       "数值上在范围内、但实际已被过滤掉"的下标（见 `Chapter` 类文档的锚点
-       偏移问题），必须严格按幸存下标集合的成员关系校验。
-    2. 按 start_seg 去重（保留首次出现）；去重后若非严格递增，按 start_seg
-       排序归一化（打 warning 留观测数据）而**不**判失败——数组的排列顺序
-       只是 start_seg 取值集合的冗余表示，模型按主题弧线而非时间序排列数组
-       时，各章 (title, gist, start_seg) 的配对与锚点仍然正确，整体判死会
-       把可救数据全部丢弃（生产事故：BV1fcHD6cEw3 两次因乱序 FAILED，用户
-       视图页无章节目录）。排序确实改变顺序时打 warning，内容含被移动章节
-       数与 LIS 长度，为未来评估「排序后 gist-区间错配」是否出现留样本。
-    3. 排序后若首项 start_seg 不是幸存下标里最小的那个，钳制为最小幸存下标
-       （覆盖开头；这是自动修正，不算校验失败）——同样不能再硬编码钳制为字面
-       量 0：0 本身就可能已被过滤掉，不在幸存下标集合里。
-    4. title、gist 必须是非空字符串（strip 后非空）——曾经缺失/非字符串/空白值
-       会被 `str(x or "").strip()` 强转成空串照样成章，导致章节标题/梗概为空。
-       与 start_seg 越界/重复同等对待：视为语义校验失败，触发重试。
-
-    注意：title 长度规范化（超长截断）**不**在这里做。这里保留的是原始完整
-    title（仅 strip），供调用方在"合并相邻同名章节"时用完整标题比较——如果在
-    这一步就截断，两个最终截断结果相同但完整内容不同的长标题会被截成同一个
-    字符串，随后被 `_merge_adjacent_same_title` 误判成"同名"而错误合并。截断改
-    为在合并（及合并后的数量校验）**之后**、构造最终 Chapter 列表前统一做
-    （见 `_normalize_title_length` 的调用点）。
-
-    Args:
-        raw_chapters: response.structured_output.get("chapters") 的原始返回
-        survived_indices: 入口过滤后幸存的原始下标列表，按原始顺序升序排列
-            （由调用方保证非空——`segment_count < _MIN_CHAPTER_COUNT` 的门控
-            已经在调用前拦下了空/单元素的情况）
-
-    Returns:
-        (normalized, error):
-        - 成功：normalized 是去重 + 钳制后的 [{"title","gist","start_seg"}, ...]
-          列表（按 start_seg 升序，start_seg 取值来自 survived_indices），
-          title 为未截断的完整原文，error 为 None
-        - 失败：normalized 为 None，error 是具体原因描述（用于拼进重试 prompt
-          或写入最终失败结果的 error 字段）
-    """
-    if not isinstance(raw_chapters, list) or not raw_chapters:
-        return None, "chapters field is missing, not a list, or empty"
-
-    survived_set = set(survived_indices)
-    min_survived = survived_indices[0]  # survived_indices 按原始顺序升序排列
-
-    items: List[Dict[str, Any]] = []
-    for idx, item in enumerate(raw_chapters):
-        if not isinstance(item, dict):
-            return None, f"chapters[{idx}] is not an object"
-
-        start_seg = item.get("start_seg")
-        # 容忍 LLM 返回的类型抖动：整数字符串（"1676"）与整数值浮点（1676.0）
-        # 统一强转为 int——真实样本中 deepseek 对靠后的章节会把下标输出成字符
-        # 串，严格 isinstance int 会让整轮章节在重试后失败。非整数/非数值
-        # （None、"12.5"、"abc"）依旧判失败走重试，语义严格性不变。
-        if isinstance(start_seg, bool):
-            coerced = None
-        elif isinstance(start_seg, int):
-            coerced = start_seg
-        elif isinstance(start_seg, float) and start_seg.is_integer():
-            coerced = int(start_seg)
-        elif isinstance(start_seg, str):
-            try:
-                coerced = int(start_seg.strip())
-            except ValueError:
-                coerced = None
-        else:
-            coerced = None
-        if coerced is None:
-            return None, (
-                f"chapters[{idx}].start_seg is not an int: "
-                f"{_truncate_repr_for_hint(start_seg)}"
-            )
-        start_seg = coerced
-        if start_seg not in survived_set:
-            return None, (
-                f"chapters[{idx}].start_seg={start_seg} out of range (not among the "
-                f"{len(survived_indices)} surviving segment indices in "
-                f"[{survived_indices[0]}, {survived_indices[-1]}])"
-            )
-
-        raw_title = item.get("title")
-        if not isinstance(raw_title, str) or not raw_title.strip():
-            return None, (
-                f"chapters[{idx}].title is missing, not a string, or blank: "
-                f"{_truncate_repr_for_hint(raw_title)}"
-            )
-
-        raw_gist = item.get("gist")
-        if not isinstance(raw_gist, str) or not raw_gist.strip():
-            return None, (
-                f"chapters[{idx}].gist is missing, not a string, or blank: "
-                f"{_truncate_repr_for_hint(raw_gist)}"
-            )
-
-        items.append({
-            "title": raw_title.strip(),
-            "gist": raw_gist.strip(),
-            "start_seg": start_seg,
-        })
-
-    # 去重：按 start_seg 保留首次出现
-    seen: set = set()
-    deduped: List[Dict[str, Any]] = []
-    for item in items:
-        if item["start_seg"] in seen:
-            continue
-        seen.add(item["start_seg"])
-        deduped.append(item)
-
-    # 去重后非严格递增：排序归一化，不判失败（理由见 docstring 第 2 条）。
-    # 排序必须稳定且只按 start_seg 比较键——值互异（已去重），sorted 的结果
-    # 唯一确定；(title, gist, start_seg) 整体随元素移动，配对不变。已升序
-    # 的输入不排序、不打 warning，行为与归一化之前完全一致。
-    is_sorted = all(
-        curr["start_seg"] > prev["start_seg"]
-        for prev, curr in zip(deduped, deduped[1:])
-    )
-    if not is_sorted:
-        moved = _count_moved_entries(deduped)
-        lis_len = _longest_increasing_subsequence([d["start_seg"] for d in deduped])
-        logger.warning(
-            f"[CHAPTERS] start_seg sequence not strictly increasing after dedup; "
-            f"normalizing by sorting: moved {moved}/{len(deduped)} chapters, "
-            f"LIS {lis_len}/{len(deduped)}, "
-            f"before {[d['start_seg'] for d in deduped]}"
-        )
-        deduped.sort(key=lambda c: c["start_seg"])
-
-    # 首项若不是最小幸存下标，钳制为最小幸存下标（覆盖开头，不算失败）。
-    # 不能钳制为字面量 0——0 本身可能已被入口过滤掉、不在幸存下标集合里。
-    if deduped[0]["start_seg"] > min_survived:
-        logger.info(
-            f"[CHAPTERS] Clamping first chapter start_seg from "
-            f"{deduped[0]['start_seg']} to {min_survived} (smallest surviving segment index)"
-        )
-        deduped[0] = {**deduped[0], "start_seg": min_survived}
-
-    return deduped, None
 
 
 def _derive_end_segs(chapters: List[Dict[str, Any]], survived_indices: List[int]) -> None:
@@ -1444,13 +1223,20 @@ class ChaptersProcessor:
 
             raw_chapters = (response.structured_output or {}).get("chapters")
             normalized, validation_error = _validate_and_normalize_start_segs(
-                raw_chapters, survived_indices
+                raw_chapters,
+                survived_indices,
+                expected_language="en" if is_english() else None,
             )
 
             if normalized is not None:
                 if attempt > 0:
                     logger.info("[CHAPTERS] Semantic validation retry succeeded")
                 return normalized, raw_chapters, None
+
+            if validation_error and validation_error.startswith(
+                f"{CHAPTERS_LANGUAGE_MISMATCH}:"
+            ):
+                return None, raw_chapters, validation_error
 
             logger.warning(
                 f"[CHAPTERS] Semantic validation failed (attempt {attempt + 1}/"
