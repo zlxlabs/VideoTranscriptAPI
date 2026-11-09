@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import pytest
 
@@ -35,7 +36,7 @@ def test_matching_completed_item_preserves_srt_content():
     srt = "1\n00:00:00,000 --> 00:00:01,000\nhello\n"
 
     actual = client()._handle_poll_message(
-        batch([{"task_id": "ours", "status": "completed", "srt_content": srt}]),
+        batch([{"task_id": "ours", "status": "completed", "result": {}, "srt_content": srt}]),
         "ours",
     )
 
@@ -65,29 +66,54 @@ def test_batch_without_our_task_is_protocol_error(items):
         client()._handle_poll_message(batch(items), "ours")
 
 
-@pytest.mark.parametrize("status", ["queued_unknown", "new_server_state"])
-def test_unknown_status_is_protocol_error(status):
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [("queued_unknown", None), ("new_server_state", None), (None, None), (None, "unknown_error")],
+)
+def test_unknown_status_is_protocol_error(status, error):
     with pytest.raises(FunASRFatal, match="FUNASR_PROTOCOL_ERROR"):
         client()._handle_poll_message(
-            batch([{"task_id": "ours", "status": status}]), "ours"
+            batch([{"task_id": "ours", "status": status, "error": error}]), "ours"
         )
 
 
-def test_task_complete_push_for_other_task_is_ignored():
-    actual = client()._handle_poll_message(
+@pytest.mark.parametrize("status", ["pending", "processing"])
+def test_pending_status_continues_polling(status):
+    assert client()._handle_poll_message(
+        batch([{"task_id": "ours", "status": status}]), "ours"
+    ) is None
+
+
+def test_task_complete_push_for_other_task_is_ignored_until_our_result():
+    instance = client()
+    instance.poll_interval = 0
+    instance.poll_recv_timeout = 1
+    result = {"segments": [{"text": "ours"}]}
+    responses = [
         {"type": "task_complete", "data": {"task_id": "other", "result": {"wrong": True}}},
-        "ours",
-    )
+        {"type": "task_complete", "data": {"task_id": "ours", "result": result}},
+    ]
+    requests = []
 
-    assert actual is None
+    async def send_message(message):
+        requests.append(message)
+
+    async def receive_message(timeout):
+        return responses.pop(0)
+
+    instance.send_message = send_message
+    instance.receive_message = receive_message
+
+    actual = asyncio.run(instance._poll("ours", 0, time.time() + 5))
+
+    assert actual == result
+    assert len(requests) == 2
 
 
-def test_task_complete_push_without_task_id_is_protocol_error():
+@pytest.mark.parametrize("data", [{"result": {"unbound": True}}, {"task_id": None}])
+def test_task_complete_push_without_task_id_is_protocol_error(data):
     with pytest.raises(FunASRFatal, match="FUNASR_PROTOCOL_ERROR"):
-        client()._handle_poll_message(
-            {"type": "task_complete", "data": {"result": {"unbound": True}}},
-            "ours",
-        )
+        client()._handle_poll_message({"type": "task_complete", "data": data}, "ours")
 
 
 @pytest.mark.parametrize(
