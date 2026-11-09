@@ -30,7 +30,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 1
+          # 全量历史：test_upload_restore.py 等用 git show 读历史提交，浅克隆必红（run 42636089086）
+          fetch-depth: 0
       - name: Verify runner-provided toolchain
         run: which uv && uv --version && uv cache dir
       - name: Lint / format
