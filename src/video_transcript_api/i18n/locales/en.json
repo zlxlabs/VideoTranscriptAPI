@@ -525,6 +525,7 @@
   "web.transcript.cal_failed_body": "LLM proofreading failed or fell back repeatedly. The original ASR text is shown and may contain errors. Try Recalibrate above.",
   "web.transcript.cal_partial": "Partial calibration issue",
   "web.transcript.cal_partial_chunks": "{success}/{total} chunks succeeded, {fallback} fell back, {failed} failed.",
+  "web.transcript.cal_partial_coverage": " Also, {n} segments had low coverage.",
   "web.transcript.cal_partial_low_quality": ", including {n} questionable-quality segments",
   "web.transcript.cal_partial_segments": "{success}/{total} segments succeeded, {fallback} fell back to the original",
   "web.transcript.cal_partial_typos": "Some text may contain recognition errors.",

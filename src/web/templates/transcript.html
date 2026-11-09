@@ -435,7 +435,7 @@
         <span>&#x26A0;&#xFE0F;</span>
         <span><strong>{{ t('web.transcript.cal_partial') }}</strong>{{ t('web.punct.colon') }}
         {%- if cal and cal.total_chunks is defined %}
-            {{ t('web.transcript.cal_partial_chunks', success=cal.success_count, total=cal.total_chunks, fallback=cal.fallback_count, failed=cal.failed_count) }}
+            {{ t('web.transcript.cal_partial_chunks', success=cal.success_count, total=cal.total_chunks, fallback=cal.fallback_count, failed=cal.failed_count) }}{% if cal.partial_count %}{{ t('web.transcript.cal_partial_coverage', n=cal.partial_count) }}{% endif %}
         {%- elif cal and cal.total_segments is defined %}
             {{ t('web.transcript.cal_partial_segments', success=cal.calibrated_segments, total=cal.total_segments, fallback=cal.fallback_segments) }}{% if cal.low_quality_segments %}{{ t('web.transcript.cal_partial_low_quality', n=cal.low_quality_segments) }}{% endif %}{{ t('web.punct.period') }}
         {%- endif %}
