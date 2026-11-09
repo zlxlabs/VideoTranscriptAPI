@@ -2,6 +2,7 @@
 
 Console output: English only, no emoji.
 """
+import json
 import threading
 
 import pytest
@@ -84,6 +85,24 @@ def test_second_file_replace_failure_never_exposes_mixed_group(
         load_segments(media_dir), {old_group[1], new_group[1]}
     )
 
+    legacy_path = cm._get_file_path("youtube", "legacy-layout")
+    legacy_path.mkdir(parents=True)
+    (legacy_path / "transcript_capswriter.txt").write_text(
+        "LEGACY BODY", encoding="utf-8"
+    )
+    legacy_loc = legacy_path.relative_to(cm.cache_dir).as_posix()
+    with cm._get_cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO video_cache "
+            "(platform, url, media_id, use_speaker_recognition, files_loc) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("youtube", "https://example.com/legacy-layout", "legacy-layout", 0, legacy_loc),
+        )
+    legacy_data = cm.get_cache(
+        platform="youtube", media_id="legacy-layout", use_speaker_recognition=False
+    )
+    assert legacy_data["transcript_data"] == "LEGACY BODY"
+
 
 def test_reader_between_artifact_replacements_never_sees_mixed_group(
     cm, monkeypatch,
@@ -140,3 +159,11 @@ def test_reader_between_artifact_replacements_never_sees_mixed_group(
         platform="youtube", media_id="generation-test", use_speaker_recognition=False
     )
     _assert_complete_group(final_data, [new_group])
+    generation_dir = cm.cache_dir / final_data["files_loc"]
+    assert (generation_dir / "transcript_capswriter.txt").read_bytes() == b"NEW BODY"
+    expected_sidecar = json.dumps(
+        {"segments": [{"start_time": 0, "end_time": 1, "text": "NEW SEGMENT"}]},
+        ensure_ascii=False,
+        indent=2,
+    ).encode("utf-8")
+    assert (generation_dir / "transcript_capswriter.json").read_bytes() == expected_sidecar

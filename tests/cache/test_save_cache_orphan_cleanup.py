@@ -105,9 +105,8 @@ class TestSaveCacheCleansOrphanedResidueOnFreshRow:
         assert result is not None
 
         fresh_file_path = cm.cache_dir / Path(result["files_loc"])
-        assert fresh_file_path == orphan_path, (
-            "sanity check: the deterministic path must actually collide "
-            "with the orphaned directory for this test to be meaningful"
+        assert fresh_file_path != orphan_path, (
+            "a committed cache must point to an isolated immutable generation"
         )
         assert not (fresh_file_path / "transcript_funasr.json").exists(), (
             "stale funasr leftover must be cleaned up before a brand new "
@@ -119,6 +118,9 @@ class TestSaveCacheCleansOrphanedResidueOnFreshRow:
             "transcript (red: old code leaves it in place)"
         )
         assert (fresh_file_path / "transcript_capswriter.txt").exists()
+        assert not (orphan_path / "llm_summary.txt").exists(), (
+            "known stale artifacts in the unreferenced legacy directory must be cleaned"
+        )
 
         cache_data = cm.get_cache(
             platform=platform, media_id=media_id, use_speaker_recognition=False,
@@ -165,13 +167,9 @@ class TestSaveCacheCleansOrphanedResidueOnFreshRow:
 
 class TestSaveCacheSkipsCleanupWhenAnyRowIsStillLive:
     def test_live_sibling_variant_directory_is_not_touched(self, cm):
-        """Non-regression (W3 sharing): _get_file_path() does not depend on
-        use_speaker_recognition, so both variants of the same (platform,
-        media_id) share one directory. If the OTHER variant already has a
-        live row there, a brand new row for the current variant is NOT an
-        orphan-residue scenario -- it's normal sharing -- and must not
-        trigger cleanup, or it would destroy the sibling's still-needed
-        files."""
+        """A live sibling variant means the deterministic legacy directory
+        is not orphan residue. A new variant gets its own generation, copied
+        from the sibling's active files, without mutating the published one."""
         platform, media_id = "youtube", f"vid-{uuid.uuid4().hex[:8]}"
         sibling = cm.save_cache(
             platform=platform,
@@ -187,9 +185,7 @@ class TestSaveCacheSkipsCleanupWhenAnyRowIsStillLive:
         sibling_file_path = cm.cache_dir / Path(sibling["files_loc"])
         assert (sibling_file_path / "transcript_funasr.json").exists()
 
-        # Fresh row for the OTHER variant of the same media -- no row for
-        # THIS exact (platform, media_id, use_speaker_recognition) tuple
-        # yet, but the sibling variant is alive and shares the directory.
+        # Fresh row for the OTHER variant: only the sibling row is live.
         result = cm.save_cache(
             platform=platform,
             url=f"https://example.com/{media_id}",
@@ -201,12 +197,23 @@ class TestSaveCacheSkipsCleanupWhenAnyRowIsStillLive:
             author="Other author",
         )
         assert result is not None
-        assert cm.cache_dir / Path(result["files_loc"]) == sibling_file_path
-
+        other_file_path = cm.cache_dir / Path(result["files_loc"])
+        assert other_file_path != sibling_file_path
+        assert (other_file_path / "transcript_capswriter.txt").exists()
+        assert not (other_file_path / "transcript_funasr.json").exists()
         assert (sibling_file_path / "transcript_funasr.json").exists(), (
-            "a live sibling variant's files must survive when a fresh row "
-            "is created for the other variant sharing the same directory"
+            "publishing a new variant must not mutate the sibling's old generation"
         )
+        assert (other_file_path / "transcript_capswriter.txt").read_text(
+            encoding="utf-8"
+        ) == "capswriter body"
+        with cm._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT files_loc FROM video_cache WHERE platform=? AND media_id=? "
+                "AND use_speaker_recognition=0",
+                (platform, media_id),
+            )
+            assert cursor.fetchone()["files_loc"] == result["files_loc"]
 
     def test_resaving_the_same_variant_is_not_treated_as_orphan_cleanup(self, cm):
         """Non-regression: re-saving the SAME (platform, media_id,
@@ -237,9 +244,10 @@ class TestSaveCacheSkipsCleanupWhenAnyRowIsStillLive:
             transcript_type="capswriter",
         )
         assert second is not None
-        assert (file_path / "llm_summary.txt").exists(), (
-            "an ordinary re-save of the same variant must not wipe "
-            "co-located LLM artifacts as if it were orphan cleanup"
+        second_path = cm.cache_dir / Path(second["files_loc"])
+        assert second_path != file_path
+        assert (second_path / "llm_summary.txt").read_text(encoding="utf-8") == "real summary", (
+            "an ordinary re-save must carry forward co-located LLM artifacts"
         )
 
         cache_data = cm.get_cache(

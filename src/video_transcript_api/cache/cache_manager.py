@@ -5,6 +5,7 @@ import sqlite3
 import datetime
 import uuid
 import secrets
+import shutil
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple, Union, Callable
 from contextlib import contextmanager
@@ -1188,94 +1189,48 @@ class CacheManager:
             Dict: 包含缓存信息的字典
         """
         try:
-            # Y6 修复（PR3 review hardening 加固轮，核实结论见评审复盘文档）：
-            # 文件写入 + DB 落库整体纳入该媒体的 media_lock 临界区，与
-            # save_speaker_mapping/save_llm_status/_save_llm_results 等既有
-            # 写路径用同一把锁（U1，做减法，不引入新机制）。
-            #
-            # 核实结论：评审称"U1 清理复核前提失效"——复核依据 U1 的锁内
-            # 双复核之一（"该媒体存在非终态 task_status 行则跳过"）覆盖了
-            # save_cache 的写入窗口，但 save_cache 本身此前完全不持锁。
-            # 核实 save_cache 唯一的调用链（transcription.py::
-            # process_transcription，6 个调用点）：process_task_queue 把
-            # 任务提交给 worker 之前，已经把该 task_id 的 task_status 行
-            # 写成 PROCESSING（非终态），且该行在这次 save_cache 调用返回
-            # 之前始终保持非终态（写 CALIBRATING/FAILED 都严格发生在
-            # save_cache 调用之后）——复核 1 因此天然覆盖"当前任务自己的
-            # save_cache 写入"这个具体窗口，评审对这一点的复核前提判断
-            # 没有错，但同一次核实过程中发现一个相邻的真实缺口：
-            # cleanup_old_cache 对每条候选记录的"复核 -> 删除"判定只发生在
-            # 拿到锁的那一刻，如果判定当时这个媒体压根没有任何任务（两次
-            # 复核均合法通过），随后它仍持锁执行 rmtree（目录较大或磁盘
-            # 较慢时可能有明显耗时）期间，一个全新请求恰好为同一媒体重新
-            # 落地（比如很久没人看的旧内容与它自己的清理周期撞在一起）——
-            # 该请求的 save_cache 此前完全不检查 media_lock，会在 cleanup
-            # 的 rmtree 进行中并发 mkdir/写入同一目录，物理竞争新产物与
-            # 正在被拆除的旧目录。补持同一把锁后，save_cache 会在 cleanup
-            # 释放锁之前排队等待；锁释放时 cleanup 的删除已完全落定（DB 行
-            # 也已先于 rmtree 删除，见 cleanup_old_cache 的 Y5 修复），
-            # save_cache 随后拿到锁时面对的是一个 DB 中已无引用的旧目录，
-            # mkdir 重新创建、正常写入，不再有并发窗口。
             with self.media_lock(platform, media_id):
-                # 获取文件存储路径
-                file_path = self._get_file_path(platform, media_id)
-
-                # Z3（PR3 review hardening 本轮）：写入前清理 rmtree 失败
-                # 残留的孤儿产物文件——仅当 (platform, media_id) 当前完全
-                # 没有任何存活的 video_cache 行（任一 use_speaker_
-                # recognition 变体）时才清理。Y5 修复已经保证 DB 行严格
-                # 先于 rmtree 删除，所以“目录存在但没有任何行引用它”只
-                # 可能是 rmtree 失败的孤儿残留，不会是别的情况；只要还有
-                # 一行存活（本变体的正常覆盖写，或 W3 场景下另一变体仍
-                # 引用同一目录），目录里的文件就都是仍在被引用的有效
-                # 产物，不能碰——跳过清理。仍在同一把 media_lock 临界区
-                # 内做这次判定 + 清理 + 写入，避免跟另一变体的并发写产生
-                # 新的竞争窗口。
+                base_path = self._get_file_path(platform, media_id)
                 with self._get_cursor() as cursor:
                     cursor.execute(
-                        "SELECT 1 FROM video_cache WHERE platform = ? AND media_id = ? LIMIT 1",
+                        "SELECT use_speaker_recognition, files_loc FROM video_cache "
+                        "WHERE platform = ? AND media_id = ? "
+                        "ORDER BY use_speaker_recognition DESC",
                         (platform, media_id),
                     )
-                    has_any_live_row = cursor.fetchone() is not None
-                if not has_any_live_row and file_path.exists():
-                    orphan_cleanup_failed_filenames = (
-                        self._cleanup_orphaned_artifact_files(file_path)
-                    )
-                    if orphan_cleanup_failed_filenames:
-                        # K2（CI review 第 3 轮 major）：删除失败的残留
-                        # 文件若不会被本轮写入覆盖，会被 get_cache 按既有
-                        # 读取优先级（transcript_funasr.json 优先于
-                        # capswriter 系；llm_calibrated.txt/llm_summary.txt/
-                        # llm_status.json/llm_processed.json/
-                        # speaker_mapping.json 只要存在就会被无条件读取）
-                        # 连带读出——新 video_cache 行因此会让调用方读到
-                        # 新旧混合的产物，不能提交新行、也不能返回成功
-                        # 掩盖这个真实冲突。本轮实际会写入哪些产物文件名
-                        # 取决于 transcript_type/extra_json_data，据此算出
-                        # "本轮会覆盖"的文件名集合——只有落在这个集合之外
-                        # 的删除失败才算真正冲突（本轮会重写的同名文件，
-                        # 删除是否成功不影响最终内容，不算冲突）。
-                        overwritten_this_round = {
-                            "transcript_funasr.json" if transcript_type == "funasr"
-                            else "transcript_capswriter.txt"
-                        }
-                        if transcript_type != "funasr" and extra_json_data:
-                            overwritten_this_round.add("transcript_capswriter.json")
-                        conflicting_failures = (
-                            orphan_cleanup_failed_filenames - overwritten_this_round
+                    cache_rows = cursor.fetchall()
+                source_row = next(
+                    (row for row in cache_rows
+                     if bool(row["use_speaker_recognition"]) == use_speaker_recognition),
+                    cache_rows[0] if cache_rows else None,
+                )
+                if not cache_rows and base_path.exists():
+                    failed = self._cleanup_orphaned_artifact_files(base_path)
+                    overwritten = {"transcript_funasr.json" if transcript_type == "funasr"
+                                   else "transcript_capswriter.txt"}
+                    if transcript_type != "funasr" and extra_json_data:
+                        overwritten.add("transcript_capswriter.json")
+                    conflicts = failed - overwritten
+                    if conflicts:
+                        logger.error(
+                            f"孤儿残留产物清理失败且与本轮写入冲突，放弃保存: "
+                            f"{platform}/{media_id}, 冲突文件: {sorted(conflicts)}"
                         )
-                        if conflicting_failures:
-                            logger.error(
-                                f"孤儿残留产物清理失败且与本轮写入冲突，"
-                                f"放弃本次保存: {platform}/{media_id}, "
-                                f"冲突文件: {sorted(conflicting_failures)}"
-                            )
-                            return None
+                        return None
 
-                file_path.mkdir(parents=True, exist_ok=True)
+                generation_root = base_path.parent / f".{base_path.name}.generations"
+                file_path = generation_root / uuid.uuid4().hex
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                if source_row is None:
+                    file_path.mkdir()
+                else:
+                    source_path = self.cache_dir / Path(source_row["files_loc"])
+                    shutil.copytree(source_path, file_path)
 
-                # 保存转录文件
+                # Each generation is immutable after the database row points to it.
                 if transcript_type == "funasr":
+                    for filename in ("transcript_capswriter.txt", "transcript_capswriter.json"):
+                        (file_path / filename).unlink(missing_ok=True)
                     transcript_file = file_path / "transcript_funasr.json"
                     # 原子写（G5）：json.dump 直接写进 temp 文件对象，序列化
                     # 中途抛错也不会影响 transcript_file 里已有的旧转录。
@@ -1286,27 +1241,9 @@ class CacheManager:
                 else:
                     transcript_file = file_path / "transcript_capswriter.txt"
 
-                    # 覆盖写不再携带 timeline 时，必须在写入新正文之前清掉
-                    # 上一轮可能残留的旧侧车 transcript_capswriter.json：
-                    # 本目录是 (platform, media_id) 的确定性路径，上一轮的
-                    # 侧车在本轮不会被重写（下面的 if 只在 extra_json_data
-                    # 为真时才写），而 Z3 的孤儿清理只在"没有任何存活
-                    # video_cache 行"时才触发，正常覆盖写（行仍存在）走不到
-                    # 那里——不主动删除的话，get_cache 会经 load_segments 把
-                    # 上一轮旧 segments 读回来，与本轮新正文混用。删除放在
-                    # 写新正文之前、失败时如实中止本次保存（与 K2 同一原则：
-                    # 宁肯不写入新行，也不制造新旧产物混用的读取状态），这样
-                    # 删除失败时磁盘上仍是上一轮的完整旧状态。
+                    (file_path / "transcript_funasr.json").unlink(missing_ok=True)
                     if not extra_json_data:
-                        stale_json_file = file_path / "transcript_capswriter.json"
-                        try:
-                            stale_json_file.unlink(missing_ok=True)
-                        except OSError as unlink_exc:
-                            logger.error(
-                                f"删除旧 timeline 侧车失败，放弃本次保存以避免"
-                                f"新旧 segments/正文混用: {stale_json_file}: {unlink_exc}"
-                            )
-                            return None
+                        (file_path / "transcript_capswriter.json").unlink(missing_ok=True)
 
                     self._atomic_write(transcript_file, lambda f: f.write(transcript_data))
 
