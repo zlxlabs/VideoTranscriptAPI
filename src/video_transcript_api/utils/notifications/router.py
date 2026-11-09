@@ -66,12 +66,26 @@ class NotificationRouter:
         return [ch for ch in self.channels if ch.name not in excluded_names]
 
     def _resolve_webhook(
-        self, ch_name: str, webhooks: Optional[Dict[str, str]] = None, webhook: str = None,
+        self,
+        ch_name: str,
+        webhooks: Optional[Dict[str, str]] = None,
+        webhook: str = None,
+        *,
+        method_name: str,
+        task_id: str = None,
     ) -> Optional[str]:
         """Resolve webhook for a specific channel: webhooks dict > single webhook > None."""
         if webhooks:
-            return webhooks.get(ch_name)
-        return webhook
+            resolved = webhooks.get(ch_name)
+        else:
+            resolved = webhook
+
+        if resolved is None:
+            details = f"channel={ch_name} method={method_name}"
+            if task_id is not None:
+                details += f" task_id={task_id}"
+            logger.warning(f"NOTIFY_TARGET_FALLBACK_DEFAULT {details}")
+        return resolved
 
     def send_text(
         self,
@@ -86,7 +100,9 @@ class NotificationRouter:
 
         for ch in targets:
             try:
-                ch_webhook = self._resolve_webhook(ch.name, webhooks, webhook)
+                ch_webhook = self._resolve_webhook(
+                    ch.name, webhooks, webhook, method_name="send_text"
+                )
                 results[ch.name] = ch.send_text(content, webhook=ch_webhook)
                 logger.debug(f"[router] [{ch.name}] send_text: {results[ch.name]}")
             except Exception as e:
@@ -98,7 +114,9 @@ class NotificationRouter:
             fallbacks = self._get_fallback_channels(targets)
             for ch in fallbacks:
                 try:
-                    ch_webhook = self._resolve_webhook(ch.name, webhooks)
+                    ch_webhook = self._resolve_webhook(
+                        ch.name, webhooks, method_name="send_text"
+                    )
                     ok = ch.send_text(content, webhook=ch_webhook)
                     results[f"{ch.name}_fallback"] = ok
                     if ok:
@@ -116,6 +134,8 @@ class NotificationRouter:
         channel_name: str = None,
         webhook: str = None,
         webhooks: Dict[str, str] = None,
+        _router_method: str = "send_rich",
+        _task_id: str = None,
         **kwargs,
     ) -> Dict[str, bool]:
         """Send rich content to target channels with fallback."""
@@ -124,7 +144,15 @@ class NotificationRouter:
 
         for ch in targets:
             try:
-                ch_webhook = self._resolve_webhook(ch.name, webhooks, webhook)
+                ch_webhook = self._resolve_webhook(
+                    ch.name,
+                    webhooks,
+                    webhook,
+                    method_name=_router_method,
+                    task_id=(
+                        _task_id if _task_id is not None else kwargs.get("task_id")
+                    ),
+                )
                 results[ch.name] = ch.send_rich(content, webhook=ch_webhook, **kwargs)
             except Exception as e:
                 logger.error(f"[router] [{ch.name}] send_rich exception: {e}")
@@ -133,7 +161,14 @@ class NotificationRouter:
         if channel_name and targets and not any(results.values()):
             for ch in self._get_fallback_channels(targets):
                 try:
-                    ch_webhook = self._resolve_webhook(ch.name, webhooks)
+                    ch_webhook = self._resolve_webhook(
+                        ch.name,
+                        webhooks,
+                        method_name=_router_method,
+                        task_id=(
+                            _task_id if _task_id is not None else kwargs.get("task_id")
+                        ),
+                    )
                     ok = ch.send_rich(content, webhook=ch_webhook, **kwargs)
                     results[f"{ch.name}_fallback"] = ok
                     if ok:
@@ -159,7 +194,13 @@ class NotificationRouter:
 
         for ch in targets:
             try:
-                ch_webhook = self._resolve_webhook(ch.name, webhooks, webhook)
+                ch_webhook = self._resolve_webhook(
+                    ch.name,
+                    webhooks,
+                    webhook,
+                    method_name="notify_task_status",
+                    task_id=kwargs.get("task_id"),
+                )
                 results[ch.name] = ch.notify_task_status(
                     url=url, status=status, webhook=ch_webhook, **kwargs
                 )
@@ -170,7 +211,12 @@ class NotificationRouter:
         if channel_name and targets and not any(results.values()):
             for ch in self._get_fallback_channels(targets):
                 try:
-                    ch_webhook = self._resolve_webhook(ch.name, webhooks)
+                    ch_webhook = self._resolve_webhook(
+                        ch.name,
+                        webhooks,
+                        method_name="notify_task_status",
+                        task_id=kwargs.get("task_id"),
+                    )
                     ok = ch.notify_task_status(
                         url=url, status=status, webhook=ch_webhook, **kwargs
                     )
@@ -269,4 +315,6 @@ class NotificationRouter:
             webhook=webhook,
             webhooks=webhooks,
             title=heading,
+            _router_method="send_view_link",
+            _task_id=task_id,
         )
