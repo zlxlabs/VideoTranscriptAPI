@@ -21,3 +21,9 @@
 - 本段结论：提交闸拒绝增长 1037 行的 SSRF 测试模块，拒绝修改已撤销；seq=2 获批在 tests/unit/downloaders/conftest.py 增加仅作用于 test_generic_ssrf 的自动 fixture，遵守 request.module 名称限定。
 - 关键决策与已否决方案：不压行或删除测试绕过文件体积 ratchet；不用无条件全目录 stub。
 - 下一步唯一动作：提交实现与隔离 fixture，再运行最终接受检查。
+
+### 里程碑 5：Content-Encoding TDD 红
+- 当前阶段：implementing / 编码长度回归先行
+- 本段结论：新增 BaseDownloader 与 GenericDownloader gzip 解码长度测试，并将既有基类长度不符测试改为混合大小写的 identity 编码；当前 HEAD 上两条 gzip 测试均因压缩长度与解码字节不同而失败。
+- 关键决策与已否决方案：测试以 gzip 的真实压缩长度作 Content-Length、以 iter_content 返回解码后的字节写盘；不在测试里模拟编码逻辑或预先改生产代码。
+- 下一步唯一动作：单独提交 TDD 红测试，再提取共享 Content-Encoding 判定并复用。

@@ -1,5 +1,6 @@
 """Download integrity regressions using streamed fake HTTP responses."""
 
+import gzip
 import os
 
 import requests
@@ -11,7 +12,7 @@ from video_transcript_api.downloaders.generic import GenericDownloader
 class _FakeResponse:
     def __init__(self, body, headers=None):
         self.body = body
-        self.headers = headers or {}
+        self.headers = requests.structures.CaseInsensitiveDict(headers or {})
         self.status_code = 200
 
     def raise_for_status(self):
@@ -157,7 +158,9 @@ def test_base_content_length_mismatch_fails_and_discards_temp_file(
     downloader.max_download_bytes = 0
     monkeypatch.setattr(
         "video_transcript_api.downloaders.base.requests.get",
-        lambda *args, **kwargs: _FakeResponse(b"short", {"Content-Length": "12"}),
+        lambda *args, **kwargs: _FakeResponse(
+            b"short", {"Content-Length": "12", "Content-Encoding": "IdEnTiTy"}
+        ),
     )
     monkeypatch.setattr(downloader, "_validate_media_file", lambda path: True)
     error_logs = []
@@ -174,3 +177,50 @@ def test_base_content_length_mismatch_fails_and_discards_temp_file(
     assert downloader.temp_manager.created
     assert not os.path.exists(downloader.temp_manager.created[0])
     assert any("DOWNLOAD_LENGTH_MISMATCH" in str(message) for message in error_logs)
+
+
+def test_base_gzip_length_is_not_compared_to_decoded_bytes(tmp_path, monkeypatch):
+    downloader = _ConcreteBaseDownloader()
+    downloader.temp_manager = _BaseTempManager(str(tmp_path))
+    downloader.max_download_bytes = 0
+    decoded_body = b"decoded payload is longer than its gzip representation"
+    compressed_body = gzip.compress(decoded_body)
+    response = _FakeResponse(
+        decoded_body,
+        {
+            "Content-Encoding": "gzip",
+            "Content-Length": str(len(compressed_body)),
+        },
+    )
+    monkeypatch.setattr(
+        "video_transcript_api.downloaders.base.requests.get",
+        lambda *args, **kwargs: response,
+    )
+    monkeypatch.setattr(downloader, "_validate_media_file", lambda path: True)
+
+    result = downloader.download_file(
+        "https://files.example/audio.mp4", "audio.mp4", max_retries=1
+    )
+
+    assert result == downloader.temp_manager.created[0]
+    assert open(result, "rb").read() == decoded_body
+
+
+def test_generic_gzip_length_is_not_compared_to_decoded_bytes(tmp_path, monkeypatch):
+    downloader, task_dir = _make_generic(tmp_path)
+    decoded_body = b"decoded payload is longer than its gzip representation"
+    compressed_body = gzip.compress(decoded_body)
+    response = _FakeResponse(
+        decoded_body,
+        {
+            "Content-Encoding": "gzip",
+            "Content-Length": str(len(compressed_body)),
+        },
+    )
+    monkeypatch.setattr(downloader, "_safe_request", lambda *args, **kwargs: response)
+    monkeypatch.setattr(downloader, "_validate_media_file", lambda path: True)
+
+    result = downloader.download_file("https://files.example/audio.mp3", "audio.mp3")
+
+    assert result == str(task_dir / "audio.mp3")
+    assert (task_dir / "audio.mp3").read_bytes() == decoded_body
