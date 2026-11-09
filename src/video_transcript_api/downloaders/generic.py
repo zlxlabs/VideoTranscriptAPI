@@ -4,7 +4,7 @@ import hashlib
 import time
 import requests
 from urllib.parse import urlparse, urlunparse, unquote, urljoin
-from .base import BaseDownloader
+from .base import BaseDownloader, _should_compare_content_length
 from .models import VideoMetadata, DownloadInfo
 from ..errors import InvalidURLError
 from ..utils.logging import setup_logger
@@ -580,12 +580,12 @@ class GenericDownloader(BaseDownloader):
     
     def download_file(self, url, filename):
         """
-        下载文件到本地（增强版，支持大文件和断点续传）
-        
+        下载文件到本地，每次尝试都从头写入并校验完整性。
+
         参数:
             url: 文件URL
             filename: 本地文件名
-            
+
         返回:
             str: 本地文件路径，如果下载失败则返回None
 
@@ -601,16 +601,12 @@ class GenericDownloader(BaseDownloader):
         # 2) 不同任务即使同名文件也写在各自目录，避免同名碰撞互相覆盖/误删。
         task_dir = self.temp_manager.get_current_task_dir()
         local_path = os.path.join(str(task_dir), filename)
-
-        # 创建目录（如果不存在）
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        
-        # 最大重试次数
+
         max_retries = 3
-        # 重试退避（秒）：给瞬态故障（如文件服务重启的部署窗口）留恢复时间
         retry_backoff = (5, 15)
         chunk_size = 1024 * 1024  # 1MB 块大小
-        
+
         for attempt in range(max_retries):
             if attempt > 0:
                 delay = retry_backoff[min(attempt - 1, len(retry_backoff) - 1)]
@@ -618,86 +614,88 @@ class GenericDownloader(BaseDownloader):
                 time.sleep(delay)
             try:
                 logger.info(f"开始下载文件 (尝试 {attempt + 1}/{max_retries}): {url}")
-                
-                # 检查是否已有部分下载的文件
-                resume_header = {}
-                initial_pos = 0
-                
-                if os.path.exists(local_path):
-                    initial_pos = os.path.getsize(local_path)
-                    if initial_pos > 0:
-                        resume_header['Range'] = f'bytes={initial_pos}-'
-                        logger.info(f"检测到部分下载文件，从 {initial_pos} 字节处续传")
-                
-                # 发起请求（经 SSRF 校验 + 逐跳重定向校验）
-                try:
-                    response = self._safe_request(
-                        'get',
-                        url,
-                        headers=resume_header,
-                        stream=True,
-                        timeout=(30, 300)  # 连接超时30秒，读取超时300秒
-                    )
-                    response.raise_for_status()
-                except requests.exceptions.HTTPError as e:
-                    # 处理 416 Range Not Satisfiable 错误（服务器不支持断点续传）
-                    if e.response.status_code == 416:
-                        logger.warning(f"服务器不支持断点续传 (416)，删除部分文件重新下载: {local_path}")
+                response = self._safe_request(
+                    'get',
+                    url,
+                    stream=True,
+                    timeout=(30, 300),
+                )
+                response.raise_for_status()
+
+                compare_content_length = _should_compare_content_length(response)
+                content_length = response.headers.get('content-length')
+                expected_size = int(content_length) if content_length is not None else None
+                if expected_size is not None:
+                    logger.info(f"文件总大小: {expected_size / (1024*1024):.2f} MB")
+                    if (
+                        compare_content_length
+                        and self.max_download_bytes
+                        and expected_size > self.max_download_bytes
+                    ):
+                        logger.error(
+                            f"文件大小超过限制: {expected_size} > {self.max_download_bytes}"
+                        )
                         if os.path.exists(local_path):
                             os.remove(local_path)
-                            logger.info("已删除部分下载文件，准备重新下载")
-                        # 重新发起请求（不带 Range header）
-                        response = self._safe_request(
-                            'get',
-                            url,
-                            stream=True,
-                            timeout=(30, 300)
-                        )
-                        response.raise_for_status()
-                        initial_pos = 0  # 重置初始位置
-                        resume_header = {}  # 清空 resume header
-                    else:
-                        raise
-                
-                # 获取文件总大小
-                content_length = response.headers.get('content-length')
-                if content_length:
-                    total_size = int(content_length)
-                    if initial_pos > 0:
-                        total_size += initial_pos
-                    logger.info(f"文件总大小: {total_size / (1024*1024):.2f} MB")
-                
-                # 打开文件进行写入
-                mode = 'ab' if initial_pos > 0 else 'wb'
-                with open(local_path, mode) as f:
-                    downloaded = initial_pos
-                    last_log_time = datetime.datetime.now()
-                    
+                        return None
+
+                downloaded = 0
+                size_exceeded = False
+                last_log_time = datetime.datetime.now()
+                with open(local_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=chunk_size):
                         if chunk:
                             f.write(chunk)
                             downloaded += len(chunk)
-                            
-                            # 每10秒打印一次进度
+                            if self.max_download_bytes and downloaded > self.max_download_bytes:
+                                size_exceeded = True
+                                break
+
                             now = datetime.datetime.now()
                             if (now - last_log_time).seconds >= 10:
-                                if content_length:
-                                    progress = (downloaded / total_size) * 100
-                                    progress_msg = f"下载进度: {progress:.1f}% ({downloaded / (1024*1024):.2f}/{total_size / (1024*1024):.2f} MB)"
-                                    logger.info(progress_msg)
-                                    
+                                if compare_content_length and expected_size:
+                                    progress = (downloaded / expected_size) * 100
+                                    logger.info(
+                                        f"下载进度: {progress:.1f}% "
+                                        f"({downloaded / (1024*1024):.2f}/"
+                                        f"{expected_size / (1024*1024):.2f} MB)"
+                                    )
                                 else:
                                     logger.info(f"已下载: {downloaded / (1024*1024):.2f} MB")
                                 last_log_time = now
-                
-                # 验证文件完整性
+
+                if size_exceeded:
+                    os.remove(local_path)
+                    logger.error(
+                        f"下载超过大小限制: {self.max_download_bytes} bytes"
+                    )
+                    return None
+
                 final_size = os.path.getsize(local_path)
-                if content_length and final_size != total_size:
-                    logger.warning(f"文件大小不匹配: 期望 {total_size}, 实际 {final_size}")
-                    # 不删除文件，下次重试时会续传
+                if (
+                    compare_content_length
+                    and expected_size is not None
+                    and final_size != expected_size
+                ):
+                    logger.warning(
+                        f"文件大小不匹配: 期望 {expected_size}, 实际 {final_size}"
+                    )
+                    os.remove(local_path)
                     continue
-                
-                logger.info(f"文件下载成功: {local_path} (大小: {final_size / (1024*1024):.2f} MB)")
+
+                if final_size == 0:
+                    logger.warning("下载结果为空文件")
+                    os.remove(local_path)
+                    continue
+
+                if not self._validate_media_file(local_path):
+                    logger.error(f"下载文件媒体校验失败: {local_path}")
+                    os.remove(local_path)
+                    return None
+
+                logger.info(
+                    f"文件下载成功: {local_path} (大小: {final_size / (1024*1024):.2f} MB)"
+                )
                 return local_path
 
             except InvalidURLError:
@@ -709,37 +707,34 @@ class GenericDownloader(BaseDownloader):
             except requests.exceptions.ChunkedEncodingError as e:
                 logger.warning(f"分块编码错误 (尝试 {attempt + 1}/{max_retries}): {str(e)}")
                 if attempt < max_retries - 1:
-                    logger.info("将尝试断点续传...")
+                    logger.info("将从头重试下载...")
                     continue
-                    
+
             except requests.exceptions.ConnectionError as e:
                 logger.warning(f"连接错误 (尝试 {attempt + 1}/{max_retries}): {str(e)}")
                 if attempt < max_retries - 1:
-                    logger.info("将尝试重新连接...")
+                    logger.info("将从头重试下载...")
                     continue
-                    
+
             except requests.exceptions.Timeout as e:
                 logger.warning(f"下载超时 (尝试 {attempt + 1}/{max_retries}): {str(e)}")
                 if attempt < max_retries - 1:
-                    logger.info("将尝试重新下载...")
+                    logger.info("将重新下载...")
                     continue
-                    
+
             except Exception as e:
                 logger.error(f"下载异常 (尝试 {attempt + 1}/{max_retries}): {str(e)}")
                 if attempt < max_retries - 1:
                     continue
-                    
-        # 所有重试都失败了
+
         logger.error(f"文件下载失败，已尝试 {max_retries} 次: {url}")
-        
-        # 清理不完整的文件
         if os.path.exists(local_path):
             try:
                 os.remove(local_path)
                 logger.info("已清理不完整的下载文件")
             except:
                 pass
-                
+
         return None
 
     def _fetch_metadata(self, url: str, video_id: str) -> VideoMetadata:

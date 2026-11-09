@@ -281,7 +281,7 @@ def test_large_generic_download_sends_no_progress_notification(tmp_path, monkeyp
     downloader = GenericDownloader.__new__(GenericDownloader)
     downloader.temp_manager = SimpleNamespace(get_current_task_dir=lambda: tmp_path)
     downloader.max_download_bytes = 0
-    downloader._validate_or_raise = lambda _url: None
+    downloader._validate_or_raise = downloader._validate_media_file = lambda _p: True
     downloader._safe_request = lambda *_a, **_k: Response()
     monkeypatch.setattr(generic_module, "datetime", SimpleNamespace(datetime=Clock))
     notifier = MagicMock()

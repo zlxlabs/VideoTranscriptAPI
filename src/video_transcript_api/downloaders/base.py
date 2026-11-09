@@ -17,6 +17,13 @@ from ..utils.logging import setup_logger, load_config, ensure_dir
 
 logger = setup_logger("downloaders")
 
+
+def _should_compare_content_length(response) -> bool:
+    """Whether Content-Length describes the bytes yielded by iter_content."""
+    content_encoding = response.headers.get("Content-Encoding", "")
+    return not content_encoding.strip() or content_encoding.strip().lower() == "identity"
+
+
 def get_temp_manager():
     """获取临时文件管理器单例（下沉到 utils 的全局共享实例）。"""
     from ..utils.tempfile_manager import get_shared_temp_manager
@@ -234,13 +241,19 @@ class BaseDownloader(ABC):
                 )
                 response.raise_for_status()
 
+                compare_content_length = _should_compare_content_length(response)
                 content_length = response.headers.get("Content-Length")
                 expected_size = int(content_length) if content_length else None
                 if expected_size:
                     logger.info(f"expected file size: {expected_size / 1024 / 1024:.2f} MB")
 
                 # 大小上限预检：Content-Length 超限直接失败（不重试）
-                if self.max_download_bytes and expected_size and expected_size > self.max_download_bytes:
+                if (
+                    compare_content_length
+                    and self.max_download_bytes
+                    and expected_size
+                    and expected_size > self.max_download_bytes
+                ):
                     logger.error(
                         f"file size {expected_size / 1024 / 1024:.0f} MB exceeds limit "
                         f"{self.max_download_bytes / 1024 / 1024:.0f} MB, aborting: {url[:100]}"
@@ -274,14 +287,22 @@ class BaseDownloader(ABC):
                 actual_size = os.path.getsize(local_path)
                 logger.info(f"actual file size: {actual_size / 1024 / 1024:.2f} MB")
 
+                if (
+                    compare_content_length
+                    and expected_size is not None
+                    and actual_size != expected_size
+                ):
+                    message = (
+                        f"DOWNLOAD_LENGTH_MISMATCH: expected {expected_size}, "
+                        f"actual {actual_size}"
+                    )
+                    logger.error(message)
+                    self._discard_temp(local_path)
+                    raise DownloadFailedError(message)
+
                 if actual_size == 0:
                     self._discard_temp(local_path)
                     raise DownloadFailedError(f"downloaded file is 0 bytes: {local_path}")
-
-                if expected_size and abs(actual_size - expected_size) > 1024:
-                    logger.warning(
-                        f"file size mismatch - expected: {expected_size}, actual: {actual_size}"
-                    )
 
                 if not self._validate_media_file(local_path):
                     self._discard_temp(local_path)

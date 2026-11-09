@@ -308,7 +308,7 @@ class TestConditionalDownloadHeaders:
             captured_headers.append((url, headers))
             mock_resp = Mock()
             mock_resp.raise_for_status.return_value = None
-            mock_resp.headers = {"Content-Length": "100"}
+            mock_resp.headers = {"Content-Length": str(len(b"fake_mp4_bytes"))}
             mock_resp.iter_content.return_value = [b"fake_mp4_bytes"]
             return mock_resp
 
@@ -339,7 +339,7 @@ class TestConditionalDownloadHeaders:
                 raise requests.exceptions.HTTPError("403 Forbidden")
             mock_resp = Mock()
             mock_resp.raise_for_status.return_value = None
-            mock_resp.headers = {"Content-Length": "100"}
+            mock_resp.headers = {"Content-Length": str(len(b"fake_mp4_bytes"))}
             mock_resp.iter_content.return_value = [b"fake_mp4_bytes"]
             return mock_resp
 
