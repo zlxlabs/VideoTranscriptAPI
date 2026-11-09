@@ -78,6 +78,18 @@ def _make_coordinator():
     return coordinator
 
 
+@pytest.fixture(autouse=True)
+def _english_summary_language(monkeypatch):
+    monkeypatch.setattr(
+        "video_transcript_api.llm.processors.summary_processor.get_language",
+        lambda: "en",
+    )
+    monkeypatch.setattr(
+        "video_transcript_api.llm.prompts.localized.get_language",
+        lambda: "en",
+    )
+
+
 class TestShareCardWiring:
     @patch("video_transcript_api.llm.core.llm_client.LLMClient.call")
     def test_generated_summary_produces_share_card(self, mock_call):
