@@ -4,7 +4,7 @@ import hashlib
 import time
 import requests
 from urllib.parse import urlparse, urlunparse, unquote, urljoin
-from .base import BaseDownloader
+from .base import BaseDownloader, _should_compare_content_length
 from .models import VideoMetadata, DownloadInfo
 from ..errors import InvalidURLError
 from ..utils.logging import setup_logger
@@ -622,11 +622,16 @@ class GenericDownloader(BaseDownloader):
                 )
                 response.raise_for_status()
 
+                compare_content_length = _should_compare_content_length(response)
                 content_length = response.headers.get('content-length')
                 expected_size = int(content_length) if content_length is not None else None
                 if expected_size is not None:
                     logger.info(f"文件总大小: {expected_size / (1024*1024):.2f} MB")
-                    if self.max_download_bytes and expected_size > self.max_download_bytes:
+                    if (
+                        compare_content_length
+                        and self.max_download_bytes
+                        and expected_size > self.max_download_bytes
+                    ):
                         logger.error(
                             f"文件大小超过限制: {expected_size} > {self.max_download_bytes}"
                         )
@@ -648,7 +653,7 @@ class GenericDownloader(BaseDownloader):
 
                             now = datetime.datetime.now()
                             if (now - last_log_time).seconds >= 10:
-                                if expected_size:
+                                if compare_content_length and expected_size:
                                     progress = (downloaded / expected_size) * 100
                                     logger.info(
                                         f"下载进度: {progress:.1f}% "
@@ -667,7 +672,11 @@ class GenericDownloader(BaseDownloader):
                     return None
 
                 final_size = os.path.getsize(local_path)
-                if expected_size is not None and final_size != expected_size:
+                if (
+                    compare_content_length
+                    and expected_size is not None
+                    and final_size != expected_size
+                ):
                     logger.warning(
                         f"文件大小不匹配: 期望 {expected_size}, 实际 {final_size}"
                     )

@@ -203,7 +203,8 @@ def test_base_gzip_length_is_not_compared_to_decoded_bytes(tmp_path, monkeypatch
     )
 
     assert result == downloader.temp_manager.created[0]
-    assert open(result, "rb").read() == decoded_body
+    with open(result, "rb") as downloaded_file:
+        assert downloaded_file.read() == decoded_body
 
 
 def test_generic_gzip_length_is_not_compared_to_decoded_bytes(tmp_path, monkeypatch):

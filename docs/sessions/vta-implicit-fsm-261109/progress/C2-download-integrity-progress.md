@@ -27,3 +27,9 @@
 - 本段结论：新增 BaseDownloader 与 GenericDownloader gzip 解码长度测试，并将既有基类长度不符测试改为混合大小写的 identity 编码；当前 HEAD 上两条 gzip 测试均因压缩长度与解码字节不同而失败。
 - 关键决策与已否决方案：测试以 gzip 的真实压缩长度作 Content-Length、以 iter_content 返回解码后的字节写盘；不在测试里模拟编码逻辑或预先改生产代码。
 - 下一步唯一动作：单独提交 TDD 红测试，再提取共享 Content-Encoding 判定并复用。
+
+### 里程碑 6：编码长度判定修复
+- 当前阶段：implementing / 实现完成
+- 本段结论：在 base.py 增加共享 Content-Encoding 判定，base 与 generic 仅在编码缺失或 identity 时比较 Content-Length；其他编码仍按解码流执行非空、媒体与流式体积限制。
+- 关键决策与已否决方案：不对压缩长度做体积上限预检，因为它不代表 iter_content 解码字节；保留实际解码流累计上限。
+- 下一步唯一动作：提交修复后运行 gzip、identity 与原窄测验收。
