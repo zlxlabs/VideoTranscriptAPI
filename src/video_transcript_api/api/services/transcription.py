@@ -3,6 +3,7 @@ import datetime
 import json
 import os
 import threading
+import uuid
 from pathlib import Path
 import time
 from typing import Callable, Optional, Dict, Any
@@ -2164,8 +2165,8 @@ def process_transcription(
                                     "[youtube-api] Using CapsWriter for transcription"
                                 )
                                 transcriber = Transcriber()
-                                temp_output_base = datetime.datetime.now().strftime(
-                                    "%y%m%d-%H%M%S"
+                                temp_output_base = (
+                                    f"{time.strftime('%y%m%d-%H%M%S')}-{task_id or uuid.uuid4().hex[:8]}"
                                 )
                                 # 没探测到时长时保持既有的两参调用形状：缺省与 None
                                 # 对下游完全等价（都不传 deadline_total），且既有
@@ -2627,9 +2628,8 @@ def process_transcription(
                                     transcriber.capswriter_client.write_admission = (
                                         _local_upload_write_admission(task_id)
                                     )
-                                # 使用时间戳作为临时输出基础名
-                                temp_output_base = datetime.datetime.now().strftime(
-                                    "%y%m%d-%H%M%S"
+                                temp_output_base = (
+                                    f"{time.strftime('%y%m%d-%H%M%S')}-{task_id or uuid.uuid4().hex[:8]}"
                                 )
                                 # 没探测到时长时保持既有的两参调用形状：缺省与 None
                                 # 对下游完全等价（都不传 deadline_total）。

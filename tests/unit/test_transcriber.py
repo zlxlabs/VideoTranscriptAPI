@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
+from video_transcript_api.errors import EmptyTranscriptError
 from video_transcript_api.transcriber import Transcriber
 
 
@@ -65,6 +66,44 @@ class TestTranscriber(unittest.TestCase):
         mock_client.transcribe_file.assert_called_once_with(self.test_audio_file)
         self.assertIn("transcript", result)
         self.assertEqual(result["transcript"], "This is the transcribed text.")
+
+    @patch("video_transcript_api.transcriber.transcriber.logger")
+    @patch("video_transcript_api.transcriber.transcriber.CapsWriterClient")
+    def test_transcript_read_failure_raises_with_grep_marker(
+        self, mock_client_cls, mock_logger
+    ):
+        """A transcript file read failure must not turn into an empty success."""
+        txt_path = os.path.join(self.temp_dir, "unreadable.txt")
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write("transcript")
+
+        mock_client = MagicMock()
+        mock_client.transcribe_file.return_value = (True, [Path(txt_path)])
+        mock_client_cls.return_value = mock_client
+        transcriber = Transcriber(config=self.test_config)
+
+        with patch("builtins.open", side_effect=PermissionError("read denied")):
+            with self.assertRaises(PermissionError):
+                transcriber.transcribe(self.test_audio_file, "unreadable")
+
+        self.assertTrue(
+            any("TRANSCRIPT_READ_FAILED" in str(call) for call in mock_logger.error.call_args_list)
+        )
+
+    @patch("video_transcript_api.transcriber.transcriber.CapsWriterClient")
+    def test_transcribe_whitespace_only_text_raises(self, mock_client_cls):
+        """A successfully read but blank transcript must remain an error."""
+        txt_path = os.path.join(self.temp_dir, "blank.txt")
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(" \n\t ")
+        mock_client = MagicMock()
+        mock_client.transcribe_file.return_value = (True, [Path(txt_path)])
+        mock_client_cls.return_value = mock_client
+
+        transcriber = Transcriber(config=self.test_config)
+
+        with self.assertRaises(EmptyTranscriptError):
+            transcriber.transcribe(self.test_audio_file, "blank")
 
     @patch("video_transcript_api.transcriber.transcriber.CapsWriterClient")
     def test_transcribe_failure(self, mock_client_cls):

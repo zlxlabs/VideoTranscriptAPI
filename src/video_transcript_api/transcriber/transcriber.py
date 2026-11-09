@@ -158,7 +158,10 @@ class Transcriber:
                                 result["transcript"] = f.read()
                             logger.info(f"已从文本文件提取转录文本")
                         except Exception as e:
-                            logger.warning(f"读取转录文本失败: {str(e)}")
+                            logger.error(
+                                f"TRANSCRIPT_READ_FAILED: {file_path_str}: {e}"
+                            )
+                            raise
                         else:
                             if not result["transcript"].strip():
                                 raise EmptyTranscriptError()
