@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 
 from video_transcript_api.llm.processors import summary_processor as summary_processor_module
 from video_transcript_api.llm.processors.summary_processor import SummaryProcessor
+from video_transcript_api.llm.prompts import localized as localized_prompts
 from video_transcript_api.llm.core.config import LLMConfig
 from video_transcript_api.llm.core.llm_client import LLMResponse, LLMUsage
 from video_transcript_api.utils.llm_status import SummaryStatus
@@ -35,6 +36,16 @@ def _usage(completion_tokens: int) -> LLMUsage:
 class TestSummaryProcessor(unittest.TestCase):
   def setUp(self):
     self.processor_module_logger = processor_module_logger
+    self.language_patcher = patch.object(
+      summary_processor_module, "get_language", return_value="en"
+    )
+    self.language_patcher.start()
+    self.addCleanup(self.language_patcher.stop)
+    self.prompt_language_patcher = patch.object(
+      localized_prompts, "get_language", return_value="en"
+    )
+    self.prompt_language_patcher.start()
+    self.addCleanup(self.prompt_language_patcher.stop)
     self.processor = _make_processor()
     self.long_text = _long_text()
     self.mock_call = self.processor.llm_client.call

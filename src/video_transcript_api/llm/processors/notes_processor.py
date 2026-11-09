@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
+from ...i18n import get_language
 from ...transcriber.segments import load_segments, parse_time_to_seconds
 from ...utils.logging import setup_logger
 from ...utils.llm_status import NotesStatus
@@ -26,6 +27,7 @@ from ..prompts.localized import (
     length_budget_coefficient,
     notes_system_prompt,
 )
+from ..utils.language_detector import detect_language
 from .chapters_processor import _compute_fingerprint
 
 
@@ -603,8 +605,27 @@ class NotesProcessor:
                     if progress_callback is not None:
                         progress_callback(completed_count, len(mapping.slices))
 
+            notes_text = "\n\n".join(
+                section for section in notes_sections if section is not None
+            )
+            expected_language = "en" if get_language() == "en" else "zh"
+            detected_language = detect_language(notes_text)
+            if detected_language != expected_language:
+                error = (
+                    "NOTES-LANGUAGE-MISMATCH: "
+                    f"expected={expected_language} detected={detected_language}"
+                )
+                logger.error(error)
+                return NotesResult(
+                    text=None,
+                    status=NotesStatus.FAILED,
+                    error=error,
+                    fingerprint=mapping.current_fingerprint,
+                    chapter_count=len(mapping.slices),
+                )
+
             return NotesResult(
-                text="\n\n".join(section for section in notes_sections if section is not None),
+                text=notes_text,
                 status=NotesStatus.GENERATED,
                 fingerprint=mapping.current_fingerprint,
                 chapter_count=len(mapping.slices),

@@ -34,7 +34,12 @@ def test_notes_density_retry_uses_language_budget(language, expected_calls):
             {"title": "Chapter", "gist": "A gist", "start_seg": 0, "end_seg": 0}
         ],
     }
-    client = FakeNotesClient(["x" * 81, "y" * 70])
+    responses = (
+        ["x" * 81, "y" * 70]
+        if language == "en"
+        else ["中" * 81, "文" * 70]
+    )
+    client = FakeNotesClient(responses)
     config = LLMConfig(
         api_key="test-key",
         base_url="http://localhost",
@@ -45,6 +50,9 @@ def test_notes_density_retry_uses_language_budget(language, expected_calls):
     )
 
     with patch(
+        "video_transcript_api.llm.processors.notes_processor.get_language",
+        return_value=language,
+    ), patch(
         "video_transcript_api.llm.prompts.localized.get_language",
         return_value=language,
     ):
