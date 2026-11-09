@@ -502,6 +502,8 @@ import inspect
 import os
 import pathlib as _pathlib
 import requests
+import time
+from types import SimpleNamespace
 
 from video_transcript_api.downloaders import media_resolver as mr_module
 from video_transcript_api.downloaders.media_resolver_client import MediaResolverClient
@@ -588,11 +590,8 @@ def make_space_downloader(monkeypatch, responses, with_clock=False, sleep_log=No
     dl._resolver_netloc = "resolver.local:8000"
     dl._resolver_api_key = "secret-key"
     monkeypatch.setattr(BaseDownloader, "_validate_media_file", lambda self, path: True)
-    if sleep_log is None:
-        sleep_log = []
+    sleep_log = [] if sleep_log is None else sleep_log
     clock = FakeClock() if with_clock else None
-    if clock is not None:
-        monkeypatch.setattr(mr_module.time, "monotonic", clock)
 
     seq = list(responses)
     calls = {"urls": [], "headers": []}
@@ -610,8 +609,8 @@ def make_space_downloader(monkeypatch, responses, with_clock=False, sleep_log=No
         if clock is not None:
             clock.sleep(seconds)
 
-    monkeypatch.setattr(mr_module.requests, "get", fake_get)
-    monkeypatch.setattr(mr_module.time, "sleep", fake_sleep)
+    monkeypatch.setattr(mr_module, "time", SimpleNamespace(monotonic=clock or time.monotonic, sleep=fake_sleep))
+    monkeypatch.setattr(mr_module, "requests", SimpleNamespace(get=fake_get, RequestException=requests.RequestException))
     return dl, calls, sleep_log
 
 
