@@ -72,7 +72,17 @@ class BusyLock:
 
         False means denied: either the deploy holds the exclusive lock, or
         the lock infrastructure is unavailable (fail-closed).
+
+        Reentrant calls on an instance that already holds the shared flock
+        raise RuntimeError instead of silently opening a second flock and
+        overwriting ``self._fd`` (which would leak the first fd and leave
+        the original lock undiscoverable for release()).
         """
+        if self._fd is not None:
+            raise RuntimeError(
+                f"reentrant acquire on {self.path}: this BusyLock already "
+                "holds a shared flock; call acquire() once per instance"
+            )
         if self._disabled:
             return False
         # 只读打开既有文件：不 makedirs、不带 O_CREAT（契约见模块注释）。

@@ -9,6 +9,12 @@
                     └──► failed ◄──┘
     (success / failed 为终态,具备黏性,除 recalibrate 显式重置外不被覆写)
 
+初始态与直达边(隐式约定,仅文档说明,无运行时校验):
+    - recalibrate / resummarize / generate_notes 三条通道建任务时跳过
+      queued,INSERT 即以 processing 为初始态 (api/routes/tasks.py)。
+    - 缓存全命中(含 LLM 结果)的任务在 worker 置 processing 后无后续
+      LLM 工作,processing ──► success 直达 (api/services/transcription.py)。
+
 HTTP 映射:
     queued / processing / calibrating → 202 (处理中,继续轮询)
     success                           → 200 (完成)
