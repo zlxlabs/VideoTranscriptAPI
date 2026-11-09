@@ -54,6 +54,7 @@ from ...utils.llm_status import (
     ChaptersStatus,
     NotesStatus,
     SummaryStatus,
+    derive_calibration_status_from_stats,
 )
 from ...i18n import get_language, t
 from ...cache.cache_manager import language_mismatched_generation_layers
@@ -2802,22 +2803,15 @@ def _render_completion_body(
 
 
 def _build_calibration_warning(stats: dict) -> str:
-    """构建校准质量警告文本
+    """构建校准质量警告文本（触发条件基于统一派生的 calibration_status）。
 
-    优先判断 calibration_status == DISABLED（用户通过 processing_options
-    主动关闭校对）：这种情况下根本不会产生 chunk/segment 级别的详细统计，
-    但通知里如果对此毫无提示，用户会把"未经 AI 校对的原始语音识别文本"
-    误当成已校对结果查看——尤其是 calibrate=False 但 summarize=True 时，
-    总结本身是基于这份未校对原文生成的，缺了这条提示用户完全无从得知
-    （ci-gate review：只处理了 summary_status 维度，漏了 calibration_status
-    维度，与 docs/guides/notification.md 里"关闭校对或总结都会体现真实
-    状态"的承诺不符）。
-
-    其余情况下，两条校对路径统计口径不同：结构化路径（说话人识别）按 chunk
-    计数（total_chunks/success_count/fallback_count/failed_count），纯文本
-    路径按 segment 计数（total_segments/calibrated_segments/fallback_segments/
-    low_quality_segments）。这里按 cal_stats 里出现的字段名分辨路径，
-    分别生成对应的详情文案，保证纯文本路径的降级也能像结构化路径一样出警告。
+    口径与 utils.llm_status.derive_calibration_status 同源：DISABLED → 未启用
+    提示；NONE（没有任何单元获得有效 LLM 修正/输出）→ 完全失败；PARTIAL
+    （存在降级/失败/低覆盖/低质量）→ 部分异常；FULL → 无警告。本函数不再
+    自行用计数推导状态：状态优先读 stats["calibration_status"]（coordinator
+    已归一化），缺失时用 derive_calibration_status_from_stats 从
+    calibration_stats 计数现派生。PARTIAL 详情文案仍按 cal_stats 字段名
+    分辨路径（chunk/segment 口径），仅用于展示计数。
 
     Args:
         stats: 统计信息字典（coordinator.process() 返回的 stats，
@@ -2826,7 +2820,8 @@ def _build_calibration_warning(stats: dict) -> str:
     Returns:
         str: 警告文本（空字符串表示无警告）
     """
-    if stats.get("calibration_status") == CalibrationStatus.DISABLED:
+    status = stats.get("calibration_status")
+    if status == CalibrationStatus.DISABLED:
         return (
             "\n⚠️ **AI 校对未启用**：当前显示为未经校对的原始语音识别文本"
             "（可能含错别字、断句错误）。"
@@ -2836,47 +2831,37 @@ def _build_calibration_warning(stats: dict) -> str:
     if not cal_stats:
         return ""
 
-    if "total_chunks" in cal_stats:
-        # 结构化路径（说话人识别）：chunk 口径
-        failed = cal_stats.get("failed_count", 0)
-        fallback = cal_stats.get("fallback_count", 0)
-        total = cal_stats.get("total_chunks", 0)
-        success = cal_stats.get("success_count", 0)
-
-        if failed == total and total > 0:
-            return (
-                "\n⚠️ **校准完全失败**：LLM API 超时，"
-                "当前显示为未校准的原始语音识别文本，质量较低。"
-                "建议稍后重新提交。"
+    if status is None:
+        status = derive_calibration_status_from_stats(cal_stats)
+    if status == CalibrationStatus.NONE:
+        return (
+            "\n⚠️ **校准完全失败**：LLM API 超时，"
+            "当前显示为未校准的原始语音识别文本，质量较低。"
+            "建议稍后重新提交。"
+        )
+    if status == CalibrationStatus.PARTIAL:
+        if "total_chunks" in cal_stats:
+            # 结构化路径（说话人识别）：chunk 口径
+            success = cal_stats.get("success_count", 0)
+            total = cal_stats.get("total_chunks", 0)
+            detail = f"{success}/{total} 段校准成功"
+            partial = cal_stats.get("partial_count", 0)
+            if partial:
+                detail += f"，{partial} 段覆盖率不足"
+            detail += (
+                f"，{cal_stats.get('fallback_count', 0)} 段降级，"
+                f"{cal_stats.get('failed_count', 0)} 段失败"
             )
-        if failed > 0 or fallback > 0:
-            return (
-                f"\n⚠️ **校准部分异常**：{success}/{total} 段校准成功，"
-                f"{fallback} 段降级，{failed} 段失败。"
-                "部分内容为未校准文本。"
-            )
-        return ""
-
-    if "total_segments" in cal_stats:
-        # 纯文本路径：segment 口径
-        total = cal_stats.get("total_segments", 0)
-        calibrated = cal_stats.get("calibrated_segments", 0)
-        fallback = cal_stats.get("fallback_segments", 0)
-        low_quality = cal_stats.get("low_quality_segments", 0)
-
-        if calibrated == 0 and total > 0:
-            return (
-                "\n⚠️ **校准完全失败**：LLM API 超时，"
-                "当前显示为未校准的原始语音识别文本，质量较低。"
-                "建议稍后重新提交。"
-            )
-        if fallback > 0 or low_quality > 0:
+        else:
+            # 纯文本路径：segment 口径
+            total = cal_stats.get("total_segments", 0)
+            calibrated = cal_stats.get("calibrated_segments", 0)
+            fallback = cal_stats.get("fallback_segments", 0)
+            low_quality = cal_stats.get("low_quality_segments", 0)
             detail = f"{calibrated}/{total} 段校准成功，{fallback} 段降级为原文"
             if low_quality:
                 detail += f"，其中 {low_quality} 段质量存疑"
-            return f"\n⚠️ **校准部分异常**：{detail}。部分内容为未校准文本。"
-        return ""
-
+        return f"\n⚠️ **校准部分异常**：{detail}。部分内容为未校准文本。"
     return ""
 
 

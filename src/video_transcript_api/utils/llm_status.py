@@ -33,6 +33,81 @@ class CalibrationStatus(StrEnum):
                             # （区别于 NONE：NONE 是"尝试了但失败"，DISABLED 是"根本没尝试"）
 
 
+def derive_calibration_status(
+    *,
+    total_units: int,
+    llm_output_units: int,
+    degraded_units: int,
+    partial_units: int,
+) -> CalibrationStatus:
+    """校对完成度的唯一派生口径（全仓四处调用点共用，禁再各自重写公式）。
+
+    单元指校对粒度：结构化路径为 chunk，纯文本路径为 segment。
+
+    Args:
+        total_units: 校对单元总数。
+        llm_output_units: 实际采用了有效 LLM 修正/输出的单元数。
+        degraded_units: 整体降级为原文(fallback)或失败的单元数。
+        partial_units: 采用了 LLM 输出但覆盖率不足/质量存疑的单元数
+            （结构化 chunk 口径的 partial / 纯文本 segment 口径的 low_quality）。
+
+    Returns:
+        CalibrationStatus: 按锁定口径返回 FULL/PARTIAL/NONE（DISABLED 只能由
+        调用方在关闭校对的入口直接赋值，与本函数无关）。
+    """
+    if total_units <= 0:
+        # 没有任何校对单元，谈不上完成度。
+        return CalibrationStatus.NONE
+    if llm_output_units <= 0:
+        # 没有任何单元获得有效 LLM 修正/输出：全部 fallback/failed，
+        # 或结构化 corrections 全空(applied==0，chunk 状态是 partial 但一个修正都没应用)。
+        return CalibrationStatus.NONE
+    if degraded_units > 0 or partial_units > 0:
+        # 任一单元降级/失败/低覆盖/低质量 → 只能算部分完成。
+        return CalibrationStatus.PARTIAL
+    return CalibrationStatus.FULL
+
+
+def derive_calibration_status_from_stats(
+    cal_stats: dict,
+) -> CalibrationStatus | None:
+    """从持久化的 calibration_stats 字典按统一口径派生校对完成度。
+
+    消费者：llm_ops 通知警告构造、views 旧缓存(无 llm_status.json)读取。
+    结构化(chunk)口径尊重显式的 dialog_counts.applied==0 信号（corrections
+    全空 → 无任何单元获得有效修正）；缺失该字段时按接受过合并结果的单元
+    (total - degraded) 默认计入输出，避免旧数据被误判为 NONE。
+
+    Args:
+        cal_stats: calibration_stats 字典（chunk 或 segment 口径）。
+
+    Returns:
+        CalibrationStatus 取值；字典不含任何已知口径字段时返回 None。
+    """
+    if "total_chunks" in cal_stats:
+        total = cal_stats.get("total_chunks", 0)
+        degraded = (
+            cal_stats.get("fallback_count", 0) + cal_stats.get("failed_count", 0)
+        )
+        applied = (cal_stats.get("dialog_counts") or {}).get("applied")
+        return derive_calibration_status(
+            total_units=total,
+            llm_output_units=(total - degraded) if applied != 0 else 0,
+            degraded_units=degraded,
+            partial_units=cal_stats.get("partial_count", 0),
+        )
+    if "total_segments" in cal_stats:
+        total = cal_stats.get("total_segments", 0)
+        fallback = cal_stats.get("fallback_segments", 0)
+        return derive_calibration_status(
+            total_units=total,
+            llm_output_units=cal_stats.get("calibrated_segments", total - fallback),
+            degraded_units=fallback,
+            partial_units=cal_stats.get("low_quality_segments", 0),
+        )
+    return None
+
+
 class SummaryStatus(StrEnum):
     """总结状态: 区分"未触发生成"(正常路径)和"触发了但失败"，避免二义 None。
 

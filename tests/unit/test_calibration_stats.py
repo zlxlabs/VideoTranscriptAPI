@@ -209,13 +209,14 @@ class TestCalibrationStats(unittest.TestCase):
         self.assertEqual(texts[1], "dialog 1")
         self.assertEqual(cal_stats["dialog_counts"]["applied"], 1)
         self.assertEqual(cal_stats["dialog_counts"]["kept_original"], 2)
-        # calibration_status formula only looks at failed_count/fallback_count;
-        # partial_count alone (low coverage but still applied, not discarded)
-        # does NOT disqualify from FULL, since every chunk kept real LLM output.
+        # CONTRACT CHANGE (card vta-fsm-C3-calibration-status): partial_count
+        # (low coverage but still applied, not discarded) now demotes the
+        # status to PARTIAL via the single derivation in utils.llm_status;
+        # the old formula ignored partial_count and reported FULL here.
         self.assertEqual(cal_stats["partial_count"], 1)
         self.assertEqual(cal_stats["fallback_count"], 0)
         self.assertEqual(cal_stats["failed_count"], 0)
-        self.assertEqual(cal_stats["calibration_status"], CalibrationStatus.FULL)
+        self.assertEqual(cal_stats["calibration_status"], CalibrationStatus.PARTIAL)
 
 
 if __name__ == "__main__":
