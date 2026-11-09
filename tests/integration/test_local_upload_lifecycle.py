@@ -668,10 +668,10 @@ def test_terminal_publish_and_revoke_are_both_write_once(
     assert final["terminal_at"]
     assert final["expires_at"]
     assert cache.get_task_by_id(upload["root_task_id"])["status"] == "success"
-    transcript = (
-        cache._get_file_path("local_upload", upload["media_id"])
-        / "transcript_capswriter.txt"
-    )
+    transcript = Path(cache.get_cache(
+        platform="local_upload", media_id=upload["media_id"],
+        use_speaker_recognition=False,
+    )["file_path"]) / "transcript_capswriter.txt"
     assert transcript.read_text(encoding="utf-8") == "actual transcript body"
     denied = client.get(f"/view/{upload['view_token']}?raw=transcript")
     assert denied.status_code == 404
@@ -784,10 +784,10 @@ def test_active_upload_cleanup_and_cache_publish_preserve_body_in_both_orders(
     publish_result = next(result for result in results if isinstance(result, dict))
     assert cleanup_count == 0
     assert publish_result["media_id"] == upload["media_id"]
-    transcript = (
-        cache._get_file_path("local_upload", upload["media_id"])
-        / "transcript_capswriter.txt"
-    )
+    transcript = Path(cache.get_cache(
+        platform="local_upload", media_id=upload["media_id"],
+        use_speaker_recognition=False,
+    )["file_path"]) / "transcript_capswriter.txt"
     assert transcript.read_text(encoding="utf-8") == (
         "published after the cleanup candidate snapshot"
     )

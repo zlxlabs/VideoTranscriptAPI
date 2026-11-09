@@ -1199,26 +1199,44 @@ class CacheManager:
                         (platform, media_id),
                     )
                     cache_rows = cursor.fetchall()
+                generation_root = base_path.parent / f".{base_path.name}.generations"
                 source_row = next(
                     (row for row in cache_rows
                      if bool(row["use_speaker_recognition"]) == use_speaker_recognition),
                     cache_rows[0] if cache_rows else None,
                 )
-                if not cache_rows and base_path.exists():
-                    failed = self._cleanup_orphaned_artifact_files(base_path)
-                    overwritten = {"transcript_funasr.json" if transcript_type == "funasr"
-                                   else "transcript_capswriter.txt"}
-                    if transcript_type != "funasr" and extra_json_data:
-                        overwritten.add("transcript_capswriter.json")
-                    conflicts = failed - overwritten
-                    if conflicts:
-                        logger.error(
-                            f"孤儿残留产物清理失败且与本轮写入冲突，放弃保存: "
-                            f"{platform}/{media_id}, 冲突文件: {sorted(conflicts)}"
-                        )
-                        return None
+                if not cache_rows:
+                    if base_path.exists():
+                        failed = self._cleanup_orphaned_artifact_files(base_path)
+                        overwritten = {"transcript_funasr.json" if transcript_type == "funasr"
+                                       else "transcript_capswriter.txt"}
+                        if transcript_type != "funasr" and extra_json_data:
+                            overwritten.add("transcript_capswriter.json")
+                        conflicts = failed - overwritten
+                        if conflicts:
+                            logger.error(
+                                f"孤儿残留产物清理失败且与本轮写入冲突，放弃保存: "
+                                f"{platform}/{media_id}, 冲突文件: {sorted(conflicts)}"
+                            )
+                            return None
+                    if generation_root.exists():
+                        shutil.rmtree(generation_root)
+                elif generation_root.exists():
+                    referenced = {row["files_loc"] for row in cache_rows}
+                    for stale_generation in generation_root.iterdir():
+                        if (
+                            stale_generation.is_dir()
+                            and not stale_generation.is_symlink()
+                            and stale_generation.relative_to(self.cache_dir).as_posix()
+                            not in referenced
+                        ):
+                            shutil.rmtree(stale_generation)
 
-                generation_root = base_path.parent / f".{base_path.name}.generations"
+                base_path.mkdir(parents=True, exist_ok=True)
+                old_file_path = (
+                    self.cache_dir / Path(source_row["files_loc"])
+                    if source_row is not None else None
+                )
                 file_path = generation_root / uuid.uuid4().hex
                 file_path.parent.mkdir(parents=True, exist_ok=True)
                 if source_row is None:
@@ -1267,6 +1285,16 @@ class CacheManager:
                         (platform, url, title, author, description, media_id, use_speaker_recognition, files_loc, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     ''', (platform, url, title, author, description, media_id, use_speaker_recognition, files_loc))
+
+                if old_file_path and old_file_path.parent.name == generation_root.name:
+                    with self._get_cursor() as cursor:
+                        cursor.execute(
+                            "SELECT 1 FROM video_cache WHERE files_loc = ? LIMIT 1",
+                            (source_row["files_loc"],),
+                        )
+                        still_referenced = cursor.fetchone() is not None
+                    if not still_referenced:
+                        shutil.rmtree(old_file_path)
 
                 logger.info(f"缓存保存成功: {platform}/{media_id}, 说话人识别: {use_speaker_recognition}")
 
@@ -1353,121 +1381,82 @@ class CacheManager:
             Dict: 缓存数据，包含数据库记录和文件内容
         """
         try:
+            conditions = []
+            params = []
+            if platform and media_id:
+                conditions.append("platform = ? AND media_id = ?")
+                params.extend([platform, media_id])
+            elif url:
+                conditions.append("url = ?")
+                params.append(url)
+            else:
+                logger.warning("必须提供 platform+media_id 或 url")
+                return None
+            if use_speaker_recognition is True:
+                conditions.append("use_speaker_recognition = 1")
             with self._get_cursor() as cursor:
-                # 构建查询条件
-                conditions = []
-                params = []
-                
-                if platform and media_id:
-                    conditions.append("platform = ? AND media_id = ?")
-                    params.extend([platform, media_id])
-                elif url:
-                    conditions.append("url = ?")
-                    params.append(url)
-                else:
-                    logger.warning("必须提供 platform+media_id 或 url")
-                    return None
-                    
-                # 处理 use_speaker_recognition 条件
-                if use_speaker_recognition is True:
-                    # 如果明确要求说话人识别，只查找带说话人识别的
-                    conditions.append("use_speaker_recognition = 1")
-                elif use_speaker_recognition is False:
-                    # 如果不要求说话人识别，可以使用任何缓存（优先使用带说话人识别的）
-                    pass  # 不添加条件
-                    
-                query = f"SELECT * FROM video_cache WHERE {' AND '.join(conditions)} ORDER BY use_speaker_recognition DESC, updated_at DESC LIMIT 1"
+                query = (
+                    f"SELECT * FROM video_cache WHERE {' AND '.join(conditions)} "
+                    "ORDER BY use_speaker_recognition DESC, updated_at DESC LIMIT 1"
+                )
                 cursor.execute(query, params)
-                
                 row = cursor.fetchone()
                 if not row:
                     return None
-                    
-                # 转换为字典
+                cache_id = row["id"]
+                lock_platform, lock_media_id = row["platform"], row["media_id"]
+
+            with self.media_lock(lock_platform, lock_media_id):
+                with self._get_cursor() as cursor:
+                    cursor.execute("SELECT * FROM video_cache WHERE id = ?", (cache_id,))
+                    row = cursor.fetchone()
+                if not row:
+                    return None
                 cache_data = dict(row)
-                
-                # 获取文件路径
-                files_loc = Path(cache_data['files_loc'])
-                file_path = self.cache_dir / files_loc
-                
-                # 检查文件夹是否存在
+                file_path = self.cache_dir / Path(cache_data["files_loc"])
                 if not file_path.exists():
                     logger.warning(f"缓存文件夹不存在: {file_path}")
-                    # 删除数据库记录
-                    cursor.execute("DELETE FROM video_cache WHERE id = ?", (cache_data['id'],))
+                    with self._get_cursor() as cursor:
+                        cursor.execute("DELETE FROM video_cache WHERE id = ?", (cache_id,))
                     return None
-                    
-                # 读取转录文件
+
                 transcript_funasr = file_path / "transcript_funasr.json"
                 transcript_capswriter = file_path / "transcript_capswriter.txt"
-                
                 if transcript_funasr.exists():
-                    with open(transcript_funasr, 'r', encoding='utf-8') as f:
-                        cache_data['transcript_data'] = json.load(f)
-                    cache_data['transcript_type'] = 'funasr'
+                    with open(transcript_funasr, "r", encoding="utf-8") as f:
+                        cache_data["transcript_data"] = json.load(f)
+                    cache_data["transcript_type"] = "funasr"
                 elif transcript_capswriter.exists():
-                    with open(transcript_capswriter, 'r', encoding='utf-8') as f:
-                        cache_data['transcript_data'] = f.read()
-                    cache_data['transcript_type'] = 'capswriter'
+                    with open(transcript_capswriter, "r", encoding="utf-8") as f:
+                        cache_data["transcript_data"] = f.read()
+                    cache_data["transcript_type"] = "capswriter"
                 else:
                     logger.warning(f"未找到转录文件: {file_path}")
-                    # 删除数据库记录
-                    cursor.execute("DELETE FROM video_cache WHERE id = ?", (cache_data['id'],))
-                    logger.info(f"已删除无效的缓存记录: {cache_data['id']}")
+                    with self._get_cursor() as cursor:
+                        cursor.execute("DELETE FROM video_cache WHERE id = ?", (cache_id,))
+                    logger.info(f"已删除无效的缓存记录: {cache_id}")
                     return None
-                    
-                # 读取其他文件（如果存在）
-                llm_calibrated = file_path / "llm_calibrated.txt"
-                llm_summary = file_path / "llm_summary.txt"
-                llm_notes = file_path / "llm_notes.txt"
-                
-                if llm_calibrated.exists():
-                    with open(llm_calibrated, 'r', encoding='utf-8') as f:
-                        cache_data['llm_calibrated'] = f.read()
-                        
-                if llm_summary.exists():
-                    with open(llm_summary, 'r', encoding='utf-8') as f:
-                        cache_data['llm_summary'] = f.read()
 
-                if llm_notes.exists():
-                    with open(llm_notes, 'r', encoding='utf-8') as f:
-                        cache_data['llm_notes'] = f.read()
-
-                # 读取诚实状态模型落盘文件（可能不存在：历史任务或校对未完成）
-                llm_status_file = file_path / "llm_status.json"
-                if llm_status_file.exists():
-                    try:
-                        with open(llm_status_file, 'r', encoding='utf-8') as f:
-                            cache_data['llm_status'] = json.load(f)
-                    except (OSError, json.JSONDecodeError) as status_exc:
-                        logger.warning(f"读取 llm_status.json 失败，忽略: {status_exc}")
-
-                # 读取说话人结构化数据（仅说话人识别路径才会有：dialogs/speaker_mapping
-                # 等，见 save_llm_result(llm_type="structured")）。可能不存在：非说话人
-                # 缓存、或说话人缓存尚未完成一次真实校对。调用方（如分层缓存"只补总结"
-                # 场景）用它拿到真实说话人数，避免总结时因内容被降级为纯文本而误判为
-                # 单说话人（codex-review R5 #3）。
-                llm_processed_file = file_path / "llm_processed.json"
-                if llm_processed_file.exists():
-                    try:
-                        with open(llm_processed_file, 'r', encoding='utf-8') as f:
-                            cache_data['llm_processed'] = json.load(f)
-                    except (OSError, json.JSONDecodeError) as processed_exc:
-                        logger.warning(f"读取 llm_processed.json 失败，忽略: {processed_exc}")
-
-                # 章节梗概产物（仅 GENERATED 时落盘；见 save_llm_result llm_type=chapters）
-                llm_chapters_file = file_path / "llm_chapters.json"
-                if llm_chapters_file.exists():
-                    try:
-                        with open(llm_chapters_file, 'r', encoding='utf-8') as f:
-                            cache_data['llm_chapters'] = json.load(f)
-                    except (OSError, json.JSONDecodeError) as chapters_exc:
-                        logger.warning(f"读取 llm_chapters.json 失败，忽略: {chapters_exc}")
-
-                # Timeline segments 侧车：经统一适配器 load_segments 读回
-                # transcript_funasr.json / transcript_capswriter.json。权威读法
-                # 仍是 load_segments(cache_dir)；这里附带是为方便调用方。缺
-                # 失或坏数据时诚实降级（不塞字段），不阻断缓存命中。
+                for key, filename in (
+                    ("llm_calibrated", "llm_calibrated.txt"),
+                    ("llm_summary", "llm_summary.txt"),
+                    ("llm_notes", "llm_notes.txt"),
+                ):
+                    artifact = file_path / filename
+                    if artifact.exists():
+                        cache_data[key] = artifact.read_text(encoding="utf-8")
+                for key, filename in (
+                    ("llm_status", "llm_status.json"),
+                    ("llm_processed", "llm_processed.json"),
+                    ("llm_chapters", "llm_chapters.json"),
+                ):
+                    artifact = file_path / filename
+                    if artifact.exists():
+                        try:
+                            with artifact.open("r", encoding="utf-8") as f:
+                                cache_data[key] = json.load(f)
+                        except (OSError, json.JSONDecodeError) as read_exc:
+                            logger.warning(f"读取 {filename} 失败，忽略: {read_exc}")
                 try:
                     from video_transcript_api.transcriber.segments import load_segments
 
@@ -1475,15 +1464,14 @@ class CacheManager:
                     if segments is not None:
                         cache_data["segments"] = segments
                 except Exception as segments_exc:
-                    # load_segments 自身契约是"不抛异常"；这里再兜一层，避免
-                    # 未来改动破坏 get_cache 主路径。
                     logger.warning(f"读取 timeline segments 失败，忽略: {segments_exc}")
 
-                cache_data['file_path'] = str(file_path)
-                
-                logger.info(f"缓存命中: {platform}/{media_id}, 说话人识别: {cache_data['use_speaker_recognition']}")
+                cache_data["file_path"] = str(file_path)
+                logger.info(
+                    f"缓存命中: {platform}/{media_id}, 说话人识别: "
+                    f"{cache_data['use_speaker_recognition']}"
+                )
                 return cache_data
-                
         except Exception as e:
             logger.error(f"获取缓存失败: {e}")
             return None
@@ -2427,15 +2415,10 @@ class CacheManager:
                         # 下一轮 cleanup_old_cache 重试，不会有任何数据丢失。
                         #
                         # rmtree 挪到 DB 行已确认删除之后：此时再失败，只是留下
-                        # 一个不再被任何 video_cache 行引用的空目录——无害孤儿
-                        # （DB 行已经不在了，不会被误当成有效缓存返回），只记
-                        # warning 不 raise，不阻断本轮清理继续处理其它候选行，
-                        # 也不让 deleted_count 失真归零。代价：这类孤儿目录目前
-                        # 没有独立的兜底清扫器——tempfile_manager 只扫 data/temp
-                        # 下的临时任务目录，不扫 cache_dir 下的持久化产物目录；
-                        # 只有 rmtree 本身持续失败（如权限被改）时才会累积，规模
-                        # 上界是"本轮候选行数"，且新故障模式（无害目录残留）远
-                        # 好于旧故障模式（DB 行指向已删目录的确定性数据丢失）。
+                        # 一个不再被任何 video_cache 行引用的目录——无害孤儿。
+                        # 失败只记 warning，不阻断本轮清理；同媒体下一次
+                        # save_cache 会在 media_lock 内回收无引用 generation，
+                        # 若后续没有写入则目录保留，但不影响有效缓存读取。
                         with self._get_cursor() as cursor:
                             cursor.execute("DELETE FROM video_cache WHERE id = ?", (record_id,))
 
@@ -2444,13 +2427,43 @@ class CacheManager:
                                 f"清理仅删 DB 行、保留目录（files_loc 仍被其它变体"
                                 f"引用）: {platform}/{media_id}, files_loc={files_loc}"
                             )
-                        elif file_path.exists():
+                        generation_root = file_path.parent
+                        if generation_root.name.endswith(".generations"):
+                            with self._get_cursor() as cursor:
+                                cursor.execute(
+                                    "SELECT files_loc FROM video_cache "
+                                    "WHERE platform = ? AND media_id = ?",
+                                    (platform, media_id),
+                                )
+                                referenced = {row["files_loc"] for row in cursor.fetchall()}
+                            for generation in generation_root.iterdir():
+                                generation_loc = generation.relative_to(self.cache_dir).as_posix()
+                                if (
+                                    generation.is_dir()
+                                    and not generation.is_symlink()
+                                    and generation_loc not in referenced
+                                ):
+                                    try:
+                                        shutil.rmtree(generation)
+                                    except OSError as rmtree_exc:
+                                        logger.warning(
+                                            f"DB 行已删除，孤儿 generation 删除失败: "
+                                            f"{generation}: {rmtree_exc}"
+                                        )
+                            if generation_root.is_dir() and not any(generation_root.iterdir()):
+                                try:
+                                    generation_root.rmdir()
+                                except OSError as rmdir_exc:
+                                    logger.warning(
+                                        f"空 generation 根目录删除失败: "
+                                        f"{generation_root}: {rmdir_exc}"
+                                    )
+                        elif not files_loc_shared and file_path.exists():
                             try:
                                 shutil.rmtree(file_path)
                             except OSError as rmtree_exc:
                                 logger.warning(
-                                    f"DB 行已删除，目录删除失败（留作无害孤儿，暂无"
-                                    f"专门兜底清扫器）: {file_path}: {rmtree_exc}"
+                                    f"DB 行已删除，目录删除失败: {file_path}: {rmtree_exc}"
                                 )
                         deleted_count += 1
                 except TimeoutError:

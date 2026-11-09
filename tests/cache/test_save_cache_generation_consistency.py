@@ -114,7 +114,9 @@ def test_reader_between_artifact_replacements_never_sees_mixed_group(
 
     first_replace_done = threading.Event()
     continue_writer = threading.Event()
+    read_done = threading.Event()
     save_result = {}
+    read_result = {}
     real_replace = cache_manager_module.os.replace
     replace_count = 0
 
@@ -132,28 +134,39 @@ def test_reader_between_artifact_replacements_never_sees_mixed_group(
     def save_new_group():
         save_result["value"] = _save_group(cm, *new_group)
 
-    writer = threading.Thread(target=save_new_group)
-    writer.start()
-    try:
-        assert first_replace_done.wait(timeout=3), "writer never reached first replacement"
+    def read_during_save():
         cache_data = cm.get_cache(
             platform="youtube", media_id="generation-test", use_speaker_recognition=False
         )
-        _assert_complete_group(cache_data, [old_group, new_group])
-
-        media_dir = (
-            cm.cache_dir / cache_data["files_loc"]
-            if cache_data is not None
-            else cm.cache_dir / initial["files_loc"]
+        read_result["cache"] = cache_data
+        read_result["segments"] = (
+            load_segments(cm.cache_dir / cache_data["files_loc"])
+            if cache_data is not None else None
         )
-        _assert_segments_are_one_known_generation(
-            load_segments(media_dir), {old_group[1], new_group[1]}
+        read_done.set()
+
+    writer = threading.Thread(target=save_new_group)
+    writer.start()
+    reader = None
+    try:
+        assert first_replace_done.wait(timeout=3), "writer never reached first replacement"
+        reader = threading.Thread(target=read_during_save)
+        reader.start()
+        assert not read_done.wait(timeout=0.3), (
+            "reader exposed an in-progress artifact group before the database switch"
         )
     finally:
         continue_writer.set()
         writer.join(timeout=5)
+        if reader is not None:
+            reader.join(timeout=5)
 
     assert not writer.is_alive(), "writer did not finish after release"
+    assert read_done.is_set(), "reader did not finish after publication"
+    _assert_complete_group(read_result["cache"], [old_group, new_group])
+    _assert_segments_are_one_known_generation(
+        read_result["segments"], {old_group[1], new_group[1]}
+    )
     assert save_result.get("value") is not None
     final_data = cm.get_cache(
         platform="youtube", media_id="generation-test", use_speaker_recognition=False

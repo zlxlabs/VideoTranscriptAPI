@@ -35,6 +35,7 @@ files there are still in active use and cleanup is skipped entirely.
 
 Console output: English only, no emoji (project convention).
 """
+import datetime
 import uuid
 from pathlib import Path
 
@@ -147,6 +148,10 @@ class TestSaveCacheCleansOrphanedResidueOnFreshRow:
             "transcript_funasr.json": '{"stale": true}',
             "unrelated_future_artifact.bin": "not a known artifact filename",
         })
+        generation_root = orphan_path.parent / f".{media_id}.generations"
+        abandoned_generation = generation_root / "abandoned"
+        abandoned_generation.mkdir(parents=True)
+        (abandoned_generation / "partial.tmp").write_text("unpublished", encoding="utf-8")
 
         result = cm.save_cache(
             platform=platform,
@@ -163,6 +168,35 @@ class TestSaveCacheCleansOrphanedResidueOnFreshRow:
             "not a wholesale directory wipe"
         )
         assert not (orphan_path / "transcript_funasr.json").exists()
+        assert not abandoned_generation.exists(), "unreferenced generation directories must be reclaimed"
+        assert generation_root.exists(), "the newly published generation needs its parent"
+
+    def test_cleanup_old_cache_reclaims_empty_generation_root(self, cm):
+        platform, media_id = "youtube", "expired-generation"
+        base_path = cm._get_file_path(platform, media_id)
+        generation_root = base_path.parent / f".{media_id}.generations"
+        generation = generation_root / "old-generation"
+        generation.mkdir(parents=True)
+        (generation / "transcript_capswriter.txt").write_text("expired", encoding="utf-8")
+        files_loc = generation.relative_to(cm.cache_dir).as_posix()
+        with cm._get_cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO video_cache "
+                "(platform, url, media_id, use_speaker_recognition, files_loc, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    platform, "https://example.com/expired-generation", media_id, 0,
+                    files_loc, "2025-12-01 00:00:00",
+                ),
+            )
+
+        deleted = cm.cleanup_old_cache(
+            days=1, now=datetime.datetime(2026, 1, 10, tzinfo=datetime.timezone.utc)
+        )
+
+        assert deleted == 1
+        assert not generation.exists()
+        assert not generation_root.exists(), "empty .generations parent must be reclaimed"
 
 
 class TestSaveCacheSkipsCleanupWhenAnyRowIsStillLive:
