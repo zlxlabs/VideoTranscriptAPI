@@ -1,6 +1,6 @@
-# 发版流程（全手动）
+# 发版与部署流程
 
-本项目采用全手动发版：一条取材命令 + 人工整理 CHANGELOG，不引入 Conventional Commits、release-please 或任何发布自动化。版本号以 1.0.0 为基线，散布在 `pyproject.toml`、`package.json`、`e2e/package.json`、`src/video_transcript_api/__init__.py` 与 `src/video_transcript_api/api/app.py`，发版时人工同步。
+CHANGELOG、annotated tag 与 GitHub Release 按下述人工流程维护；应用改动推送到 `main` 后由部署工作流自动构建并部署（[DEPLOY.md:5](../docker/DEPLOY.md)）。版本号以 1.0.0 为基线，散布在 `pyproject.toml`、`package.json`、`e2e/package.json`、`src/video_transcript_api/__init__.py` 与 `src/video_transcript_api/api/app.py`，发版时人工同步。
 
 ## 发版时机
 
@@ -20,9 +20,16 @@ git log --first-parent --merges vX.Y.Z..HEAD --format='%b'
 
 把素材人工整理成用户可见变更，写入 `CHANGELOG.md` 的新条目（Keep a Changelog 风格）。CHANGELOG 只回答「版本 → 用户可见变更」，不搬运 WORKLOG 或验收流水。
 
-### 2. 构建与部署
+### 2. 自动构建与部署
 
-CHANGELOG 条目经日常流程进主干后，先构建并部署。按现有镜像流程：`docker/push_to_ghcr.sh` 在干净工作树上构建并推送 `ghcr.io/zj1123581321/video-transcript-api:<sha12>`，随后 `docker/pull_and_deploy.sh <镜像引用>` 以不可变 digest 部署到目标机。
+应用改动推送到 `main` 后，由 `.github/workflows/deploy.yml` 自动构建并部署；该工作流对 `**.md`、`docs/**`、`.github/**` 配置了忽略路径，因此仅修改文档或 CI 文件不会触发生产部署（[deploy.yml:14-23](../.github/workflows/deploy.yml)、[DEPLOY.md:5](../docker/DEPLOY.md)）。部署入口、运行细节和灾备步骤见[部署流程与入口链路](../docker/DEPLOY.md)。
+
+判定部署镜像状态时区分以下两项，不要互相替代：
+
+- **实际运行版本**：在部署主机上查看运行容器的 `.Image`，例如 `docker inspect --format='{{.Image}}' video-transcript-api`。工作流也以运行容器 `.Image` 与候选镜像 ID 对账（[deploy.yml:164-201](../.github/workflows/deploy.yml)）。
+- **最近验证成功镜像 / 回滚锚点**：部署目录 `.deploy-state/last_verified_good`。工作流在验证通过后写入运行容器镜像 ID（[deploy.yml:242-252](../.github/workflows/deploy.yml)），回滚时读取该记录（[deploy.yml:307-318](../.github/workflows/deploy.yml)）；它表示最近验证成功的镜像，不代表当前容器必然仍在运行该版本。
+
+`.deploy-image` 已废弃，当前部署与回滚链路不再使用它；判断运行版本只看运行容器 `.Image`，判断回滚锚点只看 `last_verified_good`（现行判定逻辑见 [deploy.yml:164-201、242-252、307-318](../.github/workflows/deploy.yml)）。
 
 ### 3. 打 annotated tag
 
@@ -44,10 +51,3 @@ gh release create vA.B.C --title "vA.B.C" --notes-file notes.md
 ```
 
 临时文件用完即删，不要提交。
-
-## 两条红线
-
-1. **禁止给镜像打浮动 tag**（含 `:latest`、`:vA.B.C` 等任何会被后续推送覆盖的引用），镜像 tag 只允许 sha12 唯一。机理：`docker/Dockerfile` 构建时通过 `COPY --from` 从仓库里一个冻结的旧镜像获取 BBDown 二进制；一旦出现浮动 tag，下次构建会把它静默解析到新镜像，BBDown 的来源就被悄悄换掉。`tests/deployment/test_pull_and_deploy.py` 已锁定该行为。
-2. **部署 digest 链不动**：`docker/pull_and_deploy.sh` 与 `docker/docker-compose.deploy.yml` 的不可变 digest 约束（`${VIDEO_TRANSCRIPT_IMAGE:?...}` 强制 digest 引用）是部署可追溯性的根基，禁止改成浮动引用或绕过校验。
-
-出现第三方镜像消费者时，浮动 tag 政策需重新裁决后才能放开。
