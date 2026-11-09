@@ -381,6 +381,7 @@ def test_processing_options_cross_real_upload_boundaries(
             "url": payload["source_url"],
             "platform": "local_upload",
             "processing_options": expected_options,
+            "notification_webhooks": {},
         }
     ]
     assert dispatched["processing_options"] == expected_options
@@ -577,6 +578,7 @@ def test_http_queue_handoff_precedes_durable_acceptance_commit(upload_client, mo
             "processing_options": normalize_processing_options(
                 PRODUCER_METADATA["processing_options"]
             ),
+            "notification_webhooks": {},
         },
     )]
     assert runtime.cache_manager.get_local_upload_by_owner_key("alice", key)["state"] == "accepted"

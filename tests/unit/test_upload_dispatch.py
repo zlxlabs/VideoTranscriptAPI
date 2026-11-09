@@ -17,6 +17,56 @@ def _key():
     return f"{int(now.timestamp() * 1000)}-{uuid.uuid4()}"
 
 
+def test_accept_local_upload_carries_notification_targets_in_enqueue_payload(
+    tmp_path,
+):
+    cache = CacheManager(str(tmp_path / "cache"))
+    intent = cache.register_local_upload(
+        owner_user_id="alice", idempotency_key=_key(), retention="30d"
+    )
+    task_id = cache.generate_task_id()
+    published = []
+    webhooks = {
+        "wechat": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=alice",
+        "feishu": "https://open.feishu.cn/open-apis/bot/v2/hook/alice",
+    }
+    cache.accept_local_upload(
+        intent["upload_id"],
+        media_id=f"upload_{uuid.uuid4().hex}",
+        task_id=task_id,
+        filename="clip.mp4",
+        source_url="",
+        processing_options={"calibrate": True},
+        notification_webhooks=dict(webhooks),
+        enqueue=published.append,
+    )
+
+    assert published == [
+        {
+            "id": task_id,
+            "url": "",
+            "platform": "local_upload",
+            "processing_options": {"calibrate": True},
+            "notification_webhooks": dict(webhooks),
+        }
+    ]
+
+
+def test_accept_local_upload_defaults_to_empty_notification_targets(tmp_path):
+    cache = CacheManager(str(tmp_path / "cache"))
+    intent = cache.register_local_upload(
+        owner_user_id="alice", idempotency_key=_key(), retention="30d"
+    )
+    published = []
+    cache.accept_local_upload(
+        intent["upload_id"],
+        media_id=f"upload_{uuid.uuid4().hex}",
+        enqueue=published.append,
+    )
+
+    assert published[0]["notification_webhooks"] == {}
+
+
 def test_dispatcher_fails_stale_local_mapping_before_processing_or_executor_submit(
     tmp_path, monkeypatch
 ):
