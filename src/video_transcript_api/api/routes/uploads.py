@@ -3,7 +3,6 @@
 import asyncio
 import base64
 import binascii
-import datetime
 import hashlib
 import json
 import math
@@ -175,20 +174,8 @@ def _receipt(upload: dict) -> dict:
         "expires_at": upload.get("expires_at"),
         "share_active": bool(
             accepted
-            and upload.get("revoked_at") is None
-            and (
-                upload["retention"] == "never"
-                and upload.get("expires_at") is None
-                or upload["retention"] == "30d"
-                and (
-                    upload.get("expires_at") is None
-                    and upload.get("root_status") not in {"success", "failed"}
-                    or upload.get("expires_at") is not None
-                    and upload["expires_at"] > datetime.datetime.now(
-                        datetime.timezone.utc
-                    ).strftime("%Y-%m-%d %H:%M:%S")
-                )
-            )
+            and not upload.get("error_code")
+            and get_cache_manager().local_upload_share_is_active(upload)
         ),
         "error_code": upload.get("error_code"),
     }
