@@ -78,15 +78,17 @@ def test_official_ok_bbdown_mode_no_download():
     with patch(
         "video_transcript_api.downloaders.bilibili.requests.get",
         return_value=_official_response(),
-    ), patch.object(
+    ) as mock_get, patch.object(
         dl, "get_video_info",
         side_effect=AssertionError("get_video_info must not run in metadata phase (bbdown mode)"),
     ):
-        meta = dl.get_metadata(URL)
+        meta = dl.get_metadata(f"{URL}?p=2")
 
     assert meta.title == "Real Title"
     assert meta.author == "Real Author"
     assert meta.description == "a description"
+    assert meta.video_id == f"{BV_ID}_p2"
+    assert f"bvid={BV_ID}" in mock_get.call_args.args[0]
 
 
 def test_official_ok_bbdown_would_fail_regression():

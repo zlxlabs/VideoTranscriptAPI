@@ -176,6 +176,7 @@ def test_b23_input_uses_canonical_bv_url_and_skip_flags(supervisor):
     assert "https://b23.tv/abc" not in args
     assert args[args.index("-p") + 1] == "2"
     assert {"--skip-subtitle", "--skip-cover", "--skip-ai"} <= set(args)
+    assert result["video_id"] == f"{BV_ID}_p2"
     assert Path(result["local_file"]).exists()
 
 
