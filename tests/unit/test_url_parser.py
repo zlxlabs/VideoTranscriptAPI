@@ -74,6 +74,16 @@ class TestURLParserBasic:
         assert result.platform == "bilibili"
         assert result.video_id == "av12345678"
 
+    def test_bilibili_page_number_is_part_of_video_identity(self):
+        """P1 keeps the BV identity while later pages get distinct identities."""
+        parser = URLParser()
+        first_page = parser.parse("https://www.bilibili.com/video/BV1AoEg6SEW4?p=1")
+        second_page = parser.parse("https://www.bilibili.com/video/BV1AoEg6SEW4?p=2")
+
+        assert first_page.video_id == "BV1AoEg6SEW4"
+        assert second_page.video_id == "BV1AoEg6SEW4_p2"
+        assert first_page.video_id != second_page.video_id
+
     def test_bilibili_short_url(self):
         """Test Bilibili short URL (b23.tv)"""
         parser = URLParser()
