@@ -15,20 +15,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: astral-sh/setup-uv@v8.1.0
-        with:
-          enable-cache: true
-          prune-cache: false
+      - name: Verify runner-provided toolchain
+        run: which uv && uv --version && uv cache dir && npm config get cache
       - name: Install Python dependencies
         run: uv sync --frozen
 
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            e2e/package-lock.json
       - name: Install root Node dependencies
         run: npm ci
       - name: Install browser-test dependencies
