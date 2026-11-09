@@ -111,16 +111,27 @@ def init_identity() -> None:
 
 
 def save_identity() -> None:
-    """持久化当前 token 与 device-id，便于下次复用、避免重复轮换。"""
-    try:
-        TOKEN_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_STATE_FILE.write_text(json.dumps({
-            "accessToken": _ACCESS_TOKEN,
-            "refreshToken": _REFRESH_TOKEN,
-            "deviceId": _DEVICE_ID,
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as exc:
-        print(f"[token] warn: save state failed: {exc}")
+    """持久化当前 token 与 device-id，便于下次复用、避免重复轮换。
+
+    原子发布：先写同目录临时文件，flush + os.fsync 落盘后用 os.replace
+    覆盖目标，读到的永远是完整 JSON。写失败直接上抛、不吞错：refresh
+    token 是一次性轮换，服务端已换新而本地没落盘时，下次启动只能拿旧
+    refresh token 必然 401。「服务端已轮换、本地落盘前崩溃」这个丢失
+    窗口无法由本地消除，只能 fail loud 让调用方看见，绝不带 persisted
+    假成功退出。
+    """
+    TOKEN_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({
+        "accessToken": _ACCESS_TOKEN,
+        "refreshToken": _REFRESH_TOKEN,
+        "deviceId": _DEVICE_ID,
+    }, ensure_ascii=False, indent=2)
+    tmp_path = TOKEN_STATE_FILE.with_name(TOKEN_STATE_FILE.name + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp_path, TOKEN_STATE_FILE)
 
 
 def build_headers(extra: dict | None = None) -> dict:

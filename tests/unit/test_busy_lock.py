@@ -404,6 +404,25 @@ def test_http_ex_holder_returns_503_then_release_restores_202(
     assert not _host_ex_blocked(path)
 
 
+def test_reentrant_acquire_raises_and_keeps_original_fd(tmp_path):
+    """Reentrant acquire() must raise RuntimeError instead of silently opening
+    a second flock and overwriting self._fd. The original fd must survive the
+    failed call: the shared lock stays held (host exclusive probe stays
+    blocked) and release() unlocks via the original fd.
+    """
+    path = str(tmp_path / "busy.lock")
+    _provision(path)
+    lock = BusyLock(path)
+    assert lock.acquire() is True
+    original_fd = lock._fd
+    with pytest.raises(RuntimeError, match="reentrant"):
+        lock.acquire()
+    assert lock._fd is original_fd
+    assert _host_ex_blocked(path)
+    lock.release()
+    assert not _host_ex_blocked(path)
+
+
 def test_default_path_constant_matches_compose_mount():
     assert BUSY_LOCK_PATH == "/app/.deploy-state/busy.lock"
 
