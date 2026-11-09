@@ -125,6 +125,8 @@ jobs:
       busy_lock_file: /opt/media/VideoTranscriptAPI/.deploy-state/busy.lock   # 与容器 /app/.deploy-state/busy.lock 同 inode（compose bind mount + 本 workflow 对账）
       busy_lock_timeout: "600"
       runner: self                                      # self-hosted fleet;显式钉死不随上游默认漂移(该形态下 runner 内直连 tailnet 目标机,临时入网步骤整体跳过)
+      # 跨 slot 共享构建层缓存 + 内网 registry 优先拉取（#290，源自 url-parse-api deploy.yml:31）
+      local_registry: zlx-vm-work-i7-ci-runner.taile9071.ts.net:5001
       healthcheck_url: http://localhost:8200/livez      # 宿主发布端口 8200(容器内 8000);探针用 /livez 纯存活恒 200,不用深度检查的 /health(依赖下游,抖动误触发回滚)
       healthcheck_warmup: "20"                          # 生产实测启动到 healthy 约 10-25s(startup ~10s 内完成),warmup 给 2 倍裕度
       healthcheck_interval: "3"                         # 默认 5 次探针,末次最晚 ~35s,覆盖 25s 上界
