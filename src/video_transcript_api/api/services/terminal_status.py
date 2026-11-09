@@ -537,8 +537,7 @@ def _resolve_delivery_webhooks(task: dict) -> Optional[Dict[str, str]]:
     """Resolve notify targets without request context: audit log, user, then global."""
     task_id = task.get("task_id")
     audit_webhook = _lookup_audit_wechat_webhook(task_id)
-    if audit_webhook:
-        return {"wechat": audit_webhook}
+    webhooks = {"wechat": audit_webhook} if audit_webhook else {}
 
     submitted_by = task.get("submitted_by")
     if submitted_by:
@@ -551,14 +550,11 @@ def _resolve_delivery_webhooks(task: dict) -> Optional[Dict[str, str]]:
             logger.exception("failed to resolve user webhook for terminal notify")
             user = None
         if user:
-            webhooks = {}
-            if user.get("wechat_webhook"):
+            if not audit_webhook and user.get("wechat_webhook"):
                 webhooks["wechat"] = user["wechat_webhook"]
             if user.get("feishu_webhook"):
                 webhooks["feishu"] = user["feishu_webhook"]
-            if webhooks:
-                return webhooks
-    return None
+    return webhooks or None
 
 
 def _lookup_audit_wechat_webhook(task_id: Optional[str]) -> Optional[str]:
