@@ -525,6 +525,7 @@
   "web.transcript.cal_failed_body": "LLM 校对异常或多次降级，当前显示为未校准的原始语音识别文本，可能包含较多错别字。建议点击上方「重新校对」按钮。",
   "web.transcript.cal_partial": "校准部分异常",
   "web.transcript.cal_partial_chunks": "{success}/{total} 段校准成功，{fallback} 段降级，{failed} 段失败。",
+  "web.transcript.cal_partial_coverage": "另有 {n} 段覆盖率不足。",
   "web.transcript.cal_partial_low_quality": "，其中 {n} 段质量存疑",
   "web.transcript.cal_partial_segments": "{success}/{total} 段校准成功，{fallback} 段降级为原文",
   "web.transcript.cal_partial_typos": "部分内容可能包含错别字。",
