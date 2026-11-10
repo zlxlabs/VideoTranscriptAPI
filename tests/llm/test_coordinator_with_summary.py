@@ -126,8 +126,9 @@ class TestCoordinatorWithSummary(unittest.TestCase):
                 }
                 response.text = ""
             elif task_type == "summary":
-                # Summary generation response
-                response.text = "## Overview\nThis is a comprehensive summary..." * 10
+                # Summary generation response; length must clear the English
+                # S-band floor (600 chars) so the floor guard does not retry.
+                response.text = "## Overview\nThis is a comprehensive summary..." * 15
                 response.structured_output = None
             else:
                 # Calibration response

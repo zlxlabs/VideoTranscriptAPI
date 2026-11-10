@@ -6,12 +6,19 @@ from typing import Any, Dict, Optional
 
 @dataclass(frozen=True)
 class SummaryBudget:
-    """Budget envelope for one summary generation call."""
+    """Budget envelope for one summary generation call.
+
+    ``floor`` is the post-hoc length lower bound: a generated summary shorter
+    than ``floor`` is treated as truncated regardless of model or protocol
+    signals (locked decision for issue #322). It equals ``int(target_min *
+    0.5)`` of the scaled ``target_min``.
+    """
 
     target_min: int
     target_max: int
     hard_cap: int
     max_tokens: int
+    floor: int
 
 
 @dataclass(frozen=True)
@@ -91,11 +98,13 @@ def compute_summary_budget(
     hard_cap = int(hard_cap * scale)
 
     max_tokens = int(hard_cap * cfg.max_tokens_multiplier)
+    floor = int(target_min * 0.5)
     return SummaryBudget(
         target_min=target_min,
         target_max=target_max,
         hard_cap=hard_cap,
         max_tokens=max_tokens,
+        floor=floor,
     )
 
 

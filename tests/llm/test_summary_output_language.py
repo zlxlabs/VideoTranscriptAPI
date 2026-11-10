@@ -49,7 +49,9 @@ def _with_language(language: str, processor_module):
 
 
 def test_english_request_rejects_chinese_summary_and_logs_token():
-    processor, client = _summary_processor("这是一段中文总结内容，包含主要观点和详细说明。" * 5)
+    # Fixture length must stay above the English S-band floor (600 chars) so
+    # the outcome is decided by language validation, not the floor guard.
+    processor, client = _summary_processor("这是一段中文总结内容，包含主要观点和详细说明。" * 30)
     captured_log = StringIO()
     sink_id = summary_processor.logger.add(captured_log, format="{message}")
     language_patches = _with_language("en", summary_processor)
@@ -68,7 +70,7 @@ def test_english_request_rejects_chinese_summary_and_logs_token():
 def test_chinese_request_rejects_english_and_accepts_chinese_summary():
     language_patches = _with_language("zh-CN", summary_processor)
     processor, client = _summary_processor(
-        "This is an English summary with enough detail. " * 5
+        "This is an English summary with enough detail. " * 6
     )
     with language_patches[0], language_patches[1]:
         result = processor.process("transcript " * 100, title="Video")
@@ -77,7 +79,8 @@ def test_chinese_request_rejects_english_and_accepts_chinese_summary():
     assert result.text is None
     assert client.call.call_count == 1
 
-    chinese_summary = "这是一段中文总结内容，包含主要观点和详细说明。" * 5
+    # Above the Chinese S-band floor (250 chars) so the floor guard stays out.
+    chinese_summary = "这是一段中文总结内容，包含主要观点和详细说明。" * 12
     processor, _ = _summary_processor(chinese_summary)
     language_patches = _with_language("zh-CN", summary_processor)
     with language_patches[0], language_patches[1]:
