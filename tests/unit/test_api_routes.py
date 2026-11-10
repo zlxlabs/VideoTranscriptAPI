@@ -77,11 +77,9 @@ def mock_audit_logger():
         {"endpoint": "/api/transcribe", "timestamp": "2025-01-01T00:00:00"}
     ]
     mock.log_api_call.return_value = None
-    with patch(
-        "video_transcript_api.api.routes.audit.audit_logger", mock
-    ), patch(
+    with patch("video_transcript_api.api.routes.audit.audit_logger", mock), patch(
         "video_transcript_api.api.routes.tasks.audit_logger", mock
-    ):
+    ), patch("video_transcript_api.api.routes.task_status_view.audit_logger", mock):
         yield mock
 
 
@@ -114,11 +112,9 @@ def mock_cache_manager():
         "task_id": "task-abc-123",
         "view_token": "vt-xyz-789",
     }
-    with patch(
-        "video_transcript_api.api.routes.tasks.cache_manager", mock
-    ), patch(
+    with patch("video_transcript_api.api.routes.tasks.cache_manager", mock), patch(
         "video_transcript_api.api.routes.views.cache_manager", mock
-    ):
+    ), patch("video_transcript_api.api.routes.task_status_view.cache_manager", mock):
         yield mock
 
 

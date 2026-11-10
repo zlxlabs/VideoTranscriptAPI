@@ -49,12 +49,12 @@ def test_english_queue_errors_describe_distinct_capacity_limits(language_config)
 
 def test_task_route_preserves_plain_http_exception_status(language_config, monkeypatch):
     language_config("en")
-    from video_transcript_api.api.routes import tasks
+    from video_transcript_api.api.routes import task_status_view, tasks
     from video_transcript_api.api.services.transcription import verify_token
 
     cache_manager = MagicMock()
     cache_manager.get_task_by_id.side_effect = HTTPException(418, detail="teapot")
-    monkeypatch.setattr(tasks, "cache_manager", cache_manager)
+    monkeypatch.setattr(task_status_view, "cache_manager", cache_manager)
     app = FastAPI()
     install_api_error_handlers(app)
     app.include_router(tasks.router)

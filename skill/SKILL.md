@@ -154,6 +154,23 @@ python3 scripts/videotranscript.py result <view_token> --type <summary|calibrate
 
 任务还没完成时会返回 exit 0 + 一行提示"仍在处理中"；拿不到结果时返回 exit 1。
 
+### wait — 等任务结束（推荐代替轮询）
+
+```bash
+python3 scripts/videotranscript.py wait <task_id> [--timeout 秒]
+```
+
+服务端长轮询：单次请求最多挂起 30 秒，任务进终态立即返回，脚本内部自动循环
+直到拿到结果或总超时（`--timeout`，默认 600 秒）。输出与 `status` 一致，不必
+自己反复调 `status`。
+
+- exit 0 = 任务成功（markdown 里带 view_token；json 里 `task_status: "success"`）
+- exit 1 = 任务失败或总超时（json 里 `timed_out: true` 表示超时，`task_status`
+  是当时状态）
+
+注意：`--timeout` 到点还没结束就返回当前状态，别把它当失败重提任务；
+若任务还在跑，等一段时间后再调一次 `wait` 即可。
+
 ### history — 查历史任务
 
 ```bash
@@ -164,6 +181,7 @@ Options：`--platform youtube`、`--author 作者名`、`--q 关键词`、`--sta
 
 ### 辅助命令
 
+- `wait <task_id>`：长轮询等任务结束（见上文），代替手动反复 `status`/`result` 探测
 - `status <task_id>`：用 task_id 查详细进度（一般不需要，`result` 已经能判断是否完成）
 - `filter-options`：列出服务端已有的平台/作者/webhook 列表（做下拉时用）
 - `profile`：查当前 token 对应的用户信息
@@ -177,7 +195,7 @@ Options：`--platform youtube`、`--author 作者名`、`--q 关键词`、`--sta
 2. 调 `submit https://www.bilibili.com/video/BVxxx`，脚本输出查看链接和 `view_token`
 3. **把脚本输出的查看链接原样复制，单独发一条消息给用户**
 4. 立即调 `result <view_token> --type summary`，如果命中缓存直接拿到结果
-5. 返回 202 → 每隔 1 分钟重试，直到拿到结果（最多 10 次）
+5. 返回 202 → 调 `wait <task_id> --timeout 600`（或分段 `--timeout 300`）等服务端长轮询返回结果
 6. 拿到结果后把总结贴给用户
 
 **场景 B：查找最近转过的小宇宙节目**
