@@ -39,3 +39,10 @@
 - **本段结论**：`deliver_pending_terminal_notifications` 把每行的「加载任务 + 解析目标 + 解析 view_url」纳入行内异常边界，失败打 `NOTIFY_TARGETS_RESOLVE_FAILED`、计一次 attempted 后 continue，行保持 pending；新增 HTTP 边界毒丸测试（3 行中间行损坏 JSON）锁死该行为。顺手删除 `process_transcription` 已废弃的 `notification_webhooks` 形参并同步调用方与两个测试。
 - **关键决策与已否决方案**：失败分支的 `mark_terminal_notification_attempted` 不加 `_DELIVERY_LOCK`——该 SQL 自带 `notified_at IS NULL` 守卫且只是观测计数器，无 check-then-send 竞态；不新增回退目标或重试逻辑。`process_transcription` 函数体保留局部变量名 `notification_webhooks`（现由 `load_task_targets` 赋值），避免超过 30 行牵动面。
 - **下一步唯一动作**：运行完整 `make test` 后推送并交付报告。
+
+## 里程碑 7：本轮修复交付完成
+
+- **当前阶段**：修复已推送至 PR #323 同分支，等待主脑下一轮 gate 复核。
+- **本段结论**：完整 `make test` exit 0，耗时 529 秒，进度 100%，仅 3 个既有 skip（进度行含 3 个 s、无 F/E 字符）；窄验与毒丸新测试均绿。修复提交为毒丸隔离提交，新增文件仅 tests/unit/notifications/test_notify_targets_persistence.py。
+- **关键决策与已否决方案**：无。
+- **下一步唯一动作**：主脑复核新 head 的远端 quality gate，确认 reliability finding 关闭且无新 finding。
