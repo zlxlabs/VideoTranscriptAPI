@@ -18,3 +18,10 @@
 - **本段结论**：`CacheManager.create_task` 与 `accept_local_upload` 对新任务的零目标默认值统一写成 JSON `{}`；旧行 `NULL` 兼容逻辑保留，真实旧行测试显式写入 NULL，不再拿新任务模拟 legacy。
 - **关键决策与已否决方案**：不在测试 fixture 注入 `user_manager`，而是在 producer/storage 边界保证新行非 NULL；不改 systemd/Context fallback 来掩盖根因。
 - **下一步唯一动作**：运行完整 `make test`，检查失败和耗时，必要时修复后重跑至 exit 0。
+
+## 里程碑 4：完整 gate 回归通过
+
+- **当前阶段**：修复已通过本地完整 `make test`，准备推送续派修复。
+- **本段结论**：`make test` exit 0，完成耗时 467 秒，pytest 进度到 100%，3 个既有测试 skip；两个上传生命周期失败用例也单独通过。完整 suite 未复现 45 分钟挂起。
+- **关键决策与已否决方案**：新任务的缺省收件目标固定为 `{}`；不通过给 RuntimeContext fixture 加 `user_manager` 或伪造 legacy 数据来绕过生产路径。
+- **下一步唯一动作**：推送修复提交并核对 PR #323 仍为 OPEN/ready（非 draft）。
