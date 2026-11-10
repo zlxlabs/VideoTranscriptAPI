@@ -35,6 +35,7 @@ def _seed_notes_source(
         platform="youtube",
         media_id="notes-media",
         submitted_by="notes-owner",
+        notify_targets={"wechat": "parent-notes-target"},
     )
     cache_manager.save_cache(
         platform="youtube",
@@ -117,7 +118,7 @@ def _configure_notes_route(
     return tasks_route, llm_queue
 
 
-def _call_generate_notes(tasks_route, view_token):
+def _call_generate_notes(tasks_route, view_token, **request_fields):
     request = Request(
         {
             "type": "http",
@@ -129,7 +130,7 @@ def _call_generate_notes(tasks_route, view_token):
     )
     return asyncio.run(
         tasks_route.generate_notes(
-            request_body=GenerateNotesRequest(view_token=view_token),
+            request_body=GenerateNotesRequest(view_token=view_token, **request_fields),
             request=request,
             user_info={
                 "user_id": "notes-owner",
@@ -143,8 +144,11 @@ def _call_generate_notes(tasks_route, view_token):
 def test_generate_notes_enqueues_notes_only_task(notes_cache, monkeypatch):
     task = _seed_notes_source(notes_cache)
     tasks_route, llm_queue = _configure_notes_route(notes_cache, monkeypatch)
+    child_feishu = "https://open.feishu.cn/open-apis/bot/v2/hook/notes-fixture"
 
-    response = _call_generate_notes(tasks_route, task["view_token"])
+    response = _call_generate_notes(
+        tasks_route, task["view_token"], feishu_webhook=child_feishu,
+    )
 
     assert response.code == 202
     queued = llm_queue.get_nowait()
@@ -162,6 +166,7 @@ def test_generate_notes_enqueues_notes_only_task(notes_cache, monkeypatch):
     created = notes_cache.get_task_by_id(response.data["task_id"])
     assert created["submitted_by"] == "notes-owner"
     assert created["processing_options"] == queued["processing_options"]
+    assert created["notify_targets"] == {"feishu": child_feishu}
 
 
 def test_generate_notes_requires_generated_chapters(notes_cache, monkeypatch):

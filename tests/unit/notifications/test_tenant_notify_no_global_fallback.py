@@ -106,8 +106,12 @@ def cm(tmp_path):
     manager.close()
 
 
-def _persist_pending_terminal(cm, status=TaskStatus.SUCCESS, **create_kwargs):
-    created = cm.create_task(url="https://example.test/clip", **create_kwargs)
+def _persist_pending_terminal(
+    cm, status=TaskStatus.SUCCESS, notify_targets=None, **create_kwargs,
+):
+    created = cm.create_task(
+        url="https://example.test/clip", notify_targets=notify_targets, **create_kwargs
+    )
     task_id = created["task_id"]
     cm.update_task_status(task_id, TaskStatus.PROCESSING)
     assert finalize_terminal_status_and_notify(
@@ -199,10 +203,8 @@ def test_user_feishu_target_reaches_http_boundary_without_global_feishu_config(
 def test_zero_target_terminal_notice_is_processed_once_across_replay_and_restart(
     cm, http_boundary,
 ):
-    """No submitted_by, no audit webhook: replay strips the global addresses,
-    the row is marked processed (skipped) on the first round, and further
-    rounds plus a simulated restart never request any URL."""
-    task_id = _persist_pending_terminal(cm)
+    """An explicit empty target object is permanently silent across replays."""
+    task_id = _persist_pending_terminal(cm, notify_targets={})
 
     assert deliver_pending_terminal_notifications(
         cm, router=http_boundary["router"],
@@ -235,7 +237,9 @@ def test_zero_target_terminal_notice_is_processed_once_across_replay_and_restart
 # ---------------------------------------------------------------------------
 
 def test_rejected_declared_channel_keeps_outbox_row_pending(cm, http_boundary):
-    task_id = _persist_pending_terminal(cm)
+    task_id = _persist_pending_terminal(
+        cm, notify_targets={"wechat": TENANT_WECHAT, "feishu": TENANT_FEISHU}
+    )
     feishu_channel = next(
         channel for channel in http_boundary["router"].channels
         if channel.name == "feishu"
@@ -247,7 +251,6 @@ def test_rejected_declared_channel_keeps_outbox_row_pending(cm, http_boundary):
     deliver_terminal_notification(
         task_id,
         TaskStatus.SUCCESS,
-        webhooks={"wechat": TENANT_WECHAT, "feishu": TENANT_FEISHU},
         cache_manager=cm,
         router=http_boundary["router"],
     )
@@ -293,20 +296,17 @@ def test_asr_monitor_alert_requests_global_webhook_url(http_boundary, monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# Invariant 6: replay reverse-lookup strips global addresses for non-legacy
-# submitters.
+# Invariant 6: replay uses the submission-time destination snapshot.
 # ---------------------------------------------------------------------------
 
-def test_replay_strips_audit_recorded_global_webhook_for_non_legacy_submitter(
+def test_replay_ignores_later_user_configuration_changes(
     cm, http_boundary, monkeypatch,
 ):
-    """Historic reruns wrote the global wechat address into the audit log; the
-    replay path must strip it (and any user-configured global address) so the
-    global group never receives an HTTP request."""
     from src.video_transcript_api.api import context
-    from src.video_transcript_api.api.services import terminal_status
 
-    task_id = _persist_pending_terminal(cm, submitted_by="user-9")
+    task_id = _persist_pending_terminal(
+        cm, submitted_by="user-9", notify_targets={"feishu": TENANT_FEISHU},
+    )
     user_manager = type("UM", (), {})()
     user_manager.get_user_by_id = lambda _user_id: {
         "user_id": "user-9", "is_legacy": False,
@@ -315,21 +315,13 @@ def test_replay_strips_audit_recorded_global_webhook_for_non_legacy_submitter(
     runtime = type("RT", (), {})()
     runtime.user_manager = user_manager
     monkeypatch.setattr(context, "get_runtime", lambda: runtime)
-    monkeypatch.setattr(
-        terminal_status, "_lookup_audit_wechat_webhook",
-        lambda _task_id: GLOBAL_WECHAT,
-    )
-
-    assert terminal_status._resolve_delivery_webhooks(
-        cm.get_task_by_id(task_id),
-    ) is None
 
     assert deliver_pending_terminal_notifications(
         cm, router=http_boundary["router"],
-    ) == 0
+    ) == 1
+    assert http_boundary["wait_for"](2)
+    assert set(http_boundary["records"]) == {TENANT_FEISHU}
     assert cm.is_terminal_notification_pending(task_id) is False
-    assert http_boundary["wait_for"](1, timeout=0.3) is False
-    assert http_boundary["records"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +334,9 @@ def test_legacy_user_replay_keeps_global_webhook_targets(
     from src.video_transcript_api.api import context
     from src.video_transcript_api.api.services import terminal_status
 
-    task_id = _persist_pending_terminal(cm, submitted_by="legacy_user")
+    task_id = _persist_pending_terminal(
+        cm, submitted_by="legacy_user", notify_targets=None,
+    )
     user_manager = type("UM", (), {})()
     user_manager.get_user_by_id = lambda _user_id: {
         "user_id": "legacy_user", "is_legacy": True,
@@ -352,7 +346,7 @@ def test_legacy_user_replay_keeps_global_webhook_targets(
     runtime.user_manager = user_manager
     monkeypatch.setattr(context, "get_runtime", lambda: runtime)
 
-    webhooks = terminal_status._resolve_delivery_webhooks(
+    webhooks = terminal_status._task_notify_targets(
         cm.get_task_by_id(task_id),
     )
     assert webhooks == {"wechat": GLOBAL_WECHAT, "feishu": GLOBAL_FEISHU}

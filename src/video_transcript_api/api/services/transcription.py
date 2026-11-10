@@ -9,8 +9,16 @@ import time
 from typing import Callable, Optional, Dict, Any
 
 from fastapi import Header, Request
-from pydantic import BaseModel, Field, StrictBool, field_validator
+from pydantic import BaseModel, Field
 from ..processing_options import ProcessingOptions, normalize_processing_options
+from .request_models import (
+    GenerateNotesRequest,
+    MetadataOverride,
+    NotificationConfig,
+    RecalibrateRequest,
+    ResummarizeRequest,
+    TranscribeRequest,
+)
 
 from ..context import (
     ApiError,
@@ -281,7 +289,11 @@ from ...utils.perf_tracker import PerfTracker
 from ...utils.task_status import TaskStatus
 from ...i18n import t
 from ...utils.llm_status import CalibrationStatus, SummaryStatus
-from .terminal_status import _resolve_view_url, finalize_terminal_status_and_notify
+from .terminal_status import (
+    _resolve_view_url,
+    finalize_terminal_status_and_notify,
+    load_task_targets,
+)
 
 logger = lazy_resource(get_logger)
 config = lazy_resource(get_config)
@@ -291,121 +303,6 @@ cache_manager = lazy_resource(get_cache_manager)
 task_queue = lazy_resource(get_task_queue)
 llm_task_queue = lazy_resource(get_llm_queue)
 executor = lazy_resource(get_executor)
-
-
-class MetadataOverride(BaseModel):
-    """元数据覆盖模型"""
-    title: Optional[str] = Field(None, description="视频标题", max_length=200)
-    description: Optional[str] = Field(None, description="视频描述", max_length=2000)
-    author: Optional[str] = Field(None, description="视频作者", max_length=200)
-
-
-class NotificationConfig(BaseModel):
-    """通知配置（可选，用于 per-request 指定渠道）"""
-    channel: Optional[str] = Field(None, description="通知渠道: wechat / feishu / None(全部)")
-    webhook: Optional[str] = Field(None, description="自定义 webhook URL")
-
-    @field_validator("webhook")
-    @classmethod
-    def validate_webhook_url(cls, v):
-        if v is None or v.strip() == "":
-            return v
-        from ...utils.url_validator import validate_url_safe, URLValidationError
-        try:
-            validate_url_safe(v)
-        except URLValidationError as e:
-            raise ValueError(f"webhook URL is not allowed: {e}")
-        return v
-
-
-class TranscribeRequest(BaseModel):
-    """转录请求数据模型"""
-
-    url: str = Field(..., description="视频URL（平台链接，用于 view_token 和缓存）")
-    # StrictBool（同 ProcessingOptions，ci-gate review）：这个开关会切换转录
-    # 引擎（FunASR vs CapsWriter）并影响缓存 key，同样不该被 "yes"/"1" 之类
-    # 宽松字符串静默触发。
-    use_speaker_recognition: StrictBool = Field(False, description="是否使用说话人识别功能")
-    wechat_webhook: Optional[str] = Field(
-        None, description="企业微信webhook地址"
-    )
-    feishu_webhook: Optional[str] = Field(
-        None, description="飞书webhook地址"
-    )
-    download_url: Optional[str] = Field(
-        None, description="实际下载地址（可选，如果提供则优先使用）"
-    )
-    metadata_override: Optional[MetadataOverride] = Field(
-        None, description="元数据覆盖（用于补充或覆盖解析的元数据）"
-    )
-    notification_config: Optional[NotificationConfig] = Field(
-        None, description="通知配置（可选，指定渠道和自定义 webhook）"
-    )
-    processing_options: Optional[ProcessingOptions] = Field(
-        None,
-        description="处理深度开关（只转录/转录+校对/全流程）。None 等价于全部启用",
-    )
-
-    @field_validator("wechat_webhook", "feishu_webhook")
-    @classmethod
-    def validate_webhook_url(cls, v):
-        """验证 webhook URL 安全性（防止 SSRF）"""
-        if v is None or v.strip() == "":
-            return v
-        from ...utils.url_validator import validate_url_safe, URLValidationError
-        try:
-            validate_url_safe(v)
-        except URLValidationError as e:
-            raise ValueError(f"webhook URL is not allowed: {e}")
-        return v
-
-
-class RecalibrateRequest(BaseModel):
-    """重新校对请求数据模型"""
-
-    view_token: str = Field(..., description="查看页面的 view_token")
-    wechat_webhook: Optional[str] = Field(
-        None, description="企业微信webhook地址，用于发送通知"
-    )
-
-    @field_validator("wechat_webhook")
-    @classmethod
-    def validate_webhook_url(cls, v):
-        """验证 webhook URL 安全性（防止 SSRF）"""
-        if v is None or v.strip() == "":
-            return v
-        from ...utils.url_validator import validate_url_safe, URLValidationError
-        try:
-            validate_url_safe(v)
-        except URLValidationError as e:
-            raise ValueError(f"webhook URL is not allowed: {e}")
-        return v
-
-
-class ResummarizeRequest(BaseModel):
-    """重新生成总结请求数据模型（字段与 RecalibrateRequest 完全相同）"""
-
-    view_token: str = Field(..., description="查看页面的 view_token")
-    wechat_webhook: Optional[str] = Field(
-        None, description="企业微信webhook地址，用于发送通知"
-    )
-
-    @field_validator("wechat_webhook")
-    @classmethod
-    def validate_webhook_url(cls, v):
-        """验证 webhook URL 安全性（防止 SSRF）"""
-        if v is None or v.strip() == "":
-            return v
-        from ...utils.url_validator import validate_url_safe, URLValidationError
-        try:
-            validate_url_safe(v)
-        except URLValidationError as e:
-            raise ValueError(f"webhook URL is not allowed: {e}")
-        return v
-
-
-class GenerateNotesRequest(ResummarizeRequest):
-    """按需生成分章详细笔记请求数据模型。"""
 
 
 class TranscribeResponse(BaseModel):
@@ -1072,8 +969,7 @@ def process_transcription(
         url_parse_attempted: API 是否已经尝试过 URL 解析。解析失败时为 True，
             worker 直接走 generic 回退而不再尝试短链跳转。
     """
-    if notification_webhooks is None:
-        notification_webhooks = {}
+    notification_webhooks = load_task_targets(cache_manager, task_id)
     processing_options = normalize_processing_options(processing_options)
     # 性能追踪器：记录各阶段耗时
     tracker = PerfTracker(task_id=task_id)

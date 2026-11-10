@@ -37,9 +37,6 @@ def test_compensation_drain_routes_to_submitting_users_wechat_webhook(
         "get_runtime",
         lambda: SimpleNamespace(user_manager=user_manager),
     )
-    monkeypatch.setattr(
-        terminal_status, "_lookup_audit_wechat_webhook", lambda _task_id: None
-    )
     router = MagicMock()
     router.notify_task_status.return_value = {"wechat": True}
     monkeypatch.setattr(

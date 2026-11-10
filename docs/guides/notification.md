@@ -55,7 +55,7 @@ VideoTranscriptAPI 支持同时向企业微信和飞书推送任务通知。基�
 }
 ```
 
-用户级 webhook 优先于全局配置。用户 A 的通知发到用户 A 的群，不会和全局群混。
+用户级 webhook 是租户任务默认目标；全局配置不参与租户任务解析（仅 `legacy_user` 的用户信息会显式包含全局地址）。用户 A 的通知发到任务提交时确定的目标，不会因之后修改用户配置而改变。
 
 ### 3. Per-request 指定渠道
 
@@ -82,19 +82,23 @@ curl -X POST "http://localhost:8000/api/transcribe" \
   -d '{"url": "...", "wechat_webhook": "https://qyapi.weixin.qq.com/..."}'
 ```
 
-## Webhook 优先级（C1 止血后）
+## Webhook 优先级与任务目标快照（C2）
+
+每个任务提交时只解析一次通知目标，写入 `task_status.notify_targets`；内联通知、偏慢提醒、缓存命中、终态 outbox 和重启补发都读取该字段。之后修改 `users.json` 不改变已有任务的收件目标。
 
 ```
-notification_config.webhook  (per-request 指定)
-        ↓ 未设置时
-wechat_webhook / feishu_webhook 字段  (per-request 显式声明)
-        ↓ 未设置时
-user_info.wechat/feishu_webhook  (用户级配置)
-        ↓ 未设置时（该渠道 = 无目标，静默跳过）
-（不再回落全局 config.wechat/feishu.webhook）
+notification_config{channel, webhook}
+        ↓ 未覆盖的渠道
+顶层 wechat_webhook / feishu_webhook
+        ↓ 未覆盖的渠道
+提交者 users.json 用户级 webhook
 ```
 
-每个渠道独立解析，互不影响。**全局配置的 webhook 只服务运维告警**
+`notification_config` 只给 `channel`、未给 `webhook` 时，会从合并后的目标中只保留该渠道（例如 `channel=feishu` 只发飞书）。`channel` 只允许 `wechat` / `feishu`；只给 `webhook` 不给 `channel` 会返回 HTTP 422。没有渠道目标即静默跳过，不回落全局 `config.wechat/feishu.webhook`。
+
+提交请求可设置 `"notify": "none"`，压过所有 webhook 来源并使任务永久静默；默认 `"default"` 使用上述目标优先级。上传元数据和校对/总结/笔记重跑请求也支持 `notify`。skill 的 `submit --no-notify` 会发送 `notify=none`，不会发送环境变量中配置的 webhook。
+
+全局配置的 webhook 只服务运维告警
 （ASR 监控，经 `router.send_ops_alert` 显式发送），租户任务通知永远不会
 落到全局群。
 
@@ -149,14 +153,7 @@ user_info.wechat/feishu_webhook  (用户级配置)
 
 outbox 不做限流/重试/分段：`wecom-notifier` 是唯一限流权威。outbox 只承载终态**状态**通知（状态行 + 错误 + 查看链接），不把总结/校对/笔记正文搬进表。
 
-恢复路径没有请求上下文，目标解析顺序：
-
-1. `api_audit_logs.wechat_webhook` by task_id
-2. `user_manager.get_user_by_id(submitted_by)` 的用户级 webhook
-
-对**非 legacy** 提交者，任何等于全局配置 webhook 的地址都会被剔除（历史
-重跑曾把全局地址写进审计表）；`legacy_user` 提交的任务保留全局目标。
-飞书自定义 webhook 未落库，恢复路径取不回，是已知缺口。
+恢复路径直接读取任务行的 `notify_targets`，不会查询审计表或重新解析当前用户配置。`NULL` 表示迁移前的旧任务：按提交者当前用户配置解析并记录 `NOTIFY_TARGETS_LEGACY_ROW task_id=<id>`；提交者为 `NULL` 时按零目标跳过。`{}` 表示显式零目标，永久静默；非空 JSON 对象是唯一投递目标。新任务（包括自定义飞书 webhook）均在任务创建事务中持久化完整目标。
 
 ### 投递侧残留风险（本卡不修）
 
