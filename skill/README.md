@@ -153,6 +153,7 @@ python3 skill/scripts/videotranscript.py submit https://b23.tv/DBUt7OW
 |--------|------|
 | `submit <url>` | 提交转录任务，返回查看链接（agent 内部记录 task_id 用于后续查询） |
 | `status <task_id>` | 查任务状态（agent 内部使用），success 时自动附带 view_token |
+| `wait <task_id>` | 长轮询等任务结束（服务端挂起最多 30s/次，循环到终态或总超时，默认 600s），输出同 status |
 | `result <view_token>` | 拉结果文本（`--type summary`/`calibrated`/`transcript`） |
 | `history` | 按平台/作者/关键词/日期/状态查历史任务 |
 | `filter-options` | 列出可选的平台/作者/webhook |

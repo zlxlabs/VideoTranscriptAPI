@@ -4,6 +4,7 @@
 Subcommands:
   submit         Submit a transcription task for a video/podcast URL.
   status         Check the status of a task by task_id.
+  wait           Poll with server-side long-polling until the task is done.
   result         Fetch the finished text (calibrated/summary/transcript) by view_token.
   history        Query past tasks with filters.
   filter-options List available filter values (platforms/authors/webhooks).
@@ -28,6 +29,7 @@ import json
 import os
 import sys
 import textwrap
+import time
 from typing import Any
 from urllib import error as urlerror
 from urllib import parse as urlparse
@@ -35,6 +37,12 @@ from urllib import request as urlrequest
 
 DEFAULT_TIMEOUT = 30
 RESULT_TYPES = ("calibrated", "summary", "transcript")
+
+# `wait` subcommand: server-side long polling (GET /api/task/{id}?wait=N).
+# The client HTTP timeout must exceed the per-request wait slice.
+WAIT_SLICE_SECONDS = 30
+WAIT_HTTP_TIMEOUT = WAIT_SLICE_SECONDS + 10
+DEFAULT_WAIT_TOTAL_TIMEOUT = 600
 
 
 # ---------- Error classes ----------
@@ -331,44 +339,65 @@ def _lookup_view_token_by_task_id(task_id: str) -> str | None:
     return None
 
 
-def cmd_status(args: argparse.Namespace) -> int:
-    status, resp = _request("GET", f"/api/task/{urlparse.quote(args.task_id)}")
+def _task_status_from_response(resp: Any) -> str:
+    """从任务查询响应推断任务状态。
 
+    服务端 HTTP 层恒 200；业务码在 body.code（202=进行中、500=失败、
+    其余=成功）。data.status 为显式字段，仅在缺失时按业务码兜底。
+    """
+    data = (resp or {}).get("data") or {}
+    body_code = (resp or {}).get("code")
+    if body_code == 202:
+        return data.get("status") or "processing"
+    if body_code == 500:
+        return data.get("status") or "failed"
+    return data.get("status") or "success"
+
+
+def _fetch_task(task_id: str) -> tuple[int, Any]:
+    """GET /api/task/{task_id}；404 转 BusinessError，其余非 200 转 TransportError。"""
+    status, resp = _request("GET", f"/api/task/{urlparse.quote(task_id)}")
     if status == 404:
-        raise BusinessError(f"任务不存在: {args.task_id}")
-    if status not in (200, 202, 500):
+        raise BusinessError(f"任务不存在: {task_id}")
+    if status != 200:
         raise TransportError(f"查询失败 HTTP {status}: {resp}")
+    return status, resp
 
+
+def cmd_status(args: argparse.Namespace) -> int:
+    status, resp = _fetch_task(args.task_id)
+    return _render_status(args.task_id, status, resp, args.format)
+
+
+def _render_status(
+    task_id: str,
+    http_status: int,
+    resp: Any,
+    fmt: str,
+    timed_out: bool | None = None,
+) -> int:
+    """渲染任务状态响应（status 与 wait 共用的输出路径）。"""
     data = (resp or {}).get("data") or {}
     message = (resp or {}).get("message") or ""
-
-    # 服务端语义：HTTP 200 = 成功（data 含 transcript 等），HTTP 202 = 队列中/处理中，
-    # HTTP 500 = 失败。`data` 在成功时不含 status 字段，需按 HTTP code 推断。
-    if status == 200:
-        task_status = data.get("status") or "success"
-    elif status == 202:
-        task_status = data.get("status") or "processing"
-    elif status == 500:
-        task_status = data.get("status") or "failed"
-    else:
-        task_status = data.get("status") or "unknown"
+    task_status = _task_status_from_response(resp)
 
     # success 但响应不含 view_token（常见于缓存命中）→ 反查 history 补齐。
     # 这样 agent 拿 task_id 就能闭环到 result，不必再找用户要 view_token。
     view_token = data.get("view_token")
     if task_status == "success" and not view_token:
-        view_token = _lookup_view_token_by_task_id(args.task_id)
+        view_token = _lookup_view_token_by_task_id(task_id)
 
-    if args.format == "json":
-        _emit_json(
-            {
-                "http_status": status,
-                "task_status": task_status,
-                "view_token": view_token,
-                "data": data,
-                "raw": resp,
-            }
-        )
+    if fmt == "json":
+        payload: dict[str, Any] = {
+            "http_status": http_status,
+            "task_status": task_status,
+            "view_token": view_token,
+            "data": data,
+            "raw": resp,
+        }
+        if timed_out is not None:
+            payload["timed_out"] = timed_out
+        _emit_json(payload)
         return 1 if task_status == "failed" else 0
 
     # markdown
@@ -401,6 +430,43 @@ def cmd_status(args: argparse.Namespace) -> int:
                 f" 请使用 submit 时保存的 view_token 调 `result`，或直接访问 {_public_url()}/view/<view_token>。"
             )
     return 1 if task_status == "failed" else 0
+
+
+def cmd_wait(args: argparse.Namespace) -> int:
+    """长轮询等任务结束：循环调 GET /api/task/{id}?wait=30，直到终态或总超时。"""
+    if args.timeout <= 0:
+        raise ConfigError(f"--timeout 必须是正整数秒，得到 {args.timeout}")
+
+    deadline = time.monotonic() + args.timeout
+    timed_out = True
+    last_status: int | None = None
+    last_resp: Any = None
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        slice_wait = max(1, min(WAIT_SLICE_SECONDS, int(remaining)))
+        status, resp = _request(
+            "GET",
+            f"/api/task/{urlparse.quote(args.task_id)}",
+            query={"wait": slice_wait},
+            timeout=WAIT_HTTP_TIMEOUT,
+        )
+        if status == 404:
+            raise BusinessError(f"任务不存在: {args.task_id}")
+        if status != 200:
+            raise TransportError(f"查询失败 HTTP {status}: {resp}")
+        last_status, last_resp = status, resp
+        if _task_status_from_response(resp) in ("success", "failed"):
+            timed_out = False
+            break
+
+    exit_code = _render_status(
+        args.task_id, last_status or 200, last_resp, args.format, timed_out=timed_out
+    )
+    # 总超时仍未终态 = 没等到，按业务失败退出（终态 failed 时 exit_code 已是 1）。
+    return 1 if timed_out else exit_code
 
 
 def cmd_result(args: argparse.Namespace) -> int:
@@ -571,6 +637,23 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("task_id")
     add_format(sp)
     sp.set_defaults(func=cmd_status)
+
+    # wait
+    sp = sub.add_parser(
+        "wait",
+        help="长轮询等任务结束（服务端挂起，不必频繁轮询）",
+        description="循环调用 GET /api/task/{id}?wait=N，任务进终态或总超时即返回；"
+        "输出与 status 一致。exit 0=成功，1=失败或超时。",
+    )
+    sp.add_argument("task_id")
+    sp.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_WAIT_TOTAL_TIMEOUT,
+        help=f"总超时秒数（默认 {DEFAULT_WAIT_TOTAL_TIMEOUT}）；到点返回当前状态",
+    )
+    add_format(sp)
+    sp.set_defaults(func=cmd_wait)
 
     # result
     sp = sub.add_parser("result", help="拉取已完成任务的文字结果")

@@ -5,7 +5,7 @@ import os
 import queue
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 
 from ..context import (
     ApiError,
@@ -19,6 +19,7 @@ from ..context import (
     lazy_resource,
 )
 from .audit import check_view_token_ownership
+from .task_status_view import get_task_status_impl
 from ..services.transcription import (
     GenerateNotesRequest,
     RecalibrateRequest,
@@ -33,7 +34,7 @@ from ...utils.busy_lock import acquire_for_task, release_for_task
 from ...utils.llm_status import ChaptersStatus, NotesStatus, SummaryStatus
 from ...cache.cache_manager import language_mismatched_generation_layers
 from ...utils.notifications import get_notification_router
-from ...utils.task_status import TaskStatus, http_code_for_status
+from ...utils.task_status import TaskStatus
 from ..services.terminal_status import finalize_terminal_status_and_notify
 from ...i18n import t
 
@@ -505,93 +506,21 @@ async def transcribe_video(
 async def get_task_status(
     task_id: str,
     request: Request,
+    wait: int | None = Query(
+        default=None,
+        ge=1,
+        le=60,
+        description="长轮询秒数（1-60）；任务进终态或超时即返回，响应与无 wait 一致",
+    ),
     user_info: dict = Depends(verify_token),
 ):
-    start_time = datetime.datetime.now()
-    user_id = user_info.get("user_id")
-    api_key = user_info.get("api_key")
+    """查询任务状态；wait 给定时挂起至终态或超时（C3 长轮询）。
 
-    try:
-        # 状态以持久化的 task_status 表为唯一真相源（重启不丢、覆盖全流程）
-        task_info = cache_manager.get_task_by_id(task_id)
-        if not task_info:
-            processing_time_ms = int(
-                (datetime.datetime.now() - start_time).total_seconds() * 1000
-            )
-            audit_logger.log_api_call(
-                api_key=api_key,
-                user_id=user_id,
-                endpoint=f"/api/task/{task_id}",
-                processing_time_ms=processing_time_ms,
-                status_code=404,
-                task_id=None,
-                user_agent=request.headers.get("User-Agent"),
-                remote_ip=request.client.host if request.client else None,
-            )
-            logger.warning("任务不存在: {}", task_id)
-            raise ApiError(404, "task_id_not_found", task_id=task_id)
-
-        status = task_info.get("status") or TaskStatus.QUEUED
-        code = http_code_for_status(status)
-
-        # progress is already dict|None from CacheManager.get_task_by_id
-        progress = task_info.get("progress")
-
-        # 干净的元信息形状 + 显式 status；正文走 view_token 获取
-        data = {
-            "status": status,
-            "view_token": task_info.get("view_token"),
-            "title": task_info.get("title"),
-            "author": task_info.get("author"),
-            "platform": task_info.get("platform"),
-            "completed_at": task_info.get("completed_at"),
-            "progress": progress,
-        }
-        if status == TaskStatus.FAILED:
-            data["error"] = task_info.get("error_message") or t("error.task_failed")
-
-        message_map = {
-            TaskStatus.QUEUED: t("api.task_status.queued"),
-            TaskStatus.PROCESSING: t("api.task_status.processing"),
-            TaskStatus.CALIBRATING: t("api.task_status.calibrating"),
-            TaskStatus.SUCCESS: t("api.task_status.success"),
-            TaskStatus.FAILED: t("api.task_status.failed"),
-        }
-        message = message_map.get(status, t("api.task_status.query_succeeded"))
-
-        processing_time_ms = int(
-            (datetime.datetime.now() - start_time).total_seconds() * 1000
-        )
-        audit_logger.log_api_call(
-            api_key=api_key,
-            user_id=user_id,
-            endpoint=f"/api/task/{task_id}",
-            processing_time_ms=processing_time_ms,
-            status_code=code,
-            task_id=task_id,
-            user_agent=request.headers.get("User-Agent"),
-            remote_ip=request.client.host if request.client else None,
-        )
-
-        return TranscribeResponse(code=code, message=message, data=data)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        processing_time_ms = int(
-            (datetime.datetime.now() - start_time).total_seconds() * 1000
-        )
-        audit_logger.log_api_call(
-            api_key=api_key,
-            user_id=user_id,
-            endpoint=f"/api/task/{task_id}",
-            processing_time_ms=processing_time_ms,
-            status_code=500,
-            task_id=task_id,
-            user_agent=request.headers.get("User-Agent"),
-            remote_ip=request.client.host if request.client else None,
-        )
-        logger.exception("获取任务状态异常: {}", exc)
-        raise ApiError(500, "task_status_failed", error=str(exc))
+    实现在 task_status_view（tasks.py 已超文件体积 ratchet，禁止净增长）。
+    """
+    return await get_task_status_impl(
+        task_id, request, wait, user_info.get("user_id"), user_info.get("api_key")
+    )
 
 
 @router.get("/webhook-stats")
