@@ -48,15 +48,15 @@ class TestAlertTrigger:
         monitor._handle_check_result("TestASR", "ws://localhost:9999", False)
         monitor._handle_check_result("TestASR", "ws://localhost:9999", False)
 
-        mock_notifier.send_text.assert_not_called()
+        mock_notifier.send_ops_alert.assert_not_called()
 
     def test_alert_at_threshold(self, monitor, mock_notifier):
         """Should alert when failure count reaches threshold."""
         for _ in range(3):
             monitor._handle_check_result("TestASR", "ws://localhost:9999", False)
 
-        mock_notifier.send_text.assert_called_once()
-        alert_msg = mock_notifier.send_text.call_args[0][0]
+        mock_notifier.send_ops_alert.assert_called_once()
+        alert_msg = mock_notifier.send_ops_alert.call_args[0][0]
         assert "TestASR" in alert_msg
         assert "3" in alert_msg  # failure count
 
@@ -71,7 +71,7 @@ class TestAlertTrigger:
         monitor._handle_check_result("TestASR", "ws://localhost:9999", False)
         monitor._handle_check_result("TestASR", "ws://localhost:9999", False)
 
-        mock_notifier.send_text.assert_not_called()
+        mock_notifier.send_ops_alert.assert_not_called()
 
 
 class TestDebounce:
@@ -83,13 +83,13 @@ class TestDebounce:
         for _ in range(3):
             monitor._handle_check_result("TestASR", "ws://localhost:9999", False)
 
-        assert mock_notifier.send_text.call_count == 1
+        assert mock_notifier.send_ops_alert.call_count == 1
 
         # More failures should not trigger another alert (within debounce)
         for _ in range(3):
             monitor._handle_check_result("TestASR", "ws://localhost:9999", False)
 
-        assert mock_notifier.send_text.call_count == 1  # Still just 1
+        assert mock_notifier.send_ops_alert.call_count == 1  # Still just 1
 
     def test_alert_after_debounce_period(self, monitor, mock_notifier):
         """Should send alert again after debounce period expires."""
@@ -97,7 +97,7 @@ class TestDebounce:
         for _ in range(3):
             monitor._handle_check_result("TestASR", "ws://localhost:9999", False)
 
-        assert mock_notifier.send_text.call_count == 1
+        assert mock_notifier.send_ops_alert.call_count == 1
 
         # Simulate debounce expiry
         monitor._last_alert_time["TestASR"] = time.time() - 61  # Past 60s debounce
@@ -106,7 +106,7 @@ class TestDebounce:
         for _ in range(3):
             monitor._handle_check_result("TestASR", "ws://localhost:9999", False)
 
-        assert mock_notifier.send_text.call_count == 2
+        assert mock_notifier.send_ops_alert.call_count == 2
 
 
 class TestRecoveryNotification:
@@ -118,19 +118,19 @@ class TestRecoveryNotification:
         for _ in range(3):
             monitor._handle_check_result("TestASR", "ws://localhost:9999", False)
 
-        assert mock_notifier.send_text.call_count == 1  # Down alert
+        assert mock_notifier.send_ops_alert.call_count == 1  # Down alert
 
         # Service comes back
         monitor._handle_check_result("TestASR", "ws://localhost:9999", True)
 
-        assert mock_notifier.send_text.call_count == 2  # Recovery alert
-        recovery_msg = mock_notifier.send_text.call_args[0][0]
+        assert mock_notifier.send_ops_alert.call_count == 2  # Recovery alert
+        recovery_msg = mock_notifier.send_ops_alert.call_args[0][0]
         assert "recovery" in recovery_msg.lower() or "恢复" in recovery_msg
 
     def test_no_recovery_if_never_down(self, monitor, mock_notifier):
         """Should not send recovery if service was never down."""
         monitor._handle_check_result("TestASR", "ws://localhost:9999", True)
-        mock_notifier.send_text.assert_not_called()
+        mock_notifier.send_ops_alert.assert_not_called()
 
 
 class TestServiceCheck:

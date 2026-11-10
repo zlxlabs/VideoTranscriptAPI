@@ -1,8 +1,12 @@
 """
-Notification router — dispatches notifications to configured channels.
+Notification router — dispatches notifications to declared channels.
 
-Supports multi-channel parallel dispatch, per-request channel selection,
-and fallback on failure.
+Tenant notifications go ONLY to the channels with an address in the task's
+declared ``webhooks`` dict; an unconfigured channel is skipped silently, and a
+task with zero declared targets is logged once as NOTIFY_TARGET_MISSING
+(C1 stop-leak, docs/sessions/notify-redesign-261110/design.md). Ops alerts
+(ASR monitor) go through :meth:`send_ops_alert`, which explicitly targets the
+global group webhooks.
 """
 
 from typing import Dict, List, Optional
@@ -14,34 +18,32 @@ logger = setup_logger("notification_router")
 
 
 class NotificationRouter:
-    """Routes notifications to configured channels with fallback support."""
+    """Routes notifications: tenant methods to declared targets, ops alerts to
+    the global group webhooks."""
 
     def __init__(self):
         self.channels: List[NotificationChannel] = []
         self._init_channels_from_config()
 
     def _init_channels_from_config(self):
-        """Detect and initialize channels based on config."""
+        """Initialize every channel object regardless of global webhook config.
+
+        Channel enablement for tenant sends is decided per task by the
+        declared ``webhooks`` dict, not by the global config; the global
+        webhook only feeds the ops-alert path (``send_ops_alert``).
+        """
         config = load_config()
 
-        if config.get("wechat", {}).get("webhook"):
+        for factory, name in ((WeComChannel, "wechat"), (FeishuChannel, "feishu")):
             try:
-                ch = WeComChannel()
+                ch = factory()
                 self.channels.append(ch)
-                logger.info("[router] WeChat channel initialized")
+                logger.info(f"[router] {name} channel initialized")
             except Exception as e:
-                logger.error(f"[router] Failed to init WeChat channel: {e}")
-
-        if config.get("feishu", {}).get("webhook"):
-            try:
-                ch = FeishuChannel()
-                self.channels.append(ch)
-                logger.info("[router] Feishu channel initialized")
-            except Exception as e:
-                logger.error(f"[router] Failed to init Feishu channel: {e}")
+                logger.error(f"[router] Failed to init {name} channel: {e}")
 
         if not self.channels:
-            logger.warning("[router] No notification channels configured")
+            logger.warning("[router] No notification channels available")
         else:
             names = [ch.name for ch in self.channels]
             logger.info(f"[router] Active channels: {names}")
@@ -50,81 +52,66 @@ class NotificationRouter:
     def is_enabled(self) -> bool:
         return len(self.channels) > 0
 
-    def _resolve_targets(
-        self, channel_name: Optional[str] = None
-    ) -> List[NotificationChannel]:
-        """Resolve which channels to send to."""
-        if channel_name:
-            return [ch for ch in self.channels if ch.name == channel_name]
-        return list(self.channels)
-
-    def _get_fallback_channels(
-        self, excluded: List[NotificationChannel]
-    ) -> List[NotificationChannel]:
-        """Get channels not in the excluded list (for fallback)."""
-        excluded_names = {ch.name for ch in excluded}
-        return [ch for ch in self.channels if ch.name not in excluded_names]
-
-    def _resolve_webhook(
+    def _tenant_targets(
         self,
-        ch_name: str,
         webhooks: Optional[Dict[str, str]] = None,
-        webhook: str = None,
+        channel_name: Optional[str] = None,
         *,
         method_name: str,
         task_id: str = None,
-    ) -> Optional[str]:
-        """Resolve webhook for a specific channel: webhooks dict > single webhook > None."""
-        if webhooks:
-            resolved = webhooks.get(ch_name)
-        else:
-            resolved = webhook
+    ) -> List[NotificationChannel]:
+        """Channels this tenant call may use: those with a declared address.
 
-        if resolved is None:
-            details = f"channel={ch_name} method={method_name}"
+        A channel without an address in ``webhooks`` is skipped silently. When
+        NO declared channel has an address (zero-target task), one
+        NOTIFY_TARGET_MISSING line is logged and the caller gets no targets.
+        """
+        declared = webhooks or {}
+        targets = [
+            ch for ch in self.channels
+            if declared.get(ch.name) and (channel_name is None or ch.name == channel_name)
+        ]
+        if not targets:
+            details = f"method={method_name}"
             if task_id is not None:
                 details += f" task_id={task_id}"
-            logger.warning(f"NOTIFY_TARGET_FALLBACK_DEFAULT {details}")
-        return resolved
+            logger.warning(f"NOTIFY_TARGET_MISSING {details}")
+        return targets
+
+    def send_ops_alert(self, message: str) -> Dict[str, bool]:
+        """Send an ops alert (ASR monitor, service health) to the global group
+        webhooks explicitly. This is the only path allowed to use the global
+        channel-level webhooks; tenant notifications must never land here."""
+        results = {}
+        for ch in self.channels:
+            if not ch.is_enabled:
+                continue
+            try:
+                results[ch.name] = ch.send_text(message, webhook=ch.webhook)
+            except Exception as e:
+                logger.error(f"[router] [{ch.name}] send_ops_alert exception: {e}")
+                results[ch.name] = False
+        return results
 
     def send_text(
         self,
         content: str,
         channel_name: str = None,
-        webhook: str = None,
         webhooks: Dict[str, str] = None,
     ) -> Dict[str, bool]:
-        """Send text to target channels with fallback."""
-        targets = self._resolve_targets(channel_name)
+        """Send text only to channels declared in ``webhooks``."""
+        targets = self._tenant_targets(
+            webhooks, channel_name, method_name="send_text",
+        )
         results = {}
 
         for ch in targets:
             try:
-                ch_webhook = self._resolve_webhook(
-                    ch.name, webhooks, webhook, method_name="send_text"
-                )
-                results[ch.name] = ch.send_text(content, webhook=ch_webhook)
+                results[ch.name] = ch.send_text(content, webhook=webhooks[ch.name])
                 logger.debug(f"[router] [{ch.name}] send_text: {results[ch.name]}")
             except Exception as e:
                 logger.error(f"[router] [{ch.name}] send_text exception: {e}")
                 results[ch.name] = False
-
-        # Fallback: if targeted channel(s) were found but all failed, try others
-        if channel_name and targets and not any(results.values()):
-            fallbacks = self._get_fallback_channels(targets)
-            for ch in fallbacks:
-                try:
-                    ch_webhook = self._resolve_webhook(
-                        ch.name, webhooks, method_name="send_text"
-                    )
-                    ok = ch.send_text(content, webhook=ch_webhook)
-                    results[f"{ch.name}_fallback"] = ok
-                    if ok:
-                        logger.info(f"[router] Fallback to {ch.name} succeeded")
-                        break
-                except Exception as e:
-                    logger.error(f"[router] Fallback [{ch.name}] failed: {e}")
-                    results[f"{ch.name}_fallback"] = False
 
         return results
 
@@ -132,50 +119,26 @@ class NotificationRouter:
         self,
         content: str,
         channel_name: str = None,
-        webhook: str = None,
         webhooks: Dict[str, str] = None,
         _router_method: str = "send_rich",
         _task_id: str = None,
         **kwargs,
     ) -> Dict[str, bool]:
-        """Send rich content to target channels with fallback."""
-        targets = self._resolve_targets(channel_name)
+        """Send rich content only to channels declared in ``webhooks``."""
+        task_id = _task_id if _task_id is not None else kwargs.get("task_id")
+        targets = self._tenant_targets(
+            webhooks, channel_name, method_name=_router_method, task_id=task_id,
+        )
         results = {}
 
         for ch in targets:
             try:
-                ch_webhook = self._resolve_webhook(
-                    ch.name,
-                    webhooks,
-                    webhook,
-                    method_name=_router_method,
-                    task_id=(
-                        _task_id if _task_id is not None else kwargs.get("task_id")
-                    ),
+                results[ch.name] = ch.send_rich(
+                    content, webhook=webhooks[ch.name], **kwargs
                 )
-                results[ch.name] = ch.send_rich(content, webhook=ch_webhook, **kwargs)
             except Exception as e:
-                logger.error(f"[router] [{ch.name}] send_rich exception: {e}")
+                logger.error(f"[router] [{ch.name}] {_router_method} exception: {e}")
                 results[ch.name] = False
-
-        if channel_name and targets and not any(results.values()):
-            for ch in self._get_fallback_channels(targets):
-                try:
-                    ch_webhook = self._resolve_webhook(
-                        ch.name,
-                        webhooks,
-                        method_name=_router_method,
-                        task_id=(
-                            _task_id if _task_id is not None else kwargs.get("task_id")
-                        ),
-                    )
-                    ok = ch.send_rich(content, webhook=ch_webhook, **kwargs)
-                    results[f"{ch.name}_fallback"] = ok
-                    if ok:
-                        logger.info(f"[router] Fallback to {ch.name} succeeded")
-                        break
-                except Exception as e:
-                    results[f"{ch.name}_fallback"] = False
 
         return results
 
@@ -184,48 +147,26 @@ class NotificationRouter:
         url: str,
         status: str,
         channel_name: str = None,
-        webhook: str = None,
         webhooks: Dict[str, str] = None,
         **kwargs,
     ) -> Dict[str, bool]:
-        """Send task status notification to target channels with fallback."""
-        targets = self._resolve_targets(channel_name)
+        """Send task status only to channels declared in ``webhooks``."""
+        targets = self._tenant_targets(
+            webhooks,
+            channel_name,
+            method_name="notify_task_status",
+            task_id=kwargs.get("task_id"),
+        )
         results = {}
 
         for ch in targets:
             try:
-                ch_webhook = self._resolve_webhook(
-                    ch.name,
-                    webhooks,
-                    webhook,
-                    method_name="notify_task_status",
-                    task_id=kwargs.get("task_id"),
-                )
                 results[ch.name] = ch.notify_task_status(
-                    url=url, status=status, webhook=ch_webhook, **kwargs
+                    url=url, status=status, webhook=webhooks[ch.name], **kwargs
                 )
             except Exception as e:
                 logger.error(f"[router] [{ch.name}] notify_task_status exception: {e}")
                 results[ch.name] = False
-
-        if channel_name and targets and not any(results.values()):
-            for ch in self._get_fallback_channels(targets):
-                try:
-                    ch_webhook = self._resolve_webhook(
-                        ch.name,
-                        webhooks,
-                        method_name="notify_task_status",
-                        task_id=kwargs.get("task_id"),
-                    )
-                    ok = ch.notify_task_status(
-                        url=url, status=status, webhook=ch_webhook, **kwargs
-                    )
-                    results[f"{ch.name}_fallback"] = ok
-                    if ok:
-                        logger.info(f"[router] Fallback to {ch.name} succeeded")
-                        break
-                except Exception as e:
-                    results[f"{ch.name}_fallback"] = False
 
         return results
 
@@ -235,7 +176,6 @@ class NotificationRouter:
         url: str,
         text: str,
         channel_name: str = None,
-        webhook: str = None,
         webhooks: Dict[str, str] = None,
         is_summary: bool = False,
         has_speaker_recognition: bool = False,
@@ -262,7 +202,6 @@ class NotificationRouter:
         return self.send_rich(
             message,
             channel_name=channel_name,
-            webhook=webhook,
             webhooks=webhooks,
             title=safe_title or "转录结果",
         )
@@ -272,7 +211,6 @@ class NotificationRouter:
         title: str,
         view_token: str,
         channel_name: str = None,
-        webhook: str = None,
         webhooks: Dict[str, str] = None,
         original_url: str = None,
         task_id: str = None,
@@ -312,7 +250,6 @@ class NotificationRouter:
         return self.send_rich(
             message,
             channel_name=channel_name,
-            webhook=webhook,
             webhooks=webhooks,
             title=heading,
             _router_method="send_view_link",

@@ -18,6 +18,12 @@ from video_transcript_api.utils.notifications import slow_alert
 from video_transcript_api.utils.notifications.router import NotificationRouter
 
 
+DECLARED_WEBHOOKS = {
+    "wechat": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=slow-w",
+    "feishu": "https://open.feishu.cn/open-apis/bot/v2/hook/slow-f",
+}
+
+
 class FakeChannel:
     def __init__(self, name):
         self.name = name
@@ -65,6 +71,7 @@ def test_slow_transcription_alerts_exactly_once_on_both_channels(channels, monke
     )
     slow_alert.track_transcription(
         "task_aabbcc112233", url="https://www.youtube.com/watch?v=x",
+        webhooks=DECLARED_WEBHOOKS,
     )
     assert _wait_for(wecom, 1) == 1
     assert _wait_for(feishu, 1) == 1
@@ -84,6 +91,7 @@ def test_already_alerted_task_never_alerts_again_in_llm_stage(channels, monkeypa
     monkeypatch.setattr(slow_alert, "SLOW_LLM_SECONDS", 0.05)
     slow_alert.track_transcription(
         "task_aabbcc112233", url="https://www.youtube.com/watch?v=x",
+        webhooks=DECLARED_WEBHOOKS,
     )
     assert _wait_for(wecom, 1) == 1
     slow_alert.finish_transcription("task_aabbcc112233")
@@ -97,6 +105,7 @@ def test_llm_queue_wait_is_not_counted(channels, monkeypatch):
     monkeypatch.setattr(slow_alert, "SLOW_LLM_SECONDS", 0.2)
     slow_alert.track_transcription(
         "task_aabbcc112233", url="https://www.youtube.com/watch?v=x",
+        webhooks=DECLARED_WEBHOOKS,
     )
     slow_alert.finish_transcription("task_aabbcc112233")
     time.sleep(0.4)
@@ -112,7 +121,9 @@ def test_terminal_cas_loss_cancels_slow_alert(channels, monkeypatch):
     wecom, feishu = channels
     task_id = "task_cas_lossabcdef"
     monkeypatch.setattr(slow_alert, "SLOW_TRANSCRIPTION_UNKNOWN_DURATION_SECONDS", 0.1)
-    slow_alert.track_transcription(task_id, url="https://example.test/video")
+    slow_alert.track_transcription(
+        task_id, url="https://example.test/video", webhooks=DECLARED_WEBHOOKS,
+    )
     cache_manager = SimpleNamespace(
         update_task_status=lambda *_a, **_kw: False,
         get_task_by_id=lambda _task_id: {"status": "failed"},
@@ -125,7 +136,9 @@ def test_terminal_cas_loss_cancels_slow_alert(channels, monkeypatch):
 
 def test_terminal_cancels_timing_before_status_write(channels, monkeypatch):
     task_id = "task_cancel_before_writeabcdef"
-    slow_alert.track_transcription(task_id, url="https://example.test/video")
+    slow_alert.track_transcription(
+        task_id, url="https://example.test/video", webhooks=DECLARED_WEBHOOKS,
+    )
     cache_manager = SimpleNamespace(update_task_status=lambda *_a, **_kw: task_id not in slow_alert._TASKS)
     assert finalize_terminal_status_and_notify(
         task_id, "success", cache_manager=cache_manager, defer_delivery=True,
@@ -134,7 +147,9 @@ def test_terminal_cancels_timing_before_status_write(channels, monkeypatch):
 
 def test_slow_alert_enqueue_precedes_concurrent_terminal_enqueue(channels, monkeypatch):
     task_id = "task_enqueue_orderabcdef"
-    slow_alert.track_transcription(task_id, url="https://example.test/video")
+    slow_alert.track_transcription(
+        task_id, url="https://example.test/video", webhooks=DECLARED_WEBHOOKS,
+    )
     timing = slow_alert._TASKS[task_id]
     slow_started, release_slow, update_called, finalize_started = [threading.Event() for _ in range(4)]
     records = []
@@ -186,6 +201,7 @@ def test_terminal_before_deadline_no_alert_and_timing_released(channels, monkeyp
     )
     slow_alert.track_transcription(
         "task_aabbcc112233", url="https://www.youtube.com/watch?v=x",
+        webhooks=DECLARED_WEBHOOKS,
     )
     slow_alert.cancel_all("task_aabbcc112233")
     assert "task_aabbcc112233" not in slow_alert._TASKS
@@ -202,6 +218,7 @@ def test_deadline_and_terminal_race_never_alerts_after_cancel(channels, monkeypa
         task_id = f"task_race{round_index:02d}abcdef"
         slow_alert.track_transcription(
             task_id, url="https://www.youtube.com/watch?v=x",
+            webhooks=DECLARED_WEBHOOKS,
         )
         cancel_done = threading.Event()
 

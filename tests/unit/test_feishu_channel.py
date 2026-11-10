@@ -104,7 +104,7 @@ class TestFeishuSendText:
     def test_send_text_calls_feishu_notifier(self, feishu_channel):
         feishu_channel.notifier.send_text.return_value = MagicMock(success=True)
 
-        result = feishu_channel.send_text("hello feishu")
+        result = feishu_channel.send_text("hello feishu", webhook=FEISHU_WEBHOOK)
 
         feishu_channel.notifier.send_text.assert_called_once_with(
             webhook_url=FEISHU_WEBHOOK,
@@ -151,7 +151,7 @@ class TestFeishuSendRich:
     def test_send_rich_calls_send_card(self, feishu_channel):
         feishu_channel.notifier.send_card.return_value = MagicMock(success=True)
 
-        result = feishu_channel.send_rich("## Title\n\nContent")
+        result = feishu_channel.send_rich("## Title\n\nContent", webhook=FEISHU_WEBHOOK)
 
         feishu_channel.notifier.send_card.assert_called_once_with(
             webhook_url=FEISHU_WEBHOOK,
@@ -164,7 +164,7 @@ class TestFeishuSendRich:
     def test_send_rich_with_custom_title(self, feishu_channel):
         feishu_channel.notifier.send_card.return_value = MagicMock(success=True)
 
-        feishu_channel.send_rich("content", title="Custom Title")
+        feishu_channel.send_rich("content", title="Custom Title", webhook=FEISHU_WEBHOOK)
 
         feishu_channel.notifier.send_card.assert_called_once_with(
             webhook_url=FEISHU_WEBHOOK,
@@ -255,7 +255,7 @@ class TestWeComChannel:
             ch = WeComChannel(webhook="https://qyapi.weixin.qq.com/test")
 
         with patch.object(ch._notifier, "send_text", return_value=True) as mock_send:
-            result = ch.send_text("hello")
+            result = ch.send_text("hello", webhook="https://qyapi.weixin.qq.com/test")
 
         mock_send.assert_called_once()
         assert result is True
@@ -266,7 +266,7 @@ class TestWeComChannel:
             ch = WeComChannel(webhook="https://qyapi.weixin.qq.com/test")
 
         with patch.object(ch._notifier, "send_markdown_v2", return_value=True) as mock_send:
-            result = ch.send_rich("## content")
+            result = ch.send_rich("## content", webhook="https://qyapi.weixin.qq.com/test")
 
         mock_send.assert_called_once()
         assert result is True

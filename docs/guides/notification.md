@@ -82,27 +82,33 @@ curl -X POST "http://localhost:8000/api/transcribe" \
   -d '{"url": "...", "wechat_webhook": "https://qyapi.weixin.qq.com/..."}'
 ```
 
-## Webhook 优先级
+## Webhook 优先级（C1 止血后）
 
 ```
 notification_config.webhook  (per-request 指定)
         ↓ 未设置时
-wechat_webhook 字段          (per-request 向后兼容)
+wechat_webhook / feishu_webhook 字段  (per-request 显式声明)
         ↓ 未设置时
 user_info.wechat/feishu_webhook  (用户级配置)
-        ↓ 未设置时
-config.wechat/feishu.webhook     (全局配置)
+        ↓ 未设置时（该渠道 = 无目标，静默跳过）
+（不再回落全局 config.wechat/feishu.webhook）
 ```
 
-每个渠道独立解析，互不影响。
+每个渠道独立解析，互不影响。**全局配置的 webhook 只服务运维告警**
+（ASR 监控，经 `router.send_ops_alert` 显式发送），租户任务通知永远不会
+落到全局群。
 
-## Fallback 机制
+- `legacy_user`（单 token 回退模式，即运营者本人）保留全局目标；
+- 其余用户「没配 = 不发」：未配置的渠道收不到任何消息；
+- 整个任务零声明目标时，终态通知只记一行 `NOTIFY_TARGET_MISSING` 日志、
+  outbox 行按 skipped 处理，**不无限重试**。
 
-当指定渠道发送失败时，自动退到其他可用渠道：
+## 跨渠道改投（已删除）
 
-- 指定飞书但飞书 webhook 失败 → 自动退到企业微信
-- 指定企业微信但企微 webhook 失败 → 自动退到飞书
-- 不指定渠道（全部推送）时，各渠道独立发送，互不影响
+指定渠道发送失败时**不再**自动退到其他渠道（2026-11-10 C1 删除）：任务只
+发它声明过的目标。任一声明渠道未被接受（渠道返回非 True），终态通知整组
+重试——已成功的渠道可能重复收到，这是接受的重试语义。租户通知路径里
+「渠道级回落自身默认 webhook」「跨渠道失败改投」均已移除。
 
 ## 通知时机
 
@@ -124,7 +130,7 @@ config.wechat/feishu.webhook     (全局配置)
 
 两态 `pending → sent`，不做 `sending`。投递由**单线程串行**完成：服务是单进程（uvicorn 无 `workers`、单容器单副本），投递线程是该表唯一的写者，互斥由「同一线程逐行处理」天然提供。**没有 owner 锁、没有接管租约、没有 claim/release**：这些机制仲裁的并发在本部署拓扑下不存在，且多进程场景下任务状态机本身早已崩坏（启动时无条件把所有非终态行写 failed），给通知表加锁救不了任何东西。`attempts` 仅作观测计数（每次投递尝试递增），**不参与任何过滤**。
 
-`sent`（= `notified_at`）**只表示「已提交给投递器」**，不表示送达：当前实现下投递器 = 进程内 daemon 队列（`async_send=True` 立即返回）。`notified_at` 只在发送未抛异常、且路由至少一个渠道返回 True 时写入；发送抛异常或渠道全 False 不标 sent，该行**保持列出**并在下一轮重试。
+`sent`（= `notified_at`）**只表示「已提交给投递器」**，不表示送达：当前实现下投递器 = 进程内 daemon 队列（`async_send=True` 立即返回）。`notified_at` 只在发送未抛异常、且**每一个声明渠道**都返回 True 时写入；发送抛异常或任一声明渠道非 True 不标 sent，该行**保持列出**并在下一轮重试（部分成功整组重试，成功渠道可能重复收到）。整任务零声明目标是例外：投递器记 `NOTIFY_TARGET_SKIPPED` 并把该行按已处理落账，不进重试。
 
 这是**有界至少一次**：崩溃或失败窗口内**可能重复一条**终态通知，但不会静默丢失。漏发比重复更糟。
 
@@ -137,7 +143,7 @@ config.wechat/feishu.webhook     (全局配置)
 - **I5 至少一次**：`notified_at` 只在一次**返回真实成功信号**的发送之后写入；崩溃于此之间 ⇒ 允许重复一条（显式接受的窗口）。
 - **I6 抑制在写入期决定**：需要抑制通知的终态写入路径，**在同一事务里就不产生可投递的行**（`update_task_status(suppress_terminal_notification=True)`，HTTP 建行后清理走这条）。
 
-投递器只接受路由返回的渠道结果字典，并要求至少一个渠道值为真；`None`、布尔值、模拟对象或渠道全 False 都不会标记 sent。
+投递器只接受路由返回的渠道结果字典，并要求**所有声明渠道**的值都为真（任一非真值即整组重试）；`None`、布尔值、模拟对象或任一渠道 False 都不会标记 sent；路由返回空字典（零声明目标）按 skipped 落账。
 
 超过 3 次仍失败的行**不停止补发**，只多记一条 warning 日志（`STUCK_ATTEMPT_WARN_THRESHOLD`）：任何让一行同时满足「未送达」且「不再被任何视图列出」的机制，都是本卡要消灭的那类静默事故。
 
@@ -147,8 +153,9 @@ outbox 不做限流/重试/分段：`wecom-notifier` 是唯一限流权威。out
 
 1. `api_audit_logs.wechat_webhook` by task_id
 2. `user_manager.get_user_by_id(submitted_by)` 的用户级 webhook
-3. 全局配置默认渠道
 
+对**非 legacy** 提交者，任何等于全局配置 webhook 的地址都会被剔除（历史
+重跑曾把全局地址写进审计表）；`legacy_user` 提交的任务保留全局目标。
 飞书自定义 webhook 未落库，恢复路径取不回，是已知缺口。
 
 ### 投递侧残留风险（本卡不修）

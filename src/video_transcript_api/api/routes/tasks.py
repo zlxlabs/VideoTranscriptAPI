@@ -32,7 +32,7 @@ from ..services.view_token_resolver import ViewTokenResolver
 from ...utils.busy_lock import acquire_for_task, release_for_task
 from ...utils.llm_status import ChaptersStatus, NotesStatus, SummaryStatus
 from ...cache.cache_manager import language_mismatched_generation_layers
-from ...utils.notifications import send_view_link_wechat, get_notification_router
+from ...utils.notifications import get_notification_router
 from ...utils.task_status import TaskStatus, http_code_for_status
 from ..services.terminal_status import finalize_terminal_status_and_notify
 from ...i18n import t
@@ -808,19 +808,17 @@ async def recalibrate(
                 note=_terminal_write_note(terminal_write_ok),
             )
 
-        # Build per-channel webhooks
+        # Build per-channel webhooks from the declaring user/request only; no
+        # global config fallback (C1 stop-leak): a tenant task never sends to
+        # the operator's global group.
         recal_webhooks = {}
         wechat_wh = (
             request_body.wechat_webhook
             or user_info.get("wechat_webhook")
-            or config.get("wechat", {}).get("webhook")
         )
         if wechat_wh:
             recal_webhooks["wechat"] = wechat_wh
-        feishu_wh = (
-            user_info.get("feishu_webhook")
-            or config.get("feishu", {}).get("webhook")
-        )
+        feishu_wh = user_info.get("feishu_webhook")
         if feishu_wh:
             recal_webhooks["feishu"] = feishu_wh
 
@@ -1116,19 +1114,16 @@ async def resummarize(
                 note=_terminal_write_note(terminal_write_ok),
             )
 
-        # Build per-channel webhooks
+        # Build per-channel webhooks from the declaring user/request only; no
+        # global config fallback (C1 stop-leak).
         resum_webhooks = {}
         wechat_wh = (
             request_body.wechat_webhook
             or user_info.get("wechat_webhook")
-            or config.get("wechat", {}).get("webhook")
         )
         if wechat_wh:
             resum_webhooks["wechat"] = wechat_wh
-        feishu_wh = (
-            user_info.get("feishu_webhook")
-            or config.get("feishu", {}).get("webhook")
-        )
+        feishu_wh = user_info.get("feishu_webhook")
         if feishu_wh:
             resum_webhooks["feishu"] = feishu_wh
 
@@ -1399,18 +1394,16 @@ async def generate_notes(
             logger.error(f"创建详细笔记任务失败: {exc}")
             raise ApiError(500, "notes_creation_failed", error=str(exc))
 
+        # Build per-channel webhooks from the declaring user/request only; no
+        # global config fallback (C1 stop-leak).
         notes_webhooks = {}
         wechat_webhook = (
             request_body.wechat_webhook
             or user_info.get("wechat_webhook")
-            or config.get("wechat", {}).get("webhook")
         )
         if wechat_webhook:
             notes_webhooks["wechat"] = wechat_webhook
-        feishu_webhook = (
-            user_info.get("feishu_webhook")
-            or config.get("feishu", {}).get("webhook")
-        )
+        feishu_webhook = user_info.get("feishu_webhook")
         if feishu_webhook:
             notes_webhooks["feishu"] = feishu_webhook
 

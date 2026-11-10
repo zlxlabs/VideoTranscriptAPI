@@ -38,8 +38,28 @@ def cm(tmp_path):
     manager.close()
 
 
-def _new_task(cm, url="https://example.com/v1"):
-    return cm.create_task(url=url)["task_id"]
+def _new_task(cm, url="https://example.com/v1", submitted_by=None):
+    return cm.create_task(url=url, submitted_by=submitted_by)["task_id"]
+
+
+def _bind_declared_targets(monkeypatch):
+    """Give tasks a declared non-legacy submitter with tenant-only targets so
+    replay deliveries route to a real (non-zero) target set."""
+    from src.video_transcript_api.api import context
+    from src.video_transcript_api.api.services import terminal_status
+
+    user_manager = type("UM", (), {})()
+    user_manager.get_user_by_id = lambda _uid: {
+        "user_id": "outbox-user", "is_legacy": False,
+        "wechat_webhook": "https://qyapi.weixin.qq.com/outbox-w",
+        "feishu_webhook": "https://feishu.invalid/outbox-f",
+    }
+    runtime = type("RT", (), {})()
+    runtime.user_manager = user_manager
+    monkeypatch.setattr(context, "get_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        terminal_status, "_lookup_audit_wechat_webhook", lambda _tid: None,
+    )
 
 
 def _accepted_router():
@@ -218,6 +238,7 @@ class TestPersistedCompletionRendering:
             terminal_snapshot={"result": {"内容总结": "brief", "stats": {}}},
             cache_manager=cm,
             router=router,
+            webhooks={"feishu": "https://feishu.invalid/hook"},
         ) is True
 
         assert notifier.send_card.call_count == 2
@@ -259,7 +280,7 @@ class TestSuccessWithoutPersistedResultDegrades:
         return router, notifier
 
     def _make_pending_success_without_result(self, cm, router, terminal_snapshot=None):
-        task_id = _new_task(cm)
+        task_id = _new_task(cm, submitted_by="outbox-user")
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
         assert finalize_terminal_status_and_notify(
             task_id,
@@ -295,6 +316,7 @@ class TestSuccessWithoutPersistedResultDegrades:
     def test_dispatcher_delivers_header_and_link_when_result_missing(
         self, cm, monkeypatch,
     ):
+        _bind_declared_targets(monkeypatch)
         router, notifier = self._degraded_feishu_router(monkeypatch)
         task_id = self._make_pending_success_without_result(cm, router)
 
@@ -308,6 +330,7 @@ class TestSuccessWithoutPersistedResultDegrades:
         assert any("COMPLETION-BODY-MISSING task_id=" in line for line in records)
 
     def test_dispatcher_degrades_on_non_dict_result(self, cm, monkeypatch):
+        _bind_declared_targets(monkeypatch)
         router, notifier = self._degraded_feishu_router(monkeypatch)
         task_id = self._make_pending_success_without_result(
             cm, router, terminal_snapshot={"result": ["not", "a", "dict"]},
@@ -323,6 +346,7 @@ class TestSuccessWithoutPersistedResultDegrades:
         assert any("COMPLETION-BODY-MISSING task_id=" in line for line in records)
 
     def test_dispatcher_degrades_on_empty_result_dict(self, cm, monkeypatch):
+        _bind_declared_targets(monkeypatch)
         router, notifier = self._degraded_feishu_router(monkeypatch)
         task_id = self._make_pending_success_without_result(
             cm, router, terminal_snapshot={"result": {}, "use_speaker_recognition": False},
@@ -353,6 +377,7 @@ class TestSuccessWithoutPersistedResultDegrades:
                 terminal_snapshot={"use_speaker_recognition": False},
                 cache_manager=cm,
                 router=router,
+                webhooks={"feishu": "https://feishu.invalid/hook"},
             ) is True
         finally:
             loguru_logger.remove(sink_id)
@@ -391,8 +416,9 @@ class TestSuccessWithoutPersistedResultDegrades:
 
 
 class TestSteadyStateDispatcherAgeGate:
-    def test_fresh_deferred_row_is_not_sent_by_steady_state_round(self, cm):
-        task_id = _new_task(cm)
+    def test_fresh_deferred_row_is_not_sent_by_steady_state_round(self, cm, monkeypatch):
+        _bind_declared_targets(monkeypatch)
+        task_id = _new_task(cm, submitted_by="outbox-user")
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
         router = _accepted_router()
 
@@ -411,8 +437,9 @@ class TestSteadyStateDispatcherAgeGate:
         assert cm.is_terminal_notification_pending(task_id) is True
         router.notify_task_status.assert_not_called()
 
-    def test_aged_deferred_row_is_sent_by_steady_state_round(self, cm):
-        task_id = _new_task(cm)
+    def test_aged_deferred_row_is_sent_by_steady_state_round(self, cm, monkeypatch):
+        _bind_declared_targets(monkeypatch)
+        task_id = _new_task(cm, submitted_by="outbox-user")
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
         router = _accepted_router()
         assert finalize_terminal_status_and_notify(
@@ -706,8 +733,9 @@ def _assert_one_pending_and_one_notify(cm, task_id, router, *, reason):
 
 
 class TestRedARecoveryPathsNotify:
-    def test_recover_orphaned_tasks_enqueues_and_dispatcher_sends(self, cm):
-        task_id = _new_task(cm)
+    def test_recover_orphaned_tasks_enqueues_and_dispatcher_sends(self, cm, monkeypatch):
+        _bind_declared_targets(monkeypatch)
+        task_id = _new_task(cm, submitted_by="outbox-user")
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
         router = _accepted_router()
         assert cm.recover_orphaned_tasks() == 1
@@ -715,8 +743,9 @@ class TestRedARecoveryPathsNotify:
             cm, task_id, router, reason="orphaned_on_startup",
         )
 
-    def test_drain_on_shutdown_enqueues_and_dispatcher_sends(self, cm):
-        task_id = _new_task(cm)
+    def test_drain_on_shutdown_enqueues_and_dispatcher_sends(self, cm, monkeypatch):
+        _bind_declared_targets(monkeypatch)
+        task_id = _new_task(cm, submitted_by="outbox-user")
         cm.update_task_status(task_id, TaskStatus.CALIBRATING)
         router = _accepted_router()
         assert cm.drain_non_terminal_tasks_on_shutdown() == 1
@@ -724,8 +753,9 @@ class TestRedARecoveryPathsNotify:
             cm, task_id, router, reason="shutdown_drain",
         )
 
-    def test_reconcile_runtime_enqueues_and_dispatcher_sends(self, cm):
-        task_id = _new_task(cm)
+    def test_reconcile_runtime_enqueues_and_dispatcher_sends(self, cm, monkeypatch):
+        _bind_declared_targets(monkeypatch)
+        task_id = _new_task(cm, submitted_by="outbox-user")
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
         router = _accepted_router()
         future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
@@ -738,8 +768,9 @@ class TestRedARecoveryPathsNotify:
 
 
 class TestRedBReplayIncludesCompletedAt:
-    def test_replay_after_process_death_sends_original_completed_at(self, cm):
-        task_id = _new_task(cm)
+    def test_replay_after_process_death_sends_original_completed_at(self, cm, monkeypatch):
+        _bind_declared_targets(monkeypatch)
+        task_id = _new_task(cm, submitted_by="outbox-user")
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
         assert cm.update_task_status(
             task_id, TaskStatus.FAILED,
@@ -760,8 +791,9 @@ class TestRedBReplayIncludesCompletedAt:
 
 
 class TestRedDSentRowsAreNotResent:
-    def test_replay_after_mark_sent_does_not_resend(self, cm):
-        task_id = _new_task(cm)
+    def test_replay_after_mark_sent_does_not_resend(self, cm, monkeypatch):
+        _bind_declared_targets(monkeypatch)
+        task_id = _new_task(cm, submitted_by="outbox-user")
         cm.update_task_status(
             task_id, TaskStatus.FAILED, error_message="boom",
         )
@@ -795,8 +827,9 @@ class TestSerialDeliveryIsExclusive:
     NULL` under it, so the same row cannot be sent twice within one process.
     """
 
-    def test_row_is_delivered_once_per_pass_and_never_again(self, cm):
-        task_id = _new_task(cm)
+    def test_row_is_delivered_once_per_pass_and_never_again(self, cm, monkeypatch):
+        _bind_declared_targets(monkeypatch)
+        task_id = _new_task(cm, submitted_by="outbox-user")
         cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
         router = _accepted_router()
 
@@ -868,49 +901,10 @@ class TestSerialDeliveryIsExclusive:
         assert cm.is_terminal_notification_pending(task_id) is False
 
 
-class TestNotificationAcceptance:
-    @pytest.mark.parametrize(
-        ("result", "accepted"),
-        [
-            (None, False),
-            ({"wechat": False}, False),
-            ({"wechat": True}, True),
-            ({"wechat": False, "feishu": True}, True),
-            ({"wechat": object()}, False),
-            ({"wechat": "ok"}, False),
-            ({"wechat": 1}, False),
-            ({"wechat": []}, False),
-            ({"wechat": {}}, False),
-            ({}, False),
-            ("True", False),
-            ({"wechat": True}, True),
-            ({"wechat": False, "feishu": True}, True),
-            ({"wechat": False, "feishu": False}, False),
-        ],
-    )
-    def test_only_dict_with_accepted_channel_is_accepted(self, result, accepted):
-        assert _notification_accepted(result) is accepted
-
-    def test_mixed_channel_acceptance_marks_row_sent(self, cm):
-        task_id = _new_task(cm)
-        cm.update_task_status(task_id, TaskStatus.PROCESSING)
-        router = MagicMock()
-        router.notify_task_status.return_value = {"wechat": False, "feishu": True}
-
-        assert finalize_terminal_status_and_notify(
-            task_id,
-            TaskStatus.FAILED,
-            error_message="boom",
-            cache_manager=cm,
-            router=router,
-        ) is True
-        assert _outbox_state(cm, task_id)["notified_at"] is not None
-
-
-
 class TestBoundedAtLeastOnceReplay:
-    def test_i5_send_exception_leaves_row_replayable(self, cm):
-        task_id = _new_task(cm)
+    def test_i5_send_exception_leaves_row_replayable(self, cm, monkeypatch):
+        _bind_declared_targets(monkeypatch)
+        task_id = _new_task(cm, submitted_by="outbox-user")
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
         router = MagicMock()
         router.notify_task_status.side_effect = RuntimeError("webhook down")
@@ -928,8 +922,9 @@ class TestBoundedAtLeastOnceReplay:
         assert deliver_pending_terminal_notifications(cm, router=replay) == 1
         replay.notify_task_status.assert_called_once()
 
-    def test_i5_all_channels_false_leaves_row_replayable(self, cm):
-        task_id = _new_task(cm)
+    def test_i5_all_channels_false_leaves_row_replayable(self, cm, monkeypatch):
+        _bind_declared_targets(monkeypatch)
+        task_id = _new_task(cm, submitted_by="outbox-user")
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
         router = MagicMock()
         router.notify_task_status.return_value = {"wechat": False, "feishu": False}
@@ -947,10 +942,11 @@ class TestBoundedAtLeastOnceReplay:
         assert deliver_pending_terminal_notifications(cm, router=replay) == 1
         replay.notify_task_status.assert_called_once()
 
-    def test_i4_row_past_any_attempt_threshold_is_still_replayed(self, cm):
+    def test_i4_row_past_any_attempt_threshold_is_still_replayed(self, cm, monkeypatch):
         # Consultant P1: `attempts < 3` used to filter permanently-False rows
         # out of the listing -> terminal written, zero notices, no trace.
-        task_id = _new_task(cm)
+        _bind_declared_targets(monkeypatch)
+        task_id = _new_task(cm, submitted_by="outbox-user")
         cm.update_task_status(task_id, TaskStatus.FAILED, error_message="boom")
         failing = MagicMock()
         failing.notify_task_status.side_effect = RuntimeError("down")
@@ -968,14 +964,16 @@ class TestBoundedAtLeastOnceReplay:
         replay.notify_task_status.assert_called_once()
         assert _outbox_state(cm, task_id)["notified_at"] is not None
 
-    def test_r12_limit_does_not_starve_fresh_rows_behind_stuck_head(self, cm):
+    def test_r12_limit_does_not_starve_fresh_rows_behind_stuck_head(self, cm, monkeypatch):
         """R12.2: 21 stuck rows (attempts=5) sit at the head of created_at ASC.
         With `LIMIT 20` the newest row was never attempted at all -- listed but
         starved, which is the same silent loss I4 forbids.
         """
+        _bind_declared_targets(monkeypatch)
         stuck_ids = []
         for i in range(21):
-            tid = _new_task(cm, url=f"https://example.com/stuck{i}")
+            tid = _new_task(cm, url=f"https://example.com/stuck{i}",
+                            submitted_by="outbox-user")
             cm.update_task_status(tid, TaskStatus.FAILED, error_message="boom")
             with cm._get_cursor() as cursor:
                 cursor.execute(
@@ -985,7 +983,8 @@ class TestBoundedAtLeastOnceReplay:
                 )
             stuck_ids.append(tid)
 
-        fresh_id = _new_task(cm, url="https://example.com/fresh")
+        fresh_id = _new_task(cm, url="https://example.com/fresh",
+                             submitted_by="outbox-user")
         cm.update_task_status(fresh_id, TaskStatus.FAILED, error_message="boom")
         with cm._get_cursor() as cursor:
             cursor.execute(

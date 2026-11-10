@@ -241,20 +241,17 @@ class ASRMonitor:
         logger.info(f"ASR recovery alert sent for {name}")
 
     def _send_notification(self, message: str):
-        """Send alert notification via all configured channels.
-
-        Args:
-            message: notification content
-        """
+        """Send alert notification via the explicit ops-alert path (global
+        group webhooks; ASR monitor is the ops-alert consumer, C1)."""
         try:
             if self.notifier is None:
                 from .notifications import get_notification_router
                 self.notifier = get_notification_router()
 
-            if hasattr(self.notifier, 'send_text') and callable(self.notifier.send_text):
-                self.notifier.send_text(message)
+            if hasattr(self.notifier, 'send_ops_alert') and callable(self.notifier.send_ops_alert):
+                self.notifier.send_ops_alert(message)
             else:
-                logger.warning("notifier does not support send_text")
+                logger.warning("notifier does not support send_ops_alert")
         except Exception as e:
             logger.error(f"failed to send ASR alert notification: {e}")
 

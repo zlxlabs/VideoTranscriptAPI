@@ -258,7 +258,7 @@ def mock_task_queue():
 @pytest.fixture()
 def mock_send_notification():
     with patch(
-        "video_transcript_api.api.routes.tasks.send_view_link_wechat"
+        "video_transcript_api.api.routes.tasks.get_notification_router"
     ) as mock:
         yield mock
 

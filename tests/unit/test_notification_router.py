@@ -1,17 +1,17 @@
 """
-Unit tests for NotificationRouter.
+Unit tests for NotificationRouter (C1 stop-leak semantics).
 
 Covers:
-- Single channel dispatch
-- Multi-channel parallel dispatch
-- Fallback on failure
-- All channels fail
+- Single channel dispatch to the declared webhook
+- Multi-channel dispatch via the declared webhooks dict
 - Per-request channel selection
-- No channels configured
-- Init from config
+- Zero-target behavior (NOTIFY_TARGET_MISSING, no channel called)
+- No cross-channel fallback (a rejected channel is NOT rescued by others)
+- Init: channels exist regardless of global webhook config
+- Ops alerts: explicit global-target path
 """
 
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 
 import pytest
 from loguru import logger as loguru_logger
@@ -21,12 +21,16 @@ from src.video_transcript_api.utils.notifications.router import NotificationRout
 
 MODULE = "src.video_transcript_api.utils.notifications.router"
 
+WECHAT_HOOK = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=w1"
+FEISHU_HOOK = "https://open.feishu.cn/open-apis/bot/v2/hook/f1"
+
 
 def _make_channel(name: str, enabled: bool = True, send_ok: bool = True):
     """Create a mock channel."""
     ch = MagicMock()
     ch.name = name
     ch.is_enabled = enabled
+    ch.webhook = f"https://global.example/{name}"
     ch.send_text.return_value = send_ok
     ch.send_rich.return_value = send_ok
     ch.notify_task_status.return_value = send_ok
@@ -35,17 +39,19 @@ def _make_channel(name: str, enabled: bool = True, send_ok: bool = True):
 
 @pytest.fixture
 def router_no_config():
-    """Router with no channels (empty config)."""
-    with patch(f"{MODULE}.load_config", return_value={}):
+    """Router whose channel classes are mocked out (empty global config)."""
+    with patch(f"{MODULE}.load_config", return_value={}), \
+         patch(f"{MODULE}.WeComChannel", return_value=_make_channel("wechat")), \
+         patch(f"{MODULE}.FeishuChannel", return_value=_make_channel("feishu")):
         r = NotificationRouter()
     return r
 
 
 @pytest.fixture
 def router_wechat_only():
-    """Router with only wechat channel."""
+    """Router with only the wechat channel object registered."""
     wechat = _make_channel("wechat")
-    with patch(f"{MODULE}.load_config", return_value={"wechat": {"webhook": "https://wechat"}}):
+    with patch(f"{MODULE}.load_config", return_value={"wechat": {"webhook": WECHAT_HOOK}}):
         r = NotificationRouter()
     r.channels = [wechat]
     return r, wechat
@@ -57,8 +63,8 @@ def router_dual():
     wechat = _make_channel("wechat")
     feishu = _make_channel("feishu")
     with patch(f"{MODULE}.load_config", return_value={
-        "wechat": {"webhook": "https://wechat"},
-        "feishu": {"webhook": "https://feishu"},
+        "wechat": {"webhook": WECHAT_HOOK},
+        "feishu": {"webhook": FEISHU_HOOK},
     }):
         r = NotificationRouter()
     r.channels = [wechat, feishu]
@@ -70,18 +76,18 @@ def router_dual():
 # ============================================================
 
 class TestSingleChannel:
-    """Tests for single channel dispatch."""
+    """Tests for single channel dispatch to the declared webhook."""
 
     def test_send_text_dispatches_to_channel(self, router_wechat_only):
         router, wechat = router_wechat_only
-        result = router.send_text("hello")
+        result = router.send_text("hello", webhooks={"wechat": WECHAT_HOOK})
 
-        wechat.send_text.assert_called_once_with("hello", webhook=None)
+        wechat.send_text.assert_called_once_with("hello", webhook=WECHAT_HOOK)
         assert result["wechat"] is True
 
     def test_send_rich_dispatches_to_channel(self, router_wechat_only):
         router, wechat = router_wechat_only
-        result = router.send_rich("## content")
+        result = router.send_rich("## content", webhooks={"wechat": WECHAT_HOOK})
 
         wechat.send_rich.assert_called_once()
         assert result["wechat"] is True
@@ -91,6 +97,7 @@ class TestSingleChannel:
         result = router.notify_task_status(
             url="https://youtube.com/watch?v=test",
             status="started",
+            webhooks={"wechat": WECHAT_HOOK},
         )
 
         wechat.notify_task_status.assert_called_once()
@@ -104,6 +111,7 @@ class TestSingleChannel:
                 view_token="token",
                 original_url="https://youtube.com/watch?v=abc",
                 task_id="task_abcdef123456",
+                webhooks={"wechat": WECHAT_HOOK},
             )
 
         content = send.call_args.args[0]
@@ -112,32 +120,89 @@ class TestSingleChannel:
 
 
 # ============================================================
-# Multi-Channel Parallel Dispatch
+# Multi-Channel Dispatch
 # ============================================================
 
 class TestMultiChannel:
-    """Tests for multi-channel parallel dispatch."""
+    """Tests for multi-channel dispatch via the declared webhooks dict."""
 
-    def test_send_text_dispatches_to_all(self, router_dual):
+    def test_send_text_dispatches_to_all_declared(self, router_dual):
         router, wechat, feishu = router_dual
-        result = router.send_text("hello")
+        result = router.send_text(
+            "hello", webhooks={"wechat": WECHAT_HOOK, "feishu": FEISHU_HOOK},
+        )
 
         wechat.send_text.assert_called_once()
         feishu.send_text.assert_called_once()
         assert result["wechat"] is True
         assert result["feishu"] is True
 
-    def test_notify_dispatches_to_all(self, router_dual):
+    def test_notify_dispatches_to_all_declared(self, router_dual):
         router, wechat, feishu = router_dual
         result = router.notify_task_status(
             url="https://example.com",
             status="completed",
+            webhooks={"wechat": WECHAT_HOOK, "feishu": FEISHU_HOOK},
         )
 
         wechat.notify_task_status.assert_called_once()
         feishu.notify_task_status.assert_called_once()
         assert result["wechat"] is True
         assert result["feishu"] is True
+
+    def test_undeclared_channel_is_skipped_silently(self, router_dual):
+        """A channel without a declared address gets no call at all — the
+        global group is never contacted for a tenant send."""
+        router, wechat, feishu = router_dual
+        result = router.send_text("hello", webhooks={"feishu": FEISHU_HOOK})
+
+        wechat.send_text.assert_not_called()
+        feishu.send_text.assert_called_once_with("hello", webhook=FEISHU_HOOK)
+        assert result == {"feishu": True}
+
+
+# ============================================================
+# Zero-target behavior
+# ============================================================
+
+class TestZeroTarget:
+    """Empty/absent webhooks: no channel is called, one MISSING line logged."""
+
+    def test_empty_weblogs_request_no_channel(self, router_dual):
+        router, wechat, feishu = router_dual
+        result = router.send_text("hello", webhooks={})
+        assert result == {}
+        wechat.send_text.assert_not_called()
+        feishu.send_text.assert_not_called()
+
+    def test_absent_webhooks_request_no_channel(self, router_dual):
+        router, _wechat, _feishu = router_dual
+        assert router.send_text("hello") == {}
+        assert router.notify_task_status(url="https://e.test", status="s") == {}
+
+    def test_zero_target_logs_missing_line_without_leaking_url(self, router_dual):
+        router, _wechat, _feishu = router_dual
+        records = []
+        sink_id = loguru_logger.add(
+            lambda message: records.append(message.record), level="WARNING"
+        )
+        try:
+            router.notify_task_status(
+                url="https://example.test/video",
+                status="started",
+                webhooks={},
+                task_id="task_missing0123456",
+            )
+            warnings = [
+                record["message"] for record in records
+                if "NOTIFY_TARGET_MISSING" in record["message"]
+            ]
+            assert len(warnings) == 1
+            assert "method=notify_task_status" in warnings[0]
+            assert "task_id=task_missing0123456" in warnings[0]
+            assert "https://" not in warnings[0]
+        finally:
+            loguru_logger.remove(sink_id)
 
 
 # ============================================================
@@ -149,68 +214,101 @@ class TestPerRequestChannel:
 
     def test_select_specific_channel(self, router_dual):
         router, wechat, feishu = router_dual
-        result = router.send_text("hello", channel_name="feishu")
+        result = router.send_text(
+            "hello", channel_name="feishu", webhooks={"feishu": FEISHU_HOOK},
+        )
 
         feishu.send_text.assert_called_once()
         wechat.send_text.assert_not_called()
         assert "feishu" in result
 
     def test_select_nonexistent_channel_returns_empty(self, router_dual):
-        """Selecting a channel that doesn't exist returns empty results (no fallback)."""
+        """Selecting a channel that doesn't exist returns empty results."""
         router, wechat, feishu = router_dual
-        result = router.send_text("hello", channel_name="slack")
+        result = router.send_text(
+            "hello", channel_name="slack", webhooks={"slack": "https://slack"},
+        )
+        assert result == {}
 
-        # No targets found and no failures to trigger fallback
-        assert "slack" not in result
-
-    def test_select_channel_with_webhook_override(self, router_dual):
+    def test_select_channel_with_declared_webhook(self, router_dual):
         router, wechat, feishu = router_dual
         custom = "https://open.feishu.cn/custom"
-        router.send_text("hello", channel_name="feishu", webhook=custom)
+        router.send_text(
+            "hello", channel_name="feishu", webhooks={"feishu": custom},
+        )
 
         feishu.send_text.assert_called_once_with("hello", webhook=custom)
 
 
 # ============================================================
-# Fallback
+# No cross-channel fallback
 # ============================================================
 
-class TestFallback:
-    """Tests for fallback behavior."""
+class TestNoCrossChannelFallback:
+    """A rejected declared channel is never rescued by another channel."""
 
-    def test_fallback_on_primary_failure(self, router_dual):
+    def test_failed_channel_is_not_rescued(self, router_dual):
         router, wechat, feishu = router_dual
-        # feishu fails, wechat succeeds
         feishu.send_text.return_value = False
         wechat.send_text.return_value = True
 
-        result = router.send_text("hello", channel_name="feishu")
+        result = router.send_text(
+            "hello", channel_name="feishu", webhooks={"feishu": FEISHU_HOOK},
+        )
 
-        # Should attempt feishu first, then fallback to wechat
-        feishu.send_text.assert_called()
-        assert result.get("feishu") is False
-        # Fallback should have been attempted
-        assert result.get("wechat_fallback") is True or wechat.send_text.called
+        assert result == {"feishu": False}
+        wechat.send_text.assert_not_called()
+        assert not any(key.endswith("_fallback") for key in result)
 
-    def test_all_channels_fail(self, router_dual):
+    def test_all_declared_channels_fail(self, router_dual):
         router, wechat, feishu = router_dual
+        webhooks = {"wechat": WECHAT_HOOK, "feishu": FEISHU_HOOK}
         wechat.send_text.return_value = False
         feishu.send_text.return_value = False
 
-        result = router.send_text("hello")
+        result = router.send_text("hello", webhooks=webhooks)
 
-        assert result["wechat"] is False
-        assert result["feishu"] is False
+        assert result == {"wechat": False, "feishu": False}
 
     def test_exception_in_channel_doesnt_break_others(self, router_dual):
         router, wechat, feishu = router_dual
+        webhooks = {"wechat": WECHAT_HOOK, "feishu": FEISHU_HOOK}
         wechat.send_text.side_effect = RuntimeError("wechat down")
         feishu.send_text.return_value = True
 
-        result = router.send_text("hello")
+        result = router.send_text("hello", webhooks=webhooks)
 
         assert result["wechat"] is False
         assert result["feishu"] is True
+
+
+# ============================================================
+# Ops alerts (explicit global path)
+# ============================================================
+
+class TestOpsAlert:
+    """send_ops_alert targets the channels' global webhooks explicitly."""
+
+    def test_ops_alert_uses_global_webhooks(self, router_dual):
+        router, wechat, feishu = router_dual
+        result = router.send_ops_alert("ASR service down")
+
+        wechat.send_text.assert_called_once_with(
+            "ASR service down", webhook="https://global.example/wechat",
+        )
+        feishu.send_text.assert_called_once_with(
+            "ASR service down", webhook="https://global.example/feishu",
+        )
+        assert result == {"wechat": True, "feishu": True}
+
+    def test_ops_alert_skips_disabled_channels(self, router_dual):
+        router, _wechat, feishu = router_dual
+        feishu.is_enabled = False
+
+        result = router.send_ops_alert("ASR service down")
+
+        feishu.send_text.assert_not_called()
+        assert result == {"wechat": True}
 
 
 # ============================================================
@@ -218,13 +316,15 @@ class TestFallback:
 # ============================================================
 
 class TestNoChannels:
-    """Tests for no channels configured."""
+    """Tests for a router whose channels are unavailable (init failures)."""
 
     def test_send_text_returns_empty(self, router_no_config):
+        router_no_config.channels = []
         result = router_no_config.send_text("hello")
         assert result == {}
 
     def test_notify_returns_empty(self, router_no_config):
+        router_no_config.channels = []
         result = router_no_config.notify_task_status(
             url="https://example.com", status="test"
         )
@@ -236,47 +336,41 @@ class TestNoChannels:
 # ============================================================
 
 class TestInitFromConfig:
-    """Tests for router initialization from config."""
+    """Channel objects exist regardless of global webhook config; tenant
+    targeting is decided per call by the declared webhooks dict (C1)."""
 
-    def test_init_wechat_only(self):
-        with patch(f"{MODULE}.load_config", return_value={"wechat": {"webhook": "https://wechat"}}), \
+    def test_init_wechat_global_only(self):
+        with patch(f"{MODULE}.load_config", return_value={"wechat": {"webhook": WECHAT_HOOK}}), \
              patch(f"{MODULE}.WeComChannel") as MockWeCom, \
              patch(f"{MODULE}.FeishuChannel") as MockFeishu:
             MockWeCom.return_value = _make_channel("wechat")
+            MockFeishu.return_value = _make_channel("feishu")
             r = NotificationRouter()
 
         MockWeCom.assert_called_once()
-        MockFeishu.assert_not_called()
-        assert len(r.channels) == 1
-
-    def test_init_feishu_only(self):
-        with patch(f"{MODULE}.load_config", return_value={"feishu": {"webhook": "https://feishu"}}), \
-             patch(f"{MODULE}.WeComChannel") as MockWeCom, \
-             patch(f"{MODULE}.FeishuChannel") as MockFeishu:
-            MockFeishu.return_value = _make_channel("feishu")
-            r = NotificationRouter()
-
-        MockWeCom.assert_not_called()
         MockFeishu.assert_called_once()
-        assert len(r.channels) == 1
+        assert len(r.channels) == 2
 
-    def test_init_both_channels(self):
-        with patch(f"{MODULE}.load_config", return_value={
-            "wechat": {"webhook": "https://wechat"},
-            "feishu": {"webhook": "https://feishu"},
-        }), \
+    def test_init_no_global_webhooks_still_constructs_channels(self):
+        with patch(f"{MODULE}.load_config", return_value={}), \
              patch(f"{MODULE}.WeComChannel") as MockWeCom, \
              patch(f"{MODULE}.FeishuChannel") as MockFeishu:
             MockWeCom.return_value = _make_channel("wechat")
             MockFeishu.return_value = _make_channel("feishu")
             r = NotificationRouter()
 
+        MockWeCom.assert_called_once()
+        MockFeishu.assert_called_once()
         assert len(r.channels) == 2
 
-    def test_init_no_channels(self):
-        with patch(f"{MODULE}.load_config", return_value={}):
+    def test_init_channel_failure_is_isolated(self):
+        with patch(f"{MODULE}.load_config", return_value={}), \
+             patch(f"{MODULE}.WeComChannel", side_effect=RuntimeError("boom")), \
+             patch(f"{MODULE}.FeishuChannel") as MockFeishu:
+            MockFeishu.return_value = _make_channel("feishu")
             r = NotificationRouter()
-        assert len(r.channels) == 0
+
+        assert [channel.name for channel in r.channels] == ["feishu"]
 
 
 # ============================================================
@@ -297,16 +391,6 @@ class TestWebhooksDict:
 
         wechat.send_text.assert_called_once_with("hello", webhook="https://qyapi.weixin.qq.com/user1")
         feishu.send_text.assert_called_once_with("hello", webhook="https://open.feishu.cn/user1")
-
-    def test_webhooks_dict_missing_channel_passes_none(self, router_dual):
-        """Channel not in webhooks dict should get webhook=None (use config default)."""
-        router, wechat, feishu = router_dual
-        webhooks = {"wechat": "https://qyapi.weixin.qq.com/user1"}
-
-        router.send_text("hello", webhooks=webhooks)
-
-        wechat.send_text.assert_called_once_with("hello", webhook="https://qyapi.weixin.qq.com/user1")
-        feishu.send_text.assert_called_once_with("hello", webhook=None)
 
     def test_webhooks_dict_with_channel_name(self, router_dual):
         """When channel_name is set, webhooks dict still provides the right webhook."""
@@ -350,164 +434,21 @@ class TestWebhooksDict:
         assert wechat_call.kwargs.get("webhook") == "https://wechat/user1"
         assert feishu_call.kwargs.get("webhook") == "https://feishu/user1"
 
-    def test_webhooks_none_falls_back_to_webhook_param(self, router_dual):
-        """When webhooks=None, fall back to single webhook param (backward compat)."""
-        router, wechat, feishu = router_dual
-        router.send_text("hello", webhook="https://single-webhook")
-
-        wechat.send_text.assert_called_once_with("hello", webhook="https://single-webhook")
-        feishu.send_text.assert_called_once_with("hello", webhook="https://single-webhook")
-
-    def test_webhooks_dict_fallback_on_failure(self, router_dual):
-        """Fallback should use webhooks dict for fallback channel too."""
-        router, wechat, feishu = router_dual
-        feishu.send_text.return_value = False
-        wechat.send_text.return_value = True
-        webhooks = {
-            "wechat": "https://wechat/user1",
-            "feishu": "https://feishu/user1",
-        }
-        result = router.send_text("hello", channel_name="feishu", webhooks=webhooks)
-
-        # Feishu failed, should fallback to wechat with wechat's webhook
-        assert result.get("feishu") is False
-        assert wechat.send_text.called
-        fallback_call = wechat.send_text.call_args
-        assert fallback_call.kwargs.get("webhook") == "https://wechat/user1"
-
 
 # ============================================================
 # Convenience: is_enabled
 # ============================================================
 
 class TestRouterIsEnabled:
-    """Tests for router-level is_enabled."""
+    """Router-level is_enabled: channels available (ops alerts have targets)."""
 
     def test_enabled_with_channels(self, router_wechat_only):
         router, _ = router_wechat_only
         assert router.is_enabled is True
 
     def test_disabled_without_channels(self, router_no_config):
+        router_no_config.channels = []
         assert router_no_config.is_enabled is False
-
-
-def test_router_warns_for_every_default_webhook_dispatch_without_leaking_url(
-    router_dual,
-):
-    router, wechat, feishu = router_dual
-    records = []
-    sink_id = loguru_logger.add(
-        lambda message: records.append(message.record), level="WARNING"
-    )
-
-    def fallback_warnings():
-        return [
-            record["message"]
-            for record in records
-            if record["level"].name == "WARNING"
-            and "NOTIFY_TARGET_FALLBACK_DEFAULT" in record["message"]
-        ]
-
-    try:
-        router.send_view_link(
-            title="Video title",
-            view_token="token",
-            channel_name="wechat",
-            task_id="t1",
-        )
-        warnings = fallback_warnings()
-        assert len(warnings) == 1
-        assert "channel=wechat" in warnings[0]
-        assert "method=send_view_link" in warnings[0]
-        assert "task_id=t1" in warnings[0]
-        assert "https://" not in warnings[0]
-        assert wechat.send_rich.call_args.kwargs["webhook"] is None
-
-        for method_name, operation in (
-            ("send_text", lambda: router.send_text("hello")),
-            ("send_rich", lambda: router.send_rich("## content")),
-            (
-                "notify_task_status",
-                lambda: router.notify_task_status(
-                    url="https://example.test/video",
-                    status="started",
-                    task_id="status-t1",
-                ),
-            ),
-        ):
-            records.clear()
-            operation()
-            warnings = fallback_warnings()
-            assert len(warnings) == 2
-            assert all(f"method={method_name}" in warning for warning in warnings)
-            assert any("channel=wechat" in warning for warning in warnings)
-            assert any("channel=feishu" in warning for warning in warnings)
-            assert all("https://" not in warning for warning in warnings)
-            if method_name == "notify_task_status":
-                assert all("task_id=status-t1" in warning for warning in warnings)
-
-        for method_name, operation, channel_method in (
-            (
-                "send_text",
-                lambda: router.send_text("fallback", channel_name="feishu"),
-                "send_text",
-            ),
-            (
-                "send_rich",
-                lambda: router.send_rich("fallback", channel_name="feishu"),
-                "send_rich",
-            ),
-            (
-                "notify_task_status",
-                lambda: router.notify_task_status(
-                    url="https://example.test/video",
-                    status="started",
-                    channel_name="feishu",
-                    task_id="fallback-t1",
-                ),
-                "notify_task_status",
-            ),
-        ):
-            getattr(feishu, channel_method).return_value = False
-            getattr(wechat, channel_method).return_value = True
-            records.clear()
-            operation()
-            warnings = fallback_warnings()
-            assert len(warnings) == 2
-            assert all(f"method={method_name}" in warning for warning in warnings)
-            assert any("channel=feishu" in warning for warning in warnings)
-            assert any("channel=wechat" in warning for warning in warnings)
-            assert all("https://" not in warning for warning in warnings)
-            if method_name == "notify_task_status":
-                assert all("task_id=fallback-t1" in warning for warning in warnings)
-
-        records.clear()
-        router.send_view_link(
-            title="Video title",
-            view_token="token",
-            channel_name="wechat",
-            webhooks={"wechat": "https://custom.example/secret"},
-            task_id="t1",
-        )
-        assert fallback_warnings() == []
-        assert (
-            wechat.send_rich.call_args.kwargs["webhook"]
-            == "https://custom.example/secret"
-        )
-
-        records.clear()
-        router.send_text(
-            "hello",
-            channel_name="wechat",
-            webhook="https://custom.example/single-secret",
-        )
-        assert fallback_warnings() == []
-        assert (
-            wechat.send_text.call_args.kwargs["webhook"]
-            == "https://custom.example/single-secret"
-        )
-    finally:
-        loguru_logger.remove(sink_id)
 
 
 class TestStatusEmojiMatchesLayeredCopy:
@@ -555,6 +496,7 @@ class TestCompletionReceiptGroupResults:
             task_id="task_abcdef123456",
             completion_body="full summary body",
             completion_receipt="✅ [#abcdef] Receipt failure\nsummary excerpt",
+            webhooks={"feishu": FEISHU_HOOK},
         )
 
         assert results == {"feishu": False}
@@ -581,6 +523,7 @@ class TestCompletionReceiptGroupResults:
             task_id="task_abcdef123456",
             completion_body="full summary body",
             completion_receipt="✅ [#abcdef] Full body failure\nsummary excerpt",
+            webhook="hook",
         )
 
         assert accepted is False

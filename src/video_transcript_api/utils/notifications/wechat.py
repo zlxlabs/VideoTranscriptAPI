@@ -85,6 +85,10 @@ class WechatNotifier:
             webhook: 企业微信webhook地址，如果为None则从配置文件加载
         """
         config = load_config()
+        # C1 止血：webhook=None 时回落全局配置仅剩两类合法消费者——
+        # (1) WeComChannel 的全局默认实例（send_ops_alert 运维告警路径）；
+        # (2) 显式传地址时构造的租户实例（不会触发本回落）。
+        # 租户通知不允许经此回落发到全局群。
         self.webhook = webhook or config.get("wechat", {}).get("webhook")
         # 使用全局共享的 WeComNotifier 实例
         self.notifier = _get_global_notifier()
