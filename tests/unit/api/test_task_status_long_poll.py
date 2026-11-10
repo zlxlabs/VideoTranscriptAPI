@@ -9,15 +9,74 @@ Axis table from the task card:
 6. one wait request -> exactly one audit row
 7. response schema identical with and without wait
 
-All console output must be in English only (no emoji, no Chinese).
+Implementation lives in routes/task_status_view.py (patched there). English-only output.
 """
 
 import asyncio
 import time
+from unittest.mock import MagicMock, patch
 
 import pytest
+import pytest_asyncio
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
-from video_transcript_api.api.routes import task_status_view
+from video_transcript_api.api.context import install_api_error_handlers
+from video_transcript_api.api.routes import health, task_status_view, tasks
+from video_transcript_api.api.services.transcription import verify_token
+
+
+_FAKE_USER_INFO = {
+    "user_id": "test-user",
+    "api_key": "sk-test-key-123456",
+    "wechat_webhook": None,
+}
+
+
+async def _fake_verify_token():
+    return _FAKE_USER_INFO
+
+
+def _build_app() -> FastAPI:
+    app = FastAPI()
+    install_api_error_handlers(app)
+    app.include_router(tasks.router)
+    app.include_router(health.router)  # /livez for the not-blocked assertion
+    app.dependency_overrides[verify_token] = _fake_verify_token
+    return app
+
+
+@pytest.fixture()
+def mock_audit_logger():
+    mock = MagicMock()
+    with patch("video_transcript_api.api.routes.task_status_view.audit_logger", mock):
+        yield mock
+
+
+@pytest.fixture()
+def mock_cache_manager():
+    mock = MagicMock()
+    with patch("video_transcript_api.api.routes.task_status_view.cache_manager", mock):
+        yield mock
+
+
+@pytest.fixture()
+def client(mock_audit_logger, mock_cache_manager):
+    return TestClient(_build_app())
+
+
+@pytest_asyncio.fixture()
+async def async_client(mock_audit_logger, mock_cache_manager):
+    transport = ASGITransport(app=_build_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+@pytest.fixture()
+def fast_poll(monkeypatch):
+    """Shrink the server-side poll interval so wait loops finish quickly."""
+    monkeypatch.setattr(task_status_view, "TASK_WAIT_POLL_INTERVAL_SECONDS", 0.05)
 
 
 def _row(**overrides):
@@ -35,15 +94,9 @@ def _row(**overrides):
     return row
 
 
-@pytest.fixture()
-def fast_poll(monkeypatch):
-    """Shrink the server-side poll interval so wait loops finish quickly."""
-    monkeypatch.setattr(task_status_view, "TASK_WAIT_POLL_INTERVAL_SECONDS", 0.05)
 
 
 class TestWaitOnTerminalTask:
-    """Axis 1: terminal task + wait=N returns immediately."""
-
     @pytest.mark.usefixtures("fast_poll")
     def test_success_task_returns_immediately(
         self, client, mock_cache_manager, mock_audit_logger
@@ -74,9 +127,9 @@ class TestWaitOnTerminalTask:
         assert elapsed < 1.0
 
 
-class TestWaitReachesTerminalState:
-    """Axis 2: task enters terminal state while the request is waiting."""
 
+
+class TestWaitReachesTerminalState:
     @pytest.mark.usefixtures("fast_poll")
     def test_processing_to_success_during_wait(
         self, client, mock_cache_manager, mock_audit_logger
@@ -113,9 +166,9 @@ class TestWaitReachesTerminalState:
         assert body["data"]["error"] == "boom"
 
 
-class TestWaitTimesOut:
-    """Axis 3: task stays in-flight; response returns after ~wait seconds."""
 
+
+class TestWaitTimesOut:
     def test_returns_processing_after_wait_elapsed(
         self, client, mock_cache_manager, mock_audit_logger
     ):
@@ -143,9 +196,9 @@ class TestWaitTimesOut:
         assert elapsed < 1.0
 
 
-class TestWaitValidation:
-    """Axis 4: wait out of the 1-60 range is rejected with 422."""
 
+
+class TestWaitValidation:
     @pytest.mark.parametrize("bad_wait", ["0", "61", "-1", "abc"])
     def test_out_of_range_wait_returns_422(self, client, mock_cache_manager, bad_wait):
         mock_cache_manager.get_task_by_id.return_value = _row(status="processing")
@@ -160,16 +213,9 @@ class TestWaitValidation:
             assert resp.status_code == 200
 
 
+
+
 class TestEventLoopNotBlocked:
-    """Axis 5: other requests are served while a wait request is suspended.
-
-    /livez (same router family, zero-dependency liveness probe) is used
-    instead of the deep /health check: /health dials real downstream
-    websocket services, which makes the assertion depend on machines that
-    happen to run CapsWriter. The blocking property under test (the wait
-    handler must yield the event loop) is shared by both endpoints.
-    """
-
     @pytest.mark.asyncio
     async def test_livez_answered_while_wait_suspended(
         self, async_client, mock_cache_manager
@@ -190,9 +236,9 @@ class TestEventLoopNotBlocked:
         assert wait_resp.json()["data"]["status"] == "processing"
 
 
-class TestWaitAuditRows:
-    """Axis 6: one wait request writes exactly one audit row."""
 
+
+class TestWaitAuditRows:
     @pytest.mark.usefixtures("fast_poll")
     def test_timed_out_wait_writes_single_audit_row(
         self, client, mock_cache_manager, mock_audit_logger
@@ -220,9 +266,9 @@ class TestWaitAuditRows:
         assert mock_audit_logger.log_api_call.call_count == 1
 
 
-class TestWaitSchemaConsistency:
-    """Axis 7: response body is identical with and without wait."""
 
+
+class TestWaitSchemaConsistency:
     @pytest.mark.usefixtures("fast_poll")
     @pytest.mark.parametrize("status", ["processing", "success", "failed"])
     def test_same_body_with_and_without_wait(

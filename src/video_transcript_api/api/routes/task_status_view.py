@@ -1,11 +1,6 @@
-"""GET /api/task/{task_id} 的实现（含 C3 长轮询）。
+"""GET /api/task/{task_id} 实现（含 C3 长轮询）。
 
-从 tasks.py 拆出：tasks.py 已超文件体积 ratchet 上限（>800 行），
-gate 禁止其净增长，新增逻辑必须放 sibling 文件。tasks.py 只留薄路由。
-
-C3 长轮询：``GET /api/task/{id}?wait=<1-60>``——任务进终态或超时即返回，
-响应 schema 与无 wait 一致；等待用 await asyncio.sleep 让出事件循环，
-不占线程池；一次请求仍只写一行审计。
+从 tasks.py 拆出：tasks.py 已超文件体积 ratchet，gate 禁止其净增长。
 """
 
 import asyncio
@@ -29,7 +24,7 @@ logger = lazy_resource(get_logger)
 audit_logger = lazy_resource(get_audit_logger)
 cache_manager = lazy_resource(get_cache_manager)
 
-# wait 挂起期间的轮询间隔（秒）。
+# wait 挂起期间的轮询间隔（秒）；await asyncio.sleep 让出事件循环。
 TASK_WAIT_POLL_INTERVAL_SECONDS = 0.5
 
 
@@ -65,8 +60,7 @@ async def get_task_status_impl(
 
         status = task_info.get("status") or TaskStatus.QUEUED
 
-        # C3 长轮询：非终态时挂起等待，直到进终态或超时；循环期间不写审计
-        # （一次请求一行），超时后返回当时状态，响应 schema 与无 wait 一致。
+        # C3 长轮询：非终态时挂起至终态或超时；循环期间不写审计（一次请求一行）。
         if wait is not None:
             deadline = time.monotonic() + wait
             while status not in TERMINAL_STATUSES:

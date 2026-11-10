@@ -514,10 +514,7 @@ async def get_task_status(
     ),
     user_info: dict = Depends(verify_token),
 ):
-    """查询任务状态；wait 给定时挂起至终态或超时（C3 长轮询）。
-
-    实现在 task_status_view（tasks.py 已超文件体积 ratchet，禁止净增长）。
-    """
+    # 实现在 task_status_view（tasks.py 已超文件体积 ratchet，禁止净增长）。
     return await get_task_status_impl(
         task_id, request, wait, user_info.get("user_id"), user_info.get("api_key")
     )

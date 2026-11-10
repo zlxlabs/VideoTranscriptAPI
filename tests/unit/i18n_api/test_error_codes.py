@@ -292,7 +292,7 @@ def test_framework_http_errors_preserve_starlette_detail(language_config):
 )
 def test_get_task_status_message_is_localized(language_config, monkeypatch, language, status, expected_message):
     language_config(language)
-    from video_transcript_api.api.routes import tasks
+    from video_transcript_api.api.routes import task_status_view, tasks
     from video_transcript_api.api.services.transcription import verify_token
 
     cache_manager = MagicMock()
@@ -302,9 +302,10 @@ def test_get_task_status_message_is_localized(language_config, monkeypatch, lang
         "error_message": None,
         "view_token": "view-status-message",
     }
-    monkeypatch.setattr(tasks, "cache_manager", cache_manager)
-    monkeypatch.setattr(tasks, "audit_logger", MagicMock())
-    monkeypatch.setattr(tasks, "logger", MagicMock())
+    # Status endpoint implementation lives in task_status_view.
+    monkeypatch.setattr(task_status_view, "cache_manager", cache_manager)
+    monkeypatch.setattr(task_status_view, "audit_logger", MagicMock())
+    monkeypatch.setattr(task_status_view, "logger", MagicMock())
 
     app = FastAPI()
     install_api_error_handlers(app)
