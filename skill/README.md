@@ -33,8 +33,8 @@ skill/
 | `VIDEO_TRANSCRIPT_API_BASE_URL` | ✅ | **API 请求地址**。内网/tailnet/局域网优先，延迟低。如 `http://localhost:8000` / `http://<deploy-host>:8200` |
 | `VIDEO_TRANSCRIPT_API_TOKEN` | ✅ | Bearer token（`config.jsonc` 的 `api.auth_token` 或 `users.json` 里的 key）|
 | `VIDEO_TRANSCRIPT_API_PUBLIC_URL` | — | **给用户点的公网地址**（可选）。不设时用 BASE_URL。如 `https://vt.example.com` |
-| `VIDEO_TRANSCRIPT_API_WECHAT_WEBHOOK` | — | **企业微信 webhook 默认值**（可选）。设置后 submit 自动带上，`--webhook` 传参时覆盖。如 `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx` |
-| `VIDEO_TRANSCRIPT_API_FEISHU_WEBHOOK` | — | **飞书 webhook 默认值**（可选）。设置后 submit 自动带上，`--feishu-webhook` 传参时覆盖。如 `https://open.feishu.cn/open-apis/bot/v2/hook/xxx` |
+| `VIDEO_TRANSCRIPT_API_WECHAT_WEBHOOK` | — | **企业微信 webhook 默认值**（可选）。设置后 submit 自动带上，`--webhook` 传参时覆盖；`--no-notify` 禁止发送。如 `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx` |
+| `VIDEO_TRANSCRIPT_API_FEISHU_WEBHOOK` | — | **飞书 webhook 默认值**（可选）。设置后 submit 自动带上，`--feishu-webhook` 传参时覆盖；`--no-notify` 禁止发送。如 `https://open.feishu.cn/open-apis/bot/v2/hook/xxx` |
 
 **为什么分两个地址**：API 请求追求低延迟，通常走内网；但返给用户的 `/view/<token>` 链接需要能从公网打开。配了 PUBLIC_URL 后，`submit` / `status` / `history` 打印给用户的链接会自动用公网域名拼。
 
@@ -151,7 +151,7 @@ python3 skill/scripts/videotranscript.py submit https://b23.tv/DBUt7OW
 
 | 子命令 | 作用 |
 |--------|------|
-| `submit <url>` | 提交转录任务，返回查看链接（agent 内部记录 task_id 用于后续查询） |
+| `submit <url>` | 提交转录任务，返回查看链接；`--no-notify` 让该任务不发 IM |
 | `status <task_id>` | 查任务状态（agent 内部使用），success 时自动附带 view_token |
 | `wait <task_id>` | 长轮询等任务结束（服务端挂起最多 30s/次，循环到终态或总超时，默认 600s），输出同 status |
 | `result <view_token>` | 拉结果文本（`--type summary`/`calibrated`/`transcript`） |

@@ -90,7 +90,7 @@ def _capture_put(queue):
     return captured
 
 
-def _post_upload(client, body):
+def _post_upload(client, body, metadata_overrides=None):
     key = (
         f"{int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)}"
         f"-{uuid.uuid4()}"
@@ -102,6 +102,7 @@ def _post_upload(client, body):
         "source_url": None,
         "retention": "30d",
         "processing_options": {},
+        **(metadata_overrides or {}),
     }
     return client.post(
         "/api/uploads",
@@ -133,6 +134,27 @@ def test_upload_intake_enqueues_submitter_webhooks_and_reuses_them_for_receipt_n
     assert len(captured) == 1
     assert captured[0]["notification_webhooks"] == {"wechat": hook}
     assert router.send_view_link.call_args.kwargs["webhooks"] == {"wechat": hook}
+
+
+def test_upload_notify_none_persists_empty_targets_and_suppresses_receipt_targets(
+    tmp_path, monkeypatch,
+):
+    hook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=alice"
+    queue = asyncio.Queue()
+    router = MagicMock()
+    router.send_view_link.return_value = {}
+    app, cache_manager, _temp_manager = _upload_app(
+        tmp_path, monkeypatch, {"user_id": "alice", "wechat_webhook": hook}, queue, router,
+    )
+    monkeypatch.setenv("VTA_UPLOADS_ENABLED", "true")
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = _post_upload(client, b"silent upload", {"notify": "none"})
+
+    assert response.status_code == 202
+    task_id = response.json()["task_id"]
+    task = cache_manager.get_task_by_id(task_id)
+    assert task["notify_targets"] == {}
+    assert router.send_view_link.call_args.kwargs["webhooks"] == {}
 
 
 def test_uploaded_intake_payload_delivers_submitter_webhooks_to_terminal_notify(

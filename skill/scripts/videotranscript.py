@@ -245,12 +245,15 @@ def cmd_submit(args: argparse.Namespace) -> int:
     body: dict[str, Any] = {"url": args.url}
     if args.speaker:
         body["use_speaker_recognition"] = True
-    webhook = args.webhook or os.environ.get("VIDEO_TRANSCRIPT_API_WECHAT_WEBHOOK")
-    if webhook:
-        body["wechat_webhook"] = webhook
-    feishu_webhook = args.feishu_webhook or os.environ.get("VIDEO_TRANSCRIPT_API_FEISHU_WEBHOOK")
-    if feishu_webhook:
-        body["feishu_webhook"] = feishu_webhook
+    if args.no_notify:
+        body["notify"] = "none"
+    else:
+        webhook = args.webhook or os.environ.get("VIDEO_TRANSCRIPT_API_WECHAT_WEBHOOK")
+        if webhook:
+            body["wechat_webhook"] = webhook
+        feishu_webhook = args.feishu_webhook or os.environ.get("VIDEO_TRANSCRIPT_API_FEISHU_WEBHOOK")
+        if feishu_webhook:
+            body["feishu_webhook"] = feishu_webhook
     if args.download_url:
         body["download_url"] = args.download_url
     meta = {}
@@ -625,6 +628,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--speaker", action="store_true", help="启用说话人识别（用 FunASR 引擎）")
     sp.add_argument("--webhook", help="企业微信 webhook URL（完成后推送）")
     sp.add_argument("--feishu-webhook", help="飞书 webhook URL（完成后推送）")
+    sp.add_argument("--no-notify", action="store_true", help="本任务不发送任何 IM 通知")
     sp.add_argument("--download-url", help="直链下载 URL，绕过平台解析")
     sp.add_argument("--title", help="覆盖自动解析的标题（最多 200 字）")
     sp.add_argument("--author", help="覆盖自动解析的作者（最多 200 字）")

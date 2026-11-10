@@ -34,6 +34,7 @@ from ...utils.busy_lock import acquire_for_task, release_for_task
 from ...utils.llm_status import ChaptersStatus, NotesStatus, SummaryStatus
 from ...cache.cache_manager import language_mismatched_generation_layers
 from ...utils.notifications import get_notification_router
+from ...utils.notifications.targets import resolve_notify_targets
 from ...utils.task_status import TaskStatus
 from ..services.terminal_status import finalize_terminal_status_and_notify
 from ...i18n import t
@@ -299,6 +300,7 @@ async def transcribe_video(
                     url,
                 )
                 raise ApiError(503, "service_busy")
+            notification_webhooks = resolve_notify_targets(user_info, request_body)
             task_info = cache_manager.create_task(
                 task_id=task_id,
                 url=url,
@@ -308,36 +310,14 @@ async def transcribe_video(
                 media_id=parsed_media_id,
                 processing_options=effective_processing_options,
                 submitted_by=user_id,
+                notify_targets=notification_webhooks,
             )
             view_token = task_info["view_token"]
             # 状态以 DB 为唯一真相源；create_task 已写入 status='queued'
 
             try:
-                # Build per-channel webhooks dict from user-level config only.
-                # Global config webhooks are already embedded in user_info for
-                # legacy single-token mode (see user_manager.validate_token),
-                # so no additional fallback is needed here.
-                notification_webhooks = {}
-                wechat_wh = user_info.get("wechat_webhook")
-                if wechat_wh:
-                    notification_webhooks["wechat"] = wechat_wh
-                feishu_wh = user_info.get("feishu_webhook")
-                if feishu_wh:
-                    notification_webhooks["feishu"] = feishu_wh
-
-                # Per-request overrides (top-level fields > notification_config)
-                effective_channel = None
-                if request_body.wechat_webhook:
-                    notification_webhooks["wechat"] = request_body.wechat_webhook
-                if request_body.feishu_webhook:
-                    notification_webhooks["feishu"] = request_body.feishu_webhook
-
-                notification_config = getattr(request_body, "notification_config", None)
-                if notification_config and notification_config.webhook:
-                    effective_channel = notification_config.channel
-                    if effective_channel:
-                        notification_webhooks[effective_channel] = notification_config.webhook
-
+                notification_config = request_body.notification_config
+                effective_channel = notification_config.channel if notification_config else None
                 task_queue = get_task_queue()
                 task = {
                     "id": task_id,
@@ -670,6 +650,7 @@ async def recalibrate(
     registration_owned = True
     try:
         try:
+            recal_webhooks = resolve_notify_targets(user_info, request_body)
             with cache_manager._get_cursor() as cursor:
                 if is_local_upload:
                     cursor.execute("BEGIN IMMEDIATE")
@@ -680,14 +661,14 @@ async def recalibrate(
                     INSERT INTO task_status
                     (task_id, view_token, url, platform, media_id,
                      use_speaker_recognition, status, title, author,
-                     processing_options, submitted_by)
-                    VALUES (?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?)
+                     processing_options, submitted_by, notify_targets)
+                    VALUES (?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?)
                 ''', (
                     task_id, child_view_token, task_info.get("url", ""),
                     platform, media_id, use_speaker_recognition,
                     video_title, author,
                     json.dumps(recalibrate_processing_options, sort_keys=True),
-                    user_id,
+                    user_id, json.dumps(recal_webhooks, sort_keys=True),
                 ))
             logger.info(f"重新校对任务创建成功: {task_id}, view_token: {view_token}")
         except HTTPException:
@@ -733,20 +714,6 @@ async def recalibrate(
                 error=str(format_exc),
                 note=_terminal_write_note(terminal_write_ok),
             )
-
-        # Build per-channel webhooks from the declaring user/request only; no
-        # global config fallback (C1 stop-leak): a tenant task never sends to
-        # the operator's global group.
-        recal_webhooks = {}
-        wechat_wh = (
-            request_body.wechat_webhook
-            or user_info.get("wechat_webhook")
-        )
-        if wechat_wh:
-            recal_webhooks["wechat"] = wechat_wh
-        feishu_wh = user_info.get("feishu_webhook")
-        if feishu_wh:
-            recal_webhooks["feishu"] = feishu_wh
 
         # 放入 LLM 队列
         llm_queue = get_llm_queue()
@@ -969,6 +936,7 @@ async def resummarize(
     registration_owned = True
     try:
         try:
+            resum_webhooks = resolve_notify_targets(user_info, request_body)
             with cache_manager._get_cursor() as cursor:
                 if is_local_upload:
                     cursor.execute("BEGIN IMMEDIATE")
@@ -979,14 +947,14 @@ async def resummarize(
                     INSERT INTO task_status
                     (task_id, view_token, url, platform, media_id,
                      use_speaker_recognition, status, title, author,
-                     processing_options, submitted_by)
-                    VALUES (?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?)
+                     processing_options, submitted_by, notify_targets)
+                    VALUES (?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?)
                 ''', (
                     task_id, child_view_token, task_info.get("url", ""),
                     platform, media_id, use_speaker_recognition,
                     video_title, author,
                     json.dumps(resummarize_processing_options, sort_keys=True),
-                    user_id,
+                    user_id, json.dumps(resum_webhooks, sort_keys=True),
                 ))
             logger.info(f"重新生成总结任务创建成功: {task_id}, view_token: {view_token}")
         except HTTPException:
@@ -1039,19 +1007,6 @@ async def resummarize(
                 error=str(format_exc),
                 note=_terminal_write_note(terminal_write_ok),
             )
-
-        # Build per-channel webhooks from the declaring user/request only; no
-        # global config fallback (C1 stop-leak).
-        resum_webhooks = {}
-        wechat_wh = (
-            request_body.wechat_webhook
-            or user_info.get("wechat_webhook")
-        )
-        if wechat_wh:
-            resum_webhooks["wechat"] = wechat_wh
-        feishu_wh = user_info.get("feishu_webhook")
-        if feishu_wh:
-            resum_webhooks["feishu"] = feishu_wh
 
         # 放入 LLM 队列
         llm_queue = get_llm_queue()
@@ -1254,6 +1209,7 @@ async def generate_notes(
         try:
             inflight_notes_task_id = None
             notes_generated_during_admission = False
+            notes_webhooks = resolve_notify_targets(user_info, request_body)
             with cache_manager._get_cursor() as cursor:
                 # Serialize check + insert so concurrent requests cannot both
                 # observe "no in-flight notes task" and enqueue duplicates.
@@ -1287,8 +1243,8 @@ async def generate_notes(
                             INSERT INTO task_status
                             (task_id, view_token, url, platform, media_id,
                              use_speaker_recognition, status, title, author,
-                             processing_options, submitted_by)
-                            VALUES (?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?)
+                             processing_options, submitted_by, notify_targets)
+                            VALUES (?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?)
                             """,
                             (
                                 task_id,
@@ -1301,6 +1257,7 @@ async def generate_notes(
                                 author,
                                 json.dumps(notes_processing_options, sort_keys=True),
                                 user_id,
+                                json.dumps(notes_webhooks, sort_keys=True),
                             ),
                         )
 
@@ -1319,19 +1276,6 @@ async def generate_notes(
         except Exception as exc:
             logger.error(f"创建详细笔记任务失败: {exc}")
             raise ApiError(500, "notes_creation_failed", error=str(exc))
-
-        # Build per-channel webhooks from the declaring user/request only; no
-        # global config fallback (C1 stop-leak).
-        notes_webhooks = {}
-        wechat_webhook = (
-            request_body.wechat_webhook
-            or user_info.get("wechat_webhook")
-        )
-        if wechat_webhook:
-            notes_webhooks["wechat"] = wechat_webhook
-        feishu_webhook = user_info.get("feishu_webhook")
-        if feishu_webhook:
-            notes_webhooks["feishu"] = feishu_webhook
 
         llm_task = {
             "task_id": task_id,

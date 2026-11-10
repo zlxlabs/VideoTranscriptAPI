@@ -42,6 +42,7 @@ from typing import Any, Dict, Optional
 from ..context import get_cache_manager, get_logger, lazy_resource
 from ...utils.busy_lock import release_for_task
 from ...utils.notifications import get_notification_router, slow_alert
+from ...utils.notifications.targets import resolve_notify_targets
 from ...utils.task_status import TaskStatus
 
 logger = lazy_resource(get_logger)
@@ -184,6 +185,8 @@ def deliver_terminal_notification(
     task = _prepare_local_upload_notification_task(
         cache_manager, cache_manager.get_task_by_id(task_id) or {}
     )
+    webhooks = _task_notify_targets(task)
+    channel_name = None
     display_url = url or task.get("url") or ""
     if title is None:
         title = task.get("title")
@@ -396,17 +399,30 @@ def deliver_pending_terminal_notifications(
     sent = 0
     for row in rows:
         task_id = row["task_id"]
-        task = _prepare_local_upload_notification_task(
-            cache_manager, cache_manager.get_task_by_id(task_id) or {}
-        )
-        notify_status = (
-            TERMINAL_SUCCESS_STATUS
-            if row["status"] == TaskStatus.SUCCESS
-            else TERMINAL_FAILED_STATUS
-        )
-        error_for_notify = _compose_dispatcher_error(row, task)
-        webhooks = _resolve_delivery_webhooks(task)
-        view_url = _resolve_view_url(cache_manager, task_id, task)
+        try:
+            task = _prepare_local_upload_notification_task(
+                cache_manager, cache_manager.get_task_by_id(task_id) or {}
+            )
+            notify_status = (
+                TERMINAL_SUCCESS_STATUS
+                if row["status"] == TaskStatus.SUCCESS
+                else TERMINAL_FAILED_STATUS
+            )
+            error_for_notify = _compose_dispatcher_error(row, task)
+            webhooks = _task_notify_targets(task)
+            view_url = _resolve_view_url(cache_manager, task_id, task)
+        except Exception:
+            # Poison-row isolation: one unreadable row (corrupt notify_targets
+            # JSON, missing local-upload mapping, ...) must not kill the whole
+            # replay round for every other user's pending rows. Mark the
+            # attempt so _warn_repeatedly_failing_rows keeps it visible and
+            # move on; the row itself stays pending (no fake "sent", no
+            # fallback target) and is retried next round.
+            logger.exception(
+                f"NOTIFY_TARGETS_RESOLVE_FAILED task_id={task_id}"
+            )
+            cache_manager.mark_terminal_notification_attempted(task_id)
+            continue
         accepted = False
         with _DELIVERY_LOCK:
             if not cache_manager.is_terminal_notification_pending(task_id):
@@ -553,78 +569,30 @@ def _resolve_view_url(cache_manager, task_id: str, task: Optional[dict] = None) 
     return f"{get_base_url()}/view/{token}"
 
 
-def _resolve_delivery_webhooks(task: dict) -> Optional[Dict[str, str]]:
-    """Resolve notify targets without request context: audit log, then user.
+def load_task_targets(cache_manager, task_id: str) -> Dict[str, str]:
+    """Load a task's immutable targets, resolving only pre-migration rows."""
+    task = cache_manager.get_task_by_id(task_id)
+    if task is None:
+        logger.warning("NOTIFY_TARGETS_TASK_ROW_MISSING task_id={}", task_id)
+        return {}
+    return _task_notify_targets(task)
 
-    C1 stop-leak: for a NON-legacy submitter, any address equal to the global
-    config group webhook is stripped (historic reruns wrote the global address
-    into the audit log); legacy_user is the operator themselves and keeps the
-    global targets. An empty result means zero declared targets.
-    """
-    from ..context import get_runtime
-    from ...utils.logging import load_config
 
-    config = load_config()
-    global_webhooks = {
-        "wechat": config.get("wechat", {}).get("webhook"),
-        "feishu": config.get("feishu", {}).get("webhook"),
-    }
-
-    submitted_by = task.get("submitted_by")
-    user = None
-    if submitted_by:
-        try:
-            user = get_runtime().user_manager.get_user_by_id(submitted_by)
-        except RuntimeError:
-            user = None
-        except Exception:
-            logger.exception("failed to resolve user webhook for terminal notify")
-            user = None
-
-    is_legacy = bool(user and user.get("is_legacy"))
+def _task_notify_targets(task: dict) -> Dict[str, str]:
+    """Read persisted destinations, resolving only pre-migration rows live."""
+    stored = task.get("notify_targets")
+    if stored is not None:
+        return stored
 
     task_id = task.get("task_id")
-    audit_webhook = _lookup_audit_wechat_webhook(task_id)
-    webhooks = {"wechat": audit_webhook} if audit_webhook else {}
-    if user:
-        if not audit_webhook and user.get("wechat_webhook"):
-            webhooks["wechat"] = user["wechat_webhook"]
-        if user.get("feishu_webhook"):
-            webhooks["feishu"] = user["feishu_webhook"]
+    logger.warning("NOTIFY_TARGETS_LEGACY_ROW task_id={}", task_id)
+    submitted_by = task.get("submitted_by")
+    if not submitted_by:
+        return {}
 
-    if not is_legacy:
-        webhooks = {
-            channel: address
-            for channel, address in webhooks.items()
-            if address and address != global_webhooks.get(channel)
-        }
-    return webhooks or None
+    from ..context import get_runtime
 
-
-def _lookup_audit_wechat_webhook(task_id: Optional[str]) -> Optional[str]:
-    """Read api_audit_logs.wechat_webhook by task_id. Audit schema is not ours to extend."""
-    if not task_id:
-        return None
-    try:
-        from ..context import get_runtime
-        audit = get_runtime().audit_logger
-    except RuntimeError:
-        return None
-    except Exception:
-        logger.exception("failed to open audit logger for terminal notify webhook")
-        return None
-    try:
-        with audit._get_cursor() as cursor:
-            cursor.execute(
-                '''SELECT wechat_webhook FROM api_audit_logs
-                   WHERE task_id = ? AND wechat_webhook IS NOT NULL
-                         AND wechat_webhook != ''
-                   ORDER BY request_time DESC LIMIT 1''',
-                (task_id,),
-            )
-            row = cursor.fetchone()
-        if row:
-            return row[0]
-    except Exception:
-        logger.exception("failed to lookup audit wechat_webhook for terminal notify")
-    return None
+    user = get_runtime().user_manager.get_user_by_id(submitted_by)
+    if not user:
+        return {}
+    return resolve_notify_targets(user, {})

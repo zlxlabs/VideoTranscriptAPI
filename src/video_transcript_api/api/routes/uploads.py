@@ -24,16 +24,21 @@ from ..context import (
     get_temp_manager,
 )
 from ..processing_options import normalize_processing_options
-from ..services.transcription import verify_token
+from ..services.transcription import NotificationConfig, verify_token
 from ...utils.logging import logger
 from ...utils.notifications import get_notification_router
+from ...utils.notifications.targets import resolve_notify_targets
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 _METADATA_MAX_BYTES = 4096
 _BASE64URL = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
-_ALLOWED_METADATA = {
+_REQUIRED_METADATA = {
     "filename", "byte_size", "title", "source_url", "retention", "processing_options"
 }
+_OPTIONAL_NOTIFICATION_METADATA = {
+    "notify", "wechat_webhook", "feishu_webhook", "notification_config"
+}
+_ALLOWED_METADATA = _REQUIRED_METADATA | _OPTIONAL_NOTIFICATION_METADATA
 _MIB = 1024 * 1024
 
 
@@ -51,7 +56,11 @@ def decode_upload_metadata(value: str) -> dict:
         data = json.loads(raw.decode("utf-8"))
     except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("X-Upload-Metadata must encode UTF-8 JSON") from exc
-    if not isinstance(data, dict) or set(data) != _ALLOWED_METADATA:
+    if (
+        not isinstance(data, dict)
+        or not _REQUIRED_METADATA <= set(data)
+        or set(data) - _ALLOWED_METADATA
+    ):
         raise ValueError("upload metadata fields are incomplete or unsupported")
 
     filename = data["filename"]
@@ -98,11 +107,38 @@ def decode_upload_metadata(value: str) -> dict:
     except (TypeError, ValueError) as exc:
         raise ValueError(f"invalid processing_options: {exc}") from exc
 
-    return {
+    notify = data.get("notify", "default")
+    if not isinstance(notify, str) or notify not in {"default", "none"}:
+        raise ValueError("notify must be 'default' or 'none'")
+    for field in ("wechat_webhook", "feishu_webhook"):
+        webhook = data.get(field)
+        if webhook:
+            if not isinstance(webhook, str):
+                raise ValueError(f"{field} must be text")
+            from ...utils.url_validator import URLValidationError, validate_url_safe
+            try:
+                validate_url_safe(webhook)
+            except URLValidationError as exc:
+                raise ValueError(f"{field} is not allowed: {exc}") from exc
+    notification_config = data.get("notification_config")
+    if notification_config is not None:
+        try:
+            notification_config = NotificationConfig.model_validate(
+                notification_config
+            ).model_dump(exclude_none=True)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid notification_config: {exc}") from exc
+
+    normalized = {
         **data,
         "filename": display_name,
         "processing_options": normalized_options,
     }
+    if "notify" in data:
+        normalized["notify"] = notify
+    if "notification_config" in data:
+        normalized["notification_config"] = notification_config
+    return normalized
 
 
 def _upload_limits(config: dict) -> dict:
@@ -148,18 +184,6 @@ def _uploads_enabled(request: Request, config: dict, limits: dict) -> bool:
 def _reject(reason: str, error: ApiError) -> ApiError:
     logger.warning("UPLOAD_INTAKE_REJECTED reason={} status={}", reason, error.status_code)
     return error
-
-
-def _user_notification_webhooks(user_info: dict) -> dict:
-    """Per-channel targets from the submitting user's stored webhook config."""
-    return {
-        channel: user_info.get(field)
-        for channel, field in (
-            ("wechat", "wechat_webhook"),
-            ("feishu", "feishu_webhook"),
-        )
-        if user_info.get(field)
-    }
 
 
 def _receipt(upload: dict) -> dict:
@@ -336,7 +360,7 @@ async def receive_upload(
             cache_manager.set_local_upload_error(upload_id, failure_code)
             raise _reject(failure_code, ApiError(503, "upload_queue_full"))
         media_id = f"upload_{uuid.uuid4().hex}"
-        notification_webhooks = _user_notification_webhooks(user_info)
+        notification_webhooks = resolve_notify_targets(user_info, metadata)
         try:
             accepted = cache_manager.accept_local_upload(
                 upload_id,
@@ -351,6 +375,7 @@ async def receive_upload(
                 byte_size=observed_bytes,
                 sha256=digest.hexdigest(),
                 notification_webhooks=notification_webhooks,
+                notify_targets=notification_webhooks,
                 enqueue=task_queue.put_nowait,
             )
         except ValueError as exc:

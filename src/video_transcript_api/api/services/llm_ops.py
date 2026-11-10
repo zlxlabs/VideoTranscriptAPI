@@ -47,7 +47,7 @@ from ...utils.perf_tracker import PerfTracker
 from ...utils.task_status import TaskStatus
 from .terminal_status import (
     deliver_terminal_notification,
-    finalize_terminal_status_and_notify,
+    finalize_terminal_status_and_notify, load_task_targets,
 )
 from ...utils.llm_status import (
     CalibrationStatus,
@@ -626,7 +626,7 @@ def _handle_llm_task(llm_task: dict):
             transcript = llm_task["transcript"]
             use_speaker_recognition = llm_task.get("use_speaker_recognition", False)
             notification_channel = llm_task.get("notification_channel")
-            notification_webhooks = llm_task.get("notification_webhooks", {})
+            notification_webhooks = load_task_targets(cache_manager, task_id)
             logger.info(f"开始处理LLM任务: {task_id}, 标题: {video_title}")
 
             notes_attempted = False

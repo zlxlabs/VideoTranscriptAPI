@@ -514,7 +514,7 @@ def test_worker_runtime_binding_is_scoped_to_its_owner(tmp_path):
     assert set(observed) == {runtime_one, runtime_two}
 
 
-def test_task_queue_normalizes_explicit_null_notification_webhooks(monkeypatch):
+def test_task_queue_tolerates_null_webhooks_and_does_not_forward(monkeypatch):
     from video_transcript_api.api.services import transcription
 
     observed = []
@@ -544,7 +544,7 @@ def test_task_queue_normalizes_explicit_null_notification_webhooks(monkeypatch):
     monkeypatch.setattr(
         transcription,
         "process_transcription",
-        lambda *args, **kwargs: observed.append(kwargs["notification_webhooks"]),
+        lambda *args, **kwargs: observed.append("notification_webhooks" in kwargs),
     )
 
     async def scenario():
@@ -560,7 +560,7 @@ def test_task_queue_normalizes_explicit_null_notification_webhooks(monkeypatch):
             await processor
 
     asyncio.run(scenario())
-    assert observed == [{}]
+    assert observed == [False]
 
 
 def test_task_queue_forwards_api_preparsed_url_without_reparsing(monkeypatch):

@@ -10,6 +10,7 @@ import re
 import sqlite3
 import threading
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 from wecom_notifier import FeishuNotifier, WeComNotifier
@@ -136,7 +137,11 @@ def delivery(monkeypatch):
 
 def _persist_pending_success(cm, url):
     """Persist one producer snapshot and outbox row through SQLite."""
-    created = cm.create_task(url=url, submitted_by=TENANT_USER)
+    created = cm.create_task(
+        url=url,
+        submitted_by=TENANT_USER,
+        notify_targets={"wechat": TENANT_WECHAT, "feishu": TENANT_FEISHU},
+    )
     task_id = created["task_id"]
     cm.update_task_status(task_id, TaskStatus.PROCESSING)
     assert finalize_terminal_status_and_notify(
@@ -264,6 +269,37 @@ def test_success_snapshot_reaches_final_http_payloads_in_order(
     assert cm.is_terminal_notification_pending(task_id) is False
 
 
+def test_reopened_task_replay_uses_persisted_targets_after_user_change(
+    cm, delivery, monkeypatch,
+):
+    original_url = "https://youtube.com/watch?v=reopened-targets"
+    task_id, _view_token = _persist_pending_success(cm, original_url)
+    db_path = cm.db_path
+    cache_dir = cm.cache_dir
+    cm.close()
+    reopened = CacheManager(cache_dir=str(cache_dir), db_path=str(db_path))
+    from src.video_transcript_api.api import context
+
+    user_manager = MagicMock()
+    user_manager.get_user_by_id.return_value = {
+        "wechat_webhook": WECHAT_WEBHOOK,
+        "feishu_webhook": FEISHU_WEBHOOK,
+    }
+    monkeypatch.setattr(
+        context, "get_runtime", lambda: type("Runtime", (), {"user_manager": user_manager})()
+    )
+    try:
+        assert deliver_pending_terminal_notifications(
+            reopened, router=delivery["router"],
+        ) == 1
+        records = _wait_payloads(delivery, 4)
+        assert {url for url, _payload in records} == {TENANT_WECHAT, TENANT_FEISHU}
+        user_manager.get_user_by_id.assert_not_called()
+        assert reopened.is_terminal_notification_pending(task_id) is False
+    finally:
+        reopened.close()
+
+
 def test_process_transcription_notify_via_reaches_both_real_channels(
     cm, delivery, monkeypatch,
 ):
@@ -273,7 +309,10 @@ def test_process_transcription_notify_via_reaches_both_real_channels(
 
     monkeypatch.setattr(runtime_rendering, "get_base_url", lambda: BASE_URL)
     original_url = "https://www.youtube.com/watch?v=budget"
-    task_id = cm.create_task(url=original_url)["task_id"]
+    task_id = cm.create_task(
+        url=original_url,
+        notify_targets={"wechat": TENANT_WECHAT, "feishu": TENANT_FEISHU},
+    )["task_id"]
     cm.update_task_status(task_id, TaskStatus.PROCESSING)
     cm.save_cache(
         platform="youtube", url=original_url, media_id="budget",
@@ -315,7 +354,6 @@ def test_process_transcription_notify_via_reaches_both_real_channels(
         download_url=None,
         metadata_override=None,
         notification_channel=None,
-        notification_webhooks={"wechat": WECHAT_WEBHOOK, "feishu": FEISHU_WEBHOOK},
         processing_options={"calibrate": True, "summarize": True, "chapters": False},
     )
 
@@ -349,6 +387,7 @@ def test_local_upload_terminal_producer_sends_public_share_url_and_source_label(
         media_path="/not-in-notification/persistent/source.mp4",
         byte_size=42,
         sha256="a" * 64,
+        notify_targets={"wechat": TENANT_WECHAT, "feishu": TENANT_FEISHU},
     )
     cm.save_cache(
         platform="local_upload",
@@ -361,9 +400,11 @@ def test_local_upload_terminal_producer_sends_public_share_url_and_source_label(
     with cm._get_cursor() as cursor:
         cursor.execute(
             """INSERT INTO task_status
-               (task_id, view_token, url, platform, media_id, status, submitted_by)
-               VALUES (?, '', '', 'local_upload', ?, 'queued', 'alice')""",
-            (child_task_id, media_id),
+               (task_id, view_token, url, platform, media_id, status, submitted_by,
+                notify_targets)
+               VALUES (?, '', '', 'local_upload', ?, 'queued', 'alice', ?)""",
+            (child_task_id, media_id,
+             json.dumps({"wechat": TENANT_WECHAT, "feishu": TENANT_FEISHU})),
         )
     cm.update_task_status(root_task_id, TaskStatus.PROCESSING)
     cm.update_task_status(child_task_id, TaskStatus.PROCESSING)
@@ -406,7 +447,10 @@ def test_local_upload_terminal_producer_sends_public_share_url_and_source_label(
 
 
 def test_failed_terminal_sends_one_failure_payload_per_channel(cm, delivery):
-    task_id = cm.create_task(url="https://example.test/fail")["task_id"]
+    task_id = cm.create_task(
+        url="https://example.test/fail",
+        notify_targets={"wechat": TENANT_WECHAT, "feishu": TENANT_FEISHU},
+    )["task_id"]
     cm.update_task_status(task_id, TaskStatus.PROCESSING)
     assert finalize_terminal_status_and_notify(
         task_id,

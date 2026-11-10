@@ -405,6 +405,7 @@ class CacheManager:
                     processing_options TEXT,
                     submitted_by TEXT,
                     terminal_snapshot TEXT,
+                    notify_targets TEXT,
                     FOREIGN KEY (cache_id) REFERENCES video_cache(id)
                 )
             ''')
@@ -617,6 +618,12 @@ class CacheManager:
                     cursor.execute("ALTER TABLE task_status ADD COLUMN chapters_status TEXT")
                     logger.info("chapters_status 字段添加成功")
 
+                cursor.execute("PRAGMA table_info(task_status)")
+                columns = [col[1] for col in cursor.fetchall()]
+                if 'notify_targets' not in columns:
+                    logger.info("Adding notify_targets field to task_status table")
+                    cursor.execute("ALTER TABLE task_status ADD COLUMN notify_targets TEXT")
+
                 if all(c in columns for c in ('calibration_status', 'summary_status', 'error_message')):
                     logger.debug("数据库结构正常，无需迁移")
 
@@ -667,6 +674,7 @@ class CacheManager:
                 processing_options TEXT,
                 submitted_by TEXT,
                 terminal_snapshot TEXT,
+                notify_targets TEXT,
                 FOREIGN KEY (cache_id) REFERENCES video_cache(id)
             )
         ''')
@@ -704,6 +712,7 @@ class CacheManager:
                 row_map.get("processing_options"),
                 row_map.get("submitted_by"),
                 row_map.get("terminal_snapshot"),
+                row_map.get("notify_targets"),
             ]
 
             cursor.execute('''
@@ -711,8 +720,8 @@ class CacheManager:
                 (task_id, view_token, url, download_url, platform, media_id, use_speaker_recognition,
                  status, progress, title, author, created_at, completed_at, cache_id, llm_config,
                  error_message, calibration_status, summary_status, chapters_status,
-                 processing_options, submitted_by, terminal_snapshot)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 processing_options, submitted_by, terminal_snapshot, notify_targets)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', new_row_data)
 
         logger.info(f"数据库迁移完成，恢复了 {len(existing_data)} 条记录")
@@ -900,6 +909,7 @@ class CacheManager:
         byte_size: Optional[int] = None,
         sha256: Optional[str] = None,
         notification_webhooks: Optional[Dict[str, Any]] = None,
+        notify_targets: Optional[Dict[str, str]] = None,
         enqueue: Optional[Callable[[Dict[str, Any]], None]] = None,
         now: Optional[datetime.datetime] = None,
     ) -> Dict[str, Any]:
@@ -916,6 +926,10 @@ class CacheManager:
         task_id = task_id or self.generate_task_id()
         view_token = f"upload_{secrets.token_urlsafe(32)}"
         options_json = json.dumps(processing_options or {}, ensure_ascii=False, sort_keys=True)
+        effective_notify_targets = (
+            notify_targets if notify_targets is not None
+            else notification_webhooks or {}
+        )
         with self._get_cursor() as cursor:
             cursor.execute("BEGIN IMMEDIATE")
             cursor.execute("SELECT * FROM local_uploads WHERE upload_id = ?", (upload_id,))
@@ -930,9 +944,13 @@ class CacheManager:
             cursor.execute(
                 """INSERT INTO task_status
                    (task_id, view_token, url, platform, media_id, status, title,
-                    processing_options, submitted_by)
-                   VALUES (?, '', ?, 'local_upload', ?, 'queued', ?, ?, ?)""",
-                (task_id, source_url or "", media_id, title, options_json, upload["owner_user_id"]),
+                    processing_options, submitted_by, notify_targets)
+                   VALUES (?, '', ?, 'local_upload', ?, 'queued', ?, ?, ?, ?)""",
+                (
+                    task_id, source_url or "", media_id, title, options_json,
+                    upload["owner_user_id"],
+                    json.dumps(effective_notify_targets, sort_keys=True),
+                ),
             )
             cursor.execute(
                 """UPDATE local_uploads
@@ -956,7 +974,7 @@ class CacheManager:
                     "url": source_url or "",
                     "platform": "local_upload",
                     "processing_options": json.loads(options_json),
-                    "notification_webhooks": dict(notification_webhooks or {}),
+                    "notification_webhooks": dict(effective_notify_targets),
                 })
             return record
 
@@ -2799,7 +2817,8 @@ class CacheManager:
                     download_url: str = None, platform: str = None,
                     media_id: str = None, processing_options: Optional[dict] = None,
                     submitted_by: Optional[str] = None,
-                    task_id: Optional[str] = None) -> Dict[str, str]:
+                    task_id: Optional[str] = None,
+                    notify_targets: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         """
         创建新任务，相同URL或相同(platform, media_id)会复用view_token
 
@@ -2888,11 +2907,17 @@ class CacheManager:
                 cursor.execute('''
                     INSERT INTO task_status
                     (task_id, view_token, url, download_url, use_speaker_recognition,
-                     status, platform, media_id, processing_options, submitted_by)
-                    VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
-                ''', (task_id, view_token, url, download_url, use_speaker_recognition,
-                      platform, media_id, json.dumps(normalized_options, sort_keys=True),
-                      submitted_by))
+                     status, platform, media_id, processing_options, submitted_by, notify_targets)
+                    VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)
+                ''', (
+                    task_id, view_token, url, download_url, use_speaker_recognition,
+                    platform, media_id, json.dumps(normalized_options, sort_keys=True),
+                    submitted_by,
+                    json.dumps(
+                        notify_targets if notify_targets is not None else {},
+                        sort_keys=True,
+                    ),
+                ))
 
             logger.info(f"任务创建成功: {task_id}, view_token: {view_token}, download_url: {download_url}")
             return {
@@ -3625,34 +3650,39 @@ class CacheManager:
             with self._get_cursor() as cursor:
                 cursor.execute("SELECT * FROM task_status WHERE task_id = ?", (task_id,))
                 row = cursor.fetchone()
-                
-                if row:
-                    task = dict(row)
-                    for field in ("processing_options", "terminal_snapshot"):
-                        if task.get(field):
-                            try:
-                                task[field] = json.loads(task[field])
-                            except (TypeError, json.JSONDecodeError):
-                                logger.warning("Invalid {} JSON for task {}", field, task_id)
-                                task[field] = None
-                    if task.get("progress") is not None:
-                        try:
-                            progress = json.loads(task["progress"])
-                        except (TypeError, json.JSONDecodeError):
-                            logger.warning("Invalid progress JSON for task {}", task_id)
-                            progress = None
-                        if not isinstance(progress, dict):
-                            logger.warning(
-                                "Progress JSON is not an object for task {}", task_id
-                            )
-                            progress = None
-                        task["progress"] = progress
-                    return task
-                return None
-                
         except Exception as e:
             logger.error(f"获取任务信息失败: {e}")
             return None
+
+        if row is None:
+            return None
+        task = dict(row)
+        for field in ("processing_options", "terminal_snapshot"):
+            if task.get(field):
+                try:
+                    task[field] = json.loads(task[field])
+                except (TypeError, json.JSONDecodeError):
+                    logger.warning("Invalid {} JSON for task {}", field, task_id)
+                    task[field] = None
+        if task.get("notify_targets") is not None:
+            task["notify_targets"] = json.loads(task["notify_targets"])
+            if not isinstance(task["notify_targets"], dict):
+                raise ValueError(
+                    f"notify_targets must be a JSON object for task {task_id}"
+                )
+        if task.get("progress") is not None:
+            try:
+                progress = json.loads(task["progress"])
+            except (TypeError, json.JSONDecodeError):
+                logger.warning("Invalid progress JSON for task {}", task_id)
+                progress = None
+            if not isinstance(progress, dict):
+                logger.warning(
+                    "Progress JSON is not an object for task {}", task_id
+                )
+                progress = None
+            task["progress"] = progress
+        return task
     
     def get_task_by_view_token(self, view_token: str) -> Optional[Dict[str, Any]]:
         """

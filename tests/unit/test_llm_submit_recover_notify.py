@@ -27,6 +27,7 @@ def test_compensation_drain_routes_to_submitting_users_wechat_webhook(
     task_id = cache_manager.create_task(
         url="https://example.com/video",
         submitted_by=user_id,
+        notify_targets={"wechat": webhook},
     )["task_id"]
     cache_manager.update_task_status(task_id, TaskStatus.PROCESSING)
 
@@ -36,9 +37,6 @@ def test_compensation_drain_routes_to_submitting_users_wechat_webhook(
         context,
         "get_runtime",
         lambda: SimpleNamespace(user_manager=user_manager),
-    )
-    monkeypatch.setattr(
-        terminal_status, "_lookup_audit_wechat_webhook", lambda _task_id: None
     )
     router = MagicMock()
     router.notify_task_status.return_value = {"wechat": True}
@@ -51,7 +49,7 @@ def test_compensation_drain_routes_to_submitting_users_wechat_webhook(
     )
 
     assert still_pending == set()
-    user_manager.get_user_by_id.assert_called_once_with(user_id)
+    user_manager.get_user_by_id.assert_not_called()
     router.notify_task_status.assert_called_once()
     assert router.notify_task_status.call_args.kwargs["webhooks"] == {
         "wechat": webhook

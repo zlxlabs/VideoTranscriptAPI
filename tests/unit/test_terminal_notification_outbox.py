@@ -39,14 +39,17 @@ def cm(tmp_path):
 
 
 def _new_task(cm, url="https://example.com/v1", submitted_by=None):
-    return cm.create_task(url=url, submitted_by=submitted_by)["task_id"]
+    return cm.create_task(
+        url=url,
+        submitted_by=submitted_by,
+        notify_targets={"feishu": "hook"},
+    )["task_id"]
 
 
 def _bind_declared_targets(monkeypatch):
     """Give tasks a declared non-legacy submitter with tenant-only targets so
     replay deliveries route to a real (non-zero) target set."""
     from src.video_transcript_api.api import context
-    from src.video_transcript_api.api.services import terminal_status
 
     user_manager = type("UM", (), {})()
     user_manager.get_user_by_id = lambda _uid: {
@@ -57,9 +60,6 @@ def _bind_declared_targets(monkeypatch):
     runtime = type("RT", (), {})()
     runtime.user_manager = user_manager
     monkeypatch.setattr(context, "get_runtime", lambda: runtime)
-    monkeypatch.setattr(
-        terminal_status, "_lookup_audit_wechat_webhook", lambda _tid: None,
-    )
 
 
 def _accepted_router():
@@ -365,7 +365,7 @@ class TestSuccessWithoutPersistedResultDegrades:
         self, cm, monkeypatch,
     ):
         router, notifier = self._degraded_feishu_router(monkeypatch)
-        task_id = _new_task(cm)
+        task_id = _new_task(cm, url="https://example.com/inline-degraded")
         cm.update_task_status(task_id, TaskStatus.PROCESSING)
 
         records, sink_id = _collect_warning_lines()
@@ -570,7 +570,7 @@ class TestSuccessNotificationOrder:
         assert events == ["terminal"]
         router.send_long_text.assert_not_called()
         kwargs = router.notify_task_status.call_args.kwargs
-        assert kwargs["channel_name"] == "feishu"
+        assert kwargs["channel_name"] is None
         assert kwargs["webhooks"] == {"feishu": "hook"}
         assert kwargs["completion_body"] is not None
         assert kwargs["completion_receipt"].startswith("✅ [#")

@@ -18,10 +18,10 @@ metadata:
         description: 给用户点的公网地址（可选）。不设时用 BASE_URL。例：https://vt.example.com
         required: false
       - name: VIDEO_TRANSCRIPT_API_WECHAT_WEBHOOK
-        description: 企业微信 webhook 默认值（可选）。--webhook 传参时覆盖
+        description: 企业微信 webhook 默认值（可选）。--webhook 传参时覆盖，--no-notify 禁止发送
         required: false
       - name: VIDEO_TRANSCRIPT_API_FEISHU_WEBHOOK
-        description: 飞书 webhook 默认值（可选）。--feishu-webhook 传参时覆盖
+        description: 飞书 webhook 默认值（可选）。--feishu-webhook 传参时覆盖，--no-notify 禁止发送
         required: false
   hermes:
     required_environment_variables:
@@ -121,10 +121,11 @@ python3 scripts/videotranscript.py submit <url> [options]
 - `--speaker`：启用说话人识别（FunASR 引擎，结果会按说话人分段，但更慢）
 - `--webhook URL`：完成后推送企业微信（覆盖服务端默认 webhook）
 - `--feishu-webhook URL`：完成后推送飞书（覆盖服务端默认飞书 webhook）
+- `--no-notify`：本任务完全不发送 IM 通知；优先于 `--webhook`、`--feishu-webhook` 和两个通知 webhook 环境变量
 - `--title "..."`, `--author "..."`, `--description "..."`：覆盖自动解析的元数据
 - `--download-url URL`：绕过平台解析，用直链下载音视频
 
-返回 `view_token`（和 task_id，可忽略）。**只需要记住 `view_token`**，后续查进度和拉结果都用它。
+返回 `view_token`（和 task_id，可忽略）。**只需要记住 `view_token`**，后续查进度和拉结果都用它。若用户要求不收通知，提交时加 `--no-notify`；脚本会发送 `notify: "none"`，不会把 webhook 环境变量注入请求。
 
 #### 什么时候该加 `--speaker`
 
