@@ -34,6 +34,11 @@ WECHAT_MODULE = "src.video_transcript_api.utils.notifications.wechat"
 RENDERING_MODULE = "src.video_transcript_api.utils.rendering"
 WECHAT_WEBHOOK = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=e2e-wechat"
 FEISHU_WEBHOOK = "https://open.feishu.cn/open-apis/bot/v2/hook/e2e-feishu"
+# Tenant-declared targets are distinct from the global group so a leak to the
+# global webhooks is observable at the HTTP boundary.
+TENANT_WECHAT = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=e2e-tenant-w"
+TENANT_FEISHU = "https://open.feishu.cn/open-apis/bot/v2/hook/e2e-tenant-f"
+TENANT_USER = "tenant-user-1"
 BASE_URL = "https://share.example.test"
 TITLE = "E2E 贯通标题"
 PERSISTED_SUMMARY = (
@@ -131,7 +136,7 @@ def delivery(monkeypatch):
 
 def _persist_pending_success(cm, url):
     """Persist one producer snapshot and outbox row through SQLite."""
-    created = cm.create_task(url=url)
+    created = cm.create_task(url=url, submitted_by=TENANT_USER)
     task_id = created["task_id"]
     cm.update_task_status(task_id, TaskStatus.PROCESSING)
     assert finalize_terminal_status_and_notify(
@@ -160,6 +165,20 @@ def _wait_payloads(delivery, count):
     assert delivery["wait_for_payloads"](count), delivery["records"]
     with delivery["condition"]:
         return list(delivery["records"])
+
+
+def _bind_tenant_user(monkeypatch):
+    """Give the tenant user declared non-global targets for the replay path."""
+    from src.video_transcript_api.api import context
+
+    user_manager = type("UM", (), {})()
+    user_manager.get_user_by_id = lambda _user_id: {
+        "user_id": TENANT_USER, "is_legacy": False,
+        "wechat_webhook": TENANT_WECHAT, "feishu_webhook": TENANT_FEISHU,
+    }
+    runtime = type("RT", (), {})()
+    runtime.user_manager = user_manager
+    monkeypatch.setattr(context, "get_runtime", lambda: runtime)
 
 
 def _payload_content(url, payload):
@@ -223,18 +242,25 @@ def test_accepted_upload_link_reaches_final_http_payload_with_public_capability(
 
 @pytest.mark.parametrize("entry_point", ["inline", "replay"])
 def test_success_snapshot_reaches_final_http_payloads_in_order(
-    cm, delivery, entry_point,
+    cm, delivery, entry_point, monkeypatch,
 ):
     original_url = f"https://youtube.com/watch?v=e2e-{entry_point}&track=original"
     task_id, view_token = _persist_pending_success(cm, original_url)
     if entry_point == "inline":
         deliver_terminal_notification(
             task_id, TaskStatus.SUCCESS, cache_manager=cm, router=delivery["router"],
+            webhooks={"wechat": TENANT_WECHAT, "feishu": TENANT_FEISHU},
         )
     else:
+        _bind_tenant_user(monkeypatch)
         assert deliver_pending_terminal_notifications(cm, router=delivery["router"]) == 1
 
     _assert_ordered_summary_receipt(delivery, task_id, original_url, view_token)
+    leaked = [
+        url for url in delivery["records"]
+        if "key=e2e-wechat" in url or "hook/e2e-feishu" in url
+    ]
+    assert leaked == []
     assert cm.is_terminal_notification_pending(task_id) is False
 
 
@@ -351,6 +377,7 @@ def test_local_upload_terminal_producer_sends_public_share_url_and_source_label(
     ) is True
     cm.revoke_local_upload(upload["upload_id"])
 
+    _bind_tenant_user(monkeypatch)
     deliver_pending_terminal_notifications(cm, router=delivery["router"])
 
     records = _wait_payloads(delivery, 4)
@@ -395,6 +422,7 @@ def test_failed_terminal_sends_one_failure_payload_per_channel(cm, delivery):
         error_message="fixture failure",
         cache_manager=cm,
         router=delivery["router"],
+        webhooks={"wechat": TENANT_WECHAT, "feishu": TENANT_FEISHU},
     )
 
     records = _wait_payloads(delivery, 2)

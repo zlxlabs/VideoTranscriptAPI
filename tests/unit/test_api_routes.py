@@ -134,10 +134,8 @@ def mock_task_queue():
 
 @pytest.fixture()
 def mock_send_notification():
-    """Patch wechat notification sending."""
-    with patch(
-        "video_transcript_api.api.routes.tasks.send_view_link_wechat"
-    ) as mock:
+    """Patch the notification router so no real channel is touched."""
+    with patch("video_transcript_api.api.routes.tasks.get_notification_router") as mock:
         yield mock
 
 
@@ -312,10 +310,11 @@ class TestTranscribeEndpoint:
         router.channels = [RecordingChannel()]
         monkeypatch.setattr(tasks, "get_notification_router", lambda: router)
 
-        response = client.post(
-            "/api/transcribe",
-            json={"url": "https://www.youtube.com/watch?v=abc123"},
-        )
+        payload = {
+            "url": "https://www.youtube.com/watch?v=abc123",
+            "wechat_webhook": "https://qyapi.weixin.qq.com/tenant",
+        }
+        response = client.post("/api/transcribe", json=payload)
 
         assert response.status_code == 200
         heading = sent["content"].splitlines()[0]

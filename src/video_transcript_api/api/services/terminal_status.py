@@ -217,7 +217,13 @@ def deliver_terminal_notification(
                 completion_body=completion_body,
                 completion_receipt=completion_receipt,
             )
-            accepted = _notification_accepted(result)
+            zero_target = isinstance(result, dict) and result == {}
+            if zero_target:
+                logger.info(
+                    f"NOTIFY_TARGET_SKIPPED task_id={task_id}: "
+                    "no declared notify target, outbox row processed"
+                )
+            accepted = _notification_accepted(result, zero_target=zero_target)
         except Exception:
             logger.exception(
                 f"status notification failed (terminal already persisted): {task_id}"
@@ -321,20 +327,27 @@ def _render_success_body(task, view_url, status):
     )
 
 
-def _notification_accepted(result) -> bool:
-    """Accept only an explicit channel ``True`` for the outbox sent flag.
+def _notification_accepted(result, *, zero_target: bool = False) -> bool:
+    """Decide the outbox sent/skip disposition for a router result.
 
-    The flag means that a channel explicitly reported acceptance. Truthy
-    objects or strings can represent queued or other intermediate states;
-    treating them as success would prevent the outbox from retrying the row.
-    """
+    Returns True only when EVERY declared channel explicitly accepted the
+    enqueue (any single non-True value keeps the row pending for retry; the
+    retry re-sends to already-accepted channels, an accepted semantic).
+    Truthy objects or strings can represent queued or other intermediate
+    states; treating them as success would prevent the outbox from retrying
+    the row. A zero-target task (no declared channel had an address) is
+    permanently skipped, not retried (C1)."""
+    if zero_target:
+        return True
     if not isinstance(result, dict):
         logger.warning(
             f"terminal notification result rejected: "
             f"type={type(result).__name__} value={result!r}"
         )
         return False
-    return any(value is True for value in result.values())
+    if not result:
+        return False
+    return all(value is True for value in result.values())
 
 
 DISPATCH_POLL_SECONDS = 0.5
@@ -414,7 +427,13 @@ def deliver_pending_terminal_notifications(
                     completion_body=completion_body,
                     completion_receipt=completion_receipt,
                 )
-                accepted = _notification_accepted(result)
+                zero_target = isinstance(result, dict) and result == {}
+                if zero_target:
+                    logger.info(
+                        f"NOTIFY_TARGET_SKIPPED task_id={task_id}: "
+                        "no declared notify target, outbox row processed"
+                    )
+                accepted = _notification_accepted(result, zero_target=zero_target)
             except Exception:
                 logger.exception(
                     f"dispatcher status notification failed: {task_id}"
@@ -422,7 +441,8 @@ def deliver_pending_terminal_notifications(
             else:
                 if accepted:
                     cache_manager.mark_terminal_notification_sent(task_id)
-                    sent += 1
+                    if not zero_target:
+                        sent += 1
     _warn_repeatedly_failing_rows(cache_manager)
     return sent
 
@@ -534,26 +554,50 @@ def _resolve_view_url(cache_manager, task_id: str, task: Optional[dict] = None) 
 
 
 def _resolve_delivery_webhooks(task: dict) -> Optional[Dict[str, str]]:
-    """Resolve notify targets without request context: audit log, user, then global."""
-    task_id = task.get("task_id")
-    audit_webhook = _lookup_audit_wechat_webhook(task_id)
-    webhooks = {"wechat": audit_webhook} if audit_webhook else {}
+    """Resolve notify targets without request context: audit log, then user.
+
+    C1 stop-leak: for a NON-legacy submitter, any address equal to the global
+    config group webhook is stripped (historic reruns wrote the global address
+    into the audit log); legacy_user is the operator themselves and keeps the
+    global targets. An empty result means zero declared targets.
+    """
+    from ..context import get_runtime
+    from ...utils.logging import load_config
+
+    config = load_config()
+    global_webhooks = {
+        "wechat": config.get("wechat", {}).get("webhook"),
+        "feishu": config.get("feishu", {}).get("webhook"),
+    }
 
     submitted_by = task.get("submitted_by")
+    user = None
     if submitted_by:
         try:
-            from ..context import get_runtime
             user = get_runtime().user_manager.get_user_by_id(submitted_by)
         except RuntimeError:
             user = None
         except Exception:
             logger.exception("failed to resolve user webhook for terminal notify")
             user = None
-        if user:
-            if not audit_webhook and user.get("wechat_webhook"):
-                webhooks["wechat"] = user["wechat_webhook"]
-            if user.get("feishu_webhook"):
-                webhooks["feishu"] = user["feishu_webhook"]
+
+    is_legacy = bool(user and user.get("is_legacy"))
+
+    task_id = task.get("task_id")
+    audit_webhook = _lookup_audit_wechat_webhook(task_id)
+    webhooks = {"wechat": audit_webhook} if audit_webhook else {}
+    if user:
+        if not audit_webhook and user.get("wechat_webhook"):
+            webhooks["wechat"] = user["wechat_webhook"]
+        if user.get("feishu_webhook"):
+            webhooks["feishu"] = user["feishu_webhook"]
+
+    if not is_legacy:
+        webhooks = {
+            channel: address
+            for channel, address in webhooks.items()
+            if address and address != global_webhooks.get(channel)
+        }
     return webhooks or None
 
 

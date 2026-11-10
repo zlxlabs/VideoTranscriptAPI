@@ -1,14 +1,12 @@
 """ASR 宕机/恢复告警的投递路径行为测试。
 
-ASR 告警是全仓唯一不走 per-user webhook 的通知路径：
-``ASRMonitor._send_notification`` 直接取全局 router 并调用
-``send_text(message)``，不传 ``webhooks``，因此 router 的
-``_resolve_webhook`` 回落到通道自身在 ``config.jsonc`` 里读到的全局
-``wechat.webhook``。
+ASR 告警是全仓唯一的运维告警路径：``ASRMonitor._send_notification`` 取全局
+router 并调用显式运维入口 ``send_ops_alert(message)``（C1 止血后租户通知
+不再回落全局，运维告警是唯一允许使用 config.jsonc 全局 webhook 的路径）。
 
 本文件锁定的可观察事实：
-1. 宕机告警最终落到全局企微通道，且 router 收到的 ``webhook``/``webhooks``
-   参数表明走的是「config 全局回落」而非 per-user 覆盖；
+1. 宕机告警最终落到全局企微通道，且 router 收到的调用是显式运维入口
+   ``send_ops_alert``（不再依赖隐式全局回落）；
 2. 恢复通知同样落到全局企微通道；
 3. 去抖窗口内的重复失败不再发送（注入时钟，不 sleep）。
 
@@ -154,13 +152,13 @@ def global_alert_env():
     # 用记录器替换真实企微 sender（WeComChannel 是 router 唯一的企微通道）
     router.channels[0]._notifier = sender
 
-    real_send_text = router.send_text
+    real_send_ops_alert = router.send_ops_alert
 
-    def spy_send_text(content, *args, **kwargs):
-        router_send_calls.append((args, kwargs))
-        return real_send_text(content, *args, **kwargs)
+    def spy_send_ops_alert(content, *args, **kwargs):
+        router_send_calls.append(((content,) + tuple(args), kwargs))
+        return real_send_ops_alert(content, *args, **kwargs)
 
-    router.send_text = spy_send_text
+    router.send_ops_alert = spy_send_ops_alert
 
     with patch(f"{NOTIFICATIONS_MODULE}.get_notification_router", return_value=router):
         yield router, sender, router_send_calls
@@ -179,7 +177,7 @@ def _monitor(notifier=None, debounce_seconds=1800):
 class TestAlertDeliveryTarget:
     """宕机告警 / 恢复通知的收件方 = config.jsonc 的全局企微 webhook。"""
 
-    def test_down_alert_falls_back_to_global_wecom_webhook(self, global_alert_env):
+    def test_down_alert_targets_global_wecom_webhook(self, global_alert_env):
         router, sender, router_send_calls = global_alert_env
         monitor = _monitor()
 
@@ -190,16 +188,15 @@ class TestAlertDeliveryTarget:
         assert len(sender.calls) == 1
         assert "CapsWriter" in sender.calls[0]
 
-        # 走的是 config 全局回落路径：router 未收到任何 per-user 覆盖，
+        # 走显式运维入口：asr_monitor 调 send_ops_alert，不传 per-user 覆盖；
         # 通道自身持有的 webhook 正是 config.jsonc 的全局 key。
         assert len(router_send_calls) == 1
         args, kwargs = router_send_calls[0]
-        assert args == ()
-        assert kwargs.get("webhook") is None
-        assert kwargs.get("webhooks") is None
+        assert len(args) == 1 and "CapsWriter" in args[0]
+        assert kwargs == {}
         assert sender.webhook == GLOBAL_WEBHOOK
 
-    def test_recovery_alert_falls_back_to_global_wecom_webhook(self, global_alert_env):
+    def test_recovery_alert_targets_global_wecom_webhook(self, global_alert_env):
         router, sender, router_send_calls = global_alert_env
         monitor = _monitor()
 
@@ -211,9 +208,8 @@ class TestAlertDeliveryTarget:
         assert "恢复" in sender.calls[1]
 
         args, kwargs = router_send_calls[1]
-        assert args == ()
-        assert kwargs.get("webhook") is None
-        assert kwargs.get("webhooks") is None
+        assert len(args) == 1 and "恢复" in args[0]
+        assert kwargs == {}
 
 
 class TestPatchTargetReliability:
@@ -233,7 +229,14 @@ class TestPatchTargetReliability:
         # 延迟导入的函数源码里能看到实际取 router 的那一行
         src = inspect.getsource(ASRMonitor._send_notification)
         assert "from .notifications import get_notification_router" in src
-        assert "self.notifier.send_text(message)" in src
+        assert "self.notifier.send_ops_alert(message)" in src
+
+    def test_ops_alert_entry_is_named_send_ops_alert(self):
+        """租户/运维分区锁：asr_monitor 必须走显式 send_ops_alert 入口，
+        不允许再借用租户方法 send_text（那是 C1 止血要堵的隐式回落形态）。"""
+        src = inspect.getsource(ASRMonitor._send_notification)
+        assert "send_ops_alert" in src
+        assert "send_text(message)" not in src
 
 
 class TestDebounce:

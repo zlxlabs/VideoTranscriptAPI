@@ -263,10 +263,15 @@ class FeishuChannel:
         return bool(self.webhook)
 
     def send_text(self, content: str, webhook: str = None) -> bool:
-        """Send plain text via Feishu webhook bot."""
-        target = webhook or self.webhook
+        """Send plain text via Feishu webhook bot.
+
+        ``webhook`` is the ONLY target: tenant sends must pass the task's
+        declared address, and no channel-level global fallback exists (C1
+        stop-leak). ``None`` means the caller has no declared target.
+        """
+        target = webhook
         if not target:
-            logger.warning("[feishu] No webhook configured, skipping send_text")
+            logger.warning("[feishu] No declared webhook for send_text, skipping")
             return False
         if not content or not content.strip():
             logger.warning("[feishu] Empty content, skipping send_text")
@@ -284,10 +289,13 @@ class FeishuChannel:
             return False
 
     def send_rich(self, content: str, webhook: str = None, title: str = "通知", **kwargs) -> bool:
-        """Send rich content as Feishu card (accepts markdown)."""
-        target = webhook or self.webhook
+        """Send rich content as Feishu card (accepts markdown).
+
+        ``webhook`` is the ONLY target; no channel-level global fallback (C1
+        stop-leak)."""
+        target = webhook
         if not target:
-            logger.warning("[feishu] No webhook configured, skipping send_rich")
+            logger.warning("[feishu] No declared webhook for send_rich, skipping")
             return False
         if not content or not content.strip():
             logger.warning("[feishu] Empty content, skipping send_rich")
@@ -346,24 +354,38 @@ class WeComChannel:
         return "wechat"
 
     @property
+    def webhook(self) -> Optional[str]:
+        """Global group webhook (ops-alert target only, never a tenant fallback)."""
+        return self._notifier.webhook
+
+    @property
     def is_enabled(self) -> bool:
         return bool(self._notifier.webhook)
 
-    def send_text(self, content: str, webhook: str = None, **kwargs) -> bool:
-        """Send text via WeCom (delegates to WechatNotifier)."""
+    def _notifier_for(self, webhook: str) -> "WechatNotifier":
+        """Notifier bound to the declared tenant webhook (shared instance when
+        it equals the global one, a fresh wrapper otherwise)."""
         if webhook and webhook != self._notifier.webhook:
             from .wechat import WechatNotifier
-            notifier = WechatNotifier(webhook)
-            return notifier.send_text(content)
-        return self._notifier.send_text(content)
+            return WechatNotifier(webhook)
+        return self._notifier
+
+    def send_text(self, content: str, webhook: str = None, **kwargs) -> bool:
+        """Send text via WeCom to the declared webhook; no global fallback (C1)."""
+        if not webhook:
+            logger.warning("[wechat] No declared webhook for send_text, skipping")
+            return False
+        return self._notifier_for(webhook).send_text(content)
 
     def send_rich(self, content: str, webhook: str = None, **kwargs) -> bool:
-        """Send rich content via WeCom markdown (delegates to WechatNotifier)."""
-        if webhook and webhook != self._notifier.webhook:
-            from .wechat import WechatNotifier
-            notifier = WechatNotifier(webhook)
-            return notifier.send_markdown_v2(content, skip_risk_control=True)
-        return self._notifier.send_markdown_v2(content, skip_risk_control=True)
+        """Send rich content via WeCom markdown to the declared webhook; no
+        global fallback (C1)."""
+        if not webhook:
+            logger.warning("[wechat] No declared webhook for send_rich, skipping")
+            return False
+        return self._notifier_for(webhook).send_markdown_v2(
+            content, skip_risk_control=True,
+        )
 
     def notify_task_status(
         self,
@@ -380,15 +402,10 @@ class WeComChannel:
         completion_receipt: str = None,
     ) -> bool:
         """Submit full status content before an optional WeCom receipt."""
-        if webhook and webhook != self._notifier.webhook:
-            from .wechat import WechatNotifier
-            notifier = WechatNotifier(webhook)
-            return notifier.notify_task_status(
-                url, status, error, title, author, transcript,
-                view_url=view_url, task_id=task_id, completion_body=completion_body,
-                completion_receipt=completion_receipt,
-            )
-        return self._notifier.notify_task_status(
+        if not webhook:
+            logger.warning("[wechat] No declared webhook for notify_task_status, skipping")
+            return False
+        return self._notifier_for(webhook).notify_task_status(
             url, status, error, title, author, transcript,
             view_url=view_url, task_id=task_id, completion_body=completion_body,
             completion_receipt=completion_receipt,

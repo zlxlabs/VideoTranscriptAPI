@@ -63,8 +63,50 @@ class UserManager:
         self._users_data = {}
         self._lock = threading.Lock()
         self._load_users_config()
+        self._log_notify_profiles()
         
         logger.info(f"用户管理器初始化完成，配置文件: {self.users_config_path}")
+    
+    def _log_notify_profiles(self):
+        """按用户打一行 NOTIFY_PROFILE（不含地址），供部署后核对通知渠道 (C1)。
+
+        channels 语义与 C1 后的投递行为一致：多用户非 legacy 用户的渠道由
+        自身 webhook 配置决定，空配置 = 不发；legacy 单 token 回退用户保留
+        全局目标。reload_config 热更新后同样重打。
+        """
+        with self._lock:
+            users = list(self._users_data.values())
+        if users:
+            for user_info in users:
+                channels = self._notify_channels_for(user_info.get("wechat_webhook"), user_info.get("feishu_webhook"))
+                logger.info(
+                    f"NOTIFY_PROFILE user_id={user_info.get('user_id')} channels={channels}"
+                )
+            return
+        fallback_wechat = self.fallback_config.get("wechat")
+        fallback_feishu = self.fallback_config.get("feishu")
+        # fallback_config 的结构合法性由 config 校验器（load_and_validate_config）
+        # 负责，本方法只读不判错：非 dict 的段按未配置处理，不抢先炸出与
+        # 真实原因无关的 AttributeError。
+        wechat_webhook = (
+            fallback_wechat.get("webhook") if isinstance(fallback_wechat, dict) else None
+        )
+        feishu_webhook = (
+            fallback_feishu.get("webhook") if isinstance(fallback_feishu, dict) else None
+        )
+        logger.info(
+            f"NOTIFY_PROFILE user_id=legacy_user "
+            f"channels={self._notify_channels_for(wechat_webhook, feishu_webhook)}"
+        )
+
+    @staticmethod
+    def _notify_channels_for(wechat_webhook, feishu_webhook) -> list:
+        channels = []
+        if wechat_webhook:
+            channels.append("wechat")
+        if feishu_webhook:
+            channels.append("feishu")
+        return channels
     
     @staticmethod
     def _validate_users(config_data: Any) -> Dict[str, Dict[str, Any]]:
@@ -148,6 +190,7 @@ class UserManager:
         with self._lock:
             validated = self._read_validated_users(allow_missing=False)
             self._users_data = validated
+        self._log_notify_profiles()
         return True
     
     def validate_token(self, token: str) -> Optional[Dict[str, Any]]:
