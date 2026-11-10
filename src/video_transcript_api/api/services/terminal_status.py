@@ -399,17 +399,30 @@ def deliver_pending_terminal_notifications(
     sent = 0
     for row in rows:
         task_id = row["task_id"]
-        task = _prepare_local_upload_notification_task(
-            cache_manager, cache_manager.get_task_by_id(task_id) or {}
-        )
-        notify_status = (
-            TERMINAL_SUCCESS_STATUS
-            if row["status"] == TaskStatus.SUCCESS
-            else TERMINAL_FAILED_STATUS
-        )
-        error_for_notify = _compose_dispatcher_error(row, task)
-        webhooks = _task_notify_targets(task)
-        view_url = _resolve_view_url(cache_manager, task_id, task)
+        try:
+            task = _prepare_local_upload_notification_task(
+                cache_manager, cache_manager.get_task_by_id(task_id) or {}
+            )
+            notify_status = (
+                TERMINAL_SUCCESS_STATUS
+                if row["status"] == TaskStatus.SUCCESS
+                else TERMINAL_FAILED_STATUS
+            )
+            error_for_notify = _compose_dispatcher_error(row, task)
+            webhooks = _task_notify_targets(task)
+            view_url = _resolve_view_url(cache_manager, task_id, task)
+        except Exception:
+            # Poison-row isolation: one unreadable row (corrupt notify_targets
+            # JSON, missing local-upload mapping, ...) must not kill the whole
+            # replay round for every other user's pending rows. Mark the
+            # attempt so _warn_repeatedly_failing_rows keeps it visible and
+            # move on; the row itself stays pending (no fake "sent", no
+            # fallback target) and is retried next round.
+            logger.exception(
+                f"NOTIFY_TARGETS_RESOLVE_FAILED task_id={task_id}"
+            )
+            cache_manager.mark_terminal_notification_attempted(task_id)
+            continue
         accepted = False
         with _DELIVERY_LOCK:
             if not cache_manager.is_terminal_notification_pending(task_id):

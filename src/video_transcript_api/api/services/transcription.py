@@ -578,7 +578,6 @@ async def process_task_queue():
                     download_url=download_url,
                     metadata_override=metadata_override,
                     notification_channel=notification_channel,
-                    notification_webhooks=dict(notification_webhooks),
                     processing_options=dict(processing_options),
                     local_media_path=local_media_path,
                     local_media_id=local_media_id,
@@ -592,7 +591,6 @@ async def process_task_queue():
                             download_url,
                             metadata_override,
                             notification_channel=notification_channel,
-                            notification_webhooks=notification_webhooks,
                             processing_options=processing_options,
                             preparsed_url=preparsed_url,
                             url_parse_attempted=url_parse_attempted,
@@ -947,7 +945,7 @@ def _handoff_to_llm_stage(
 def process_transcription(
     task_id, url, use_speaker_recognition=False, wechat_webhook=None,
     download_url=None, metadata_override=None, notification_channel=None,
-    notification_webhooks=None, processing_options=None, preparsed_url=None,
+    processing_options=None, preparsed_url=None,
     url_parse_attempted=False, local_media_path=None, local_media_id=None,
 ):
     """
@@ -961,7 +959,6 @@ def process_transcription(
         download_url: 实际下载地址（可选，如果提供则优先使用）
         metadata_override: 元数据覆盖（dict）
         notification_channel: 指定通知渠道（wechat/feishu/None=全部）
-        notification_webhooks: per-channel webhook dict {"wechat": "...", "feishu": "..."}
         processing_options: 处理深度开关 dict {"calibrate": bool, "summarize": bool}，
             None 时按全流程兜底（向后兼容旧调用方）
         preparsed_url: API 首次解析后的 ParsedURL；提供时复用其 canonical URL，

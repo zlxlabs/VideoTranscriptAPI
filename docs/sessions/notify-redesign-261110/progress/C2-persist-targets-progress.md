@@ -32,3 +32,10 @@
 - **本段结论**：完整 `make test` 通过，耗时 467 秒，3 个 skip；两个原 CI 上传生命周期用例单独通过。新任务含直接 CacheManager 上传受理均写非 NULL 目标，远端 ref 已核对。
 - **关键决策与已否决方案**：首轮 make test 中与旧行 fallback 相关的两个单元用例改为显式模拟 NULL 历史行或显式持久化新任务目标；没有给 runtime fixture 补 user_manager。
 - **下一步唯一动作**：主脑复核 PR #323 新 head 的远端 quality gate，确认 CI 不再因上传 notify_targets NULL 失败或挂起。
+
+## 里程碑 6：毒丸行隔离（gate run 42862079901 finding 修复）
+
+- **当前阶段**：修复终态补发批量循环的毒丸行问题，已通过窄验与受影响测试面。
+- **本段结论**：`deliver_pending_terminal_notifications` 把每行的「加载任务 + 解析目标 + 解析 view_url」纳入行内异常边界，失败打 `NOTIFY_TARGETS_RESOLVE_FAILED`、计一次 attempted 后 continue，行保持 pending；新增 HTTP 边界毒丸测试（3 行中间行损坏 JSON）锁死该行为。顺手删除 `process_transcription` 已废弃的 `notification_webhooks` 形参并同步调用方与两个测试。
+- **关键决策与已否决方案**：失败分支的 `mark_terminal_notification_attempted` 不加 `_DELIVERY_LOCK`——该 SQL 自带 `notified_at IS NULL` 守卫且只是观测计数器，无 check-then-send 竞态；不新增回退目标或重试逻辑。`process_transcription` 函数体保留局部变量名 `notification_webhooks`（现由 `load_task_targets` 赋值），避免超过 30 行牵动面。
+- **下一步唯一动作**：运行完整 `make test` 后推送并交付报告。

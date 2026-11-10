@@ -354,7 +354,6 @@ def test_process_transcription_notify_via_reaches_both_real_channels(
         download_url=None,
         metadata_override=None,
         notification_channel=None,
-        notification_webhooks={"wechat": WECHAT_WEBHOOK, "feishu": FEISHU_WEBHOOK},
         processing_options={"calibrate": True, "summarize": True, "chapters": False},
     )
 
