@@ -25,3 +25,10 @@
 - **本段结论**：`make test` exit 0，完成耗时 467 秒，pytest 进度到 100%，3 个既有测试 skip；两个上传生命周期失败用例也单独通过。完整 suite 未复现 45 分钟挂起。
 - **关键决策与已否决方案**：新任务的缺省收件目标固定为 `{}`；不通过给 RuntimeContext fixture 加 `user_manager` 或伪造 legacy 数据来绕过生产路径。
 - **下一步唯一动作**：推送修复提交并核对 PR #323 仍为 OPEN/ready（非 draft）。
+
+## 里程碑 5：续派修复交付完成
+
+- **当前阶段**：修复提交已推送，PR #323 保持 OPEN/ready，等待主脑下一轮 CI 复核。
+- **本段结论**：完整 `make test` 通过，耗时 467 秒，3 个 skip；两个原 CI 上传生命周期用例单独通过。新任务含直接 CacheManager 上传受理均写非 NULL 目标，远端 ref 已核对。
+- **关键决策与已否决方案**：首轮 make test 中与旧行 fallback 相关的两个单元用例改为显式模拟 NULL 历史行或显式持久化新任务目标；没有给 runtime fixture 补 user_manager。
+- **下一步唯一动作**：主脑复核 PR #323 新 head 的远端 quality gate，确认 CI 不再因上传 notify_targets NULL 失败或挂起。
