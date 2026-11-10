@@ -87,6 +87,22 @@ class TestSummaryBudgetLanguageCoefficient(unittest.TestCase):
     self.assertEqual(english_l.hard_cap, 19200)
 
 
+class TestSummaryBudgetFloor(unittest.TestCase):
+  def test_floor_is_half_of_target_min_per_band(self):
+    self.assertEqual(compute_summary_budget(4000).floor, 250)
+    self.assertEqual(compute_summary_budget(15000).floor, 1000)
+    self.assertEqual(compute_summary_budget(47466).floor, 2000)
+    self.assertEqual(compute_summary_budget(50000).floor, 2000)
+
+  def test_floor_scales_with_language_coefficient(self):
+    chinese = compute_summary_budget(50000, coefficient=1.0)
+    english = compute_summary_budget(50000, coefficient=2.4)
+    self.assertEqual(chinese.target_min, 4000)
+    self.assertEqual(chinese.floor, 2000)
+    self.assertEqual(english.target_min, 9600)
+    self.assertEqual(english.floor, 4800)
+
+
 class TestSummaryMaxTokensPolicy(unittest.TestCase):
   def test_should_send_max_tokens_only_for_disabled(self):
     self.assertTrue(should_send_max_tokens("disabled"))

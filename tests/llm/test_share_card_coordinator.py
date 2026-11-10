@@ -60,7 +60,9 @@ def _mock_llm_response(*args, **kwargs):
         response.structured_output = dict(VALID_CARD)
         response.text = ""
     elif task_type == "summary":
-        response.text = "## Overview\nGenerated summary body. " * 10
+        # Length must clear the English S-band floor (600 chars) so the floor
+        # guard does not turn this into a retry/FAILED round.
+        response.text = "## Overview\nGenerated summary body. " * 20
         response.structured_output = None
     else:
         response.text = "Calibrated long text. " * 100

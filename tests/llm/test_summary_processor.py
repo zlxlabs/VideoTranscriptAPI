@@ -287,6 +287,90 @@ class TestSummaryProcessor(unittest.TestCase):
     self.assertEqual(kwargs.get("reasoning_effort"), "high")
 
 
+class TestSummaryBelowFloorGuard(unittest.TestCase):
+  """Length floor guard: below-floor output is treated as truncation (issue #322).
+
+  L band input (47466 chars) gives target_min=4000 and floor=2000 with the
+  default Chinese coefficient (1.0). Reasoning effort is unset, so no
+  max_tokens is sent and token-based truncation detection never fires; the
+  floor is the only truncation signal under test.
+  """
+
+  FLOOR_INPUT = "a" * 47466  # L band: target_min=4000 -> floor=2000
+
+  def setUp(self):
+    self.language_patcher = patch.object(
+      summary_processor_module, "get_language", return_value="en"
+    )
+    self.language_patcher.start()
+    self.addCleanup(self.language_patcher.stop)
+    self.processor = _make_processor()
+    self.mock_call = self.processor.llm_client.call
+
+  def test_below_floor_retry_success_returns_retry_text(self):
+    self.mock_call.side_effect = [
+      LLMResponse(text="x" * 1457),
+      LLMResponse(text="y" * 6000),
+    ]
+
+    with patch.object(processor_module_logger, "warning") as warning_mock:
+      result = self.processor.process(text=self.FLOOR_INPUT, title="Test Title")
+
+    self.assertEqual(result.status, SummaryStatus.GENERATED)
+    self.assertEqual(result.text, "y" * 6000)
+    self.assertEqual(self.mock_call.call_count, 2)
+    joined = " ".join(str(call.args[0]) for call in warning_mock.call_args_list)
+    self.assertIn("summary_below_floor:", joined)
+    self.assertIn("actual=1457", joined)
+    self.assertIn("floor=2000", joined)
+    self.assertIn("target_min=4000", joined)
+    self.assertIn("attempt=1", joined)
+
+  def test_below_floor_retry_still_short_fails(self):
+    self.mock_call.side_effect = [
+      LLMResponse(text="x" * 1457),
+      LLMResponse(text="y" * 1457),
+    ]
+
+    with patch.object(processor_module_logger, "warning") as warning_mock:
+      result = self.processor.process(text=self.FLOOR_INPUT, title="Test Title")
+
+    self.assertIsNone(result.text)
+    self.assertEqual(result.status, SummaryStatus.FAILED)
+    # On the base implementation (no floor guard) the LLM is called only once,
+    # so this count also locks the retry wiring, not just the FAILED status.
+    self.assertEqual(self.mock_call.call_count, 2)
+    joined = " ".join(str(call.args[0]) for call in warning_mock.call_args_list)
+    self.assertIn("summary_below_floor:", joined)
+    self.assertIn("attempt=2", joined)
+
+  def test_below_floor_retry_exception_fails(self):
+    self.mock_call.side_effect = [
+      LLMResponse(text="x" * 1457),
+      Exception("retry exploded"),
+    ]
+
+    result = self.processor.process(text=self.FLOOR_INPUT, title="Test Title")
+
+    self.assertIsNone(result.text)
+    self.assertEqual(result.status, SummaryStatus.FAILED)
+    # Two calls prove the floor-triggered retry actually ran; a FAILED status
+    # alone could come from the generic exception handler without any retry.
+    self.assertEqual(self.mock_call.call_count, 2)
+
+  def test_at_or_above_floor_single_call_no_retry(self):
+    self.mock_call.return_value = LLMResponse(text="z" * 3000)
+
+    with patch.object(processor_module_logger, "warning") as warning_mock:
+      result = self.processor.process(text=self.FLOOR_INPUT, title="Test Title")
+
+    self.assertEqual(result.status, SummaryStatus.GENERATED)
+    self.assertEqual(result.text, "z" * 3000)
+    self.assertEqual(self.mock_call.call_count, 1)
+    joined = " ".join(str(call.args[0]) for call in warning_mock.call_args_list)
+    self.assertNotIn("summary_below_floor:", joined)
+
+
 class TestSummaryPromptContent(unittest.TestCase):
   def test_prompts_removed_expansion_language(self):
     from video_transcript_api.llm.prompts import (

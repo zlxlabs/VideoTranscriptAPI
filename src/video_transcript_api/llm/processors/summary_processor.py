@@ -178,6 +178,30 @@ class SummaryProcessor:
                     )
                     return SummaryResult(text=None, status=SummaryStatus.FAILED)
                 working_text = retry_text
+            elif not working_text or len(working_text) < budget.floor:
+                # 思考模型不带 max_tokens，协议层无法识别截断；篇幅下限是与模型
+                # 无关的后验判据（issue #322），低于下限视同截断，重试一次。
+                logger.warning(
+                    "summary_below_floor: "
+                    f"actual={len(working_text) if working_text else 0} "
+                    f"floor={budget.floor} target_min={budget.target_min} attempt=1"
+                )
+                retry_text = self._retry_after_truncation(
+                    model=model,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    reasoning_effort=reasoning_effort,
+                    sent_max_tokens=sent_max_tokens,
+                    budget=budget,
+                )
+                if retry_text is None or len(retry_text) < budget.floor:
+                    logger.warning(
+                        "summary_below_floor: "
+                        f"actual={len(retry_text) if retry_text else 0} "
+                        f"floor={budget.floor} target_min={budget.target_min} attempt=2"
+                    )
+                    return SummaryResult(text=None, status=SummaryStatus.FAILED)
+                working_text = retry_text
 
             if not working_text or len(working_text) < 50:
                 logger.warning(
