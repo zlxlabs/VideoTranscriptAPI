@@ -1,5 +1,7 @@
+import datetime
 import json
 import sqlite3
+import uuid
 
 from loguru import logger
 import pytest
@@ -29,6 +31,39 @@ def test_notify_targets_survive_sqlite_close_and_reopen(tmp_path):
         assert json.loads(payload) == {"feishu": "fixture-feishu"}
     finally:
         reopened.close()
+
+
+def test_new_upload_task_without_explicit_targets_persists_empty_object(tmp_path):
+    db_path = tmp_path / "uploads.db"
+    cache = CacheManager(cache_dir=str(tmp_path / "cache"), db_path=str(db_path))
+    now = datetime.datetime.now(datetime.timezone.utc)
+    intent = cache.register_local_upload(
+        owner_user_id="upload-owner",
+        idempotency_key=f"{int(now.timestamp() * 1000)}-{uuid.uuid4()}",
+        retention="30d",
+        intent_metadata={"filename": "fixture.mp4"},
+    )
+    task_id = "task-upload-target-fixture"
+    cache.accept_local_upload(
+        intent["upload_id"],
+        media_id="upload_notify_fixture",
+        task_id=task_id,
+        filename="fixture.mp4",
+        title="fixture",
+        request_metadata={"filename": "fixture.mp4"},
+        media_path="/tmp/fixture.mp4",
+        byte_size=1,
+        sha256="a" * 64,
+    )
+
+    task = cache.get_task_by_id(task_id)
+    assert task["notify_targets"] == {}
+    with sqlite3.connect(db_path) as connection:
+        stored = connection.execute(
+            "SELECT notify_targets FROM task_status WHERE task_id = ?", (task_id,)
+        ).fetchone()[0]
+    assert stored == "{}"
+    cache.close()
 
 
 def test_old_task_rows_keep_null_targets_after_idempotent_migration(tmp_path):
@@ -104,6 +139,11 @@ def test_legacy_target_fallback_emits_grepable_task_id(tmp_path, monkeypatch):
     task_id = cache.create_task(url="https://example.invalid/legacy", submitted_by="user-a")[
         "task_id"
     ]
+    with cache._get_cursor() as cursor:
+        cursor.execute(
+            "UPDATE task_status SET notify_targets = NULL WHERE task_id = ?",
+            (task_id,),
+        )
     runtime = type("Runtime", (), {})()
     runtime.user_manager = type("UserManager", (), {})()
     runtime.user_manager.get_user_by_id = lambda user_id: {

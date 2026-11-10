@@ -926,6 +926,10 @@ class CacheManager:
         task_id = task_id or self.generate_task_id()
         view_token = f"upload_{secrets.token_urlsafe(32)}"
         options_json = json.dumps(processing_options or {}, ensure_ascii=False, sort_keys=True)
+        effective_notify_targets = (
+            notify_targets if notify_targets is not None
+            else notification_webhooks or {}
+        )
         with self._get_cursor() as cursor:
             cursor.execute("BEGIN IMMEDIATE")
             cursor.execute("SELECT * FROM local_uploads WHERE upload_id = ?", (upload_id,))
@@ -945,8 +949,7 @@ class CacheManager:
                 (
                     task_id, source_url or "", media_id, title, options_json,
                     upload["owner_user_id"],
-                    json.dumps(notify_targets, sort_keys=True)
-                    if notify_targets is not None else None,
+                    json.dumps(effective_notify_targets, sort_keys=True),
                 ),
             )
             cursor.execute(
@@ -971,7 +974,7 @@ class CacheManager:
                     "url": source_url or "",
                     "platform": "local_upload",
                     "processing_options": json.loads(options_json),
-                    "notification_webhooks": dict(notify_targets if notify_targets is not None else notification_webhooks or {}),
+                    "notification_webhooks": dict(effective_notify_targets),
                 })
             return record
 
@@ -2910,7 +2913,10 @@ class CacheManager:
                     task_id, view_token, url, download_url, use_speaker_recognition,
                     platform, media_id, json.dumps(normalized_options, sort_keys=True),
                     submitted_by,
-                    json.dumps(notify_targets, sort_keys=True) if notify_targets is not None else None,
+                    json.dumps(
+                        notify_targets if notify_targets is not None else {},
+                        sort_keys=True,
+                    ),
                 ))
 
             logger.info(f"任务创建成功: {task_id}, view_token: {view_token}, download_url: {download_url}")

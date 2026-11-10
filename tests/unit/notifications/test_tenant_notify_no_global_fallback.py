@@ -335,8 +335,13 @@ def test_legacy_user_replay_keeps_global_webhook_targets(
     from src.video_transcript_api.api.services import terminal_status
 
     task_id = _persist_pending_terminal(
-        cm, submitted_by="legacy_user", notify_targets=None,
+        cm, submitted_by="legacy_user", notify_targets={},
     )
+    with cm._get_cursor() as cursor:
+        cursor.execute(
+            "UPDATE task_status SET notify_targets = NULL WHERE task_id = ?",
+            (task_id,),
+        )
     user_manager = type("UM", (), {})()
     user_manager.get_user_by_id = lambda _user_id: {
         "user_id": "legacy_user", "is_legacy": True,

@@ -11,3 +11,10 @@
 - **本段结论**：全量 `tests/unit`、卡面窄验与新增验收用例通过；范围检查和报告契约通过。提交 `499fffc450eb7089a351b1214203cef8bf560b68` 已推送，draft PR #323 已创建。
 - **关键决策与已否决方案**：`make test` 属于 ci-checks-v1 远端 Verify-Command，本机未运行；未等待远端 CI 终态，交由主脑验收。
 - **下一步唯一动作**：主脑检查 PR #323 的远端完整 gate 与主审结果后决定是否标记 ready。
+
+## 里程碑 3：修复 PR #323 质量门禁
+
+- **当前阶段**：修复上传任务目标意外落为 NULL 的问题，开始完整 make test 回归。
+- **本段结论**：`CacheManager.create_task` 与 `accept_local_upload` 对新任务的零目标默认值统一写成 JSON `{}`；旧行 `NULL` 兼容逻辑保留，真实旧行测试显式写入 NULL，不再拿新任务模拟 legacy。
+- **关键决策与已否决方案**：不在测试 fixture 注入 `user_manager`，而是在 producer/storage 边界保证新行非 NULL；不改 systemd/Context fallback 来掩盖根因。
+- **下一步唯一动作**：运行完整 `make test`，检查失败和耗时，必要时修复后重跑至 exit 0。
