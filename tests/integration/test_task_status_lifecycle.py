@@ -34,8 +34,8 @@ def client(cm):
     app.dependency_overrides[verify_token] = lambda: {
         "user_id": "u1", "api_key": "sk-x", "wechat_webhook": None,
     }
-    with patch("video_transcript_api.api.routes.tasks.cache_manager", cm), patch(
-        "video_transcript_api.api.routes.tasks.audit_logger"
+    with patch("video_transcript_api.api.routes.task_status_view.cache_manager", cm), patch(
+        "video_transcript_api.api.routes.task_status_view.audit_logger"
     ):
         yield TestClient(app)
 
