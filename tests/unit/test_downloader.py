@@ -11,7 +11,9 @@ All console output must be in English only (no emoji, no Chinese).
 
 import os
 import sys
+import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
 
 from video_transcript_api.downloaders import create_downloader
@@ -19,7 +21,7 @@ from video_transcript_api.downloaders.douyin import DouyinDownloader
 from video_transcript_api.downloaders.bilibili import BilibiliDownloader
 from video_transcript_api.downloaders.xiaohongshu import XiaohongshuDownloader
 from video_transcript_api.downloaders.youtube import YoutubeDownloader
-from video_transcript_api.downloaders.xiaoyuzhou import XiaoyuzhouDownloader
+from video_transcript_api.downloaders.xiaoyuzhou import USER_AGENT, XiaoyuzhouDownloader
 from video_transcript_api.downloaders.generic import GenericDownloader
 
 
@@ -86,6 +88,42 @@ class TestXiaoyuzhouDownloaderBasic(unittest.TestCase):
         downloader = XiaoyuzhouDownloader()
         result = downloader.get_subtitle("https://www.xiaoyuzhoufm.com/episode/12345")
         self.assertIsNone(result)
+
+    def test_download_headers_browser_ua(self):
+        """Audio CDN 403s bot UAs, so download headers must carry the browser UA."""
+        downloader = XiaoyuzhouDownloader()
+        self.assertEqual(downloader.download_headers.get("User-Agent"), USER_AGENT)
+        self.assertTrue(USER_AGENT.startswith("Mozilla/5.0"))
+
+    def test_download_file_passes_browser_ua_to_requests_get(self):
+        """download_file must pass the browser UA to base.requests.get."""
+        downloader = XiaoyuzhouDownloader()
+        fd, tmp_path = tempfile.mkstemp(suffix=".mp3")
+        os.close(fd)
+        try:
+            mock_response = MagicMock()
+            mock_response.headers = {}
+            mock_response.iter_content.return_value = iter([b"fake audio bytes"])
+            mock_tm = MagicMock()
+            mock_tm.create_temp_file.return_value = tmp_path
+            with patch(
+                "video_transcript_api.downloaders.base.requests.get",
+                return_value=mock_response,
+            ) as mock_get, patch(
+                "video_transcript_api.downloaders.base.get_temp_manager",
+                return_value=mock_tm,
+            ), patch.object(downloader, "_validate_media_file", return_value=True):
+                result = downloader.download_file(
+                    "https://tk.wavpub.com/WPTK_vAi0Ca5dsV7Dr5l5.mp3",
+                    "WPTK_vAi0Ca5dsV7Dr5l5.mp3",
+                )
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        self.assertIsNotNone(result)
+        self.assertIsNotNone(mock_get.call_args)
+        headers = mock_get.call_args.kwargs.get("headers")
+        self.assertEqual(headers, {"User-Agent": USER_AGENT})
 
 
 if __name__ == '__main__':
