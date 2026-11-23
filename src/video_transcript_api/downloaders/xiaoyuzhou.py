@@ -11,12 +11,20 @@ from ..utils.logging import setup_logger
 # 创建日志记录器
 logger = setup_logger("xiaoyuzhou_downloader")
 
+# 音频 CDN 会对可识别的 bot UA 返回 403，统一伪装成普通浏览器
+# （与 apple_podcast.py 的 USER_AGENT 保持一致）
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
 class XiaoyuzhouDownloader(BaseDownloader):
     """
     小宇宙播客下载器
     """
     def __init__(self):
         super().__init__()
+        self.download_headers = {"User-Agent": USER_AGENT}
         self._cached_video_info: dict[str, dict] = {}
 
     def can_handle(self, url):
@@ -84,9 +92,7 @@ class XiaoyuzhouDownloader(BaseDownloader):
             
             # 请求网页内容
             logger.info(f"访问小宇宙播客页面: {url}")
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
+            headers = {"User-Agent": USER_AGENT}
             
             response = requests.get(url, headers=headers, timeout=30)
             response.raise_for_status()
