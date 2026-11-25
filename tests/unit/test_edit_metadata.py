@@ -13,8 +13,9 @@ Covered card scenarios:
  5. title+author edit -> 200, view page payload carries new values
  6. title-only and author-only edits keep the other field
  7. both fields missing / blank after strip -> 400 metadata_invalid
- 8. speaker=0 token with a speaker=1 cache row: the row the page actually
-    reads (speaker=1, ORDER BY use_speaker_recognition DESC) must change
+ 8. speaker=0 tokens prefer their exact cache variant, while falling back to
+    the speaker=1 row only when no speaker=0 cache row exists; edits update the
+    row the page reads in both cases
  9. "url" field in request body -> 422 (model forbids extra fields)
 10. og_card.*.png files are removed after a successful edit
 11. upload_ prefixed token is rejected (404 transcript_not_found)
@@ -461,22 +462,19 @@ class TestInvalidBody:
 
 
 # ---------------------------------------------------------------------------
-# Scenario 8: speaker=0 token must update the row the page reads
+# Scenario 8: speaker=0 token reads and updates the selected cache variant
 # ---------------------------------------------------------------------------
 
 
 class TestSpeakerVariantCoverage:
-    def test_speaker0_token_updates_speaker1_row_the_page_reads(
+    def test_speaker0_token_updates_exact_row_when_both_variants_exist(
         self, monkeypatch, cache_manager
     ):
         from video_transcript_api.api.services.view_token_resolver import (
             ViewTokenResolver,
         )
 
-        # Speaker=0 task owns the view token; a speaker=1 sibling exists on
-        # the same media. get_cache(use_speaker_recognition=False) orders by
-        # use_speaker_recognition DESC, so the page actually reads the
-        # speaker=1 video_cache row -- the edit must reach that row.
+        # The speaker=0 token has an exact cache row and a speaker=1 sibling.
         view_token = _seed_task(
             cache_manager,
             speaker=False,
@@ -492,14 +490,18 @@ class TestSpeakerVariantCoverage:
             title="Speaker1 Title",
             author="Speaker1 Author",
         )
+        cache_rows, _task_rows = _read_media_rows(cache_manager)
+        assert cache_rows == [
+            ("Speaker1 Title", "Speaker1 Author"),
+            ("Speaker0 Title", "Speaker0 Author"),
+        ]
 
-        # Precondition: the page (speaker=0 token) currently displays the
-        # speaker=1 row's values.
+        # The page resolves to the exact speaker=0 row when both exist.
         before = ViewTokenResolver(cache_manager).get_view_data_by_token(
             view_token
         )
-        assert before["title"] == "Speaker1 Title"
-        assert before["author"] == "Speaker1 Author"
+        assert before["title"] == "Speaker0 Title"
+        assert before["author"] == "Speaker0 Author"
 
         client = _build_client(monkeypatch, cache_manager, user_info=_USER_A)
         resp = client.post(
@@ -513,6 +515,51 @@ class TestSpeakerVariantCoverage:
         )
         assert after["title"] == "Both"
         assert after["author"] == "Rows"
+        cache_rows, task_rows = _read_media_rows(cache_manager)
+        assert cache_rows == [("Both", "Rows")] * 2
+        assert task_rows == [("Both", "Rows")] * 2
+
+    def test_speaker0_token_falls_back_and_updates_speaker1_row(
+        self, monkeypatch, cache_manager
+    ):
+        from video_transcript_api.api.services.view_token_resolver import (
+            ViewTokenResolver,
+        )
+
+        task = cache_manager.create_task(
+            url=_URL, platform="youtube", media_id="vta261031",
+            use_speaker_recognition=False, submitted_by="user_a",
+        )
+        with cache_manager._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE task_status SET status = 'success' WHERE task_id = ?",
+                (task["task_id"],),
+            )
+        _seed_task(
+            cache_manager, url=_URL + "&variant=sp1", speaker=True,
+            submitted_by="user_a", title="Speaker1 Title", author="Speaker1 Author",
+        )
+        resolver = ViewTokenResolver(cache_manager)
+        assert _read_media_rows(cache_manager)[0] == [
+            ("Speaker1 Title", "Speaker1 Author")
+        ]
+        before = resolver.get_view_data_by_token(task["view_token"])
+        assert (before["title"], before["author"]) == (
+            "Speaker1 Title",
+            "Speaker1 Author",
+        )
+
+        resp = _build_client(monkeypatch, cache_manager, user_info=_USER_A).post(
+            "/api/edit_metadata",
+            json={"view_token": task["view_token"], "title": "Both", "author": "Rows"},
+        )
+
+        assert resp.status_code == 200
+        after = resolver.get_view_data_by_token(task["view_token"])
+        assert (after["title"], after["author"]) == ("Both", "Rows")
+        cache_rows, task_rows = _read_media_rows(cache_manager)
+        assert cache_rows == [("Both", "Rows")]
+        assert task_rows == [("Both", "Rows")] * 2
 
 
 # ---------------------------------------------------------------------------
