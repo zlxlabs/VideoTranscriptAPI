@@ -87,7 +87,8 @@ class _DummyCacheManager:
     def save_llm_status(self, *, platform, media_id, use_speaker_recognition,
                          calibration_status=None, calibration_stats=None,
                          summary_status=None, chapters_status=None,
-                         expected_files_loc=None):
+                         expected_files_loc=None, base_status=None,
+                         clear_fields=None):
         """No-op stand-in for the honest-status-model llm_status.json writer.
 
         Intentionally does NOT append to self.saved (that list is asserted

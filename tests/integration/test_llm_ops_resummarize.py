@@ -13,16 +13,22 @@ merge-on-write semantics preserve the untouched layers' old values.
 
 All console output must be in English only (no emoji, no Chinese).
 """
+import asyncio
+import json
 import os
 from unittest.mock import MagicMock, patch
 
 import pytest
+from starlette.requests import Request
+
+from video_transcript_api.api.routes import views
 
 from src.video_transcript_api.cache.cache_manager import CacheManager
 from src.video_transcript_api.utils.task_status import TaskStatus
 from src.video_transcript_api.utils.llm_status import (
     CalibrationStatus,
     ChaptersStatus,
+    NotesStatus,
     SummaryStatus,
 )
 from src.video_transcript_api.api.services import llm_ops
@@ -53,13 +59,33 @@ def _seed_prior_run_with_failed_summary(cm):
         platform="youtube", media_id="vid1", use_speaker_recognition=False,
         llm_type="calibrated", content="REAL calibrated text from a genuine LLM pass",
     )
+    cm.save_llm_result(
+        platform="youtube", media_id="vid1", use_speaker_recognition=False,
+        llm_type="chapters", content={"chapters": [{"title": "Chapter"}]},
+    )
+    cm.save_llm_result(
+        platform="youtube", media_id="vid1", use_speaker_recognition=False,
+        llm_type="notes", content="## Chapter\n- Existing notes.",
+    )
     cm.save_llm_status(
         platform="youtube", media_id="vid1", use_speaker_recognition=False,
         calibration_status=CalibrationStatus.FULL,
         calibration_stats={"total_segments": 3},
         summary_status=SummaryStatus.FAILED,
         chapters_status=ChaptersStatus.GENERATED,
+        notes_status=NotesStatus.GENERATED,
+        artifact_provenance={
+            "schema_version": "artifact-provenance-v1",
+            "layers": {"chapters": {"kind": "chapters"}, "notes": {"kind": "notes"}},
+        },
     )
+    cache_data = cm.get_cache("youtube", "vid1", use_speaker_recognition=False)
+    status_path = os.path.join(cache_data["file_path"], "llm_status.json")
+    with open(status_path, encoding="utf-8") as file:
+        status = json.load(file)
+    status["future_layer_status"] = "generated"
+    with open(status_path, "w", encoding="utf-8") as file:
+        json.dump(status, file, ensure_ascii=False)
 
 
 def _resummarize_task(task_id):
@@ -109,7 +135,7 @@ def _patches(cm, coordinator):
 
 
 class TestResummarizeOnlyTouchesSummaryLayer:
-    def test_summary_regenerated_calibrated_layer_untouched(self, cm):
+    def test_summary_regenerated_calibrated_layer_untouched(self, cm, monkeypatch):
         _seed_prior_run_with_failed_summary(cm)
         task_id = cm.create_task(
             url="https://example.com/v1", platform="youtube", media_id="vid1",
@@ -118,6 +144,9 @@ class TestResummarizeOnlyTouchesSummaryLayer:
 
         cache_data = cm.get_cache("youtube", "vid1", use_speaker_recognition=False)
         calibrated_path = os.path.join(cache_data["file_path"], "llm_calibrated.txt")
+        notes_path = os.path.join(cache_data["file_path"], "llm_notes.txt")
+        with open(notes_path, "rb") as file:
+            notes_before = file.read()
         with open(calibrated_path, "r", encoding="utf-8") as f:
             calibrated_before = f.read()
         calibrated_mtime_before = os.path.getmtime(calibrated_path)
@@ -166,3 +195,59 @@ class TestResummarizeOnlyTouchesSummaryLayer:
         # old values, only summary_status moves failed -> generated.
         assert cache_data["llm_status"]["calibration_status"] == CalibrationStatus.FULL
         assert cache_data["llm_status"]["chapters_status"] == ChaptersStatus.GENERATED
+        assert cache_data["llm_status"]["notes_status"] == NotesStatus.GENERATED
+        assert cache_data["llm_status"]["future_layer_status"] == "generated"
+        with open(notes_path, "rb") as file:
+            assert file.read() == notes_before
+
+        status_path = os.path.join(cache_data["file_path"], "llm_status.json")
+        with open(status_path, encoding="utf-8") as file:
+            persisted_status = json.load(file)
+        assert persisted_status["notes_status"] == NotesStatus.GENERATED
+        assert persisted_status["future_layer_status"] == "generated"
+
+        monkeypatch.setattr(views, "cache_manager", cm)
+        request = Request({
+            "type": "http",
+            "method": "GET",
+            "path": f"/view/{cm.get_task_by_id(task_id)['view_token']}",
+            "query_string": b"raw=notes",
+            "headers": [],
+            "client": ("127.0.0.1", 12345),
+        })
+        response = asyncio.run(views.view_transcript(
+            view_token=cm.get_task_by_id(task_id)["view_token"],
+            request=request,
+            raw="notes",
+        ))
+        assert response.status_code == 200
+
+    def test_rewriting_chapters_clears_stale_notes_status_and_provenance(self, cm):
+        _seed_prior_run_with_failed_summary(cm)
+        result = {
+            "校对文本": "unused because calibration is suppressed",
+            "stats": {"calibration_status": CalibrationStatus.DISABLED},
+            "chapters_status": ChaptersStatus.GENERATED,
+            "chapters": [{"title": "Rewritten chapter"}],
+        }
+
+        with patch.object(llm_ops, "cache_manager", cm):
+            llm_ops._save_llm_results(
+                task_id="chapter-rewrite",
+                platform="youtube",
+                media_id="vid1",
+                use_speaker_recognition=False,
+                result_dict=result,
+                calibrate_only=False,
+                processing_options={
+                    "calibrate": False,
+                    "summarize": False,
+                    "chapters": True,
+                },
+            )
+
+        cache_data = cm.get_cache("youtube", "vid1", use_speaker_recognition=False)
+        status = cache_data["llm_status"]
+        assert "notes_status" not in status
+        assert "notes" not in status["artifact_provenance"]["layers"]
+        assert status["chapters_status"] == ChaptersStatus.GENERATED

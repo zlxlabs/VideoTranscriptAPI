@@ -7,7 +7,7 @@ import uuid
 import secrets
 import shutil
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple, Union, Callable
+from typing import Optional, Dict, Any, List, Tuple, Union, Callable, Collection
 from contextlib import contextmanager
 import threading
 import time
@@ -1949,14 +1949,14 @@ class CacheManager:
         artifact_provenance: Optional[Dict[str, Any]] = None,
         chapters_error: Optional[str] = None,
         expected_files_loc: Optional[str] = None,
+        base_status: Optional[Dict[str, Any]] = None,
+        clear_fields: Optional[Collection[str]] = None,
     ) -> Dict[str, Any]:
         """写入/合并 llm_status.json（"诚实状态模型"统一落盘文件）。
 
-        读-改-写、按字段合并语义：只覆盖本次传入的非 None 字段，未传入的字段
-        保留旧值不变。这是关键设计——recalibrate（calibrate_only=True 且未补跑
-        summary）场景下，本次调用只知道新的 calibration_status，若整份覆盖会把
-        已有的 summary_status（如 generated）静默抹掉，退回到"看起来总结缺失"
-        的旧 bug。chapters_status 同样遵循「非 None 才更新」的合并语义。
+        读-改-写时优先以磁盘状态为基底；write-ahead 撤销后文件不存在时使用
+        base_status。只覆盖本次传入的非 None 字段，未传入的字段保留基底中的原值，
+        包括未知顶层键。clear_fields 用于显式删除依赖已失效的字段。
 
         Args:
             platform: 平台名称
@@ -1974,6 +1974,8 @@ class CacheManager:
                 不更新；此外 chapters_status 为正常终态（generated/skipped_short/
                 skipped_no_timeline/disabled）时无论是否传入都会强制清空旧
                 chapters_error（见下方合并逻辑注释）
+            base_status: write-ahead 撤销前读取的完整状态；仅在状态文件不存在时用作基底。
+            clear_fields: 本次状态写入时显式删除的顶层字段。
 
         Returns:
             dict: 锁内完成写入后的完整合并快照
@@ -1992,7 +1994,9 @@ class CacheManager:
                     )
                 status_file = file_path / "llm_status.json"
 
-                # 读取已有内容作为合并基础（不存在或损坏则视为空）
+                # write-ahead 撤销后文件不存在：从撤销前的完整快照恢复全部未触碰
+                # 状态，包括 notes_status 与未来新增的任意顶层键。磁盘文件存在时仍以
+                # 磁盘内容为准，保持普通调用的读-改-写语义。
                 existing: Dict[str, Any] = {}
                 if status_file.exists():
                     try:
@@ -2001,6 +2005,8 @@ class CacheManager:
                     except (OSError, json.JSONDecodeError) as read_exc:
                         logger.warning(f"读取旧 llm_status.json 失败，将整份重写: {read_exc}")
                         existing = {}
+                elif base_status is not None:
+                    existing = dict(base_status)
 
                 if calibration_status is not None:
                     existing['calibration_status'] = calibration_status
@@ -2032,6 +2038,8 @@ class CacheManager:
                         existing['artifact_provenance'] = artifact_provenance
                     else:
                         existing.pop('artifact_provenance', None)
+                for field in clear_fields or ():
+                    existing.pop(field, None)
                 existing['updated_at'] = datetime.datetime.now(datetime.timezone.utc).strftime(
                     '%Y-%m-%d %H:%M:%S'
                 )
