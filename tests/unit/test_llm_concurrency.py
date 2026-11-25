@@ -43,7 +43,9 @@ class _DummyCacheManager:
         """
         yield
 
-    def invalidate_llm_status(self, platform, media_id, use_speaker_recognition):
+    def invalidate_llm_status(
+        self, platform, media_id, use_speaker_recognition, expected_files_loc=None
+    ):
         """No-op stand-in for the write-ahead status-file revocation
         (S1, PR3 review hardening): _save_llm_results calls this before
         rewriting any product file so a mid-rewrite failure can't leave a
@@ -60,7 +62,10 @@ class _DummyCacheManager:
         """
         return {}
 
-    def save_llm_result(self, *, platform, media_id, use_speaker_recognition, llm_type, content):
+    def save_llm_result(
+        self, *, platform, media_id, use_speaker_recognition, llm_type, content,
+        expected_files_loc=None,
+    ):
         self.saved.append(
             {
                 "platform": platform,
@@ -81,7 +86,8 @@ class _DummyCacheManager:
 
     def save_llm_status(self, *, platform, media_id, use_speaker_recognition,
                          calibration_status=None, calibration_stats=None,
-                         summary_status=None, chapters_status=None):
+                         summary_status=None, chapters_status=None,
+                         expected_files_loc=None):
         """No-op stand-in for the honest-status-model llm_status.json writer.
 
         Intentionally does NOT append to self.saved (that list is asserted
@@ -91,7 +97,7 @@ class _DummyCacheManager:
         return True
 
     def get_cache(self, platform=None, media_id=None, url=None,
-                  use_speaker_recognition=None):
+                  use_speaker_recognition=None, exact_variant: bool = False):
         """No-op cache lookup for chapters timeline gradient / status merge."""
         return None
 
