@@ -51,12 +51,16 @@ def test_jobs_reading_deployment_credentials_use_production_environment():
     }
 
     assert credential_jobs, "workflow has no deployment credential references"
-    unbound_jobs = {
-        job_name: credentials
-        for job_name, credentials in credential_jobs.items()
-        if jobs[job_name].get("environment") != "production"
-        and jobs[job_name].get("with", {}).get("environment") != "production"
-    }
+    unbound_jobs = {}
+    for job_name, credentials in credential_jobs.items():
+        job = jobs[job_name]
+        bound_environment = (
+            job.get("with", {}).get("environment")
+            if "uses" in job
+            else job.get("environment")
+        )
+        if bound_environment != "production":
+            unbound_jobs[job_name] = credentials
 
     assert not unbound_jobs, (
         "jobs reading deployment credentials must bind the production Environment: "
