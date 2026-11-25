@@ -1207,7 +1207,7 @@ def process_transcription(
             video_title = cache_data.get("title", "已缓存视频")
             author = cache_data.get("author", "")
             description = cache_data.get("description", "")
-            has_speaker_recognition = cache_data.get("use_speaker_recognition", False)
+            has_speaker_recognition = bool(cache_data.get("use_speaker_recognition", False))
             # 缓存命中时，is_from_generic 必然是 False（第 365 行条件保证了 generic 不会被缓存）
             is_from_generic = False
 
@@ -1572,7 +1572,7 @@ def process_transcription(
                 # 校对层缺失，需要真实（重新）校对：沿用原始转录内容
                 queued_transcript = transcript
                 queued_transcription_data = transcription_data if has_speaker_recognition else None
-                queued_use_speaker_recognition = has_speaker_recognition
+                queued_use_speaker_recognition = bool(has_speaker_recognition)
             else:
                 # need_calibrated=False 到这里有两种情况：
                 # 1) 校对层已满足，只缺总结：复用已有校对文本作为总结输入（而非
@@ -1593,7 +1593,7 @@ def process_transcription(
                 #    产物，语义上仍然正确。
                 queued_transcript = cache_data.get("llm_calibrated") or transcript
                 queued_transcription_data = None
-                queued_use_speaker_recognition = has_speaker_recognition
+                queued_use_speaker_recognition = bool(has_speaker_recognition)
 
             # J1 修复（本地增量复核第 3 轮）：此前这里还会在
             # need_speaker_names=True 且校对未确认 FULL 时（G2 修复）把
@@ -1672,7 +1672,7 @@ def process_transcription(
                 "url": url,
                 "display_url": display_url,
                 "platform": cache_data.get("platform"),
-                "media_id": cache_data.get("media_id"),
+                "media_id": cache_data.get("media_id"), "expected_files_loc": cache_data.get("files_loc"),
                 "video_title": video_title,
                 "author": author,
                 "description": description,
@@ -1961,7 +1961,7 @@ def process_transcription(
                                 "url": url,
                                 "display_url": display_url,
                                 "platform": platform,
-                                "media_id": media_id,
+                                "media_id": media_id, "expected_files_loc": cache_result["files_loc"],
                                 "video_title": video_title,
                                 "author": author,
                                 "description": description,
@@ -2113,13 +2113,13 @@ def process_transcription(
                                 "task_id": task_id,
                                 "url": url,
                                 "display_url": display_url,
-                                "platform": platform,
-                                "media_id": media_id,
+                                "platform": platform, "media_id": media_id,
                                 "video_title": video_title,
                                 "author": author,
                                 "description": description,
                                 "transcript": transcript,
                                 "use_speaker_recognition": use_speaker_recognition,
+                                "expected_files_loc": cache_result["files_loc"],
                                 "transcription_data": transcription_result.get(
                                     "transcription_data"
                                 )
@@ -2285,7 +2285,7 @@ def process_transcription(
                         "url": url,
                         "display_url": display_url,
                         "platform": platform,
-                        "media_id": video_id,
+                        "media_id": video_id, "expected_files_loc": cache_result["files_loc"],
                         "video_title": video_title,
                         "author": author,
                         "description": description,
@@ -2603,13 +2603,13 @@ def process_transcription(
                             "task_id": task_id,
                             "url": url,
                             "display_url": display_url,
-                            "platform": platform,
-                            "media_id": media_id,
+                            "platform": platform, "media_id": media_id,
                             "video_title": video_title,
                             "author": author,
                             "description": description,
                             "transcript": transcript,
                             "use_speaker_recognition": use_speaker_recognition,
+                            "expected_files_loc": cache_result["files_loc"],
                             "transcription_data": transcription_result.get(
                                 "transcription_data"
                             )

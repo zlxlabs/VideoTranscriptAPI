@@ -14,6 +14,7 @@ import time
 from ..utils.logging import setup_logger
 from ..utils.task_status import TaskStatus
 from ..llm.prompts.schemas.speaker_mapping import SPEAKER_MAPPING_SCHEMA_VERSION
+from .variant_isolation import CacheGenerationMismatch, resolve_variant_artifact_dir
 
 logger = setup_logger("cache_manager")
 
@@ -1220,8 +1221,8 @@ class CacheManager:
                 generation_root = base_path.parent / f".{base_path.name}.generations"
                 source_row = next(
                     (row for row in cache_rows
-                     if bool(row["use_speaker_recognition"]) == use_speaker_recognition),
-                    cache_rows[0] if cache_rows else None,
+                     if bool(row["use_speaker_recognition"]) == bool(use_speaker_recognition)),
+                    None,
                 )
                 if not cache_rows:
                     if base_path.exists():
@@ -1385,7 +1386,8 @@ class CacheManager:
                   platform: str = None, 
                   media_id: str = None,
                   url: str = None,
-                  use_speaker_recognition: Optional[bool] = None) -> Optional[Dict[str, Any]]:
+                  use_speaker_recognition: Optional[bool] = None,
+                  exact_variant: bool = False) -> Optional[Dict[str, Any]]:
         """
         获取缓存
         
@@ -1410,8 +1412,9 @@ class CacheManager:
             else:
                 logger.warning("必须提供 platform+media_id 或 url")
                 return None
-            if use_speaker_recognition is True:
-                conditions.append("use_speaker_recognition = 1")
+            if exact_variant or bool(use_speaker_recognition):
+                conditions.append("use_speaker_recognition = ?")
+                params.append(int(bool(use_speaker_recognition)))
             with self._get_cursor() as cursor:
                 query = (
                     f"SELECT * FROM video_cache WHERE {' AND '.join(conditions)} "
@@ -1507,48 +1510,13 @@ class CacheManager:
         return self.cache_dir / Path(row[0]) if row else None
 
     def _resolve_variant_artifact_dir(
-        self, platform: str, media_id: str, use_speaker_recognition: bool
+        self, platform: str, media_id: str, use_speaker_recognition: bool,
+        expected_files_loc: Optional[str] = None,
     ) -> Optional[Path]:
-        """按 get_cache()/save_llm_result()/save_llm_status() 同款row筛选口径
-        定位缓存目录，只查数据库不读任何产物文件。
-
-        V1 修复（PR3 review hardening）：_speaker_artifact_dir() 完全不看
-        use_speaker_recognition，固定按 use_speaker_recognition DESC 排序
-        优先命中说话人识别变体——同一 platform/media_id 下同时存在"说话人
-        识别"与"普通"两个缓存变体时，任何经它定位目录的写侧操作都可能
-        悄悄作用在错误的变体上。invalidate_llm_status() 正是因此撤销了
-        与本轮实际重写无关的那个变体的状态，本轮真正重写
-        的变体的旧状态反而原样残留，S1 的 write-ahead 撤销保护对错了
-        目标（本次修复的直接起因）。
-
-        与 get_cache() 的 platform+media_id 查询分支保持同一套筛选公式——
-        use_speaker_recognition=True 时严格过滤到该变体；False 时不额外
-        过滤，只按 DESC 排序把说话人识别变体放在前面（沿用 get_cache()
-        "不要求说话人识别时，退而求其次也接受说话人识别变体"的既有语义，
-        保证与 save_llm_result/save_llm_status 实际落盘的目录完全一致）。
-        不直接复用 get_cache() 本身：那个方法还会读取转录/校对/总结等
-        产物文件内容，对只需要一个目录路径的调用方来说是不必要的 I/O。
-
-        Args:
-            platform: 平台名称
-            media_id: 媒体ID
-            use_speaker_recognition: 是否精确匹配说话人识别变体
-
-        Returns:
-            Optional[Path]: 命中的缓存目录；无匹配行时返回 None。
-        """
-        with self._get_cursor() as cursor:
-            conditions = ["platform = ? AND media_id = ?"]
-            params: List[Any] = [platform, media_id]
-            if use_speaker_recognition is True:
-                conditions.append("use_speaker_recognition = 1")
-            query = (
-                f"SELECT files_loc FROM video_cache WHERE {' AND '.join(conditions)} "
-                "ORDER BY use_speaker_recognition DESC, updated_at DESC LIMIT 1"
-            )
-            cursor.execute(query, params)
-            row = cursor.fetchone()
-        return self.cache_dir / Path(row[0]) if row else None
+        """Resolve the exact write variant and, when supplied, its generation."""
+        return resolve_variant_artifact_dir(
+            self, platform, media_id, use_speaker_recognition, expected_files_loc,
+        )
 
     @staticmethod
     def _speaker_mapping_result_is_valid(
@@ -1774,7 +1742,8 @@ class CacheManager:
             logger.warning(f"回滚说话人映射缓存失败，忽略: {platform}/{media_id}: {exc}")
 
     def invalidate_llm_status(
-        self, platform: str, media_id: str, use_speaker_recognition: bool
+        self, platform: str, media_id: str, use_speaker_recognition: bool,
+        expected_files_loc: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Write-ahead 撤销 llm_status.json：删除前先读出旧内容返回给调用方。
 
@@ -1818,7 +1787,7 @@ class CacheManager:
         """
         with self.media_lock(platform, media_id):
             artifact_dir = self._resolve_variant_artifact_dir(
-                platform, media_id, use_speaker_recognition,
+                platform, media_id, use_speaker_recognition, expected_files_loc,
             )
             if artifact_dir is None:
                 return {}
@@ -1894,7 +1863,8 @@ class CacheManager:
                         media_id: str,
                         use_speaker_recognition: bool,
                         llm_type: str,
-                        content: Union[str, Dict]) -> bool:
+                        content: Union[str, Dict],
+                        expected_files_loc: Optional[str] = None) -> bool:
         """
         保存 LLM 处理结果
 
@@ -1912,95 +1882,59 @@ class CacheManager:
             bool: 是否保存成功
         """
         try:
-            # 先获取缓存记录
-            cache_data = self.get_cache(platform, media_id, use_speaker_recognition=use_speaker_recognition)
-            if not cache_data:
-                logger.warning(f"未找到缓存记录: {platform}/{media_id}")
-                return False
-
-            # 获取文件路径
-            file_path = Path(cache_data['file_path'])
-
-            # 保存 LLM 结果
-            if llm_type == "calibrated":
-                llm_file = file_path / "llm_calibrated.txt"
-                self._atomic_write(llm_file, lambda f: f.write(content))
-
-            elif llm_type == "summary":
-                llm_file = file_path / "llm_summary.txt"
-                self._atomic_write(llm_file, lambda f: f.write(content))
-
-            elif llm_type == "notes":
-                llm_file = file_path / "llm_notes.txt"
-                self._atomic_write(llm_file, lambda f: f.write(content))
-
-            elif llm_type == "structured":
-                # 保存结构化数据到 JSON 文件
-                llm_file = file_path / "llm_processed.json"
-
-                # 确保是字典类型
-                if not isinstance(content, dict):
-                    logger.error(f"structured 类型要求 content 为字典，实际类型: {type(content)}")
-                    return False
-
-                # 添加格式版本标记（用于溯源产出该缓存的校对流水线）
-                # v3: ID 锚点校对契约（corrections[{id,text}]，结构为 ground truth）。
-                # 注意：本字段仅作溯源标记，不参与缓存复用判定（复用 gate 是 llm_calibrated.txt 是否存在）；
-                # 历史 v2 缓存为修复前文本，需对个别集手动重处理才能拿到 ID 锚点修复后的结果。
-                structured_data = {
-                    "format_version": "v3",
-                    **content  # 合并传入的结构化数据
-                }
-
-                # 原子写（G5）：json.dump 直接写进 temp 文件对象，序列化
-                # 中途抛错也不会影响 llm_file 里已有的旧结果。
-                self._atomic_write(
-                    llm_file,
-                    lambda f: json.dump(structured_data, f, ensure_ascii=False, indent=2),
+            with self.media_lock(platform, media_id):
+                file_path = self._resolve_variant_artifact_dir(
+                    platform, media_id, use_speaker_recognition, expected_files_loc,
                 )
-
-            elif llm_type == "chapters":
-                # llm_chapters.json 契约（T6 / T7 依赖；start_seg/end_seg 为
-                # 原始输入列表下标，可直接用于 #dlg-{start_seg} 锚点）：
-                # {
-                #   "format_version": "v1",
-                #   "source": {
-                #     "kind": "dialogs|segments|...",
-                #     "segment_count": N,
-                #     "fingerprint": "...",
-                #     "generated_at": "ISO8601"
-                #   },
-                #   "chapters": [
-                #     {"index": 0, "title": "...", "gist": "...",
-                #      "start_seg": 0, "end_seg": 5,
-                #      "start_time": 0.0, "end_time": 12.3}
-                #   ]
-                # }
-                # 仅 GENERATED 时调用本分支；SKIPPED_*/FAILED/DISABLED 只写状态。
-                llm_file = file_path / "llm_chapters.json"
-                if not isinstance(content, dict):
-                    logger.error(
-                        f"chapters 类型要求 content 为字典，实际类型: {type(content)}"
-                    )
+                if file_path is None:
+                    logger.warning(f"未找到精确变体缓存记录: {platform}/{media_id}")
                     return False
-                # Caller may already set format_version; default to v1.
-                chapters_payload = dict(content)
-                chapters_payload.setdefault("format_version", "v1")
-                self._atomic_write(
-                    llm_file,
-                    lambda f: json.dump(chapters_payload, f, ensure_ascii=False, indent=2),
+                return self._save_llm_result_at(
+                    file_path, platform, media_id, llm_type, content,
                 )
-
-            else:
-                logger.error(f"未知的 LLM 类型: {llm_type}")
-                return False
-
-            logger.info(f"LLM 结果保存成功: {platform}/{media_id}/{llm_type}")
-            return True
-
+        except CacheGenerationMismatch as e:
+            logger.error(str(e))
+            raise
         except Exception as e:
             logger.error(f"保存 LLM 结果失败: {e}")
             return False
+
+    def _save_llm_result_at(
+        self, file_path: Path, platform: str, media_id: str,
+        llm_type: str, content: Union[str, Dict],
+    ) -> bool:
+        """Persist one LLM artifact while its caller holds the media lock."""
+        if llm_type in {"calibrated", "summary", "notes"}:
+            filename = {
+                "calibrated": "llm_calibrated.txt",
+                "summary": "llm_summary.txt",
+                "notes": "llm_notes.txt",
+            }[llm_type]
+            self._atomic_write(file_path / filename, lambda f: f.write(content))
+        elif llm_type == "structured":
+            if not isinstance(content, dict):
+                logger.error(f"structured 类型要求 content 为字典，实际类型: {type(content)}")
+                return False
+            payload = {"format_version": "v3", **content}
+            self._atomic_write(
+                file_path / "llm_processed.json",
+                lambda f: json.dump(payload, f, ensure_ascii=False, indent=2),
+            )
+        elif llm_type == "chapters":
+            if not isinstance(content, dict):
+                logger.error(f"chapters 类型要求 content 为字典，实际类型: {type(content)}")
+                return False
+            payload = dict(content)
+            payload.setdefault("format_version", "v1")
+            self._atomic_write(
+                file_path / "llm_chapters.json",
+                lambda f: json.dump(payload, f, ensure_ascii=False, indent=2),
+            )
+        else:
+            logger.error(f"未知的 LLM 类型: {llm_type}")
+            return False
+        logger.info(f"LLM 结果保存成功: {platform}/{media_id}/{llm_type}")
+        return True
 
     def save_llm_status(
         self,
@@ -2014,6 +1948,7 @@ class CacheManager:
         notes_status: Optional[str] = None,
         artifact_provenance: Optional[Dict[str, Any]] = None,
         chapters_error: Optional[str] = None,
+        expected_files_loc: Optional[str] = None,
     ) -> Dict[str, Any]:
         """写入/合并 llm_status.json（"诚实状态模型"统一落盘文件）。
 
@@ -2048,13 +1983,13 @@ class CacheManager:
             # 否则两个任务各自读到旧快照后先后写回，后写者会用自己那份
             # 缺字段的旧快照覆盖先写者刚合并进去的字段（见 media_lock 文档）。
             with self.media_lock(platform, media_id):
-                cache_data = self.get_cache(platform, media_id, use_speaker_recognition=use_speaker_recognition)
-                if not cache_data:
+                file_path = self._resolve_variant_artifact_dir(
+                    platform, media_id, use_speaker_recognition, expected_files_loc,
+                )
+                if file_path is None:
                     raise FileNotFoundError(
-                        f"cache record not found for {platform}/{media_id}"
+                        f"exact cache variant not found for {platform}/{media_id}"
                     )
-
-                file_path = Path(cache_data['file_path'])
                 status_file = file_path / "llm_status.json"
 
                 # 读取已有内容作为合并基础（不存在或损坏则视为空）

@@ -146,7 +146,7 @@ def _resolve_chapters_timeline_segments(
                 cache_snapshot = get_cache(
                     platform,
                     media_id,
-                    use_speaker_recognition=use_speaker_recognition,
+                    use_speaker_recognition=use_speaker_recognition, exact_variant=True,
                 )
             except Exception as exc:
                 logger.warning(f"get_cache failed for chapters gradient: {exc}")
@@ -413,16 +413,16 @@ def _handle_notes_generation(
     task_id = llm_task["task_id"]
     platform = llm_task.get("platform")
     media_id = llm_task.get("media_id")
-    use_speaker_recognition = llm_task.get("use_speaker_recognition", False)
+    use_speaker_recognition = bool(llm_task.get("use_speaker_recognition", False))
+    expected_files_loc = llm_task.get("expected_files_loc")
     if not platform or not media_id:
         raise ValueError("Detailed notes task requires platform and media_id")
-
     cache_dir = llm_task.get("cache_dir")
     if not cache_dir:
         cache_snapshot = cache_manager.get_cache(
             platform,
             media_id,
-            use_speaker_recognition=use_speaker_recognition,
+            use_speaker_recognition=use_speaker_recognition, exact_variant=True,
         )
         cache_dir = (cache_snapshot or {}).get("file_path")
     if not cache_dir:
@@ -431,7 +431,7 @@ def _handle_notes_generation(
     notes_status_snapshot = cache_manager.get_cache(
         platform,
         media_id,
-        use_speaker_recognition=use_speaker_recognition,
+        use_speaker_recognition=use_speaker_recognition, exact_variant=True,
     )
     for layer_name, old_language, new_language in language_mismatched_generation_layers(
         notes_status_snapshot,
@@ -506,7 +506,7 @@ def _handle_notes_generation(
             if not cache_manager.save_llm_result(
                 platform=platform,
                 media_id=media_id,
-                use_speaker_recognition=use_speaker_recognition,
+                use_speaker_recognition=use_speaker_recognition, expected_files_loc=expected_files_loc,
                 llm_type="notes",
                 content=notes_result.text,
             ):
@@ -515,7 +515,7 @@ def _handle_notes_generation(
             notes_cache = cache_manager.get_cache(
                 platform,
                 media_id,
-                use_speaker_recognition=use_speaker_recognition,
+                use_speaker_recognition=use_speaker_recognition, exact_variant=True,
             )
             notes_layers = dict(
                 _provenance_layers((notes_cache or {}).get("llm_status"))
@@ -531,7 +531,7 @@ def _handle_notes_generation(
                 platform=platform,
                 media_id=media_id,
                 use_speaker_recognition=use_speaker_recognition,
-                notes_status=NotesStatus.GENERATED,
+                notes_status=NotesStatus.GENERATED, expected_files_loc=expected_files_loc,
                 artifact_provenance={
                     "schema_version": "artifact-provenance-v1",
                     "layers": notes_layers,
@@ -624,7 +624,7 @@ def _handle_llm_task(llm_task: dict):
             media_id = llm_task.get("media_id")
             video_title = llm_task["video_title"]
             transcript = llm_task["transcript"]
-            use_speaker_recognition = llm_task.get("use_speaker_recognition", False)
+            use_speaker_recognition = bool(llm_task.get("use_speaker_recognition", False))
             notification_channel = llm_task.get("notification_channel")
             notification_webhooks = load_task_targets(cache_manager, task_id)
             logger.info(f"开始处理LLM任务: {task_id}, 标题: {video_title}")
@@ -702,7 +702,7 @@ def _handle_llm_task(llm_task: dict):
                 if calibrate_only and platform and media_id:
                     cache_snapshot_for_flags = cache_manager.get_cache(
                         platform, media_id,
-                        use_speaker_recognition=use_speaker_recognition,
+                        use_speaker_recognition=use_speaker_recognition, exact_variant=True,
                     )
                     if _should_backfill_summary(
                         cache_snapshot_for_flags or {}, calibrate_only=True
@@ -757,7 +757,7 @@ def _handle_llm_task(llm_task: dict):
                     lang_cache = cache_manager.get_cache(
                         platform,
                         media_id,
-                        use_speaker_recognition=use_speaker_recognition,
+                        use_speaker_recognition=use_speaker_recognition, exact_variant=True,
                     )
                 language_mismatches = language_mismatched_generation_layers(lang_cache)
                 if not calibrate_only:
@@ -822,7 +822,7 @@ def _handle_llm_task(llm_task: dict):
                     )
 
                 # 适配返回格式
-                result_dict = _build_result_dict(coordinator_result)
+                result_dict = {**_build_result_dict(coordinator_result), "expected_files_loc": llm_task.get("expected_files_loc")}
 
                 logger.info(f"LLM处理完成，开始保存结果和发送微信通知: {task_id}")
 
@@ -871,7 +871,7 @@ def _handle_llm_task(llm_task: dict):
                     ):
                         merged_snapshot = cache_manager.get_cache(
                             platform, media_id,
-                            use_speaker_recognition=use_speaker_recognition,
+                            use_speaker_recognition=use_speaker_recognition, exact_variant=True,
                         )
                         merged_llm_status = (merged_snapshot or {}).get("llm_status") or {}
                         if calibration_status is None:
@@ -1168,7 +1168,7 @@ def _resolve_plain_structured_segments(llm_task: dict) -> Optional[list]:
         return None
     try:
         cache_snapshot = cache_manager.get_cache(
-            platform, media_id, use_speaker_recognition=False
+            platform, media_id, use_speaker_recognition=False, exact_variant=True
         )
     except Exception as exc:
         logger.warning(f"get_cache failed for plain structured segments: {exc}")
@@ -1669,7 +1669,7 @@ def _refresh_speaker_names_in_existing_structured_artifact(
         save_ok = cache_manager.save_llm_result(
             platform=platform,
             media_id=media_id,
-            use_speaker_recognition=use_speaker_recognition,
+            use_speaker_recognition=use_speaker_recognition, expected_files_loc=(existing_snapshot or {}).get("files_loc"),
             llm_type="structured",
             content=content,
         )
@@ -2054,7 +2054,7 @@ def _save_llm_results(
     # 修复，PR3 review hardening）。提前在这里 result_dict.get() 出来的
     # 局部变量是不可变字符串的一份快照，不会随后续对 result_dict 的原地
     # 修改而更新，会绕开姓名恢复直接引用修补前的旧文本。
-    summary_text = result_dict.get("内容总结")
+    summary_text, expected_files_loc = result_dict.get("内容总结"), result_dict.get("expected_files_loc")
     skip_summary = result_dict.get("skip_summary", False)
     stats = result_dict.get("stats", {})
     models_used = result_dict.get("models_used", {})
@@ -2149,7 +2149,7 @@ def _save_llm_results(
         )
         if need_snapshot:
             existing_snapshot = cache_manager.get_cache(
-                platform, media_id, use_speaker_recognition=use_speaker_recognition,
+                platform, media_id, use_speaker_recognition=use_speaker_recognition, exact_variant=True,
             )
             if existing_snapshot:
                 calibrated_exists_before = "llm_calibrated" in existing_snapshot
@@ -2200,7 +2200,7 @@ def _save_llm_results(
             snapshot_for_names = existing_snapshot
             if snapshot_for_names is None:
                 snapshot_for_names = cache_manager.get_cache(
-                    platform, media_id, use_speaker_recognition=use_speaker_recognition,
+                    platform, media_id, use_speaker_recognition=use_speaker_recognition, exact_variant=True,
                 )
             restored_structured, name_replacements = _restore_real_names_after_identity_fallback(
                 platform=platform,
@@ -2266,7 +2266,7 @@ def _save_llm_results(
         # 一次，不会返回错误产物）。并发写入则被这把 media lock 完全阻塞，
         # 不会有两个写者同时撤销/重写同一份状态文件。
         old_llm_status = cache_manager.invalidate_llm_status(
-            platform, media_id, use_speaker_recognition=use_speaker_recognition,
+            platform, media_id, use_speaker_recognition=use_speaker_recognition, expected_files_loc=expected_files_loc,
         )
         if not isinstance(old_llm_status, dict):
             old_llm_status = {}
@@ -2286,7 +2286,7 @@ def _save_llm_results(
             if not cache_manager.save_llm_result(
                 platform=platform,
                 media_id=media_id,
-                use_speaker_recognition=use_speaker_recognition,
+                use_speaker_recognition=use_speaker_recognition, expected_files_loc=expected_files_loc,
                 llm_type="calibrated",
                 content=calibrated_text,
             ):
@@ -2313,7 +2313,7 @@ def _save_llm_results(
                 if not cache_manager.save_llm_result(
                     platform=platform,
                     media_id=media_id,
-                    use_speaker_recognition=use_speaker_recognition,
+                    use_speaker_recognition=use_speaker_recognition, expected_files_loc=expected_files_loc,
                     llm_type="summary",
                     content=summary_text,
                 ):
@@ -2330,7 +2330,7 @@ def _save_llm_results(
             if not cache_manager.save_llm_result(
                 platform=platform,
                 media_id=media_id,
-                use_speaker_recognition=use_speaker_recognition,
+                use_speaker_recognition=use_speaker_recognition, expected_files_loc=expected_files_loc,
                 llm_type="summary",
                 content=calibrated_text,
             ):
@@ -2373,7 +2373,7 @@ def _save_llm_results(
             try:
                 artifact_cache_for_card = cache_manager.get_cache(
                     platform, media_id,
-                    use_speaker_recognition=use_speaker_recognition,
+                    use_speaker_recognition=use_speaker_recognition, exact_variant=True,
                 )
                 if artifact_cache_for_card and artifact_cache_for_card.get("file_path"):
                     share_card_path = (
@@ -2455,7 +2455,7 @@ def _save_llm_results(
                 save_ok = cache_manager.save_llm_result(
                     platform=platform,
                     media_id=media_id,
-                    use_speaker_recognition=use_speaker_recognition,
+                    use_speaker_recognition=use_speaker_recognition, expected_files_loc=expected_files_loc,
                     llm_type="structured",
                     content=structured_data,
                 )
@@ -2525,7 +2525,7 @@ def _save_llm_results(
             if not cache_manager.save_llm_result(
                 platform=platform,
                 media_id=media_id,
-                use_speaker_recognition=use_speaker_recognition,
+                use_speaker_recognition=use_speaker_recognition, expected_files_loc=expected_files_loc,
                 llm_type="chapters",
                 content=chapters_file_payload,
             ):
@@ -2610,7 +2610,7 @@ def _save_llm_results(
 
                 artifact_cache = cache_manager.get_cache(
                     platform, media_id,
-                    use_speaker_recognition=use_speaker_recognition,
+                    use_speaker_recognition=use_speaker_recognition, exact_variant=True,
                 )
                 if not artifact_cache:
                     raise FileNotFoundError(
@@ -2671,7 +2671,7 @@ def _save_llm_results(
         status_updates = {
             "platform": platform,
             "media_id": media_id,
-            "use_speaker_recognition": use_speaker_recognition,
+            "use_speaker_recognition": use_speaker_recognition, "expected_files_loc": expected_files_loc,
             "calibration_status": final_calibration_status,
             "calibration_stats": final_calibration_stats,
             "summary_status": final_summary_status,
