@@ -143,6 +143,30 @@ def test_false_read_fallback_and_exact_integer_variant_writes(cm):
     assert status["summary_status"] == "generated"
 
 
+def test_integer_one_does_not_fall_back_to_false_variant_write(cm):
+    false_cache = cm.save_cache(
+        platform="generic",
+        url="https://example.com/false-only",
+        media_id="false-only",
+        use_speaker_recognition=False,
+        transcript_data="plain transcript",
+        transcript_type="capswriter",
+    )
+    assert false_cache is not None
+    assert cm.get_cache(
+        "generic", "false-only", use_speaker_recognition=1
+    ) is None
+    assert cm._resolve_variant_artifact_dir(
+        "generic", "false-only", use_speaker_recognition=1
+    ) is None
+    assert not cm.save_llm_result(
+        "generic", "false-only", 1, "summary", "must not land in false variant"
+    )
+    assert not (
+        cm.cache_dir / false_cache["files_loc"] / "llm_summary.txt"
+    ).exists()
+
+
 def test_old_generation_handoff_is_rejected_after_same_variant_republish(cm):
     old = _save_variant(cm, False, "old transcript")
     assert old is not None
