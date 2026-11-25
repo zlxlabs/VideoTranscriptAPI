@@ -1,12 +1,15 @@
 """Byte-level regressions for cache-variant and generation write isolation."""
 import hashlib
 import json
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 from src.video_transcript_api.api.services import llm_ops
 from src.video_transcript_api.cache.cache_manager import CacheManager
 from src.video_transcript_api.cache.variant_isolation import CacheGenerationMismatch
+from src.video_transcript_api.utils.llm_status import NotesStatus
 
 
 @pytest.fixture
@@ -186,6 +189,56 @@ def test_old_generation_handoff_is_rejected_after_same_variant_republish(cm):
         )
     assert not (new_dir / "llm_summary.txt").exists()
     assert (new_dir / "transcript_capswriter.txt").read_text(encoding="utf-8") == "new transcript"
+
+
+def test_notes_fallback_pins_cache_generation_before_concurrent_republish(
+    cm, monkeypatch
+):
+    old = _save_variant(cm, False, "old transcript")
+    assert old is not None
+    result = SimpleNamespace(
+        status=NotesStatus.GENERATED,
+        text="notes generated from the old cache generation",
+        error=None,
+        fingerprint="old-generation-anchor",
+        chapter_count=0,
+    )
+
+    def republish_before_notes_write(**_kwargs):
+        new = _save_variant(cm, False, "new transcript")
+        assert new is not None and new["files_loc"] != old["files_loc"]
+        return result
+
+    processor = SimpleNamespace(process=republish_before_notes_write)
+    monkeypatch.setattr(llm_ops, "NotesProcessor", lambda **_kwargs: processor)
+    monkeypatch.setattr(
+        llm_ops,
+        "llm_coordinator",
+        SimpleNamespace(llm_client=MagicMock(), config=SimpleNamespace(get_models=lambda: {})),
+    )
+    monkeypatch.setattr(
+        llm_ops, "_validate_notes_commit_fingerprint", lambda **_kwargs: None
+    )
+
+    with pytest.raises(CacheGenerationMismatch, match="CACHE-GENERATION-MISMATCH"):
+        llm_ops._handle_notes_generation(
+            llm_task={
+                "task_id": "notes-fallback-generation",
+                "platform": "generic",
+                "media_id": "same-generic-media",
+                "use_speaker_recognition": False,
+            },
+            tracker=MagicMock(),
+            processing_options={"notes": True},
+            notes_outcome={},
+        )
+
+    new_snapshot = cm.get_cache(
+        "generic", "same-generic-media", use_speaker_recognition=False, exact_variant=True
+    )
+    new_dir = cm.cache_dir / new_snapshot["files_loc"]
+    assert new_snapshot["files_loc"] != old["files_loc"]
+    assert not (new_dir / "llm_notes.txt").exists()
 
 
 def test_save_llm_status_rejects_stale_expected_generation(cm):

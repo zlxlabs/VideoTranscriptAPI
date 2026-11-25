@@ -420,10 +420,9 @@ def _handle_notes_generation(
     cache_dir = llm_task.get("cache_dir")
     if not cache_dir:
         cache_snapshot = cache_manager.get_cache(
-            platform,
-            media_id,
-            use_speaker_recognition=use_speaker_recognition, exact_variant=True,
+            platform, media_id, use_speaker_recognition=use_speaker_recognition, exact_variant=True,
         )
+        expected_files_loc = expected_files_loc or (cache_snapshot or {}).get("files_loc")
         cache_dir = (cache_snapshot or {}).get("file_path")
     if not cache_dir:
         raise ValueError("Detailed notes task requires a valid cache directory")
@@ -433,6 +432,7 @@ def _handle_notes_generation(
         media_id,
         use_speaker_recognition=use_speaker_recognition, exact_variant=True,
     )
+    expected_files_loc = expected_files_loc or (notes_status_snapshot or {}).get("files_loc")
     for layer_name, old_language, new_language in language_mismatched_generation_layers(
         notes_status_snapshot,
     ):

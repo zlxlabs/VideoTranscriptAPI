@@ -1961,7 +1961,7 @@ def process_transcription(
                                 "url": url,
                                 "display_url": display_url,
                                 "platform": platform,
-                                "media_id": media_id, "expected_files_loc": cache_result["files_loc"],
+                                "media_id": media_id, "expected_files_loc": cache_result.get("files_loc") if isinstance(cache_result, dict) else None,
                                 "video_title": video_title,
                                 "author": author,
                                 "description": description,
@@ -2119,7 +2119,7 @@ def process_transcription(
                                 "description": description,
                                 "transcript": transcript,
                                 "use_speaker_recognition": use_speaker_recognition,
-                                "expected_files_loc": cache_result["files_loc"],
+                                "expected_files_loc": cache_result.get("files_loc") if isinstance(cache_result, dict) else None,
                                 "transcription_data": transcription_result.get(
                                     "transcription_data"
                                 )
@@ -2285,7 +2285,7 @@ def process_transcription(
                         "url": url,
                         "display_url": display_url,
                         "platform": platform,
-                        "media_id": video_id, "expected_files_loc": cache_result["files_loc"],
+                        "media_id": video_id, "expected_files_loc": cache_result.get("files_loc") if isinstance(cache_result, dict) else None,
                         "video_title": video_title,
                         "author": author,
                         "description": description,
@@ -2609,7 +2609,7 @@ def process_transcription(
                             "description": description,
                             "transcript": transcript,
                             "use_speaker_recognition": use_speaker_recognition,
-                            "expected_files_loc": cache_result["files_loc"],
+                            "expected_files_loc": cache_result.get("files_loc") if isinstance(cache_result, dict) else None,
                             "transcription_data": transcription_result.get(
                                 "transcription_data"
                             )
