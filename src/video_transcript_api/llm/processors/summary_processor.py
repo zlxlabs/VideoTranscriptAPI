@@ -154,6 +154,7 @@ class SummaryProcessor:
                 budget_hard_cap=budget.hard_cap,
             )
 
+            min_len = max(50, budget.floor)
             first_response = self._call_summary_llm(
                 model=model,
                 system_prompt=system_prompt,
@@ -161,9 +162,12 @@ class SummaryProcessor:
                 reasoning_effort=reasoning_effort,
                 max_tokens=sent_max_tokens,
             )
-            working_text = first_response.text
+            first_truncated = self._is_truncated(sent_max_tokens, first_response.usage)
+            working_text = self._candidate_text(
+                first_response, sent_max_tokens=sent_max_tokens, min_len=min_len
+            )
 
-            if self._is_truncated(sent_max_tokens, first_response.usage):
+            if first_truncated:
                 retry_text = self._retry_after_truncation(
                     model=model,
                     system_prompt=system_prompt,
@@ -171,6 +175,7 @@ class SummaryProcessor:
                     reasoning_effort=reasoning_effort,
                     sent_max_tokens=sent_max_tokens,
                     budget=budget,
+                    min_len=min_len,
                 )
                 if retry_text is None:
                     logger.warning(
@@ -178,13 +183,13 @@ class SummaryProcessor:
                     )
                     return SummaryResult(text=None, status=SummaryStatus.FAILED)
                 working_text = retry_text
-            elif not working_text or len(working_text) < budget.floor:
-                # 思考模型不带 max_tokens，协议层无法识别截断；篇幅下限是与模型
-                # 无关的后验判据（issue #322），低于下限视同截断，重试一次。
+            elif working_text is None:
+                # The protocol cannot identify every incomplete answer; the same
+                # character floor is the model-independent post-hoc quality gate.
                 logger.warning(
                     "summary_below_floor: "
-                    f"actual={len(working_text) if working_text else 0} "
-                    f"floor={budget.floor} target_min={budget.target_min} attempt=1"
+                    f"actual={len(first_response.text) if first_response.text else 0} "
+                    f"floor={min_len} target_min={budget.target_min} attempt=1"
                 )
                 retry_text = self._retry_after_truncation(
                     model=model,
@@ -193,25 +198,15 @@ class SummaryProcessor:
                     reasoning_effort=reasoning_effort,
                     sent_max_tokens=sent_max_tokens,
                     budget=budget,
+                    min_len=min_len,
                 )
-                if retry_text is None or len(retry_text) < budget.floor:
-                    logger.warning(
-                        "summary_below_floor: "
-                        f"actual={len(retry_text) if retry_text else 0} "
-                        f"floor={budget.floor} target_min={budget.target_min} attempt=2"
-                    )
+                if retry_text is None:
                     return SummaryResult(text=None, status=SummaryStatus.FAILED)
                 working_text = retry_text
 
-            if not working_text or len(working_text) < 50:
-                logger.warning(
-                    f"Summary too short or empty: {len(working_text) if working_text else 0} chars"
-                )
-                return SummaryResult(text=None, status=SummaryStatus.FAILED)
-
             if len(working_text) <= budget.hard_cap:
                 logger.info(f"Summary generated successfully (length: {len(working_text)})")
-                return self._result_for_text(working_text)
+                return self._result_for_text(working_text, min_len=min_len)
 
             retry_suffix = (
                 en_prompts.SUMMARY_BUDGET_RETRY_SUFFIX
@@ -223,6 +218,7 @@ class SummaryProcessor:
             )
             retry_prompt = f"{user_prompt}\n\n{retry_suffix}"
             retry_text: Optional[str] = None
+            retry_length = 0
             try:
                 retry_response = self._call_summary_llm(
                     model=model,
@@ -236,37 +232,68 @@ class SummaryProcessor:
                         "Summary compression retry truncated, keeping first answer"
                     )
                 else:
-                    retry_text = retry_response.text
+                    retry_length = len(retry_response.text or "")
+                    retry_text = self._candidate_text(
+                        retry_response,
+                        sent_max_tokens=sent_max_tokens,
+                        min_len=min_len,
+                    )
             except Exception as retry_exc:
                 logger.warning(
                     f"Summary compression retry failed, keeping first answer: {retry_exc}"
                 )
 
-            if retry_text and len(retry_text) >= 50 and len(retry_text) <= budget.hard_cap:
+            if retry_text and len(retry_text) <= budget.hard_cap:
                 logger.info(
                     f"Summary generated after compression retry (length: {len(retry_text)})"
                 )
-                return self._result_for_text(retry_text)
+                return self._result_for_text(retry_text, min_len=min_len)
 
             candidates = [working_text]
-            if retry_text and len(retry_text) >= 50:
+            if retry_text:
                 candidates.append(retry_text)
             final_text = min(candidates, key=len)
 
             logger.warning(
                 f"summary_over_budget_accepted: first={len(working_text)} "
-                f"retry={len(retry_text) if retry_text else 0} "
+                f"retry={retry_length} "
                 f"hard_cap={budget.hard_cap} accepted={len(final_text)}"
             )
-            return self._result_for_text(final_text)
+            return self._result_for_text(final_text, min_len=min_len)
 
         except Exception as e:
             logger.error(f"Summary generation failed: {e}", exc_info=True)
             return SummaryResult(text=None, status=SummaryStatus.FAILED)
 
     @staticmethod
-    def _result_for_text(text: str) -> SummaryResult:
-        """Return GENERATED only when the final summary matches the output language."""
+    def _is_acceptable_length(text: Optional[str], min_len: int) -> bool:
+        """Return whether candidate text meets the shared character floor."""
+        return bool(text) and len(text) >= min_len
+
+    @classmethod
+    def _candidate_text(
+        cls,
+        response: LLMResponse,
+        *,
+        sent_max_tokens: Optional[int],
+        min_len: int,
+    ) -> Optional[str]:
+        """Return a complete candidate only when it clears the shared length floor."""
+        if cls._is_truncated(sent_max_tokens, response.usage):
+            return None
+        if not cls._is_acceptable_length(response.text, min_len):
+            return None
+        return response.text
+
+    @staticmethod
+    def _result_for_text(text: str, *, min_len: int) -> SummaryResult:
+        """Return GENERATED only when length and output-language gates both pass."""
+        if not SummaryProcessor._is_acceptable_length(text, min_len):
+            logger.warning(
+                f"Summary too short or empty: {len(text) if text else 0} chars; "
+                f"minimum={min_len}"
+            )
+            return SummaryResult(text=None, status=SummaryStatus.FAILED)
         expected_language = "en" if get_language() == "en" else "zh"
         detected_language = detect_language(text)
         if detected_language != expected_language:
@@ -300,6 +327,7 @@ class SummaryProcessor:
         reasoning_effort: Optional[str],
         sent_max_tokens: Optional[int],
         budget: SummaryBudget,
+        min_len: int,
     ) -> Optional[str]:
         """Retry once after truncation; truncated text is never returned."""
         retry_suffix = (
@@ -320,11 +348,18 @@ class SummaryProcessor:
             logger.warning(f"Summary truncation retry failed: {retry_exc}")
             return None
 
-        if self._is_truncated(sent_max_tokens, retry_response.usage):
-            return None
-        if not retry_response.text or len(retry_response.text) < 50:
-            return None
-        return retry_response.text
+        retry_text = self._candidate_text(
+            retry_response, sent_max_tokens=sent_max_tokens, min_len=min_len
+        )
+        if retry_text is None and not self._is_truncated(
+            sent_max_tokens, retry_response.usage
+        ):
+            logger.warning(
+                "summary_below_floor: "
+                f"actual={len(retry_response.text) if retry_response.text else 0} "
+                f"floor={min_len} target_min={budget.target_min} attempt=2"
+            )
+        return retry_text
 
     def _call_summary_llm(
         self,

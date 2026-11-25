@@ -172,15 +172,17 @@ class TestSummaryProcessor(unittest.TestCase):
     self.assertNotIn("summary_over_budget_accepted", joined)
 
   def test_over_hard_cap_retry_too_short_falls_back_to_first(self):
-    hard_cap = min(2 * len(self.long_text), 4500)
+    long_text = "a" * 47466
+    hard_cap = 8000
     first = "d" * (hard_cap + 100)
+    short_retry = "r" * 1500
     self.mock_call.side_effect = [
       LLMResponse(text=first),
-      LLMResponse(text="tiny"),
+      LLMResponse(text=short_retry),
     ]
 
     with patch.object(self.processor_module_logger, "warning") as warning_mock:
-      result = self.processor.process(text=self.long_text, title="Test Title")
+      result = self.processor.process(text=long_text, title="Test Title")
 
     self.assertEqual(result.status, SummaryStatus.GENERATED)
     self.assertEqual(result.text, first)
@@ -326,6 +328,26 @@ class TestSummaryBelowFloorGuard(unittest.TestCase):
     self.assertIn("target_min=4000", joined)
     self.assertIn("attempt=1", joined)
 
+  def test_truncation_retry_below_floor_fails(self):
+    processor = _make_processor(reasoning_effort="disabled")
+    max_tokens = 12000
+    processor.llm_client.call.side_effect = [
+      LLMResponse(text="x" * 800, usage=_usage(max_tokens)),
+      LLMResponse(text="y" * 1500, usage=_usage(1000)),
+    ]
+
+    with patch.object(processor_module_logger, "warning") as warning_mock:
+      result = processor.process(text=self.FLOOR_INPUT, title="Test Title")
+
+    self.assertIsNone(result.text)
+    self.assertEqual(result.status, SummaryStatus.FAILED)
+    self.assertEqual(processor.llm_client.call.call_count, 2)
+    joined = " ".join(str(call.args[0]) for call in warning_mock.call_args_list)
+    self.assertIn("summary_below_floor:", joined)
+    self.assertIn("actual=1500", joined)
+    self.assertIn("floor=2000", joined)
+    self.assertIn("attempt=2", joined)
+
   def test_below_floor_retry_still_short_fails(self):
     self.mock_call.side_effect = [
       LLMResponse(text="x" * 1457),
@@ -359,13 +381,13 @@ class TestSummaryBelowFloorGuard(unittest.TestCase):
     self.assertEqual(self.mock_call.call_count, 2)
 
   def test_at_or_above_floor_single_call_no_retry(self):
-    self.mock_call.return_value = LLMResponse(text="z" * 3000)
+    self.mock_call.return_value = LLMResponse(text="z" * 2000)
 
     with patch.object(processor_module_logger, "warning") as warning_mock:
       result = self.processor.process(text=self.FLOOR_INPUT, title="Test Title")
 
     self.assertEqual(result.status, SummaryStatus.GENERATED)
-    self.assertEqual(result.text, "z" * 3000)
+    self.assertEqual(result.text, "z" * 2000)
     self.assertEqual(self.mock_call.call_count, 1)
     joined = " ".join(str(call.args[0]) for call in warning_mock.call_args_list)
     self.assertNotIn("summary_below_floor:", joined)
