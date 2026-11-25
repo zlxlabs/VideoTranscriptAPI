@@ -40,6 +40,7 @@ env:
 jobs:
   # 替换前对当前运行容器做 inode 对账。失败 → ship 不执行（首次无挂载/inode 不一致/容器不存在均 fail-closed）。
   pre-flight:
+    environment: production
     runs-on: [self-hosted, linux, x64, codex]
     timeout-minutes: 5
     steps:
@@ -118,6 +119,7 @@ jobs:
     needs: pre-flight
     uses: zlxlabs/ci-templates/.github/workflows/build-deploy.yml@v2
     with:
+      environment: production
       image_name: video-transcript-api                  # == ACR 镜像名 == 宿主 compose 的 image(本地 tag 形态,见 docker/docker-compose.deploy.yml)
       dockerfile: docker/Dockerfile                     # Dockerfile 在 docker/ 子目录(build_context 默认仓根:COPY 的 pyproject/uv.lock/src 都在根)
       host: 100.68.21.80                                # n305 的 Tailscale IP
@@ -148,6 +150,7 @@ jobs:
   # 不吞错、不自动重试部署。
   verify-busy-lock-inode:
     needs: ship
+    environment: production
     runs-on: [self-hosted, linux, x64, codex]
     timeout-minutes: 5
     steps:
