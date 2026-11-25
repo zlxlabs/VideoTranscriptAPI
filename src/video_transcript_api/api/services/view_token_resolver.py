@@ -161,6 +161,25 @@ class ViewTokenResolver:
         """Use the application's existing CacheManager instance."""
         self._cache_manager = cache_manager
 
+    def _resolve_task_cache(
+        self, platform: str, media_id: str, use_speaker_recognition: Any
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve a task's own cache variant before legacy read-side reuse."""
+        variant = bool(use_speaker_recognition)
+        cache_data = self._cache_manager.get_cache(
+            platform=platform,
+            media_id=media_id,
+            use_speaker_recognition=variant,
+            exact_variant=True,
+        )
+        if cache_data is None and not variant:
+            return self._cache_manager.get_cache(
+                platform=platform,
+                media_id=media_id,
+                use_speaker_recognition=False,
+            )
+        return cache_data
+
     def _resolve_summary_state(
         self, task_info: Dict[str, Any], cache_data: Dict[str, Any]
     ) -> tuple:
@@ -379,7 +398,7 @@ class ViewTokenResolver:
                 }
 
             if task_info["platform"] and task_info["media_id"]:
-                cache_data = self._cache_manager.get_cache(
+                cache_data = self._resolve_task_cache(
                     platform=task_info["platform"],
                     media_id=task_info["media_id"],
                     use_speaker_recognition=task_info["use_speaker_recognition"],
@@ -431,7 +450,7 @@ class ViewTokenResolver:
                 )
                 return None
 
-            cache_data = self._cache_manager.get_cache(
+            cache_data = self._resolve_task_cache(
                 platform=platform,
                 media_id=media_id,
                 use_speaker_recognition=use_speaker_recognition,

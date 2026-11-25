@@ -53,6 +53,35 @@ def _make_success_task(cm, media_id="vid1"):
     return task
 
 
+def _save_variant_cache(cm, media_id, use_speaker_recognition, transcript):
+    """Persist one cache variant with an independently verifiable transcript."""
+    return cm.save_cache(
+        platform="youtube",
+        url=f"https://www.youtube.com/watch?v={media_id}",
+        media_id=media_id,
+        use_speaker_recognition=use_speaker_recognition,
+        transcript_data=transcript,
+        transcript_type="capswriter",
+        title="Variant Video",
+        author="Author",
+        description="A variant test video",
+    )
+
+
+def _make_variant_task(cm, media_id, use_speaker_recognition):
+    """Create a completed task for one variant of a generic media URL."""
+    task = cm.create_task(
+        url=f"https://www.youtube.com/watch?v={media_id}",
+        use_speaker_recognition=use_speaker_recognition,
+        platform="youtube",
+        media_id=media_id,
+    )
+    cm.update_task_status(
+        task["task_id"], "success", platform="youtube", media_id=media_id
+    )
+    return task
+
+
 def _content_view_task_info(task):
     """Build the task_info shape `_assemble_content_view` reads directly.
 
@@ -259,6 +288,70 @@ class TestViewTokenResolver:
         assert cache_data is not None
         assert cache_data["task_info"]["task_id"] == task["task_id"]
         assert cache_data["transcript_data"].startswith("Hello world")
+
+    def test_view_tokens_resolve_each_persisted_variant(self, cm, resolver):
+        media_id = "vid-variant-binding"
+        transcripts = {
+            False: "ordinary transcript artifact",
+            True: "speaker transcript artifact",
+        }
+        _save_variant_cache(cm, media_id, False, transcripts[False])
+        _save_variant_cache(cm, media_id, True, transcripts[True])
+        tasks = {
+            variant: _make_variant_task(cm, media_id, variant)
+            for variant in (False, True)
+        }
+
+        resolved_paths = {}
+        for variant, task in tasks.items():
+            view_data = resolver.get_view_data_by_token(task["view_token"])
+            cache_data = resolver.get_cache_by_view_token(task["view_token"])
+
+            assert view_data["status"] == "success"
+            assert view_data["transcript"] == transcripts[variant]
+            assert cache_data["transcript_data"] == transcripts[variant]
+            assert bool(cache_data["use_speaker_recognition"]) is variant
+            view_artifact = Path(view_data["cache_dir"]) / "transcript_capswriter.txt"
+            cache_artifact = Path(cache_data["file_path"]) / "transcript_capswriter.txt"
+            assert view_artifact.read_text(encoding="utf-8") == transcripts[variant]
+            assert cache_artifact.read_bytes() == transcripts[variant].encode("utf-8")
+            resolved_paths[variant] = cache_artifact
+
+        assert resolved_paths[False] != resolved_paths[True]
+
+    @pytest.mark.parametrize(
+        "use_speaker_recognition", [False, 0], ids=["false", "sqlite-zero"]
+    )
+    def test_ordinary_task_falls_back_to_only_speaker_cache(
+        self, cm, resolver, use_speaker_recognition
+    ):
+        media_id = "vid-speaker-cache-fallback"
+        transcript = "reused speaker transcript artifact"
+        _save_variant_cache(cm, media_id, True, transcript)
+        task = _make_variant_task(cm, media_id, use_speaker_recognition)
+
+        view_data = resolver.get_view_data_by_token(task["view_token"])
+        cache_data = resolver.get_cache_by_view_token(task["view_token"])
+
+        assert view_data["status"] == "success"
+        assert view_data["transcript"] == transcript
+        assert cache_data["transcript_data"] == transcript
+        assert cache_data["use_speaker_recognition"] == 1
+
+    @pytest.mark.parametrize(
+        "use_speaker_recognition", [True, 1], ids=["true", "sqlite-one"]
+    )
+    def test_speaker_task_does_not_fall_back_to_only_ordinary_cache(
+        self, cm, resolver, use_speaker_recognition
+    ):
+        media_id = "vid-no-speaker-fallback"
+        _save_variant_cache(cm, media_id, False, "ordinary transcript artifact")
+        task = _make_variant_task(cm, media_id, use_speaker_recognition)
+
+        view_data = resolver.get_view_data_by_token(task["view_token"])
+
+        assert view_data["status"] == "file_cleaned"
+        assert resolver.get_cache_by_view_token(task["view_token"]) is None
 
     def test_missing_view_token_returns_none(self, resolver):
         assert resolver.get_view_data_by_token("missing") is None
