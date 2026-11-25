@@ -92,7 +92,9 @@ def test_chinese_request_rejects_english_and_accepts_chinese_summary():
 
 def test_compression_retry_final_text_is_language_validated():
     first_answer = "An English summary. " * 400
-    retry_answer = "压缩后的中文总结内容，保留所有重要信息。" * 5
+    # Keep the wrong-language sample above the English S-band floor (600 chars)
+    # so failure remains attributable to the language gate.
+    retry_answer = "压缩后的中文总结内容，保留所有重要信息。" * 40
     processor, client = _summary_processor(first_answer, retry_answer)
     language_patches = _with_language("en", summary_processor)
     with language_patches[0], language_patches[1]:
