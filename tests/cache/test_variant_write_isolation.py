@@ -292,6 +292,62 @@ def test_notes_supplied_old_cache_dir_is_pinned_after_republish(cm, monkeypatch)
     assert not (new_dir / "llm_notes.txt").exists()
 
 
+def test_notes_rejects_cache_dir_outside_cache_root_without_writing(
+    cm, tmp_path, monkeypatch
+):
+    saved = _save_variant(cm, False, "current transcript")
+    assert saved is not None
+    current_dir = cm.cache_dir / saved["files_loc"]
+    outside_cache_dir = tmp_path / "external-cache"
+    outside_cache_dir.mkdir()
+    result = SimpleNamespace(
+        status=NotesStatus.GENERATED,
+        text="notes from an untrusted cache directory",
+        error=None,
+        fingerprint="external-cache-anchor",
+        chapter_count=0,
+    )
+    monkeypatch.setattr(
+        llm_ops, "NotesProcessor",
+        lambda **_kwargs: SimpleNamespace(process=lambda **_args: result),
+    )
+    monkeypatch.setattr(
+        llm_ops,
+        "llm_coordinator",
+        SimpleNamespace(llm_client=MagicMock(), config=SimpleNamespace(get_models=lambda: {})),
+    )
+    monkeypatch.setattr(
+        llm_ops, "_validate_notes_commit_fingerprint", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(llm_ops, "finalize_terminal_status_and_notify", lambda *_a, **_k: True)
+    monkeypatch.setattr(llm_ops, "get_notification_router", MagicMock())
+
+    with pytest.raises(
+        CacheGenerationMismatch,
+        match="CACHE-GENERATION-MISMATCH: cache_dir outside cache root",
+    ):
+        llm_ops._handle_notes_generation(
+            llm_task={
+                "task_id": "notes-outside-cache-root",
+                "platform": "generic",
+                "media_id": "same-generic-media",
+                "use_speaker_recognition": False,
+                "cache_dir": outside_cache_dir,
+            },
+            tracker=MagicMock(),
+            processing_options={"notes": True},
+            notes_outcome={},
+        )
+
+    current = cm.get_cache(
+        "generic", "same-generic-media", use_speaker_recognition=False,
+        exact_variant=True,
+    )
+    assert current["files_loc"] == saved["files_loc"]
+    assert not (current_dir / "llm_notes.txt").exists()
+    assert not (outside_cache_dir / "llm_notes.txt").exists()
+
+
 def test_save_llm_status_rejects_stale_expected_generation(cm):
     old = _save_variant(cm, False, "old transcript")
     assert old is not None

@@ -7,12 +7,14 @@ class CacheGenerationMismatch(RuntimeError):
     """A delayed writer no longer targets the published cache generation."""
 
 
-def files_loc_from_cache_dir(cache_manager: Any, cache_dir: Any) -> Optional[str]:
+def files_loc_from_cache_dir(cache_manager: Any, cache_dir: Any) -> str:
     """Return the published-files location represented by a cache directory."""
-    cache_path = Path(cache_dir)
-    cache_root = Path(cache_manager.cache_dir)
+    cache_path = Path(cache_dir).resolve()
+    cache_root = Path(cache_manager.cache_dir).resolve()
     if not cache_path.is_relative_to(cache_root):
-        return None
+        raise CacheGenerationMismatch(
+            f"CACHE-GENERATION-MISMATCH: cache_dir outside cache root: {cache_dir!r}"
+        )
     return cache_path.relative_to(cache_root).as_posix()
 
 
