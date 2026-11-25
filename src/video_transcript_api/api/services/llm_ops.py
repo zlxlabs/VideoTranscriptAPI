@@ -39,15 +39,12 @@ from ...llm.processors.notes_processor import (
     load_notes_source_segments,
 )
 from ...utils.notifications import (
-    format_llm_config_markdown,
-    get_notification_router,
-    slow_alert,
+    format_llm_config_markdown, get_notification_router, slow_alert,
 )
 from ...utils.perf_tracker import PerfTracker
 from ...utils.task_status import TaskStatus
 from .terminal_status import (
-    deliver_terminal_notification,
-    finalize_terminal_status_and_notify, load_task_targets,
+    deliver_terminal_notification, finalize_terminal_status_and_notify, load_task_targets,
 )
 from ...utils.llm_status import (
     CalibrationStatus,
@@ -58,6 +55,7 @@ from ...utils.llm_status import (
 )
 from ...i18n import get_language, t
 from ...cache.cache_manager import language_mismatched_generation_layers
+from ...cache.variant_isolation import files_loc_from_cache_dir
 
 logger = lazy_resource(get_logger)
 config = lazy_resource(get_config)
@@ -432,7 +430,9 @@ def _handle_notes_generation(
         media_id,
         use_speaker_recognition=use_speaker_recognition, exact_variant=True,
     )
-    expected_files_loc = expected_files_loc or (notes_status_snapshot or {}).get("files_loc")
+    expected_files_loc = expected_files_loc or (
+        files_loc_from_cache_dir(cache_manager, cache_dir)
+        if llm_task.get("cache_dir") else (notes_status_snapshot or {}).get("files_loc"))
     for layer_name, old_language, new_language in language_mismatched_generation_layers(
         notes_status_snapshot,
     ):

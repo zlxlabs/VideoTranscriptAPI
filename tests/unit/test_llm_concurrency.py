@@ -91,7 +91,7 @@ class _DummyCacheManager:
         return True
 
     def get_cache(self, platform=None, media_id=None, url=None,
-                  use_speaker_recognition=None):
+                  use_speaker_recognition=None, exact_variant: bool = False):
         """No-op cache lookup for chapters timeline gradient / status merge."""
         return None
 

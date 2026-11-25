@@ -241,6 +241,57 @@ def test_notes_fallback_pins_cache_generation_before_concurrent_republish(
     assert not (new_dir / "llm_notes.txt").exists()
 
 
+def test_notes_supplied_old_cache_dir_is_pinned_after_republish(cm, monkeypatch):
+    old = _save_variant(cm, False, "old transcript")
+    assert old is not None
+    old_cache_dir = cm.cache_dir / old["files_loc"]
+    new = _save_variant(cm, False, "new transcript")
+    assert new is not None and new["files_loc"] != old["files_loc"]
+    new_dir = cm.cache_dir / new["files_loc"]
+    result = SimpleNamespace(
+        status=NotesStatus.GENERATED,
+        text="notes generated from the old cache generation",
+        error=None,
+        fingerprint="old-generation-anchor",
+        chapter_count=0,
+    )
+    monkeypatch.setattr(
+        llm_ops, "NotesProcessor",
+        lambda **_kwargs: SimpleNamespace(process=lambda **_args: result),
+    )
+    monkeypatch.setattr(
+        llm_ops,
+        "llm_coordinator",
+        SimpleNamespace(llm_client=MagicMock(), config=SimpleNamespace(get_models=lambda: {})),
+    )
+    monkeypatch.setattr(
+        llm_ops, "_validate_notes_commit_fingerprint", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(llm_ops, "finalize_terminal_status_and_notify", lambda *_a, **_k: True)
+    monkeypatch.setattr(llm_ops, "get_notification_router", MagicMock())
+
+    with pytest.raises(CacheGenerationMismatch, match="CACHE-GENERATION-MISMATCH"):
+        llm_ops._handle_notes_generation(
+            llm_task={
+                "task_id": "notes-supplied-old-generation",
+                "platform": "generic",
+                "media_id": "same-generic-media",
+                "use_speaker_recognition": False,
+                "cache_dir": old_cache_dir,
+            },
+            tracker=MagicMock(),
+            processing_options={"notes": True},
+            notes_outcome={},
+        )
+
+    current = cm.get_cache(
+        "generic", "same-generic-media", use_speaker_recognition=False,
+        exact_variant=True,
+    )
+    assert current["files_loc"] == new["files_loc"]
+    assert not (new_dir / "llm_notes.txt").exists()
+
+
 def test_save_llm_status_rejects_stale_expected_generation(cm):
     old = _save_variant(cm, False, "old transcript")
     assert old is not None

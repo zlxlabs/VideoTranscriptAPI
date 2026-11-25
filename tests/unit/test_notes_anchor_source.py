@@ -131,7 +131,9 @@ class _FileBackedCacheManager:
     def __init__(self, cache_dir: Path):
         self.cache_dir = cache_dir
 
-    def get_cache(self, platform, media_id, use_speaker_recognition=False):
+    def get_cache(
+        self, platform, media_id, use_speaker_recognition=False, exact_variant: bool = False
+    ):
         processed = json.loads(
             (self.cache_dir / "llm_processed.json").read_text(encoding="utf-8")
         )
