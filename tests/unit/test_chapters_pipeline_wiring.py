@@ -314,8 +314,10 @@ class TestSaveLlmResultsChapters:
         )
         assert result["chapters_status"] is None
         kwargs = mock_cm.save_llm_status.call_args.kwargs
-        assert kwargs["chapters_status"] == ChaptersStatus.FAILED
-        assert kwargs["chapters_error"] == "stale semantic validation failure"
+        assert kwargs["chapters_status"] is None
+        assert kwargs["chapters_error"] is None
+        assert kwargs["base_status"] == old
+        assert kwargs.get("clear_fields") is None
 
     def test_skipped_does_not_write_chapters_file(self, monkeypatch):
         mock_cm = self._patch_cm(monkeypatch)
@@ -378,14 +380,14 @@ class TestSaveLlmResultsChapters:
             if c.kwargs.get("llm_type") == "chapters"
         ]
         assert chapters_calls == []
-        # effective None => preserve; final passed to save_llm_status is old GENERATED
+        # effective None => preserve the existing generated chapters status.
         assert result["chapters_status"] is None
-        assert (
-            mock_cm.save_llm_status.call_args.kwargs["chapters_status"]
-            == ChaptersStatus.GENERATED
-        )
+        kwargs = mock_cm.save_llm_status.call_args.kwargs
+        assert kwargs["chapters_status"] is None
+        assert kwargs["base_status"] == old
+        assert kwargs.get("clear_fields") is None
         # calibration/summary still written (not wiped)
-        assert mock_cm.save_llm_status.call_args.kwargs["summary_status"] is not None
+        assert kwargs["summary_status"] is not None
 
     def test_disabled_when_no_prior_and_not_requested(self, monkeypatch):
         mock_cm = self._patch_cm(monkeypatch, old_status={})

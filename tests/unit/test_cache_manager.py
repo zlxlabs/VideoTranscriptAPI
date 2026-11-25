@@ -1645,6 +1645,33 @@ class TestSaveLLMStatus:
         assert data["calibration_status"] == "partial"
         assert data["summary_status"] == "generated"
 
+    def test_base_status_restores_unknown_fields_and_clears_explicit_fields(
+        self, cm, cache_dir
+    ):
+        _save_sample_capswriter(cm)
+        cm.save_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            calibration_status="full", notes_status="generated",
+        )
+        status_file = list(cache_dir.rglob("llm_status.json"))[0]
+        persisted = json.loads(status_file.read_text(encoding="utf-8"))
+        persisted["future_layer_status"] = "generated"
+        status_file.write_text(json.dumps(persisted), encoding="utf-8")
+
+        base_status = cm.invalidate_llm_status(
+            "youtube", "vid1", use_speaker_recognition=False,
+        )
+        result = cm.save_llm_status(
+            platform="youtube", media_id="vid1", use_speaker_recognition=False,
+            summary_status="generated", base_status=base_status,
+            clear_fields=("notes_status",),
+        )
+
+        assert result["calibration_status"] == "full"
+        assert result["summary_status"] == "generated"
+        assert result["future_layer_status"] == "generated"
+        assert "notes_status" not in result
+
     def test_raises_when_cache_missing(self, cm):
         with pytest.raises(FileNotFoundError):
             cm.save_llm_status(
